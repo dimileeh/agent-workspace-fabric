@@ -1,0 +1,88 @@
+"""Tests for ControlWorker.run_forever — stop signalling and backoff."""
+
+from __future__ import annotations
+
+import asyncio
+from unittest.mock import AsyncMock
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.control.worker import ControlWorker, WorkerConfig
+from awf.db.base import Base
+from awf.db.session import make_engine, make_session_factory
+
+
+@pytest.fixture
+async def factory():  # type: ignore[no-untyped-def]
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield make_session_factory(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_run_forever_exits_when_stop_requested(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """run_forever must terminate promptly on request_stop()."""
+    provisioner = AsyncMock()
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=provisioner,
+        config=WorkerConfig(poll_interval_seconds=0.05, max_concurrent_provisions=1),
+    )
+
+    async def _stop_after_tick() -> None:
+        # Give run_forever a couple of idle ticks, then ask it to stop.
+        await asyncio.sleep(0.12)
+        worker.request_stop()
+
+    # The task itself must complete within the test's 30s timeout — no hangs.
+    await asyncio.gather(worker.run_forever(), _stop_after_tick())
+
+
+@pytest.mark.unit
+async def test_safely_provision_swallows_provisioner_exceptions(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """One failing provision must not abort the rest of the batch."""
+    from awf.db.models import Workspace as WorkspaceModel
+    from awf.db.repositories import WorkspaceRepository
+
+    # Seed two workspaces in ``requested`` so run_once finds them.
+    async with factory() as s:
+        for title in ["a", "b"]:
+            await WorkspaceRepository(s).create(
+                repo_url="git@x:y.git",
+                branch_base="development",
+                task_title=title,
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+        await s.commit()
+
+    provisioner = AsyncMock()
+    provisioner.provision.side_effect = [RuntimeError("boom"), None]  # first fails, second ok
+
+    worker = ControlWorker(
+        session_factory=factory,
+        provisioner=provisioner,
+        config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=2),
+    )
+
+    # run_once must not raise even though one provision threw.
+    dispatched = await worker.run_once()
+    assert dispatched == 2
+    assert provisioner.provision.call_count == 2
+
+    # Both workspaces were looked up from the DB; assert shape.
+    async with factory() as s:
+        from sqlalchemy import select
+
+        rows = (await s.execute(select(WorkspaceModel))).scalars().all()
+        assert len(rows) == 2
