@@ -1,0 +1,100 @@
+"""WorkspaceCleaner tests — compose-down + worktree removal with mocked deps."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import AsyncMock
+
+import pytest
+
+from awf.node.cleanup import WorkspaceCleaner
+from awf.node.compose_manager import ComposeOperationError
+from awf.node.git_manager import GitOperationError
+
+
+@pytest.fixture
+def cleaner() -> tuple[AsyncMock, AsyncMock, WorkspaceCleaner]:
+    git = AsyncMock()
+    compose = AsyncMock()
+    return git, compose, WorkspaceCleaner(git=git, compose=compose)
+
+
+class TestCleanup:
+    @pytest.mark.unit
+    async def test_happy_path_calls_compose_down_then_worktree_remove(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+
+        failures = await wc.cleanup(
+            workspace_id="ws_clean",
+            repo_url="git@x:y.git",
+            worktree_host_path=Path("/tmp/wt"),
+        )
+
+        assert failures == []
+        compose.down.assert_awaited_once()
+        git.remove_worktree.assert_awaited_once_with(
+            workspace_id="ws_clean", repo_url="git@x:y.git"
+        )
+
+    @pytest.mark.unit
+    async def test_compose_failure_does_not_block_worktree_removal(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+        compose.down.side_effect = ComposeOperationError(
+            operation="down",
+            returncode=1,
+            stdout="",
+            stderr="network still in use",
+        )
+
+        failures = await wc.cleanup(
+            workspace_id="ws_partial",
+            repo_url="git@x:y.git",
+        )
+
+        assert "compose_down" in failures
+        # Worktree cleanup still ran despite compose error.
+        git.remove_worktree.assert_awaited_once()
+        assert "worktree_remove" not in failures
+
+    @pytest.mark.unit
+    async def test_worktree_failure_captured_but_not_raised(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+        git.remove_worktree.side_effect = GitOperationError(
+            operation="worktree.remove",
+            returncode=1,
+            stdout="",
+            stderr="worktree locked",
+        )
+
+        failures = await wc.cleanup(
+            workspace_id="ws_locked",
+            repo_url="git@x:y.git",
+        )
+
+        assert failures == ["worktree_remove"]
+        compose.down.assert_awaited_once()
+
+    @pytest.mark.unit
+    async def test_both_failures_both_recorded(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+        compose.down.side_effect = ComposeOperationError(
+            operation="down", returncode=1, stdout="", stderr="x"
+        )
+        git.remove_worktree.side_effect = GitOperationError(
+            operation="worktree.remove", returncode=1, stdout="", stderr="y"
+        )
+
+        failures = await wc.cleanup(
+            workspace_id="ws_both_fail",
+            repo_url="git@x:y.git",
+        )
+
+        assert set(failures) == {"compose_down", "worktree_remove"}
