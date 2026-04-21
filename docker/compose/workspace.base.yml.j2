@@ -1,0 +1,70 @@
+{#
+  Per-workspace Docker Compose stack.
+
+  Rendered by awf.node.compose_manager for each workspace. One compose project
+  per workspace = deterministic cleanup (``docker compose down -v`` removes
+  everything named with the project prefix).
+
+  Variables expected:
+    workspace_id           — e.g. ws_abc123 (used for project name scoping)
+    agent_runtime_image    — image to run the coding agent + repo in
+    worktree_host_path     — absolute host path to the git worktree, mounted
+                             into the agent container at /workspace
+    postgres_image         — e.g. postgres:16-alpine
+    postgres_user, postgres_password, postgres_db
+    resources              — optional mapping with cpu/memory caps
+#}
+services:
+  postgres:
+    image: "{{ postgres_image }}"
+    container_name: "awf-{{ workspace_id }}-postgres"
+    environment:
+      POSTGRES_USER: "{{ postgres_user }}"
+      POSTGRES_PASSWORD: "{{ postgres_password }}"
+      POSTGRES_DB: "{{ postgres_db }}"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U {{ postgres_user }} -d {{ postgres_db }}"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+      start_period: 2s
+    networks:
+      - awf_net
+    restart: "no"
+
+  agent:
+    image: "{{ agent_runtime_image }}"
+    container_name: "awf-{{ workspace_id }}-agent"
+    working_dir: /workspace
+    environment:
+      WORKSPACE_ID: "{{ workspace_id }}"
+      DATABASE_URL: "postgresql+psycopg://{{ postgres_user }}:{{ postgres_password }}@postgres:5432/{{ postgres_db }}"
+    volumes:
+      - "{{ worktree_host_path }}:/workspace"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - awf_net
+    # The default command is a sleep so the container stays alive while the
+    # adapter exec's into it to invoke the coding CLI. Task 5 will swap this
+    # for a tini-based supervised entrypoint.
+    command: ["sh", "-c", "sleep infinity"]
+    restart: "no"
+    {% if resources %}
+    deploy:
+      resources:
+        limits:
+          cpus: "{{ resources.cpu_limit }}"
+          memory: "{{ resources.memory_limit }}"
+    {% endif %}
+
+volumes:
+  postgres_data:
+    name: "awf-{{ workspace_id }}-pgdata"
+
+networks:
+  awf_net:
+    name: "awf-{{ workspace_id }}-net"
