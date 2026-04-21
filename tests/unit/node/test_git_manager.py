@@ -1,0 +1,213 @@
+"""GitManager tests against a real throwaway git repository.
+
+We intentionally exercise the real ``git`` CLI rather than mock it — the whole
+value of GitManager is correct handling of real worktree semantics, so mocking
+would test nothing useful. Setup is fast (git init + two commits < 200 ms on
+typical hardware) and each test gets an isolated ``tmp_path``.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from awf.node.git_manager import GitManager, GitOperationError
+
+
+def _git(args: list[str], cwd: Path) -> None:
+    """Run a synchronous git command for fixture setup; fail loudly on error."""
+    subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+    )
+
+
+@pytest.fixture
+def origin_repo(tmp_path: Path) -> Path:
+    """Create a minimal git repository with two commits on ``development``.
+
+    Acts as the "origin" URL the GitManager will clone as a mirror.
+    """
+    repo = tmp_path / "origin"
+    repo.mkdir()
+    _git(["init", "-q", "-b", "development"], repo)
+    _git(["config", "user.name", "AWF Test"], repo)
+    _git(["config", "user.email", "awf@test.local"], repo)
+
+    (repo / "README.md").write_text("first\n")
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "init"], repo)
+
+    (repo / "README.md").write_text("second\n")
+    _git(["add", "."], repo)
+    _git(["commit", "-q", "-m", "update"], repo)
+    return repo
+
+
+@pytest.fixture
+def work_dir(tmp_path: Path) -> Path:
+    d = tmp_path / "awf-work"
+    d.mkdir()
+    return d
+
+
+@pytest.fixture
+def manager(work_dir: Path) -> GitManager:
+    return GitManager(work_dir)
+
+
+class TestEnsureMirror:
+    @pytest.mark.unit
+    async def test_clones_on_first_call(self, manager: GitManager, origin_repo: Path) -> None:
+        mirror = await manager.ensure_mirror(str(origin_repo))
+        assert mirror.exists()
+        assert (mirror / "HEAD").exists()  # bare repo has HEAD at the top level
+
+    @pytest.mark.unit
+    async def test_updates_on_second_call(
+        self, manager: GitManager, origin_repo: Path, tmp_path: Path
+    ) -> None:
+        mirror = await manager.ensure_mirror(str(origin_repo))
+        first_call_path = mirror
+
+        # Add a new commit on the origin.
+        (origin_repo / "NEW.md").write_text("added later\n")
+        _git(["add", "."], origin_repo)
+        _git(["commit", "-q", "-m", "third"], origin_repo)
+
+        mirror_again = await manager.ensure_mirror(str(origin_repo))
+        assert mirror_again == first_call_path  # same path, no re-clone
+
+        # The fetched commit is reachable from development.
+        rev_list = subprocess.run(
+            ["git", "--git-dir", str(mirror_again), "rev-list", "--count", "development"],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        assert int(rev_list.stdout.strip()) == 3
+
+    @pytest.mark.unit
+    async def test_concurrent_first_calls_for_different_repos_do_not_collide(
+        self, manager: GitManager, origin_repo: Path, tmp_path: Path
+    ) -> None:
+        other = tmp_path / "origin-2"
+        other.mkdir()
+        _git(["init", "-q", "-b", "main"], other)
+        _git(["config", "user.name", "x"], other)
+        _git(["config", "user.email", "x@x"], other)
+        (other / "f").write_text("a\n")
+        _git(["add", "."], other)
+        _git(["commit", "-q", "-m", "a"], other)
+
+        m1, m2 = await asyncio.gather(
+            manager.ensure_mirror(str(origin_repo)),
+            manager.ensure_mirror(str(other)),
+        )
+        assert m1 != m2
+        assert m1.exists() and m2.exists()
+
+
+class TestAddWorktree:
+    @pytest.mark.unit
+    async def test_creates_worktree_with_new_branch(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_abc123",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_abc123",
+        )
+
+        assert layout.worktree_path.exists()
+        assert (layout.worktree_path / "README.md").read_text() == "second\n"
+
+        branch = subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "symbolic-ref", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert branch == "awf/ws_abc123"
+
+    @pytest.mark.unit
+    async def test_rejects_duplicate_worktree_path(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        await manager.add_worktree(
+            workspace_id="ws_dup",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_dup",
+        )
+        with pytest.raises(GitOperationError) as exc:
+            await manager.add_worktree(
+                workspace_id="ws_dup",
+                repo_url=str(origin_repo),
+                base_branch="development",
+                new_branch="awf/ws_dup-2",
+            )
+        assert exc.value.reason_code == "GIT_WORKTREE_ALREADY_EXISTS"
+
+    @pytest.mark.unit
+    async def test_rejects_missing_base_branch(
+        self, manager: GitManager, origin_repo: Path
+    ) -> None:
+        with pytest.raises(GitOperationError) as exc:
+            await manager.add_worktree(
+                workspace_id="ws_missing",
+                repo_url=str(origin_repo),
+                base_branch="does-not-exist",
+                new_branch="awf/ws_missing",
+            )
+        assert exc.value.reason_code == "GIT_BASE_BRANCH_MISSING"
+
+
+class TestRemoveWorktree:
+    @pytest.mark.unit
+    async def test_removes_existing_worktree(self, manager: GitManager, origin_repo: Path) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_rm",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_rm",
+        )
+        assert layout.worktree_path.exists()
+
+        await manager.remove_worktree(workspace_id="ws_rm", repo_url=str(origin_repo))
+        assert not layout.worktree_path.exists()
+
+    @pytest.mark.unit
+    async def test_missing_worktree_is_noop(self, manager: GitManager, origin_repo: Path) -> None:
+        # Ensure mirror exists so only worktree is "missing."
+        await manager.ensure_mirror(str(origin_repo))
+        # Should not raise.
+        await manager.remove_worktree(workspace_id="ws_never_created", repo_url=str(origin_repo))
+
+
+class TestHeadSha:
+    @pytest.mark.unit
+    async def test_returns_current_head(self, manager: GitManager, origin_repo: Path) -> None:
+        layout = await manager.add_worktree(
+            workspace_id="ws_head",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_head",
+        )
+        sha = await manager.head_sha(workspace_id="ws_head")
+        assert len(sha) == 40
+        assert all(c in "0123456789abcdef" for c in sha)
+
+        expected = subprocess.run(
+            ["git", "-C", str(layout.worktree_path), "rev-parse", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout.strip()
+        assert sha == expected
