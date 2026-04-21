@@ -116,6 +116,7 @@ extend-immutable-calls = [
     "fastapi.Cookie",
     "fastapi.File",
     "fastapi.Form",
+    "pydantic.Field",
     "typer.Argument",
     "typer.Option",
 ]
