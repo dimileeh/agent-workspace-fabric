@@ -1,0 +1,155 @@
+"""SQLAlchemy ORM models for the AWF control plane.
+
+Three core tables for the MVP:
+
+- ``workspaces``        : one row per workspace (isolated execution environment).
+- ``operations``        : one row per async action (create, start, validate, cancel, destroy).
+- ``workspace_events``  : append-only audit log of state transitions and notable events.
+
+Design notes:
+
+- ``Workspace.version`` enables optimistic concurrency: repositories bump + check it.
+- ``Workspace.idempotency_key`` is unique (nullable) — duplicate POSTs with the same
+  key return the existing workspace rather than creating a second one.
+- Status columns are stored as strings, not DB-level enums, so migrations don't
+  require DB-level enum alterations every time we add a state.
+- ``WorkspaceEvent`` is append-only; no UPDATE/DELETE should ever touch it.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from awf.db.base import Base, _now
+
+
+class Workspace(Base):
+    __tablename__ = "workspaces"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_workspaces_idempotency_key"),
+        Index("ix_workspaces_status", "status"),
+        Index("ix_workspaces_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    version: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+
+    # Request inputs
+    repo_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    branch_base: Mapped[str] = mapped_column(String(256), nullable=False)
+    branch_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    base_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    task_title: Mapped[str] = mapped_column(String(512), nullable=False)
+    task_prompt: Mapped[str] = mapped_column(String(16384), nullable=False)
+    task_external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    agent: Mapped[str] = mapped_column(String(32), nullable=False)
+    env_profile: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # Validation inputs (list of shell commands, stored as JSON for portability)
+    test_commands: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    requires_database: Mapped[bool] = mapped_column(default=False, nullable=False)
+
+    # Runtime placement + compose project
+    node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    compose_project_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # Terminal-state metadata
+    pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    failure_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+
+    # Idempotency
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    # Timestamps
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+    # Relationships — eagerly loaded via ``selectin`` so async callers can access
+    # ``ws.events`` / ``ws.operations`` without triggering lazy I/O in a non-async context.
+    # Both collections are bounded (O(tens) per workspace in the MVP lifecycle) so the
+    # extra SELECT is negligible.
+    operations: Mapped[list[Operation]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="Operation.created_at",
+    )
+    events: Mapped[list[WorkspaceEvent]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="WorkspaceEvent.occurred_at",
+    )
+
+
+class Operation(Base):
+    __tablename__ = "operations"
+    __table_args__ = (
+        Index("ix_operations_workspace", "workspace_id"),
+        Index("ix_operations_status", "status"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+
+    # Payload + result are free-form JSON so we don't need schema changes per op type.
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    result: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    workspace: Mapped[Workspace] = relationship(back_populates="operations")
+
+
+class WorkspaceEvent(Base):
+    """Append-only audit log. Records every state transition + notable event.
+
+    No UPDATE/DELETE should ever hit this table — repositories enforce this by
+    providing an ``add_event`` method and no ``update_event`` equivalent.
+    """
+
+    __tablename__ = "workspace_events"
+    __table_args__ = (
+        Index("ix_workspace_events_workspace", "workspace_id"),
+        Index("ix_workspace_events_occurred_at", "occurred_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    old_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    new_state: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="events")

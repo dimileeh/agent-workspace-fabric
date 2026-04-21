@@ -1,0 +1,80 @@
+"""Application settings — pydantic-settings backed.
+
+Settings are read from environment variables (with the ``AWF_`` prefix) and from a
+``.env`` file if one exists. The ``Settings`` class is immutable after construction
+so later code can't accidentally mutate global state.
+
+Tests override settings via ``Settings(_env_file=None, AWF_...=...)`` construction
+rather than mutating a global object.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic import Field
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
+RuntimeEnv = Literal["local", "ci", "staging", "prod"]
+
+
+class Settings(BaseSettings):
+    """Single source of truth for runtime configuration.
+
+    All fields are either required or have defaults that are safe in local dev.
+    Production deployments MUST set database_url and github_token explicitly.
+    """
+
+    model_config = SettingsConfigDict(
+        env_prefix="AWF_",
+        env_file=".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
+        frozen=True,
+        case_sensitive=False,
+    )
+
+    # Identity
+    service_name: str = Field(default="awf", description="Service identifier used in logs/metrics.")
+    env: RuntimeEnv = Field(default="local", description="Runtime environment.")
+    log_level: LogLevel = Field(default="INFO")
+
+    # API
+    api_host: str = Field(default="0.0.0.0")  # noqa: S104 (intentional in containers)
+    api_port: int = Field(default=8000, ge=1, le=65535)
+
+    # Database (control-plane)
+    database_url: str = Field(
+        default="sqlite+aiosqlite:///./awf.db",
+        description=(
+            "Control-plane database URL. SQLite default is for local dev only; "
+            "production must set postgresql+asyncpg://..."
+        ),
+    )
+
+    # GitHub
+    github_token: str | None = Field(default=None)
+    github_default_base_branch: str = Field(default="development")
+
+    # Docker
+    docker_host: str = Field(default="unix:///var/run/docker.sock")
+    agent_runtime_image: str = Field(default="awf-agent-runtime:latest")
+
+    # Workspace resource defaults (overridable per-request)
+    workspace_steady_cpu: float = Field(default=3.0, gt=0)
+    workspace_steady_memory_gb: float = Field(default=10.0, gt=0)
+    workspace_peak_cpu: float = Field(default=6.0, gt=0)
+    workspace_peak_memory_gb: float = Field(default=16.0, gt=0)
+
+
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Return the process-wide Settings instance.
+
+    Cached so repeated calls don't re-read the environment/file. Tests that need
+    a different configuration should construct ``Settings(...)`` directly rather
+    than mutate the cache.
+    """
+    return Settings()

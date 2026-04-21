@@ -77,6 +77,8 @@ extend-exclude = [
 ]
 
 [tool.ruff.lint]
+# ERA (eradicate) is intentionally left out — it false-positives on docstrings
+# and URL-containing Field(description=...) arguments.
 select = [
     "E",   # pycodestyle errors
     "F",   # pyflakes
@@ -90,7 +92,6 @@ select = [
     "PTH", # flake8-use-pathlib
     "RET", # flake8-return
     "ARG", # flake8-unused-arguments
-    "ERA", # eradicate (commented-out code)
 ]
 ignore = [
     "E501",  # line-too-long handled by formatter
@@ -99,6 +100,23 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002"]  # test fixtures often appear unused to ruff
 "migrations/**" = ["E402", "F401"]
+
+[tool.ruff.lint.flake8-bugbear]
+# FastAPI and Typer require these calls as argument defaults; the rule's warning
+# ("don't call functions in defaults") doesn't apply to DI markers that aren't
+# evaluated eagerly.
+extend-immutable-calls = [
+    "fastapi.Depends",
+    "fastapi.Header",
+    "fastapi.Query",
+    "fastapi.Path",
+    "fastapi.Body",
+    "fastapi.Cookie",
+    "fastapi.File",
+    "fastapi.Form",
+    "typer.Argument",
+    "typer.Option",
+]
 
 [tool.ruff.format]
 quote-style = "double"
