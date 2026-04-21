@@ -82,7 +82,7 @@ class TestSuccess:
                 branch_base="development",
                 task_title="t",
                 task_prompt="p",
-                agent="openclaw",
+                agent="codex",
                 test_commands=[],
             )
             await s.commit()
@@ -113,7 +113,7 @@ class TestSuccess:
                 branch_base="development",
                 task_title="t",
                 task_prompt="p",
-                agent="openclaw",
+                agent="codex",
                 test_commands=[],
             )
             await s.commit()
@@ -144,7 +144,7 @@ class TestFailureHandling:
                 branch_base="nonexistent",
                 task_title="t",
                 task_prompt="p",
-                agent="openclaw",
+                agent="codex",
                 test_commands=[],
             )
             await s.commit()
@@ -175,7 +175,7 @@ class TestIdempotency:
                 branch_base="development",
                 task_title="t",
                 task_prompt="p",
-                agent="openclaw",
+                agent="codex",
                 test_commands=[],
             )
             await s.commit()

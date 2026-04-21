@@ -30,7 +30,7 @@ class WorkspaceCreateRequest(BaseModel):
     task_prompt: Annotated[str, Field(min_length=1, max_length=16384)]
     task_external_id: Annotated[str | None, Field(default=None, max_length=128)]
 
-    agent: AgentRuntime = Field(default=AgentRuntime.openclaw)
+    agent: AgentRuntime = Field(default=AgentRuntime.codex)
     env_profile: Annotated[str | None, Field(default=None, max_length=128)]
 
     test_commands: list[str] = Field(default_factory=list)

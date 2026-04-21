@@ -4,7 +4,7 @@
 
 Dmitri's primary constraint on shipping aira features is **parallel agent throughput**, not feature scope or agent capability. Today, each PR takes ~8 hours end-to-end (largely review + conflict resolution), and the workflow is serial — he babysits one PR at a time. Concurrent agent demand is 8+ but suppressed by the lack of a substrate that can isolate agents safely.
 
-**AWF (Aira Agent Workspace Fabric)** is a standalone, agent-agnostic execution service that any coding agent (OpenClaw, Codex, Claude Code) can call to run one coding task end-to-end in an isolated Docker workspace: check out source, launch the coding agent inside, run tests (with sidecar services like Postgres + Alembic migrations as repo profile requires), and submit a PR against the development branch.
+**AWF (Aira Agent Workspace Fabric)** is a standalone execution service that any orchestrator (OpenClaw agents via skill, aira-agent's own supervisor, a human-triggered CLI, etc.) can call to run one coding task end-to-end in an isolated Docker workspace: check out source, launch a **coding CLI** (Codex / Claude Code / Gemini) inside the container with the repo mounted, run tests (with sidecar services like Postgres + Alembic migrations as the repo profile requires), and submit a PR against the development branch. The distinction matters: **AWF is called by orchestrators; the actual code-writing is done by the coding CLI inside the container.**
 
 This MVP intentionally ships the "developer-in-a-box" primitive only. The stale-detection / auto-rebase / merge-queue / task-class lock machinery from the full AWF v2.2 PRD is explicitly deferred to Phase 1.5, pending evidence from real parallel runs about which conflicts actually happen in practice.
 
@@ -13,7 +13,7 @@ This MVP intentionally ships the "developer-in-a-box" primitive only. The stale-
 - **Stateful API** — full control + observability from day 1 (workspaces table, async operation IDs, polling, retries, debug pins).
 - **Dual surface** — REST (for OpenClaw via skill, shell-style invocation) + MCP server (for Codex / Claude Code to invoke AWF as a typed tool) on the same underlying service.
 - **Python 3.11 + FastAPI + mcp SDK** for the MVP. Go reserved as a later optimization for the node-worker if/when Python is the measured bottleneck.
-- **Agent-agnostic** via a pluggable adapter layer. Wire OpenClaw first (matches Spark Jr), then Codex, then Claude Code.
+- **Agent-agnostic** via a pluggable adapter layer. The three adapters are the three real coding CLIs we launch inside the workspace container: **Codex** (`codex exec`), **Claude Code** (`claude` headless), and **Gemini CLI** (`gemini --yolo`). OpenClaw is intentionally *not* an adapter — it's a model-routing gateway, not a coding CLI.
 
 ### Non-goals for MVP (deferred to Phase 1.5+)
 
@@ -50,7 +50,7 @@ This MVP intentionally ships the "developer-in-a-box" primitive only. The stale-
                        │ Node Worker (same process for MVP)       │
                        │                                          │
                        │  git worktree mgr → compose provisioner  │
-                       │  → agent adapter (OpenClaw|Codex|Claude) │
+                       │  → agent adapter (Codex|ClaudeCode|Gemini)│
                        │  → validation runner → PR creator        │
                        │  → cleanup                               │
                        └──────────────────────────────────────────┘
@@ -86,7 +86,7 @@ aira-agent-workspace-fabric/
 │       ├── control/                       # async worker, operation queue, state machine
 │       ├── db/                            # SQLAlchemy models, repositories
 │       ├── node/                          # git worktree mgr, compose provisioner, cleanup
-│       ├── adapters/                      # openclaw.py, codex.py, claude_code.py (one interface)
+│       ├── adapters/                      # codex.py, claude_code.py, gemini.py (one interface)
 │       ├── runtime/                       # validation runner, artifact + log capture
 │       ├── cli/                           # Typer CLI
 │       └── common/                        # config, events, structured logging
@@ -145,7 +145,7 @@ Abstract interface (`awf/adapters/base.py`):
 
 ```python
 class AgentAdapter(Protocol):
-    name: str  # "openclaw" | "codex" | "claude_code"
+    name: str  # "codex" | "claude_code" | "gemini"
 
     async def prepare_container(self, workspace: Workspace) -> None:
         """Install/verify the agent CLI inside the workspace container."""
@@ -156,7 +156,7 @@ class AgentAdapter(Protocol):
     async def health_check(self) -> bool: ...
 ```
 
-Implementations wired in build order: `openclaw.py` first (matches Spark Jr), then `codex.py`, then `claude_code.py`.
+Implementations: `codex.py`, `claude_code.py`, `gemini.py`. All three are structurally similar (async subprocess with CLI-specific flags + prompt injection + output parsing); wire Codex first because it's the most mature headless CLI, then Claude Code, then Gemini.
 
 ### Compose template (MVP)
 
@@ -193,7 +193,7 @@ Resource defaults per AWF PRD Section 7.3: steady-state ~3 CPU / 10 GB; peak ~6 
 | `src/awf/node/provisioner.py` | Orchestrates git + compose for one workspace |
 | `src/awf/node/cleanup.py` | Compose down + volume removal + event emit |
 | `src/awf/adapters/base.py` | AgentAdapter Protocol + registry |
-| `src/awf/adapters/openclaw.py` | First adapter (OpenClaw matches Spark Jr) |
+| ` src/awf/adapters/codex.py` | First adapter (Codex — most mature headless coding CLI) |
 | `src/awf/runtime/validation.py` | Runs `test_commands` inside container, captures artifacts/logs |
 | `src/awf/runtime/pr_creator.py` | `git push` + `gh pr create --base development` |
 | `src/awf/cli/main.py` | Typer CLI mirroring REST API |
@@ -215,7 +215,7 @@ Resource defaults per AWF PRD Section 7.3: steady-state ~3 CPU / 10 GB; peak ~6 
 | 1 | **Scaffold repo + API skeleton** | `pyproject.toml`, FastAPI app, Pydantic schemas, Alembic init, Postgres schema for workspaces/operations/events. `curl POST /v1/workspaces` returns a workspace_id in `requested` state. | `pyproject.toml`, `src/awf/api/**`, `src/awf/db/**`, `migrations/versions/0001_initial.py` |
 | 2 | **Git worktree manager** | Bare mirror creation + worktree creation from base SHA. Workspace advances `requested → provisioning → ready` with a real checkout on disk. | `src/awf/node/git_manager.py`, `src/awf/control/worker.py` |
 | 3 | **Compose provisioner + Postgres sidecar** | Jinja2 template renders, `docker compose up` launches agent + Postgres, health-check waits for Postgres readiness. Workspace `ready` event emitted only once DB is reachable. | `docker/compose/workspace.base.yml.j2`, `src/awf/node/compose_manager.py`, `src/awf/node/provisioner.py` |
-| 4 | **OpenClaw adapter** | Subprocess invocation with prompt injection + result parsing. End-to-end `POST /v1/workspaces` with a trivial task (e.g., "add a docstring to file X") produces a commit on the feature branch inside the workspace. | `src/awf/adapters/base.py`, `src/awf/adapters/openclaw.py` |
+| 4 | **Codex adapter (first)** | Subprocess invocation with prompt injection + result parsing. End-to-end `POST /v1/workspaces` with a trivial task (e.g., "add a docstring to file X") produces a commit on the feature branch inside the workspace. | `src/awf/adapters/base.py`, ` src/awf/adapters/codex.py` |
 | 5 | **Validation runner** | Executes `test_commands` inside container against workspace-local Postgres (Alembic migrate + pytest). Captures logs + artifacts. Workspace transitions `running → validating → pushing` on pass, `failed` on fail. | `src/awf/runtime/validation.py`, `src/awf/runtime/artifacts.py` |
 | 6 | **PR creator + cleanup** | `git push` + `gh pr create --base development`. `DELETE /v1/workspaces/{id}` runs compose down + volume removal. Full lifecycle returns a real PR URL; no orphaned containers after destroy. | `src/awf/runtime/pr_creator.py`, `src/awf/node/cleanup.py` |
 | 7 | **MCP server surface** | Expose `awf_create_workspace`, `awf_get_workspace`, `awf_wait_for_workspace`, `awf_cancel_workspace`, `awf_list_workspaces` as MCP tools. A Claude Code session can invoke `awf_create_workspace` and get a PR back. | `src/awf/mcp/server.py` |
@@ -233,7 +233,7 @@ pytest tests/integration/ -v                # spins real Postgres via testcontai
 
 **End-to-end (local):**
 1. `cd ~/Projects/aira-agent-workspace-fabric && docker compose up control-plane postgres -d`
-2. `awf workspace create --repo git@github.com:dimileeh/aira-agent.git --base development --agent openclaw --title "trivial docstring" --prompt "Add a one-line docstring to src/aira_agent/api/main.py explaining the module." --test 'ruff check .' --test 'pytest tests/unit/ -q'`
+2. `awf workspace create --repo git@github.com:dimileeh/aira-agent.git --base development --agent codex --title "trivial docstring" --prompt "Add a one-line docstring to src/aira_agent/api/main.py explaining the module." --test 'ruff check .' --test 'pytest tests/unit/ -q'`
 3. Poll `awf workspace show <id>` — expect `provisioning → ready → running → validating → pushing → completed`
 4. Verify PR URL returned, PR exists on GitHub targeting `development`
 5. `awf workspace destroy <id>` — verify `docker ps -a | grep awf` is empty after destroy

@@ -75,8 +75,18 @@ class FailureReason(StrEnum):
 
 
 class AgentRuntime(StrEnum):
-    """Which coding agent should execute the task inside the workspace."""
+    """Which coding CLI should execute the task inside the workspace.
 
-    openclaw = "openclaw"
+    Each value names a real, installable CLI that AWF launches inside the
+    workspace container with the repo checked out. The CLI reads the task
+    prompt, produces commits on the feature branch, and exits.
+    """
+
     codex = "codex"
+    """OpenAI Codex CLI — ``codex exec`` with ``--dangerously-bypass-approvals-and-sandbox``."""
+
     claude_code = "claude_code"
+    """Anthropic Claude Code — ``claude`` in non-interactive mode with ``--dangerously-skip-permissions``."""
+
+    gemini = "gemini"
+    """Google Gemini CLI — ``gemini --yolo``."""

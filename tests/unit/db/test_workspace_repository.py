@@ -43,7 +43,7 @@ class TestCreate:
             branch_base="development",
             task_title="trivial",
             task_prompt="Add a docstring.",
-            agent="openclaw",
+            agent="codex",
             test_commands=["pytest"],
         )
 
@@ -59,7 +59,7 @@ class TestCreate:
             branch_base="development",
             task_title="t",
             task_prompt="p",
-            agent="openclaw",
+            agent="codex",
             test_commands=[],
         )
         await session.commit()
@@ -83,7 +83,7 @@ class TestIdempotency:
             branch_base="development",
             task_title="t",
             task_prompt="p",
-            agent="openclaw",
+            agent="codex",
             test_commands=[],
             idempotency_key="same-key-abc",
         )
@@ -112,7 +112,7 @@ class TestTransition:
             branch_base="development",
             task_title="t",
             task_prompt="p",
-            agent="openclaw",
+            agent="codex",
             test_commands=[],
         )
         await session.commit()
@@ -137,7 +137,7 @@ class TestTransition:
             branch_base="development",
             task_title="t",
             task_prompt="p",
-            agent="openclaw",
+            agent="codex",
             test_commands=[],
         )
         await session.commit()

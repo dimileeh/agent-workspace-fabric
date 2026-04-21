@@ -15,7 +15,7 @@ _MINIMAL_BODY = {
     "branch_base": "development",
     "task_title": "Add module docstring",
     "task_prompt": "Add a one-line docstring to src/aira_agent/api/main.py.",
-    "agent": "openclaw",
+    "agent": "codex",
     "test_commands": ["pytest -q"],
 }
 
@@ -89,7 +89,7 @@ class TestGetWorkspace:
         assert body["status"] == "requested"
         assert body["version"] == 1
         assert body["task_title"] == _MINIMAL_BODY["task_title"]
-        assert body["agent"] == "openclaw"
+        assert body["agent"] == "codex"
         assert body["test_commands"] == _MINIMAL_BODY["test_commands"]
 
     @pytest.mark.unit

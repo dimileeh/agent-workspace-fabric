@@ -77,7 +77,7 @@ async def _create_requested(
             branch_base="development",
             task_title=title,
             task_prompt="p",
-            agent="openclaw",
+            agent="codex",
             test_commands=[],
         )
         await s.commit()
