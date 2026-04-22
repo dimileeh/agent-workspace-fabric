@@ -168,15 +168,19 @@ class TestHappyPath:
 
 class TestFailurePaths:
     @pytest.mark.unit
-    async def test_agent_failure_marks_workspace_failed_and_stops_pipeline(
+    async def test_agent_failure_with_no_work_marks_failed(
         self,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
+        # Agent exits non-zero AND left no file changes. Nothing to salvage →
+        # workspace fails with agent_failure before validation runs.
         ws_id = await _seed_ready_workspace(factory)
-        # Agent run returns non-zero → AgentRunError.
-        fake.queue_result(returncode=2, stderr="codex: auth failed")
+        fake.queue_result(returncode=2, stderr="codex: auth failed")  # adapter dies
+        fake.queue_result(returncode=0)  # git add -A (no-op)
+        fake.queue_result(returncode=0, stdout="")  # diff --cached is empty
+        fake.queue_result(returncode=0, stdout="0\n")  # rev-list base..HEAD = 0
 
         await executor.execute(ws_id)
 
@@ -185,8 +189,41 @@ class TestFailurePaths:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "agent_failure"
-            # Validation + PR never ran.
-        assert len(fake.calls) == 1
+        # Validation + PR never ran.
+        assert len(fake.calls) == 4
+
+    @pytest.mark.unit
+    async def test_agent_killed_with_uncommitted_work_is_salvaged(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Agent exits non-zero (e.g. claude_code SIGKILL 137 after long
+        # session) but the worktree has uncommitted edits — the work IS
+        # there, the CLI just didn't get to run its own final commit.
+        # AWF must capture that work rather than throwing it away.
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(returncode=137, stderr="")  # adapter killed mid-session
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="tests/e2e/bff/tasks.spec.ts\n")  # cached diff: real work
+        fake.queue_result(returncode=0)  # git commit (AWF's auto-commit)
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(
+            returncode=0,
+            stdout="https://github.com/dimileeh/aira-web/pull/999\n",
+        )  # gh pr create
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/dimileeh/aira-web/pull/999"
 
     @pytest.mark.unit
     async def test_validation_failure_marks_failed_with_reason(

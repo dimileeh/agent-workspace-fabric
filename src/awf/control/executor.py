@@ -93,20 +93,29 @@ class WorkspaceExecutor:
                 prompt=ws.task_prompt,
                 model=default_model,
             )
+            agent_exit_note = None
         except AgentRunError as exc:
-            _log.error(
-                "executor.agent_failed",
+            # Do NOT bail out yet. A CLI that exits non-zero — typically
+            # ``claude_code`` hitting a 1-hour internal session cap and
+            # returning 137 (SIGKILL), or a timeout against a flaky
+            # dependency — may have left valuable uncommitted work in the
+            # worktree. Coding CLIs in general don't commit on their own;
+            # AWF's post-agent auto-commit is the only thing that captures
+            # their edits. Log the exit code, remember it for the final
+            # failure message, but let the commit + validate pipeline run.
+            # If there's nothing to commit, the existing no-work check
+            # fails the workspace with ``agent_failure`` below. If there
+            # IS work, validation decides whether it's pushable.
+            agent_exit_note = (
+                f"agent CLI exited {exc.result.returncode} ({exc.reason_code}); "
+                f"continuing to salvage any uncommitted work"
+            )
+            _log.warning(
+                "executor.agent_nonzero_exit_salvaging",
                 workspace_id=workspace_id,
                 agent=ws.agent,
                 returncode=exc.result.returncode,
             )
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
-                failure_reason=FailureReason.agent_failure,
-                message=str(exc)[:2000],
-            )
-            return
         except Exception as exc:  # unexpected — surface with generic reason
             _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
             await self._mark_failed(
@@ -156,14 +165,18 @@ class WorkspaceExecutor:
             # past the base commit. If not, the agent produced no change.
             rev_count = await _git_in_worktree(["rev-list", "--count", f"{ws.base_commit}..HEAD"])
             if not rev_count.ok or int(rev_count.stdout.strip() or "0") == 0:
+                base_short = ws.base_commit[:10] if ws.base_commit else "unknown"
+                message = (
+                    f"agent exited without producing any commits on the feature branch "
+                    f"(base={base_short})"
+                )
+                if agent_exit_note is not None:
+                    message = f"{message}; {agent_exit_note}"
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
                     failure_reason=FailureReason.agent_failure,
-                    message=(
-                        "agent exited without producing any commits on the feature branch "
-                        f"(base={ws.base_commit[:10] if ws.base_commit else 'unknown'})"
-                    ),
+                    message=message,
                 )
                 return
 
