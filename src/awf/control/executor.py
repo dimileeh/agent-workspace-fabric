@@ -21,9 +21,10 @@ from pathlib import Path
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import re
+from collections.abc import Callable
 from typing import Protocol
 
-from awf.adapters.base import AgentRunError, get_adapter
+from awf.adapters.base import AgentAdapter, AgentRunError, get_adapter
 from awf.common.commands import AsyncCommandRunner
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
@@ -76,7 +77,24 @@ class WorkspaceExecutor:
         pr_creator: PullRequestCreator,
         config: ExecutorConfig,
         pr_monitor: _MonitorRunnerProto | None = None,
+        pr_monitor_factory: Callable[[AgentAdapter], _MonitorRunnerProto] | None = None,
     ) -> None:
+        """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
+        optional hooks that wire the ``monitoring_pr`` stage:
+
+        * ``pr_monitor`` — a pre-constructed monitor. Used by tests that
+          hand in a stub (the production monitor needs the per-task agent
+          adapter, which the executor only has mid-``execute``).
+        * ``pr_monitor_factory`` — a callable the executor invokes AFTER
+          the adapter is resolved. Production path: ``run_awf.py`` passes
+          a factory that builds a ``PullRequestMonitorRunner`` from the
+          adapter, GitHub client, and worktree paths.
+
+        If both are None the monitor stage is skipped and the executor
+        preserves the original ``pushing → completed`` contract (the
+        executor_tests no-monitor scenarios still pass)."""
+        if pr_monitor is not None and pr_monitor_factory is not None:
+            raise ValueError("pr_monitor and pr_monitor_factory are mutually exclusive")
         self._session_factory = session_factory
         self._runner = runner
         self._compose = compose
@@ -84,6 +102,7 @@ class WorkspaceExecutor:
         self._pr_creator = pr_creator
         self._config = config
         self._pr_monitor = pr_monitor
+        self._pr_monitor_factory = pr_monitor_factory
 
     async def execute(self, workspace_id: str) -> None:
         """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
@@ -340,7 +359,14 @@ class WorkspaceExecutor:
                 return
             persisted.pr_url = pr.url
             persisted.pr_number = _extract_pr_number(pr.url)
-            if self._pr_monitor is not None:
+            # Resolve which monitor (if any) to hand off to. Pre-constructed
+            # ``pr_monitor`` wins (tests); otherwise the factory builds one
+            # from the per-task adapter now that we have it.
+            monitor: _MonitorRunnerProto | None = self._pr_monitor
+            if monitor is None and self._pr_monitor_factory is not None:
+                monitor = self._pr_monitor_factory(adapter)
+
+            if monitor is not None:
                 # Hand off to the monitor — it will transition to completed
                 # (on merge) or failed (on abort / cap / close).
                 await repo.transition(
@@ -355,13 +381,13 @@ class WorkspaceExecutor:
                 )
                 await session.commit()
 
-        if self._pr_monitor is not None:
+        if monitor is not None:
             _log.info(
                 "executor.handoff_to_pr_monitor",
                 workspace_id=workspace_id,
                 pr_url=pr.url,
             )
-            await self._pr_monitor.run(
+            await monitor.run(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,

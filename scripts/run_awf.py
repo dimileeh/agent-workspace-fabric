@@ -52,8 +52,11 @@ from awf.node.compose_manager import (
     ComposeManager,
     WorkspaceComposeSpec,
 )
+from awf.adapters.base import AgentAdapter
+from awf.common.github_client import GitHubClient
 from awf.node.git_manager import GitManager
 from awf.runtime.pr_creator import PullRequestCreator
+from awf.runtime.release_pr_monitor import build_feature_pr_monitor
 from awf.runtime.validation import ValidationRunner
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -293,7 +296,20 @@ async def _run_task(
         await repo.transition(persisted, to=WorkspaceStatus.ready, reason_code="STACK_READY")
         await s.commit()
 
-    # Step 5: execute.
+    # Step 5: execute. Wire the PR monitor factory — the executor calls
+    # it once it has the per-task adapter, and the returned monitor drives
+    # the ``monitoring_pr`` stage (comments, CI, base sync, merge).
+    gh = GitHubClient(runner)
+
+    def _monitor_factory(adapter: AgentAdapter):
+        return build_feature_pr_monitor(
+            session_factory=session_factory,
+            runner=runner,
+            adapter=adapter,
+            gh=gh,
+            worktrees_root=work_dir / "git" / "worktrees",
+        )
+
     executor = WorkspaceExecutor(
         session_factory=session_factory,
         runner=runner,
@@ -305,6 +321,7 @@ async def _run_task(
             compose_projects_root=work_dir / "compose" / "compose",
             default_models=_DEFAULT_MODELS,
         ),
+        pr_monitor_factory=_monitor_factory,
     )
     print(f"[{cfg.task_title[:40]}] executor starting ...", flush=True)
     await executor.execute(ws_id)
