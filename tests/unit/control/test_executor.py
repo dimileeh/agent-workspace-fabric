@@ -112,12 +112,14 @@ class TestHappyPath:
         # Queue results for the full sequence:
         # (1) adapter.run, (2) git add -A, (3) git diff --cached --name-only,
         # (4) git commit, (5) git rev-list --count base..HEAD,
-        # (6) validation (one test cmd), (7) git push, (8) gh pr create.
+        # (6) git merge-base --is-ancestor base HEAD,
+        # (7) validation (one test cmd), (8) git push, (9) gh pr create.
         fake.queue_result(returncode=0, stdout="codex finished")  # adapter
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff (non-empty)
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(
@@ -147,6 +149,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0)  # validation
         fake.queue_result(returncode=0)  # push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
@@ -198,6 +201,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached (non-empty)
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=1, stderr="pytest: 5 failed")  # validation fails
 
         await executor.execute(ws_id)
@@ -221,6 +225,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0)  # validation ok
         fake.queue_result(returncode=128, stderr="remote: perm denied")  # push fails
 
@@ -256,6 +261,41 @@ class TestFailurePaths:
                 ws.failure_message or ""
             )
 
+    @pytest.mark.unit
+    async def test_orphan_history_marks_failed_before_push(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Agents sometimes sever git history (e.g. `git checkout --orphan` +
+        # fresh commit), producing a branch with commits but no shared
+        # ancestor with the base branch. `rev-list --count base..HEAD` can't
+        # detect this (the count is HIGH — no common ancestor means every
+        # HEAD commit is "new"). We need an explicit ancestry check so push
+        # + `gh pr create` don't waste time failing with a confusing GraphQL
+        # error.
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count (fooled)
+        fake.queue_result(returncode=1, stderr="")  # merge-base --is-ancestor FAILS
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert "history" in (ws.failure_message or "").lower()
+            # Validation + push + gh never ran.
+            assert ws.pr_url is None
+        # 6 calls: adapter, add, diff, commit, rev-list, merge-base.
+        assert len(fake.calls) == 6
+
 
 class TestIdempotency:
     @pytest.mark.unit
@@ -272,6 +312,7 @@ class TestIdempotency:
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0)  # validation
         fake.queue_result(returncode=0)  # push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")  # gh pr create

@@ -166,6 +166,31 @@ class WorkspaceExecutor:
                     ),
                 )
                 return
+
+            # Some agents sever git history (e.g. by accidentally running
+            # ``git checkout --orphan`` or by re-initialising the repo).
+            # rev-list counts HIGH in that case (every HEAD commit is "new"
+            # w.r.t. base because there's no shared ancestor), so the
+            # previous check wouldn't notice. Without this guard, the push
+            # succeeds but ``gh pr create`` dies with a cryptic
+            # ``branch has no history in common with <base>`` error. Fail
+            # here with a message that tells the operator what happened.
+            ancestor = await _git_in_worktree(
+                ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
+            )
+            if not ancestor.ok:
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.agent_failure,
+                    message=(
+                        "agent severed git history — HEAD does not descend from "
+                        f"base commit {ws.base_commit[:10] if ws.base_commit else 'unknown'}. "
+                        "The coding CLI likely ran `git checkout --orphan` or reinitialised "
+                        "the repo; feature branch cannot be turned into a PR."
+                    ),
+                )
+                return
         except Exception as exc:  # unexpected — mark infrastructure
             _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
             await self._mark_failed(
