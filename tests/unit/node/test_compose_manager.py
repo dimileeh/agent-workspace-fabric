@@ -129,6 +129,33 @@ class TestRender:
         assert "deploy" not in parsed["services"]["agent"]
 
     @pytest.mark.unit
+    def test_auth_mounts_and_git_identity_propagate(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        from awf.node.compose_manager import AuthMount
+
+        spec = _spec(
+            tmp_path,
+            auth_mounts=(
+                AuthMount(source="/home/host/.codex", target="/home/agent/.codex", mode="rw"),
+                AuthMount(source="/home/host/.ssh", target="/home/agent/.ssh", mode="ro"),
+            ),
+            git_name="AWF Agent",
+            git_email="awf@example.com",
+        )
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        volumes = parsed["services"]["agent"]["volumes"]
+        assert "/home/host/.codex:/home/agent/.codex:rw" in volumes
+        assert "/home/host/.ssh:/home/agent/.ssh:ro" in volumes
+
+        env = parsed["services"]["agent"]["environment"]
+        assert env["GIT_AUTHOR_NAME"] == "AWF Agent"
+        assert env["GIT_COMMITTER_NAME"] == "AWF Agent"
+        assert env["GIT_AUTHOR_EMAIL"] == "awf@example.com"
+        assert env["GIT_COMMITTER_EMAIL"] == "awf@example.com"
+
+    @pytest.mark.unit
     def test_strict_undefined_catches_missing_vars(self) -> None:
         # Guard: if the template starts referencing a new variable without the
         # WorkspaceComposeSpec supplying it, rendering must fail loudly rather

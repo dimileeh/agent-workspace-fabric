@@ -115,6 +115,23 @@ class GitManager:
                 ["git", "clone", "--mirror", repo_url, str(mirror_path)],
                 operation="mirror.clone",
             )
+            # ``git clone --mirror`` sets ``remote.origin.mirror=true`` which
+            # refuses refspec pushes from any worktree attached to this bare
+            # repo (``fatal: --mirror can't be combined with refspecs``). Strip
+            # the flag — the fetch refspec (+refs/*:refs/*) still pulls all
+            # refs on ``remote update`` and individual worktrees can now push
+            # their feature branches normally.
+            await self._run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(mirror_path),
+                    "config",
+                    "--unset",
+                    "remote.origin.mirror",
+                ],
+                operation="mirror.strip_mirror_flag",
+            )
             return mirror_path
 
     async def add_worktree(

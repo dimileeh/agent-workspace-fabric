@@ -13,6 +13,12 @@
     postgres_image         — e.g. postgres:16-alpine
     postgres_user, postgres_password, postgres_db
     resources              — optional mapping with cpu/memory caps
+    auth_mounts            — optional list of mapping {source, target}
+                             (host path → container path) — used to inject
+                             CLI credentials (~/.codex, ~/.claude, ~/.gemini,
+                             ~/.config/gh, ~/.ssh) read-only into the agent
+    git_name, git_email    — optional; if set, configured as the agent's
+                             git identity for commits (see entrypoint)
 #}
 services:
   postgres:
@@ -41,8 +47,15 @@ services:
     environment:
       WORKSPACE_ID: "{{ workspace_id }}"
       DATABASE_URL: "postgresql+psycopg://{{ postgres_user }}:{{ postgres_password }}@postgres:5432/{{ postgres_db }}"
+      {% if git_name %}GIT_AUTHOR_NAME: "{{ git_name }}"
+      GIT_COMMITTER_NAME: "{{ git_name }}"{% endif %}
+      {% if git_email %}GIT_AUTHOR_EMAIL: "{{ git_email }}"
+      GIT_COMMITTER_EMAIL: "{{ git_email }}"{% endif %}
     volumes:
       - "{{ worktree_host_path }}:/workspace"
+      {% if auth_mounts %}{% for m in auth_mounts %}
+      - "{{ m.source }}:{{ m.target }}:{{ m.mode | default('ro') }}"
+      {% endfor %}{% endif %}
     depends_on:
       postgres:
         condition: service_healthy

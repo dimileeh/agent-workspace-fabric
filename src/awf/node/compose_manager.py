@@ -57,6 +57,20 @@ class ComposeOperationError(Exception):
 
 
 @dataclass(frozen=True)
+class AuthMount:
+    """One read-only bind mount carrying a credential directory into the agent."""
+
+    source: str
+    """Absolute host path (e.g. ``/home/dimileeh/.codex``)."""
+
+    target: str
+    """Container path (e.g. ``/home/agent/.codex``)."""
+
+    mode: str = "ro"
+    """Bind mount mode. ``ro`` = read-only (the default — credentials shouldn't be mutated)."""
+
+
+@dataclass(frozen=True)
 class WorkspaceComposeSpec:
     """Everything the template needs to render one workspace stack."""
 
@@ -69,6 +83,9 @@ class WorkspaceComposeSpec:
     postgres_password: str | None = None  # None → generate one
     cpu_limit: str | None = None
     memory_limit: str | None = None
+    auth_mounts: tuple[AuthMount, ...] = ()
+    git_name: str | None = None
+    git_email: str | None = None
 
     def project_name(self) -> str:
         return f"awf_{self.workspace_id}"
@@ -119,6 +136,11 @@ class ComposeManager:
             postgres_password=password,
             postgres_db=spec.postgres_db,
             resources=resources,
+            auth_mounts=[
+                {"source": m.source, "target": m.target, "mode": m.mode} for m in spec.auth_mounts
+            ],
+            git_name=spec.git_name,
+            git_email=spec.git_email,
         )
         compose_file.write_text(rendered, encoding="utf-8")
 
