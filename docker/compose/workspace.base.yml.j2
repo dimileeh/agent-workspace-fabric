@@ -13,12 +13,15 @@
     postgres_image         — e.g. postgres:16-alpine
     postgres_user, postgres_password, postgres_db
     resources              — optional mapping with cpu/memory caps
-    auth_mounts            — optional list of mapping {source, target}
-                             (host path → container path) — used to inject
-                             CLI credentials (~/.codex, ~/.claude, ~/.gemini,
-                             ~/.config/gh, ~/.ssh) read-only into the agent
-    git_name, git_email    — optional; if set, configured as the agent's
-                             git identity for commits (see entrypoint)
+    auth_mounts            — list of {source, target, mode} bind mounts for
+                             CLI credentials (~/.codex, ~/.claude, etc.)
+    git_name, git_email    — optional git identity for commits
+    companions             — list of companion services (dicts rendered from
+                             CompanionService). Each adds a build-from-host
+                             service (e.g. aira-agent backend, aira-web) that
+                             runs alongside the agent so validation can run
+                             against a live stack.
+    agent_depends_on       — ordered list of services the agent depends on
 #}
 services:
   postgres:
@@ -40,6 +43,39 @@ services:
       - awf_net
     restart: "no"
 
+  {% for c in companions %}
+  {{ c.name }}:
+    container_name: "awf-{{ workspace_id }}-{{ c.name }}"
+    build:
+      context: "{{ c.build_context }}"
+      dockerfile: "{{ c.dockerfile }}"
+    {% if c.env_file %}env_file:
+      - "{{ c.env_file }}"
+    {% endif %}{% if c.environment %}environment:
+      {% for k, v in c.environment %}{{ k }}: "{{ v }}"
+      {% endfor %}
+    {% endif %}{% if c.depends_on %}depends_on:
+      {% for dep in c.depends_on %}{{ dep }}:
+        condition: service_healthy
+      {% endfor %}
+    {% endif %}{% if c.healthcheck_cmd %}healthcheck:
+      test: ["CMD-SHELL", "{{ c.healthcheck_cmd }}"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    {% endif %}{% if c.command %}command: {{ c.command }}
+    {% endif %}{% if c.ports %}ports:
+      {% for cp, hp in c.ports %}- "{{ hp }}:{{ cp }}"
+      {% endfor %}
+    {% endif %}{% if c.volumes %}volumes:
+      {% for src, tgt in c.volumes %}- "{{ src }}:{{ tgt }}"
+      {% endfor %}
+    {% endif %}networks:
+      - awf_net
+    restart: "no"
+
+  {% endfor %}
   agent:
     image: "{{ agent_runtime_image }}"
     container_name: "awf-{{ workspace_id }}-agent"
@@ -57,13 +93,11 @@ services:
       - "{{ m.source }}:{{ m.target }}:{{ m.mode | default('ro') }}"
       {% endfor %}{% endif %}
     depends_on:
-      postgres:
+      {% for dep in agent_depends_on %}{{ dep }}:
         condition: service_healthy
+      {% endfor %}
     networks:
       - awf_net
-    # The default command is a sleep so the container stays alive while the
-    # adapter exec's into it to invoke the coding CLI. Task 5 will swap this
-    # for a tini-based supervised entrypoint.
     command: ["sh", "-c", "sleep infinity"]
     restart: "no"
     {% if resources %}

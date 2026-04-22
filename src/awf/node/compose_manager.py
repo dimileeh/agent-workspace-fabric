@@ -71,6 +71,52 @@ class AuthMount:
 
 
 @dataclass(frozen=True)
+class CompanionService:
+    """An auxiliary service spun up in the same compose stack as the agent.
+
+    E.g. when the agent edits aira-web, a ``backend`` companion running
+    aira-agent is needed so Playwright tests can exercise the full
+    BFF → backend → DB path against a live stack.
+
+    The companion's source comes from a host checkout (typically a second
+    GitManager worktree of the companion's repo at its base branch). Its
+    ``.env`` file is mounted read-only so secrets never land in AWF state.
+    """
+
+    name: str
+    """Service name in compose (also the DNS hostname within ``awf_net``)."""
+
+    build_context: str
+    """Absolute host path the Dockerfile's build context points at."""
+
+    dockerfile: str = "Dockerfile"
+    """Relative path inside ``build_context`` to the Dockerfile."""
+
+    env_file: str | None = None
+    """Absolute host path to a ``.env`` file (read-only)."""
+
+    environment: tuple[tuple[str, str], ...] = ()
+    """Additional env vars that override the env_file."""
+
+    depends_on: tuple[str, ...] = ("postgres",)
+    """Other service names this companion waits on before starting."""
+
+    healthcheck_cmd: str | None = None
+    """Shell command for Docker's healthcheck. When set, the agent container
+    depends on ``service_healthy`` for this companion."""
+
+    ports: tuple[tuple[int, int], ...] = ()
+    """container_port → host_port. Usually empty — the agent talks over the
+    internal network only."""
+
+    command: str | None = None
+    """Override the default command (e.g. ``npm run dev``)."""
+
+    volumes: tuple[tuple[str, str], ...] = ()
+    """Extra ``source:target`` bind mounts for the companion."""
+
+
+@dataclass(frozen=True)
 class WorkspaceComposeSpec:
     """Everything the template needs to render one workspace stack."""
 
@@ -86,6 +132,7 @@ class WorkspaceComposeSpec:
     auth_mounts: tuple[AuthMount, ...] = ()
     git_name: str | None = None
     git_email: str | None = None
+    companions: tuple[CompanionService, ...] = ()
 
     def project_name(self) -> str:
         return f"awf_{self.workspace_id}"
@@ -127,6 +174,28 @@ class ComposeManager:
                 "memory_limit": spec.memory_limit or "8g",
             }
 
+        companions = [
+            {
+                "name": c.name,
+                "build_context": c.build_context,
+                "dockerfile": c.dockerfile,
+                "env_file": c.env_file,
+                "environment": list(c.environment),
+                "depends_on": list(c.depends_on),
+                "healthcheck_cmd": c.healthcheck_cmd,
+                "ports": list(c.ports),
+                "command": c.command,
+                "volumes": list(c.volumes),
+            }
+            for c in spec.companions
+        ]
+        # Agent waits for postgres always, plus any companion that has a healthcheck
+        # (otherwise ``service_started`` would race the companion into existence
+        # but not readiness).
+        agent_depends_on = ["postgres"] + [
+            c.name for c in spec.companions if c.healthcheck_cmd is not None
+        ]
+
         rendered = self._env.get_template(self._template_name).render(
             workspace_id=spec.workspace_id,
             worktree_host_path=str(spec.worktree_host_path),
@@ -141,6 +210,8 @@ class ComposeManager:
             ],
             git_name=spec.git_name,
             git_email=spec.git_email,
+            companions=companions,
+            agent_depends_on=agent_depends_on,
         )
         compose_file.write_text(rendered, encoding="utf-8")
 

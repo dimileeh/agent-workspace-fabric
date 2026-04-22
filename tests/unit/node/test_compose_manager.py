@@ -156,6 +156,83 @@ class TestRender:
         assert env["GIT_COMMITTER_EMAIL"] == "awf@example.com"
 
     @pytest.mark.unit
+    def test_companion_service_renders_as_build_from_source(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        from awf.node.compose_manager import CompanionService
+
+        spec = _spec(
+            tmp_path,
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/aira-agent",
+                    dockerfile="Dockerfile",
+                    env_file="/host/aira-agent/.env",
+                    environment=(
+                        ("AIRA_DATABASE_URL", "postgresql+asyncpg://awf:pw@postgres:5432/awf"),
+                    ),
+                    depends_on=("postgres",),
+                    healthcheck_cmd="curl -fsS http://localhost:8000/healthz || exit 1",
+                    ports=((8000, 18000),),
+                ),
+                CompanionService(
+                    name="web",
+                    build_context="/host/aira-web",
+                    env_file="/host/aira-web/.env.local",
+                    environment=(("AGENT_SERVICE_URL", "http://backend:8000"),),
+                    depends_on=("backend",),
+                    healthcheck_cmd="wget -qO- http://localhost:3000 >/dev/null || exit 1",
+                ),
+            ),
+        )
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        # Both companions present as services with build contexts.
+        assert "backend" in parsed["services"]
+        assert "web" in parsed["services"]
+
+        backend = parsed["services"]["backend"]
+        assert backend["build"] == {"context": "/host/aira-agent", "dockerfile": "Dockerfile"}
+        assert backend["env_file"] == ["/host/aira-agent/.env"]
+        assert backend["environment"] == {
+            "AIRA_DATABASE_URL": "postgresql+asyncpg://awf:pw@postgres:5432/awf",
+        }
+        assert backend["healthcheck"]["test"][0] == "CMD-SHELL"
+        assert backend["ports"] == ["18000:8000"]
+
+        web = parsed["services"]["web"]
+        assert web["environment"] == {"AGENT_SERVICE_URL": "http://backend:8000"}
+        assert web["depends_on"] == {"backend": {"condition": "service_healthy"}}
+
+        # Agent waits for postgres + backend + web (all have healthchecks).
+        agent_deps = parsed["services"]["agent"]["depends_on"]
+        assert set(agent_deps.keys()) == {"postgres", "backend", "web"}
+        assert all(v == {"condition": "service_healthy"} for v in agent_deps.values())
+
+    @pytest.mark.unit
+    def test_companion_without_healthcheck_is_not_waited_on_by_agent(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        from awf.node.compose_manager import CompanionService
+
+        spec = _spec(
+            tmp_path,
+            companions=(
+                CompanionService(
+                    name="fire_and_forget",
+                    build_context="/host/x",
+                    # no healthcheck_cmd
+                ),
+            ),
+        )
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+        agent_deps = parsed["services"]["agent"]["depends_on"]
+        # fire_and_forget still exists as a service, but agent doesn't wait on it.
+        assert "fire_and_forget" in parsed["services"]
+        assert set(agent_deps.keys()) == {"postgres"}
+
+    @pytest.mark.unit
     def test_strict_undefined_catches_missing_vars(self) -> None:
         # Guard: if the template starts referencing a new variable without the
         # WorkspaceComposeSpec supplying it, rendering must fail loudly rather

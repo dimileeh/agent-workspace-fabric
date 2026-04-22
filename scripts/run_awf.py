@@ -46,7 +46,12 @@ from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.node.compose_manager import AuthMount, ComposeManager, WorkspaceComposeSpec
+from awf.node.compose_manager import (
+    AuthMount,
+    CompanionService,
+    ComposeManager,
+    WorkspaceComposeSpec,
+)
 from awf.node.git_manager import GitManager
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
@@ -61,6 +66,26 @@ _DEFAULT_MODELS: dict[AgentRuntime, str] = {}
 
 
 @dataclass(frozen=True)
+class CompanionConfig:
+    """JSON-serializable companion spec. Mirrors ``CompanionService`` plus
+    an optional ``repo_url`` — if set, the driver clones the companion's
+    repo to a dedicated host dir and uses that as the build context.
+    If unset, ``build_context`` must already point at an existing path."""
+
+    name: str
+    build_context: str | None = None  # required when repo_url is None
+    repo_url: str | None = None  # optional: clone this, use the checkout as build context
+    branch: str = "development"
+    dockerfile: str = "Dockerfile"
+    env_file: str | None = None
+    environment: dict[str, str] | None = None
+    depends_on: list[str] | None = None
+    healthcheck_cmd: str | None = None
+    ports: list[list[int]] | None = None
+    command: str | None = None
+
+
+@dataclass(frozen=True)
 class TaskConfig:
     repo_url: str
     branch_base: str
@@ -69,6 +94,7 @@ class TaskConfig:
     agent: str
     test_commands: list[str]
     requires_database: bool = False
+    companions: list[dict[str, Any]] | None = None
 
 
 def _build_auth_mounts(host_home: Path) -> list[AuthMount]:
@@ -100,6 +126,45 @@ def _build_auth_mounts(host_home: Path) -> list[AuthMount]:
         for src, tgt, mode in [*rw_mounts, *ro_mounts]
         if src.exists()
     ]
+
+
+async def _materialize_companion(
+    raw: dict[str, Any],
+    *,
+    git: GitManager,
+) -> CompanionService:
+    """Resolve one JSON companion block to a CompanionService.
+
+    If ``repo_url`` is set, we clone it to a dedicated companion worktree
+    under ``<work_dir>/companions/<name>`` and use that as the build context.
+    Otherwise ``build_context`` is taken verbatim (must already exist).
+    """
+    name = raw["name"]
+    if raw.get("repo_url"):
+        # Companion gets its own mirror + worktree, checked out at the base
+        # branch (no feature branch — we don't edit companions).
+        companion_ws_id = f"companion__{name}"
+        layout = await git.add_worktree(
+            workspace_id=companion_ws_id,
+            repo_url=raw["repo_url"],
+            base_branch=raw.get("branch", "development"),
+            new_branch=f"awf-companion/{name}-{os.getpid()}",
+        )
+        build_context = str(layout.worktree_path)
+    else:
+        build_context = raw["build_context"]
+
+    return CompanionService(
+        name=name,
+        build_context=build_context,
+        dockerfile=raw.get("dockerfile", "Dockerfile"),
+        env_file=raw.get("env_file"),
+        environment=tuple((k, v) for k, v in (raw.get("environment") or {}).items()),
+        depends_on=tuple(raw.get("depends_on") or ("postgres",)),
+        healthcheck_cmd=raw.get("healthcheck_cmd"),
+        ports=tuple((cp, hp) for cp, hp in (raw.get("ports") or [])),
+        command=raw.get("command"),
+    )
 
 
 async def _run_task(
@@ -159,13 +224,43 @@ async def _run_task(
         persisted.compose_project_name = f"awf_{ws_id}"
         await s.commit()
 
-    # Step 3: compose up with auth mounts.
+    # Step 3: clone + resolve any companion repos. Companions may reference a
+    # ``${POSTGRES_URL}`` placeholder in their env overrides — we expand it to
+    # the stack-local DB URL here so the driver owns password generation and
+    # the companions read the right connection string.
+    postgres_password = "awf_dev_" + ws_id[-8:]  # deterministic per workspace
+    postgres_url = f"postgresql+asyncpg://awf:{postgres_password}@postgres:5432/awf"
+    companion_services: list[CompanionService] = []
+    for comp_raw in cfg.companions or []:
+        resolved = dict(comp_raw)
+        if resolved.get("environment"):
+            resolved["environment"] = {
+                k: (v.replace("${POSTGRES_URL}", postgres_url) if isinstance(v, str) else v)
+                for k, v in resolved["environment"].items()
+            }
+        companion_services.append(await _materialize_companion(resolved, git=git))
+
+    # Step 4: compose up with auth mounts + companions.
+    # ── git-in-container ──────────────────────────────────────────────────
+    # The worktree's ``.git`` file contains an absolute host path pointing at
+    # the mirror's ``worktrees/<ws_id>`` admin dir. Without mounting the mirror
+    # at the same absolute path inside the container, in-container ``git``
+    # fails with "fatal: not a git repository: <host-path>". Coding CLIs
+    # (Claude Code especially) sanity-check git state before making edits
+    # and refuse to proceed if it's broken.
+    mirror_mount = AuthMount(
+        source=str(layout.mirror_path),
+        target=str(layout.mirror_path),
+        mode="rw",
+    )
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
-        auth_mounts=tuple(auth_mounts),
+        postgres_password=postgres_password,
+        auth_mounts=(mirror_mount, *auth_mounts),
         git_name=git_name,
         git_email=git_email,
+        companions=tuple(companion_services),
     )
     print(f"[{cfg.task_title[:40]}] compose up ...", flush=True)
     await compose.up(spec, wait=True)
