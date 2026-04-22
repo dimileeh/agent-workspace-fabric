@@ -83,9 +83,18 @@ class TestEnsureMirror:
         mirror_again = await manager.ensure_mirror(str(origin_repo))
         assert mirror_again == first_call_path  # same path, no re-clone
 
-        # The fetched commit is reachable from development.
+        # The fetched commit is reachable from origin/development. Local
+        # heads are deleted post-clone so they don't drift — base-branch
+        # lookups go through the remote-tracking ref.
         rev_list = subprocess.run(
-            ["git", "--git-dir", str(mirror_again), "rev-list", "--count", "development"],
+            [
+                "git",
+                "--git-dir",
+                str(mirror_again),
+                "rev-list",
+                "--count",
+                "origin/development",
+            ],
             capture_output=True,
             text=True,
             check=True,
