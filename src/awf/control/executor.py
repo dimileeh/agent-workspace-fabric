@@ -173,24 +173,66 @@ class WorkspaceExecutor:
             # w.r.t. base because there's no shared ancestor), so the
             # previous check wouldn't notice. Without this guard, the push
             # succeeds but ``gh pr create`` dies with a cryptic
-            # ``branch has no history in common with <base>`` error. Fail
-            # here with a message that tells the operator what happened.
+            # ``branch has no history in common with <base>`` error.
+            #
+            # Recovery: ``git reset --soft <base>`` moves HEAD to the base
+            # commit while leaving the index untouched — the index still
+            # reflects the orphan's tree. A fresh ``git commit`` then
+            # produces a single commit on top of base that contains the
+            # cumulative diff, and the branch is reattached to a valid
+            # ancestry so the PR can be opened normally.
             ancestor = await _git_in_worktree(
                 ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
             )
             if not ancestor.ok:
-                await self._mark_failed(
+                _log.warning(
+                    "executor.orphan_history_detected",
                     workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.agent_failure,
-                    message=(
-                        "agent severed git history — HEAD does not descend from "
-                        f"base commit {ws.base_commit[:10] if ws.base_commit else 'unknown'}. "
-                        "The coding CLI likely ran `git checkout --orphan` or reinitialised "
-                        "the repo; feature branch cannot be turned into a PR."
-                    ),
+                    base_commit=ws.base_commit,
                 )
-                return
+                reset = await _git_in_worktree(["reset", "--soft", ws.base_commit])
+                if reset.ok:
+                    recovery_msg = f"awf: {ws.task_title} (recovered from orphan)"[:72]
+                    recovery_body = (
+                        f"AWF detected orphan history on workspace {workspace_id} "
+                        f"(agent: {ws.agent}) and squashed the cumulative diff "
+                        f"onto base commit {ws.base_commit[:10]}.\n"
+                    )
+                    recover_commit = await self._runner.run(
+                        [
+                            "git",
+                            "-C",
+                            str(worktree_host),
+                            "commit",
+                            "-m",
+                            recovery_msg,
+                            "-m",
+                            recovery_body,
+                        ],
+                    )
+                    if recover_commit.ok:
+                        ancestor = await _git_in_worktree(
+                            ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
+                        )
+                if not ancestor.ok:
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.agent_failure,
+                        message=(
+                            "agent severed git history — HEAD does not descend from "
+                            f"base commit {ws.base_commit[:10] if ws.base_commit else 'unknown'}, "
+                            "and automatic recovery (reset --soft + fresh commit) also failed. "
+                            "The coding CLI likely ran `git checkout --orphan` or reinitialised "
+                            "the repo; inspect the worktree manually."
+                        ),
+                    )
+                    return
+                _log.info(
+                    "executor.orphan_history_recovered",
+                    workspace_id=workspace_id,
+                    base_commit=ws.base_commit,
+                )
         except Exception as exc:  # unexpected — mark infrastructure
             _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
             await self._mark_failed(

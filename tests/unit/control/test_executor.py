@@ -262,26 +262,74 @@ class TestFailurePaths:
             )
 
     @pytest.mark.unit
-    async def test_orphan_history_marks_failed_before_push(
+    async def test_orphan_history_is_recovered_and_pipeline_continues(
         self,
         executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
         # Agents sometimes sever git history (e.g. `git checkout --orphan` +
-        # fresh commit), producing a branch with commits but no shared
-        # ancestor with the base branch. `rev-list --count base..HEAD` can't
-        # detect this (the count is HIGH — no common ancestor means every
-        # HEAD commit is "new"). We need an explicit ancestry check so push
-        # + `gh pr create` don't waste time failing with a confusing GraphQL
-        # error.
+        # fresh commit) — the branch has commits but no shared ancestor
+        # with the base. `rev-list --count base..HEAD` can't detect this
+        # (count is HIGH — every HEAD commit is "new" when there's no merge
+        # base), so the previous no-changes check lets it through, and
+        # `gh pr create` dies with GraphQL "no history in common".
+        #
+        # Recovery: `git reset --soft <base>` keeps the index at the
+        # orphan's tree while moving HEAD to base. A fresh commit then
+        # squashes the entire orphan chain into one commit on top of base.
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit
-        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count (fooled)
-        fake.queue_result(returncode=1, stderr="")  # merge-base --is-ancestor FAILS
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=1, stderr="")  # merge-base is-ancestor: FAIL
+        fake.queue_result(returncode=0)  # git reset --soft <base>
+        fake.queue_result(returncode=0)  # git commit (re-anchor)
+        fake.queue_result(returncode=0)  # merge-base is-ancestor: OK after recovery
+        fake.queue_result(returncode=0, stdout="recovery tests ok")  # validation cmd
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(
+            returncode=0,
+            stdout="https://github.com/dimileeh/aira-agent/pull/456\n",
+        )  # gh pr create
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/456"
+        # reset + commit + verify show up in the call sequence in order.
+        reset_call = next(c for c in fake.calls if "reset" in c.args and "--soft" in c.args)
+        assert reset_call.args[-1] == "a" * 40  # base_commit
+        # Two `merge-base --is-ancestor` calls (pre and post recovery).
+        ancestor_calls = [c for c in fake.calls if "merge-base" in c.args]
+        assert len(ancestor_calls) == 2
+
+    @pytest.mark.unit
+    async def test_orphan_history_fails_loudly_if_recovery_fails(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # If the post-recovery ancestry check still fails (pathological
+        # case — e.g. base_commit not reachable), mark failed with a clear
+        # message so the operator knows what happened and doesn't chase a
+        # ``gh pr create`` GraphQL error.
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="2\n")  # rev-list count
+        fake.queue_result(returncode=1, stderr="")  # merge-base is-ancestor: FAIL
+        fake.queue_result(
+            returncode=128, stderr="fatal: unknown revision"
+        )  # git reset --soft: FAIL
 
         await executor.execute(ws_id)
 
@@ -291,10 +339,7 @@ class TestFailurePaths:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "agent_failure"
             assert "history" in (ws.failure_message or "").lower()
-            # Validation + push + gh never ran.
             assert ws.pr_url is None
-        # 6 calls: adapter, add, diff, commit, rev-list, merge-base.
-        assert len(fake.calls) == 6
 
 
 class TestIdempotency:
