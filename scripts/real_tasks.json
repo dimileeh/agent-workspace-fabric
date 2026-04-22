@@ -25,7 +25,7 @@
           "AIRA_ENV": "development"
         },
         "depends_on": ["postgres"],
-        "healthcheck_cmd": "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/healthz\", timeout=2).status==200 else 1)'"
+        "healthcheck_cmd": "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/api/v1/health\", timeout=2).status==200 else 1)'"
       },
       {
         "name": "web",

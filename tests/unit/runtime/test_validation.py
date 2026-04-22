@@ -91,52 +91,91 @@ class TestFailureStopsEarly:
 
 class TestMigration:
     @pytest.mark.unit
-    async def test_runs_alembic_upgrade_head_before_tests_when_required(
+    async def test_runs_alembic_upgrade_head_after_first_command_when_required(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:
+        # New ordering: migration runs AFTER the first test command (typically
+        # dep-install) so Alembic + the app package are importable.
         fake, val = runner
-        fake.queue_result(returncode=0, stdout="migrated")
-        fake.queue_result(returncode=0, stdout="tests ok")
+        fake.queue_result(returncode=0, stdout="deps installed")  # cmd_01
+        fake.queue_result(returncode=0, stdout="migrated")  # migration
+        fake.queue_result(returncode=0, stdout="tests ok")  # cmd_02
 
         result = await val.run(
             workspace_id="ws_mig",
             compose_project=_COMPOSE_PROJECT,
             compose_file=_COMPOSE_FILE,
-            test_commands=["pytest tests/ -q"],
+            test_commands=['uv pip install -e ".[dev]"', "pytest tests/ -q"],
             requires_database=True,
         )
 
         assert result.all_passed
         assert result.migration is not None
         assert result.migration.ok
-        # Two invocations: migration + the one test command.
-        assert len(fake.calls) == 2
+        # Three invocations: cmd_01 (install), migration, cmd_02 (pytest).
+        assert len(fake.calls) == 3
 
-        migration_cmd = fake.calls[0].args
+        first_cmd = fake.calls[0].args
+        assert "sh" in first_cmd and "-lc" in first_cmd
+
+        migration_cmd = fake.calls[1].args
         assert "alembic" in migration_cmd
         assert "upgrade" in migration_cmd
         assert "head" in migration_cmd
 
+        second_cmd = fake.calls[2].args
+        assert "pytest tests/ -q" in second_cmd
+
     @pytest.mark.unit
-    async def test_skips_test_commands_when_migration_fails(
+    async def test_skips_remaining_commands_when_migration_fails(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:
+        # cmd_01 (dep install) succeeds, migration fails, remaining test
+        # commands must NOT run — they'd just execute against a broken schema.
         fake, val = runner
-        fake.queue_result(returncode=1, stderr="alembic: conflict")
+        fake.queue_result(returncode=0, stdout="deps installed")  # cmd_01
+        fake.queue_result(returncode=1, stderr="alembic: conflict")  # migration
 
         result = await val.run(
             workspace_id="ws_mig_fail",
             compose_project=_COMPOSE_PROJECT,
             compose_file=_COMPOSE_FILE,
-            test_commands=["pytest -q"],  # must NOT be executed
+            test_commands=[
+                'uv pip install -e ".[dev]"',
+                "pytest -q",  # must NOT be executed
+            ],
             requires_database=True,
         )
 
         assert not result.all_passed
         assert result.migration is not None
         assert not result.migration.ok
-        assert result.commands == []
-        # FakeCommandRunner only got the migration call.
+        # cmd_01 ran and succeeded; cmd_02 never ran.
+        assert len(result.commands) == 1
+        assert result.commands[0].ok
+        # FakeCommandRunner got cmd_01 + migration, nothing else.
+        assert len(fake.calls) == 2
+
+    @pytest.mark.unit
+    async def test_migration_not_run_if_first_command_fails(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        # If dep-install itself fails, there's no point trying to migrate.
+        fake, val = runner
+        fake.queue_result(returncode=1, stderr="pip: ERROR")  # cmd_01 fails
+
+        result = await val.run(
+            workspace_id="ws_dep_fail",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            test_commands=['uv pip install -e ".[dev]"', "pytest -q"],
+            requires_database=True,
+        )
+
+        assert not result.all_passed
+        assert result.migration is None
+        assert len(result.commands) == 1
+        assert not result.commands[0].ok
         assert len(fake.calls) == 1
 
     @pytest.mark.unit

@@ -1,9 +1,12 @@
 """Validation runner — executes test commands inside the workspace container.
 
-Contract for Task 6:
-    1. If ``requires_database``, run ``alembic upgrade head`` inside the
-       agent container first. If it fails, ValidationResult.all_passed is
-       False and the individual test commands do NOT run.
+Contract:
+    1. If ``requires_database`` is True, run ``alembic upgrade head`` AFTER
+       the first test command (which is the convention for dep-install).
+       This is deliberate: dep install must happen first so Alembic + the
+       app package are importable. If the app doesn't need this pattern,
+       set ``requires_database=False`` and put migration in test_commands
+       yourself.
     2. Run each command in ``test_commands`` sequentially via ``docker
        compose exec -T -w /workspace agent sh -lc <command>``.
     3. Capture stdout + stderr for each command to per-workspace artifact
@@ -13,6 +16,14 @@ Contract for Task 6:
 
 We route through ``AsyncCommandRunner`` so tests inject FakeCommandRunner
 and don't require a real docker daemon.
+
+Migration ordering rationale:
+    The naive ordering "migration first, then tests" fails for any repo
+    whose migration runner depends on installed Python deps (Alembic +
+    the app package). Running migration AFTER the first test command
+    (which is by convention ``uv pip install -e ".[dev]"`` or similar)
+    sidesteps that dependency chain without requiring every caller to
+    duplicate the migration line in their test_commands.
 """
 
 from __future__ import annotations
@@ -92,26 +103,8 @@ class ValidationRunner:
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
 
         migration: ValidationCommandResult | None = None
-        if requires_database:
-            migration = await self._exec(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                cli_args=list(_MIGRATION_COMMAND),
-                label="migration",
-                artifacts_dir=workspace_artifacts,
-            )
-            if not migration.ok:
-                _log.warning(
-                    "validation.migration_failed",
-                    workspace_id=workspace_id,
-                    returncode=migration.returncode,
-                )
-                # Short-circuit: running test commands against a broken schema
-                # produces misleading failures. Let the caller see the migration
-                # error as the first/only failure.
-                return ValidationResult(migration=migration, commands=[])
-
         cmd_results: list[ValidationCommandResult] = []
+
         for index, raw in enumerate(test_commands, start=1):
             # Commands are full shell strings (e.g. ``pytest -q``); we invoke
             # them under ``sh -lc`` so quoting, pipes, and env var expansion
@@ -134,7 +127,27 @@ class ValidationRunner:
                 )
                 # Stop at first failure — there's no point running later
                 # commands when an earlier one (e.g. lint) failed.
-                break
+                return ValidationResult(migration=migration, commands=cmd_results)
+
+            # Migration runs AFTER the first successful command (typically a
+            # dep-install) so Alembic + the app package are importable. If the
+            # migration fails, skip remaining test commands: they'd run against
+            # a broken schema and the output would be noise.
+            if index == 1 and requires_database:
+                migration = await self._exec(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    cli_args=list(_MIGRATION_COMMAND),
+                    label="migration",
+                    artifacts_dir=workspace_artifacts,
+                )
+                if not migration.ok:
+                    _log.warning(
+                        "validation.migration_failed",
+                        workspace_id=workspace_id,
+                        returncode=migration.returncode,
+                    )
+                    return ValidationResult(migration=migration, commands=cmd_results)
 
         return ValidationResult(migration=migration, commands=cmd_results)
 

@@ -185,17 +185,24 @@ For any task whose backend uses pgvector / embeddings, keep the default.
 
 ## 8 — Test commands: ordering + env assumptions
 
-- If `requires_database: true`, AWF runs `alembic upgrade head` **before**
-  the test commands. A migration failure short-circuits — your tests never
-  run. Make sure `AIRA_DATABASE_URL` (or whatever name your Alembic
-  `env.py` reads) is set in the agent container. AWF sets both
-  `DATABASE_URL` and `AIRA_DATABASE_URL` to the same stack-local URL.
+- **First command MUST be dependency install**: `npm ci` for Node,
+  `uv pip install -e ".[dev]"` for Python, etc. Assume nothing is
+  preinstalled beyond the base agent runtime.
+- If `requires_database: true`, AWF runs `alembic upgrade head`
+  **immediately AFTER the first test command** — not before. Reason: for
+  any repo whose Alembic `env.py` imports the app package, migration can't
+  run until the app is installed. Running migration after `test_commands[0]`
+  sidesteps that without forcing every caller to duplicate an install line.
+  - If `test_commands[0]` fails, migration is skipped (there's nothing to
+    migrate against).
+  - If migration fails, remaining test commands are skipped (they'd run
+    against a broken schema, and the output would be noise).
+- Make sure `AIRA_DATABASE_URL` (or whatever name your Alembic `env.py`
+  reads) is set in the agent container. AWF sets both `DATABASE_URL` and
+  `AIRA_DATABASE_URL` to the same stack-local URL.
 - Test commands run inside the agent container via `docker compose exec -T
   -w /workspace agent sh -lc <command>`. Shell metacharacters (pipes,
   `&&`, `$VAR`) work. First failing command stops the sequence.
-- **First command is usually dependency install**: `npm ci` for Node,
-  `uv pip install -e ".[dev]"` for Python, etc. Assume nothing is
-  preinstalled beyond the base agent runtime.
 - Agent runtime ships: Python 3.12, Node 22, git, jq, ripgrep, tini, the
   three coding CLIs. Playwright browsers are NOT pre-installed — if you
   use Playwright, include `npx playwright install --with-deps chromium` as
@@ -250,7 +257,9 @@ Common failure modes + fixes:
 | Symptom | Root cause | Fix |
 |---|---|---|
 | `fatal: not a git repository` inside container | Mirror not bind-mounted at same absolute host path | Done in stock AWF since `da07637`. If you see it, you're on a stale AWF. |
+| `alembic upgrade head` fails with `ModuleNotFoundError: <app>` | Migration ran before the app was installed | Put the dep-install step (`uv pip install -e ".[dev]"`, etc.) as `test_commands[0]` — AWF runs migration AFTER it. |
 | `alembic upgrade head` exits non-zero right after agent | Alembic env-var not set | Alias the app's env-var name → `DATABASE_URL` in the template (stock AWF aliases `AIRA_DATABASE_URL`). |
+| Companion healthcheck never goes `service_healthy` | Wrong URL path | Check the app's actual health route (e.g. aira-agent is `/api/v1/health`, not `/healthz`). `curl` the real service from the host to confirm before scheduling. |
 | `gh pr create: No commits between X and Y` | Agent made no changes (or made changes but didn't commit AND AWF's auto-commit was a no-op because files weren't staged) | Widen the prompt's scope or check agent refusal; check `git log base..HEAD` in the worktree. |
 | `failed to parse compose.yml` | Usually: a healthcheck command with mixed quoting rendered into a flow scalar | AWF template uses `tojson` filter; if you hand-rolled the compose, switch to block form. |
 | Healthcheck never goes `service_healthy` | Wrong URL in the healthcheck command | Query the real service for its health path; update the spec. |
