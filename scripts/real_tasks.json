@@ -10,7 +10,7 @@
       "npx playwright install chromium",
       "npx tsc --noEmit",
       "npm run lint",
-      "npx playwright test tests/e2e/bff/ --reporter=line"
+      "npx playwright test --config=playwright.bff.config.ts --reporter=line"
     ],
     "requires_database": false,
     "companions": [
