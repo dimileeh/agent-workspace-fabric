@@ -20,6 +20,9 @@ from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import re
+from typing import Protocol
+
 from awf.adapters.base import AgentRunError, get_adapter
 from awf.common.commands import AsyncCommandRunner
 from awf.common.logging import get_logger
@@ -29,6 +32,19 @@ from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationRunner
+
+
+class _MonitorRunnerProto(Protocol):
+    """Minimum surface the executor needs from a PR monitor runner.
+
+    Declared as a Protocol so the executor doesn't structurally depend
+    on ``PullRequestMonitorRunner`` — tests can pass a tiny stub, and
+    the monitor stage is a clean extension seam for Phase 2 variants
+    (merge queue, release-PR monitor, etc.)."""
+
+    async def run(
+        self, *, workspace_id: str, compose_project: str, compose_file: Path
+    ) -> None: ...
 
 _log = get_logger(__name__)
 
@@ -59,6 +75,7 @@ class WorkspaceExecutor:
         validation: ValidationRunner,
         pr_creator: PullRequestCreator,
         config: ExecutorConfig,
+        pr_monitor: _MonitorRunnerProto | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._runner = runner
@@ -66,6 +83,7 @@ class WorkspaceExecutor:
         self._validation = validation
         self._pr_creator = pr_creator
         self._config = config
+        self._pr_monitor = pr_monitor
 
     async def execute(self, workspace_id: str) -> None:
         """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
@@ -314,15 +332,41 @@ class WorkspaceExecutor:
             )
             return
 
-        # ── Step 4: persist PR URL + transition to completed ────────────────
+        # ── Step 4: persist PR URL + (optionally) hand off to monitor ──────
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             persisted = await repo.get(workspace_id)
             if persisted is None:  # pragma: no cover - destroyed mid-flight
                 return
             persisted.pr_url = pr.url
-            await repo.transition(persisted, to=WorkspaceStatus.completed, reason_code="PR_OPENED")
-            await session.commit()
+            persisted.pr_number = _extract_pr_number(pr.url)
+            if self._pr_monitor is not None:
+                # Hand off to the monitor — it will transition to completed
+                # (on merge) or failed (on abort / cap / close).
+                await repo.transition(
+                    persisted, to=WorkspaceStatus.monitoring_pr, reason_code="PR_OPENED"
+                )
+                await session.commit()
+            else:
+                # No monitor wired (legacy executor path / unit-test shim) —
+                # preserve the original ``pushing → completed`` contract.
+                await repo.transition(
+                    persisted, to=WorkspaceStatus.completed, reason_code="PR_OPENED"
+                )
+                await session.commit()
+
+        if self._pr_monitor is not None:
+            _log.info(
+                "executor.handoff_to_pr_monitor",
+                workspace_id=workspace_id,
+                pr_url=pr.url,
+            )
+            await self._pr_monitor.run(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+            )
+            return
 
         _log.info(
             "executor.completed",
@@ -384,6 +428,22 @@ class WorkspaceExecutor:
                 reason_code=failure_reason.value.upper(),
             )
             await session.commit()
+
+
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:/|$)")
+
+
+def _extract_pr_number(pr_url: str) -> int | None:
+    """Parse the PR number from a GitHub PR URL.
+
+    Matches both the canonical ``https://github.com/<owner>/<repo>/pull/123``
+    and the trailing-slash variant. Returns ``None`` if the URL doesn't look
+    like a PR URL — the monitor then simply won't run (executor logs a
+    warning via the transition to ``monitoring_pr`` still succeeding; the
+    monitor itself asserts on pr_number and terminates with a clear failure).
+    """
+    match = _PR_NUMBER_RE.search(pr_url)
+    return int(match.group(1)) if match else None
 
 
 def _build_pr_body(ws: Workspace) -> str:

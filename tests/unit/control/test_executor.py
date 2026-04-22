@@ -379,6 +379,121 @@ class TestFailurePaths:
             assert ws.pr_url is None
 
 
+class TestMonitorHandoff:
+    """When a PR monitor is wired, the executor transitions ``pushing →
+    monitoring_pr`` and delegates the final transition to the monitor."""
+
+    @pytest.mark.unit
+    async def test_hands_off_to_monitor_and_records_pr_number(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        from awf.db.enums import WorkspaceStatus as _WS
+
+        class _StubMonitor:
+            def __init__(self) -> None:
+                self.calls: list[dict[str, object]] = []
+                self._factory = factory
+
+            async def run(
+                self,
+                *,
+                workspace_id: str,
+                compose_project: str,
+                compose_file: Path,
+            ) -> None:
+                self.calls.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "compose_project": compose_project,
+                        "compose_file": compose_file,
+                    }
+                )
+                # Pretend the monitor merged + flipped state to completed.
+                async with self._factory() as s:
+                    ws = await WorkspaceRepository(s).get(workspace_id)
+                    assert ws is not None
+                    assert ws.status == _WS.monitoring_pr.value
+                    await WorkspaceRepository(s).transition(
+                        ws, to=_WS.completed, reason_code="STUB_MERGE"
+                    )
+                    ws.pr_merge_sha = "stub_merge_sha"
+                    await s.commit()
+
+        monitor = _StubMonitor()
+        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+        pr = PullRequestCreator(fake)
+        ex = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=compose,
+            validation=validation,
+            pr_creator=pr,
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                default_models={
+                    AgentRuntime.codex: "gpt-5",
+                    AgentRuntime.claude_code: "sonnet",
+                    AgentRuntime.gemini: "gemini-2.5-pro",
+                },
+            ),
+            pr_monitor=monitor,
+        )
+
+        ws_id = await _seed_ready_workspace(factory)
+        # 9-step sequence (same as happy path).
+        fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        fake.queue_result(returncode=0)  # validation cmd
+        fake.queue_result(returncode=0)  # push
+        fake.queue_result(
+            returncode=0,
+            stdout="https://github.com/dimileeh/aira-web/pull/7777\n",
+        )
+
+        await ex.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == _WS.completed.value
+            assert ws.pr_url == "https://github.com/dimileeh/aira-web/pull/7777"
+            assert ws.pr_number == 7777
+            assert ws.pr_merge_sha == "stub_merge_sha"
+            transitions = [(e.old_state, e.new_state) for e in ws.events]
+            assert ("pushing", "monitoring_pr") in transitions
+            assert ("monitoring_pr", "completed") in transitions
+        # Monitor received the hand-off call with the right IDs.
+        assert len(monitor.calls) == 1
+        assert monitor.calls[0]["workspace_id"] == ws_id
+
+
+class TestPrNumberExtraction:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "url, expected",
+        [
+            ("https://github.com/dimileeh/aira-web/pull/123", 123),
+            ("https://github.com/dimileeh/aira-web/pull/123/", 123),
+            ("https://github.com/dimileeh/aira-web/pull/123/files", 123),
+            ("not a url", None),
+            ("https://github.com/dimileeh/aira-web/issues/5", None),
+        ],
+    )
+    def test_extract_pr_number(self, url: str, expected: int | None) -> None:
+        from awf.control.executor import _extract_pr_number
+
+        assert _extract_pr_number(url) == expected
+
+
 class TestIdempotency:
     @pytest.mark.unit
     async def test_refuses_to_run_on_non_ready_workspace(

@@ -252,6 +252,94 @@ Don't set polling timeouts shorter than the expected stage — if you poll
 every 30 s and the backend image build takes 5 min, your first status
 check should be after 8 min.
 
+## 10.5 — PR monitor (after the PR is opened)
+
+Every AWF workspace that opens a feature-branch PR continues running in
+a new state — ``monitoring_pr`` — until the PR is **merged** into its
+base branch (feature-PR variant) or **declared ready for the human**
+(release-PR variant for ``development → main``).
+
+You don't have to do anything in the task spec to opt in — if an AWF
+orchestrator is wired with a ``PullRequestMonitorRunner`` (stock run
+launches it automatically), monitoring is the default. What matters is
+what the task prompt does and doesn't need to say.
+
+### What the task prompt does NOT need to cover
+
+The monitor owns the 5 post-PR gates:
+
+1. Inline (diff) comments resolved on GitHub (``resolveReviewThread`` GraphQL mutation).
+2. Review-level outside-diff comments evaluated + resolved.
+3. CI green — every required check SUCCESS or SKIPPED.
+4. No merge conflicts.
+5. Base branch merged into feature branch before the PR merges into base.
+
+Do NOT tell the agent to "address reviewer comments" or "merge your own
+PR" in the prompt — the agent CLI runs once, produces the initial
+commits, and exits. AWF re-invokes the same CLI inside the same
+container when comments arrive, with targeted prompts the monitor
+generates.
+
+### Per-comment decision shape the CLI produces
+
+When the monitor hands a review thread or review-level comment to the
+CLI, it expects a reply in one of three shapes:
+
+| Reply prefix | Meaning | What AWF does next |
+|---|---|---|
+| `fixed in commit <sha>` (or anything that isn't one of the markers below) | CLI made the fix, committed locally | AWF pushes after the comment burst settles, then resolves the thread |
+| `FALSE POSITIVE: <reason>` | CLI disagrees with the reviewer and replies inline | AWF resolves the thread with the reviewer's reply already posted |
+| `DEFER: <what you need>` | CLI can't address without more info | AWF leaves the thread unresolved and marks the verdict; repeated deferrals stop the monitor |
+
+The CLI also posts the reply on GitHub itself (``gh pr review-thread
+reply`` or ``gh pr comment``) — AWF's resolve call happens AFTER the
+reply is visible to the reviewer.
+
+### Commit-then-push-on-settle
+
+The monitor does NOT push after every fix. A reviewer bot like
+CodeRabbit typically drops 5–20 inline comments in one burst within 30 s
+of a push. The monitor addresses every comment in that burst locally,
+waits a 30 s settle window for more, and only pushes once the burst is
+quiet. One push → one CI run → minimum cost.
+
+### Caps (defaults; tune via ``MonitorConfig`` if policy requires)
+
+- 10 non-passive iterations (``AddressComments`` / ``SyncBase`` /
+  ``ReportCiFailure``). ``WaitForCI`` passes don't count.
+- 6-hour wall-clock cap from entering ``monitoring_pr``.
+- ``iter_cap`` hit → workspace transitions to ``failed`` with
+  ``monitor: abort (iter_cap_reached)`` in ``failure_message``.
+
+### Release PR (``development → main``)
+
+Dev-to-main PRs must NEVER be auto-merged. Use the
+``monitor_release_pr`` task kind (planned field — currently selected
+via ``build_release_pr_monitor`` instead of
+``build_feature_pr_monitor``). Everything else is identical to the
+feature flow — comment resolution, CI fixes, base sync — except:
+
+- No ``gh pr merge`` call. Ever.
+- When all 5 gates are green, AWF posts a "✅ Ready to merge at commit
+  `<sha>`" comment on the PR and transitions to ``completed``.
+- If new commits land after the ready comment, the monitor re-verifies
+  all 5 gates and re-posts on the new head SHA.
+
+### Branch-protection fallback
+
+If GitHub's branch protection rejects the ``gh pr merge`` call (token
+lacks permission, required reviews not met in the repo's ruleset, etc.),
+the monitor falls back to the release-PR behaviour: posts the
+"ready to merge" comment and exits ``completed``. Operator sees the PR
+flagged as ready and does the final click.
+
+### Auth
+
+Uses the same ``~/.config/gh`` mount as ``gh pr create``. No new auth.
+If you need a finer-grained token for release-PR merging, pass it via
+``~/.config/gh`` on the host — AWF inherits whatever ``gh`` was logged
+in as.
+
 ## 11 — What to do when validation fails
 
 **Do NOT manually intervene** — do NOT `git push` from the worktree

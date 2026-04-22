@@ -27,6 +27,12 @@ class WorkspaceStatus(StrEnum):
     running = "running"
     validating = "validating"
     pushing = "pushing"
+    monitoring_pr = "monitoring_pr"
+    """After PR is opened, the workspace polls GitHub + drives the coding CLI
+    through review comments / CI fixes / base sync until the PR is merged
+    (feature-PR variant) or until it's declared ready-for-human (release-PR
+    variant). See ``src/awf/runtime/pr_monitor.py``."""
+
     completed = "completed"
     failed = "failed"
     cancelled = "cancelled"
@@ -72,6 +78,22 @@ class FailureReason(StrEnum):
     infrastructure_failure = "infrastructure_failure"
     policy_failure = "policy_failure"
     cleanup_failure = "cleanup_failure"
+
+
+class TaskKind(StrEnum):
+    """What kind of AWF task is this?
+
+    Drives which executor + monitor path is used.
+    """
+
+    feature_branch_pr = "feature_branch_pr"
+    """Default: clone repo, run coding CLI, push PR against base branch,
+    monitor comments + CI, squash-merge into base. The everyday path."""
+
+    monitor_release_pr = "monitor_release_pr"
+    """No clone, no initial coding-CLI run, no PR creation. Given an
+    existing PR number, monitor the 5 gates and — when all green — post
+    a "ready to merge" comment. Never auto-merges (dev→main is human-only)."""
 
 
 class AgentRuntime(StrEnum):
