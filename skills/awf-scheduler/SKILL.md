@@ -105,8 +105,9 @@ Pass these as bind mounts:
 | Host source | Container target | Mode | Why |
 |---|---|---|---|
 | `~/.codex` | `/home/agent/.codex` | **rw** | Codex writes model-list cache + refresh tokens; `ro` → `ERROR failed to write models cache: Read-only file system`. |
-| `~/.claude` | `/home/agent/.claude` | **rw** | Claude Code rotates OAuth tokens. |
-| `~/.gemini` | `/home/agent/.gemini` | **rw** | Same story. |
+| `~/.claude` | `/home/agent/.claude` | **rw** | Claude Code session state, backups, skills cache. |
+| `~/.claude.json` | `/home/agent/.claude.json` | **rw** | Claude Code's top-level config is a SINGLE FILE alongside the dir above. Without this mount the session dies mid-run with `Claude configuration file not found at: /home/agent/.claude.json` — Claude atomically rewrites the file on token refresh and can't find its own backup without the file-level bind. |
+| `~/.gemini` | `/home/agent/.gemini` | **rw** | Same story as Codex/Claude. |
 | `~/.config/gh` | `/home/agent/.config/gh` | ro | Stable OAuth/PAT; no state change mid-task. |
 | `~/.gitconfig` | `/home/agent/.gitconfig` | ro | Identity + aliases only. |
 | `~/.ssh` | `/home/agent/.ssh` | ro | Keys for `git push`. |

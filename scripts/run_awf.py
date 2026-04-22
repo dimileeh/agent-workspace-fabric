@@ -114,6 +114,13 @@ def _build_auth_mounts(host_home: Path) -> list[AuthMount]:
     rw_mounts = [
         (host_home / ".codex", f"{container_home}/.codex", "rw"),
         (host_home / ".claude", f"{container_home}/.claude", "rw"),
+        # Claude Code keeps its top-level config as a single file at
+        # ``~/.claude.json`` (separate from the ``~/.claude/`` dir). When
+        # only the dir is mounted, Claude either boots on a hollow default
+        # config or — more often — invalidates the file mid-session on
+        # token refresh and dies with "Claude configuration file not
+        # found at: /home/agent/.claude.json". Mount the file itself too.
+        (host_home / ".claude.json", f"{container_home}/.claude.json", "rw"),
         (host_home / ".gemini", f"{container_home}/.gemini", "rw"),
     ]
     ro_mounts = [
