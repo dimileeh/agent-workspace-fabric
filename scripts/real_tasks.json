@@ -7,7 +7,7 @@
     "agent": "claude_code",
     "test_commands": [
       "npm ci",
-      "npx playwright install --with-deps chromium",
+      "npx playwright install chromium",
       "npx tsc --noEmit",
       "npm run lint",
       "npx playwright test tests/e2e/bff/ --reporter=line"

@@ -212,9 +212,13 @@ For any task whose backend uses pgvector / embeddings, keep the default.
   `ModuleNotFoundError: No module named '<your_app>'`. Nothing extra to
   do in your task spec; just write the commands naturally.
 - Agent runtime ships: Python 3.12, Node 22, git, jq, ripgrep, tini, the
-  three coding CLIs. Playwright browsers are NOT pre-installed — if you
-  use Playwright, include `npx playwright install --with-deps chromium` as
-  an early test command (adds ~2 min first run).
+  three coding CLIs, and the Linux system libraries Playwright's chromium
+  browser needs at runtime (libnss3, libatk-bridge2.0-0, libxkbcommon0,
+  etc). Playwright's *browser binaries* are NOT pre-installed — add
+  `npx playwright install chromium` as a test command (≈30 s download).
+  Do NOT use `--with-deps`: it tries to `su root` + `apt install`, and
+  the agent container runs as the unprivileged `agent` user with no
+  root password (fails with `su: Authentication failure`).
 
 ## 9 — Model selection
 
