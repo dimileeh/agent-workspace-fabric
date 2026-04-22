@@ -95,6 +95,15 @@ class TaskKind(StrEnum):
     existing PR number, monitor the 5 gates and — when all green — post
     a "ready to merge" comment. Never auto-merges (dev→main is human-only)."""
 
+    sync_release_pr = "sync_release_pr"
+    """Automated development→main release-PR maintenance. Checks for
+    divergence; opens a PR if one doesn't exist; attaches the release-
+    PR monitor (auto_merge=False). Intended to be fired by a watcher /
+    webhook whenever development advances beyond main. Never merges;
+    only posts "ready to merge" when all gates green. The existing open
+    PR is kept current via the monitor's SyncBase cycle as more feature
+    branches land on development."""
+
 
 class AgentRuntime(StrEnum):
     """Which coding CLI should execute the task inside the workspace.
