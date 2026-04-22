@@ -59,7 +59,9 @@ services:
         condition: service_healthy
       {% endfor %}
     {% endif %}{% if c.healthcheck_cmd %}healthcheck:
-      test: ["CMD-SHELL", "{{ c.healthcheck_cmd }}"]
+      test:
+        - "CMD-SHELL"
+        - {{ c.healthcheck_cmd | tojson }}
       interval: 5s
       timeout: 5s
       retries: 30
@@ -83,6 +85,10 @@ services:
     environment:
       WORKSPACE_ID: "{{ workspace_id }}"
       DATABASE_URL: "postgresql+psycopg://{{ postgres_user }}:{{ postgres_password }}@postgres:5432/{{ postgres_db }}"
+      # aira-agent reads AIRA_DATABASE_URL; alias so ``alembic upgrade head``
+      # during the validation step picks up the stack-local Postgres without
+      # per-task config.
+      AIRA_DATABASE_URL: "postgresql+asyncpg://{{ postgres_user }}:{{ postgres_password }}@postgres:5432/{{ postgres_db }}"
       {% if git_name %}GIT_AUTHOR_NAME: "{{ git_name }}"
       GIT_COMMITTER_NAME: "{{ git_name }}"{% endif %}
       {% if git_email %}GIT_AUTHOR_EMAIL: "{{ git_email }}"
