@@ -44,6 +44,35 @@ class MergeableState(StrEnum):
     UNKNOWN = "UNKNOWN"
 
 
+class MergeStateStatus(StrEnum):
+    """GitHub's per-PR merge-state signal. A superset of ``MergeableState``
+    that distinguishes the "cleanly mergeable but base has advanced" case
+    from "cleanly mergeable and up-to-date" — this distinction is what
+    lets the monitor trigger ``SyncBase`` without depending on a local
+    rev-list count that can go stale if the worktree's ``origin/<base>``
+    ref isn't refreshed each poll.
+
+    Values per GitHub docs — ``behind`` is the one the monitor most
+    needs to act on, but ``dirty`` and ``blocked`` also deserve
+    dedicated decisions.
+    """
+
+    CLEAN = "CLEAN"
+    """All good — safe to merge."""
+    BEHIND = "BEHIND"
+    """Head branch is behind base. Merge base into head and retry."""
+    DIRTY = "DIRTY"
+    """Merge conflicts that git won't auto-resolve. Abort."""
+    BLOCKED = "BLOCKED"
+    """Required review / branch-protection gate not met. NotifyHuman."""
+    HAS_HOOKS = "HAS_HOOKS"
+    """Branch-protection hook pending — treat like BLOCKED."""
+    UNSTABLE = "UNSTABLE"
+    """Failing but non-required CI — merge would go through but signals noise."""
+    UNKNOWN = "UNKNOWN"
+    """GitHub still computing state."""
+
+
 class CheckState(StrEnum):
     SUCCESS = "SUCCESS"
     FAILURE = "FAILURE"
@@ -104,7 +133,14 @@ class PRStatus:
     check_state: CheckState
     unresolved_inline_threads: tuple[ReviewThread, ...]
     unresolved_review_comments: tuple[ReviewComment, ...]
-    base_behind_count: int  # commits on base not in head
+    base_behind_count: int  # commits on base not in head (local rev-list)
+    merge_state_status: MergeStateStatus = MergeStateStatus.UNKNOWN
+    """GitHub's authoritative merge-state signal. Combined with
+    ``base_behind_count`` to decide whether to run ``SyncBase`` — if
+    EITHER says the head is behind, we sync. This protects against a
+    stale local worktree ``origin/<base>`` ref (the exact bug that
+    shipped PR #335 / #336 as "ready to merge" when they were BEHIND)."""
+
     ci_failures: tuple[CheckFailure, ...] = ()
     closed: bool = False
     merged: bool = False
@@ -155,6 +191,9 @@ class AbortReason(StrEnum):
     wall_clock_cap_reached = "wall_clock_cap_reached"
     pr_closed_externally = "pr_closed_externally"
     no_progress_on_comments = "no_progress_on_comments"
+    merge_conflict_unresolvable = "merge_conflict_unresolvable"
+    """GitHub reports mergeStateStatus == DIRTY after every other gate is
+    clean — git can't auto-resolve and the CLI already had its chance."""
 
 
 @dataclass(frozen=True)
@@ -288,21 +327,55 @@ def decide(
             return ReportCiFailure(failures=())
         return ReportCiFailure(failures=status.ci_failures)
 
-    # 4. CI still running, or mergeable state unknown → passive wait.
+    # 4. CI still running, or GitHub is still computing state → passive wait.
     if status.check_state == CheckState.PENDING:
         return WaitForCI(reason="pending_checks")
-    if status.mergeable == MergeableState.UNKNOWN:
+    if (
+        status.mergeable == MergeableState.UNKNOWN
+        or status.merge_state_status == MergeStateStatus.UNKNOWN
+    ):
         return WaitForCI(reason="unknown_mergeable_state")
 
-    # 5. Base behind → integrate base into head before merging.
-    if status.base_behind_count > 0:
+    # 5. Base behind OR hard conflict → integrate base into head. Three
+    # signals route here:
+    #   * local rev-list says base has advanced
+    #   * GitHub's mergeStateStatus == BEHIND
+    #   * GitHub's mergeStateStatus == DIRTY (conflict already detected
+    #     server-side; SyncBase's ``git merge`` path reproduces it
+    #     locally and invokes the coding CLI with a conflict-resolve
+    #     prompt — the CLI's fix commit + push lands a CLEAN state on
+    #     the next poll)
+    # If the CLI can't resolve after repeated attempts, iter_cap aborts
+    # — no dedicated DIRTY abort path.
+    #
+    # This was the PR #335 / #336 bug: the local count was stale
+    # (worktree hadn't fetched origin/<base> since initial checkout) and
+    # said 0, so SyncBase never fired even though GitHub correctly
+    # reported BEHIND and refused the merge call.
+    if (
+        status.base_behind_count > 0
+        or status.merge_state_status
+        in (MergeStateStatus.BEHIND, MergeStateStatus.DIRTY)
+    ):
         return SyncBase()
 
-    # 6. Still conflicting with nothing else to do → can't continue.
+    # 6. Legacy ``mergeable == CONFLICTING`` without the richer
+    # mergeStateStatus signal — same treatment as DIRTY: let SyncBase
+    # attempt to reproduce + resolve.
     if status.mergeable == MergeableState.CONFLICTING:
-        return Abort(reason=AbortReason.no_progress_on_comments)
+        return SyncBase()
 
-    # 7. All green — terminal success action.
+    # 7. Branch protection / required-review blocker → hand off to human
+    # regardless of auto_merge setting. Monitor can't bypass branch
+    # protection; the only useful action is to tell the maintainer the
+    # PR is otherwise ready.
+    if status.merge_state_status in (
+        MergeStateStatus.BLOCKED,
+        MergeStateStatus.HAS_HOOKS,
+    ):
+        return NotifyHuman()
+
+    # 8. All green — terminal success action.
     if config.auto_merge:
         return Merge()
     return NotifyHuman()

@@ -14,6 +14,7 @@ from awf.runtime.pr_monitor import (
     CheckState,
     Merge,
     MergeableState,
+    MergeStateStatus,
     MonitorConfig,
     MonitorState,
     NotifyHuman,
@@ -48,6 +49,7 @@ def _status(
     inline: tuple[ReviewThread, ...] = (),
     reviews: tuple[ReviewComment, ...] = (),
     base_behind: int = 0,
+    merge_state_status: MergeStateStatus = MergeStateStatus.CLEAN,
     ci_failures: tuple[CheckFailure, ...] = (),
     closed: bool = False,
     merged: bool = False,
@@ -60,6 +62,7 @@ def _status(
         unresolved_inline_threads=inline,
         unresolved_review_comments=reviews,
         base_behind_count=base_behind,
+        merge_state_status=merge_state_status,
         ci_failures=ci_failures,
         closed=closed,
         merged=merged,
@@ -291,19 +294,158 @@ class TestSyncBase:
 # ── Conflicting → Abort ───────────────────────────────────────────────────
 
 
+class TestMergeStateStatus:
+    """GitHub's ``mergeStateStatus`` is the authoritative merge gate.
+    These tests cover the interactions between it and local state —
+    most importantly the PR #335/#336 regression: GitHub says BEHIND
+    but the local ``base_behind_count`` is stale at 0."""
+
+    @pytest.mark.unit
+    def test_behind_triggers_sync_even_if_local_count_is_zero(self) -> None:
+        """The exact bug we shipped: local rev-list said 0 because the
+        worktree hadn't fetched origin; GitHub said BEHIND; the old
+        decide() tried to merge, got rejected, fell back to NotifyHuman.
+        Now BEHIND alone triggers SyncBase."""
+        action = decide(
+            _status(
+                base_behind=0,
+                merge_state_status=MergeStateStatus.BEHIND,
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    def test_behind_plus_local_count_still_syncs(self) -> None:
+        """Both signals agreeing on BEHIND — same action, no oscillation."""
+        action = decide(
+            _status(base_behind=3, merge_state_status=MergeStateStatus.BEHIND),
+            MonitorState(),
+            MonitorConfig(),
+        )
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    def test_dirty_triggers_sync_base_so_cli_can_resolve_conflicts(self) -> None:
+        """DIRTY means GitHub detects a conflict. We don't abort — we
+        trigger SyncBase, which runs ``git merge origin/<base>`` locally
+        to reproduce the conflict, then invokes the coding CLI with a
+        conflict-resolve prompt. If the CLI's fix commit succeeds, the
+        next poll sees CLEAN. If it doesn't, iter_cap eventually aborts
+        via the budget path — no separate DIRTY-abort path."""
+        action = decide(
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+            MonitorState(),
+            MonitorConfig(),
+        )
+        assert isinstance(action, SyncBase)
+
+    @pytest.mark.unit
+    def test_dirty_with_unresolved_comments_addresses_comments_first(self) -> None:
+        """Same priority as BEHIND — comments first. After the push, the
+        next outer iteration re-evaluates and either moves to SyncBase or
+        clears the state."""
+        t = _thread()
+        action = decide(
+            _status(merge_state_status=MergeStateStatus.DIRTY, inline=(t,)),
+            MonitorState(),
+            MonitorConfig(),
+        )
+        assert isinstance(action, AddressComments)
+
+    @pytest.mark.unit
+    def test_dirty_hits_iter_cap_after_repeated_sync_attempts(self) -> None:
+        """If the CLI can't resolve conflicts, iter_count grows with each
+        SyncBase attempt. At the cap we abort via the budget path, NOT
+        via a dedicated DIRTY abort."""
+        action = decide(
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+            MonitorState(iter_count=10),
+            MonitorConfig(iter_cap=10),
+        )
+        assert isinstance(action, Abort)
+        assert action.reason == AbortReason.iter_cap_reached
+
+    @pytest.mark.unit
+    def test_blocked_notifies_human_even_with_auto_merge(self) -> None:
+        """Branch-protection says no. Monitor can't override; fall back
+        to posting the ready-to-merge comment so the human knows to act."""
+        action = decide(
+            _status(merge_state_status=MergeStateStatus.BLOCKED),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_has_hooks_also_notifies_human(self) -> None:
+        action = decide(
+            _status(merge_state_status=MergeStateStatus.HAS_HOOKS),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_unknown_state_waits(self) -> None:
+        """GitHub still computing — don't guess, re-poll next interval."""
+        action = decide(
+            _status(merge_state_status=MergeStateStatus.UNKNOWN),
+            MonitorState(),
+            MonitorConfig(),
+        )
+        assert isinstance(action, WaitForCI)
+
+    @pytest.mark.unit
+    def test_clean_with_auto_merge_merges(self) -> None:
+        action = decide(
+            _status(merge_state_status=MergeStateStatus.CLEAN),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_clean_without_auto_merge_notifies_human(self) -> None:
+        action = decide(
+            _status(merge_state_status=MergeStateStatus.CLEAN),
+            MonitorState(),
+            MonitorConfig(auto_merge=False),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_unresolved_comments_still_take_priority_over_behind(self) -> None:
+        """Even with BEHIND, the comment-fix cycle goes first — the push
+        after addressing comments triggers GitHub to re-compute state
+        and the NEXT outer iteration picks up SyncBase if still needed."""
+        t = _thread()
+        action = decide(
+            _status(
+                inline=(t,),
+                merge_state_status=MergeStateStatus.BEHIND,
+            ),
+            MonitorState(),
+            MonitorConfig(),
+        )
+        assert isinstance(action, AddressComments)
+
+
 class TestConflictingAbort:
     @pytest.mark.unit
-    def test_conflicting_with_no_other_blocker_aborts(self) -> None:
-        """No comments, CI green, base up to date — but GitHub says
-        CONFLICTING. The coding CLI wouldn't know what to do (there's no
-        ``git merge`` in flight to resolve), so we bail."""
+    def test_conflicting_with_no_other_blocker_triggers_sync_base(self) -> None:
+        """Legacy ``mergeable == CONFLICTING`` signal without the newer
+        ``mergeStateStatus`` → route to SyncBase so the coding CLI gets
+        a chance to resolve via the `git merge origin/<base>` + fix
+        cycle. Previously this aborted — that was the same design bug
+        as DIRTY-aborts."""
         action = decide(
             _status(mergeable=MergeableState.CONFLICTING),
             MonitorState(),
             MonitorConfig(),
         )
-        assert isinstance(action, Abort)
-        assert action.reason == AbortReason.no_progress_on_comments
+        assert isinstance(action, SyncBase)
 
     @pytest.mark.unit
     def test_conflicting_with_base_behind_runs_sync_first(self) -> None:

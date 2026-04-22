@@ -137,6 +137,16 @@ class PullRequestMonitorRunner:
             pr_number = ws.pr_number
             assert pr_number is not None, "pr_number must be set before monitoring"
 
+            # Refresh the worktree's remote-tracking ref BEFORE counting
+            # how far behind we are. Without this, origin/<base> is frozen
+            # at the time of the initial ``git worktree add`` and the
+            # count silently returns 0 even after the base branch has
+            # advanced on GitHub — the exact bug that let PR #335 / #336
+            # exit as "ready to merge" when they were BEHIND.
+            await self._fetch_base(
+                worktree_path=self._worktrees_root / workspace_id,
+                base_branch=ws.branch_base,
+            )
             base_behind = await self._count_base_behind(
                 worktree_path=self._worktrees_root / workspace_id,
                 base_branch=ws.branch_base,
@@ -478,6 +488,12 @@ class PullRequestMonitorRunner:
             )
             return r.returncode, r.stdout, r.stderr
 
+        # Defense: if a previous SyncBase attempt left the repo in a
+        # MERGING state (CLI failed mid-conflict-resolve, conflicts
+        # uncommitted), the next ``git merge`` would refuse with
+        # "You have not concluded your merge". Abort first; the command
+        # exits non-zero when there's nothing to abort, which we ignore.
+        await _git("merge", "--abort")
         await _git("fetch", "origin", base_branch)
         rc, _stdout, stderr = await _git("merge", "--no-edit", f"origin/{base_branch}")
         if rc != 0:
@@ -540,6 +556,24 @@ class PullRequestMonitorRunner:
         await self._git_push(worktree_path=self._worktrees_root / workspace_id)
 
     # ── Git plumbing ───────────────────────────────────────────────────────
+
+    async def _fetch_base(self, *, worktree_path: Path, base_branch: str) -> None:
+        """``git fetch origin <base>`` — refreshes the worktree's
+        remote-tracking ref so the subsequent rev-list is accurate.
+
+        Non-fatal on failure (offline, transient network, etc.). The
+        decide() gate will fall back to GitHub's mergeStateStatus if
+        the local count is wrong."""
+        await self._deps.runner.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "fetch",
+                "origin",
+                base_branch,
+            ]
+        )
 
     async def _count_base_behind(
         self, *, worktree_path: Path, base_branch: str

@@ -100,6 +100,7 @@ def _pr_payload(
     closed: bool = False,
     merged: bool = False,
     mergeable: str = "MERGEABLE",
+    merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
@@ -112,6 +113,7 @@ def _pr_payload(
                         "number": 42,
                         "headRefOid": "abc123",
                         "mergeable": mergeable,
+                        "mergeStateStatus": merge_state_status,
                         "isDraft": False,
                         "closed": closed,
                         "merged": merged,
@@ -240,6 +242,7 @@ class TestTerminalShortCircuit:
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
         # base-behind count, then GraphQL payload reports merged=True.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
         runner = _make_runner(
@@ -269,6 +272,7 @@ class TestTerminalShortCircuit:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(closed=True))
         runner = _make_runner(
@@ -303,6 +307,7 @@ class TestHappyMerge:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR state
         cmd.queue_result(returncode=0)  # gh pr merge
@@ -343,6 +348,7 @@ class TestMergeBlockedFallsBackToNotify:
         """Branch protection blocks the merge → runner posts ready-to-merge
         and completes (no failure)."""
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=1, stderr="branch protection rule blocks merge")
@@ -380,6 +386,7 @@ class TestNotifyHumanVariant:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR state
         cmd.queue_result(returncode=0)  # gh pr comment
@@ -428,6 +435,7 @@ class TestAddressComments:
             "line": 10,
             "comments": {"nodes": [{"bodyText": "rename", "author": {"login": "cr"}}]},
         }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # PR state
         # CLI addresses the thread (implicit "fixed in commit X").
@@ -443,6 +451,7 @@ class TestAddressComments:
             ),
         )
         # Outer loop iter 2: thread now resolved upstream, no other blockers → merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean
         cmd.queue_result(returncode=0)  # gh pr merge
@@ -488,6 +497,7 @@ class TestAddressComments:
             "line": 1,
             "comments": {"nodes": [{"bodyText": "wrong", "author": {"login": "cr"}}]},
         }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
         adapter.queue(stdout="FALSE POSITIVE: the existing code is correct")
@@ -503,6 +513,7 @@ class TestAddressComments:
             ),
         )
         # Outer loop iter 2: clean, merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0)  # merge
@@ -542,6 +553,7 @@ class TestAddressComments:
             "line": 1,
             "comments": {"nodes": [{"bodyText": "?", "author": {"login": "cr"}}]},
         }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
         adapter.queue(stdout="DEFER: need design input from maintainer")
@@ -550,6 +562,7 @@ class TestAddressComments:
         # No resolve_thread call queued — test checks we didn't hit it.
         # After a second outer iteration the thread is "addressed" in state
         # so decide() returns Merge; queue the merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # still there
         cmd.queue_result(returncode=0)  # merge (thread addressed in state, gate passes)
@@ -604,6 +617,7 @@ class TestFixCyclePasses:
             "line": 2,
             "comments": {"nodes": [{"bodyText": "fix T2", "author": {"login": "cr"}}]},
         }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[t1]))  # initial
         adapter.queue(stdout="fixed T1")  # fix T1
@@ -618,6 +632,7 @@ class TestFixCyclePasses:
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve T1
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve T2
         # Outer iter 2: merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0)
@@ -654,6 +669,7 @@ class TestCiFailure:
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
         # Outer iter 1: CI FAILURE, no comments, runner calls fetch_failing_check_logs.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(check_state="FAILURE"))  # PR state
         cmd.queue_result(
@@ -673,6 +689,7 @@ class TestCiFailure:
         adapter.queue(stdout="fix(ci): lint — ...")  # CLI fix
         cmd.queue_result(returncode=0)  # git push after fix
         # Outer iter 2: green → merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0, stdout=json.dumps([]))  # no failures (extra safety)
@@ -709,12 +726,15 @@ class TestSyncBase:
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
         # Outer iter 1: base is behind by 2.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="2\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR state (mergeable OK)
+        cmd.queue_result(returncode=0)  # git merge --abort (no-op)
         cmd.queue_result(returncode=0)  # git fetch
         cmd.queue_result(returncode=0)  # git merge (clean)
         cmd.queue_result(returncode=0)  # git push
         # Outer iter 2: base synced, merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0)  # merge
@@ -731,9 +751,14 @@ class TestSyncBase:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        # git merge was invoked with origin/<base>.
+        # git merge was invoked with origin/<base>. Skip the defensive
+        # ``git merge --abort`` that now runs first.
         merge_call = next(
-            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "merge" in c.args
+            c
+            for c in cmd.calls
+            if c.args[:2] == ["git", "-C"]
+            and "merge" in c.args
+            and "--abort" not in c.args
         )
         assert "origin/development" in merge_call.args
 
@@ -747,8 +772,10 @@ class TestSyncBase:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="2\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # git merge --abort (no-op)
         cmd.queue_result(returncode=0)  # fetch
         cmd.queue_result(returncode=1, stderr="CONFLICT (content): src/x")  # merge fails
         cmd.queue_result(
@@ -757,6 +784,7 @@ class TestSyncBase:
         adapter.queue(stdout="fixed conflicts")
         cmd.queue_result(returncode=0)  # push
         # Outer iter 2: clean merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0)
@@ -777,6 +805,118 @@ class TestSyncBase:
         assert any("CONFLICT" in p or "conflicts" in p for p in adapter.calls)
 
 
+class TestDirtyConflictResolution:
+    @pytest.mark.unit
+    async def test_github_dirty_triggers_cli_conflict_resolve_and_recovery(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """GitHub reports mergeStateStatus=DIRTY (conflict against base).
+        The monitor routes to SyncBase; the local ``git merge`` hits the
+        conflict, the coding CLI is invoked with the conflict-resolve
+        prompt, commits the resolution, push lands, next poll sees
+        CLEAN, PR merges. The critical assertion here is that the CLI
+        was invoked — confirms the LLM is in the loop for conflict
+        decisions, not just waved through."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        # Outer iter 1: GitHub says DIRTY; local rev-list says 0 behind.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind (local-stale)
+        cmd.queue_result(
+            returncode=0, stdout=_pr_payload(merge_state_status="DIRTY")
+        )  # PR state
+        cmd.queue_result(returncode=0)  # git merge --abort (no-op)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(
+            returncode=1, stderr="CONFLICT (content): src/foo.py"
+        )  # git merge fails
+        cmd.queue_result(
+            returncode=0, stdout="UU src/foo.py\n"
+        )  # git status --porcelain
+        adapter.queue(stdout="resolved the merge conflict")
+        cmd.queue_result(returncode=0)  # git push
+        # Outer iter 2: CLEAN → merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(
+            returncode=0, stdout=_pr_payload(merge_state_status="CLEAN")
+        )
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGE-SHA\n")
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # The CLI saw a conflict-resolve prompt.
+        assert any(
+            "CONFLICT" in p or "merge conflicts" in p or "conflicts" in p
+            for p in adapter.calls
+        )
+        # Workspace terminated cleanly on merge.
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+    @pytest.mark.unit
+    async def test_sync_base_starts_with_merge_abort_for_crash_safety(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """If the worktree is in a MERGING state from a prior failed
+        sync, the next sync must ``git merge --abort`` first or the new
+        ``git merge`` would refuse."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="3\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # git merge --abort ← defense
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0)  # git merge (clean)
+        cmd.queue_result(returncode=0)  # git push
+        # Outer iter 2: clean → merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # merge
+        cmd.queue_result(returncode=0, stdout="M\n")
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        abort_calls = [
+            c for c in cmd.calls
+            if c.args[:2] == ["git", "-C"] and "merge" in c.args and "--abort" in c.args
+        ]
+        assert len(abort_calls) == 1, "git merge --abort must fire exactly once before sync"
+
+
 class TestAbortOnIterCap:
     @pytest.mark.unit
     async def test_iter_cap_terminates_with_failed(
@@ -793,6 +933,7 @@ class TestAbortOnIterCap:
             assert ws is not None
             ws.monitor_iter_count = 5  # at cap already
             await s.commit()
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # no reason to be over cap;
         #                                                       but we set iter_count pre-run.
@@ -828,9 +969,11 @@ class TestWaitForCi:
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
         # Outer iter 1: PENDING → sleep (no iter bump).
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(check_state="PENDING"))
         # Outer iter 2: SUCCESS → merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0)
@@ -881,6 +1024,7 @@ class TestStatePersistence:
             "line": 1,
             "comments": {"nodes": []},
         }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
         # decide() filters T1 out of the batch → falls through to Merge.
@@ -955,6 +1099,7 @@ class TestGitHubApiError:
         """Rate-limit / auth / malformed response from GitHub → failure
         (rather than hanging the monitor forever on retries)."""
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=1, stderr="rate-limited: try again in 60s")
         runner = _make_runner(
@@ -997,6 +1142,7 @@ class TestAgentRunErrorResilience:
             "line": 1,
             "comments": {"nodes": [{"bodyText": "?", "author": {"login": "cr"}}]},
         }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
         # CLI raises AgentRunError mid-fix.
@@ -1004,6 +1150,7 @@ class TestAgentRunErrorResilience:
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch
         cmd.queue_result(returncode=0)  # push (maybe nothing, still called)
         # Iter 2: thread addressed-as-defer in state → Merge gate.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
         cmd.queue_result(returncode=0)  # merge
@@ -1035,14 +1182,17 @@ class TestAgentRunErrorResilience:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="2\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # git merge --abort (no-op)
         cmd.queue_result(returncode=0)  # fetch
         cmd.queue_result(returncode=1, stderr="CONFLICT")  # merge fails
         cmd.queue_result(returncode=0, stdout="UU a\n")  # status
         adapter.queue(returncode=2, raise_error=True)  # CLI dies
         cmd.queue_result(returncode=0)  # push (still attempted)
         # Iter 2: abort on iter_cap with small cap for speed.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         runner = _make_runner(
@@ -1073,6 +1223,7 @@ class TestAgentRunErrorResilience:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(check_state="FAILURE"))
         cmd.queue_result(
@@ -1116,6 +1267,7 @@ class TestBaseBehindEdges:
         """Failed rev-list (e.g. origin/<base> not yet fetched) should not
         trip the monitor — we just get base_behind=0 and carry on."""
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=1, stderr="unknown revision")  # base-behind fails
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR green
         cmd.queue_result(returncode=0)  # merge
@@ -1147,6 +1299,7 @@ class TestBaseBehindEdges:
         tmp_path: Path,
     ) -> None:
         ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="not-a-number\n")  # garbage
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0)
@@ -1193,6 +1346,7 @@ class TestResumePreservesMonitorStartedAt:
             # Claim the monitor started 2h ago.
             ws.monitor_started_at = _dt.now(_UTC) - timedelta(hours=2)
             await s.commit()
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0)

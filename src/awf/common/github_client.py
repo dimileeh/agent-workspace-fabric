@@ -34,6 +34,7 @@ from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
     MergeableState,
+    MergeStateStatus,
     PRStatus,
     ReviewComment,
     ReviewThread,
@@ -64,6 +65,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
       number
       headRefOid
       mergeable
+      mergeStateStatus
       isDraft
       closed
       merged
@@ -177,6 +179,7 @@ class GitHubClient:
 
         # ── Mergeable ──────────────────────────────────────────────────
         mergeable = _parse_mergeable(pr.get("mergeable"))
+        merge_state_status = _parse_merge_state_status(pr.get("mergeStateStatus"))
 
         # ── Review threads: inline ─────────────────────────────────────
         inline: list[ReviewThread] = []
@@ -226,6 +229,7 @@ class GitHubClient:
             unresolved_inline_threads=tuple(inline),
             unresolved_review_comments=tuple(reviews),
             base_behind_count=base_behind_count,
+            merge_state_status=merge_state_status,
             ci_failures=(),  # populated by fetch_failing_check_logs if needed
             closed=bool(pr.get("closed")),
             merged=bool(pr.get("merged")),
@@ -456,6 +460,17 @@ def _parse_mergeable(value: Any) -> MergeableState:
     if upper == "CONFLICTING":
         return MergeableState.CONFLICTING
     return MergeableState.UNKNOWN
+
+
+def _parse_merge_state_status(value: Any) -> MergeStateStatus:
+    """GraphQL returns one of: CLEAN / BEHIND / DIRTY / BLOCKED / HAS_HOOKS
+    / UNSTABLE / UNKNOWN. Default to UNKNOWN for anything we don't
+    recognise — decide() treats UNKNOWN as "wait, don't act"."""
+    upper = (value or "").upper()
+    try:
+        return MergeStateStatus(upper)
+    except ValueError:
+        return MergeStateStatus.UNKNOWN
 
 
 def _tail(text: str, n: int) -> str:
