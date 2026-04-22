@@ -203,6 +203,14 @@ For any task whose backend uses pgvector / embeddings, keep the default.
 - Test commands run inside the agent container via `docker compose exec -T
   -w /workspace agent sh -lc <command>`. Shell metacharacters (pipes,
   `&&`, `$VAR`) work. First failing command stops the sequence.
+- **Venv auto-activation**: AWF prefixes every validation command (and the
+  migration) with a check for `/workspace/.venv/bin/activate` and sources
+  it when present. This matters because `uv pip install -e ".[dev]"` (or
+  `python -m venv`) creates a `.venv` in the repo root, and subsequent
+  calls to `alembic` / `pytest` / `ruff` via `/usr/local/bin/*` wouldn't
+  otherwise see the venv's site-packages — classic
+  `ModuleNotFoundError: No module named '<your_app>'`. Nothing extra to
+  do in your task spec; just write the commands naturally.
 - Agent runtime ships: Python 3.12, Node 22, git, jq, ripgrep, tini, the
   three coding CLIs. Playwright browsers are NOT pre-installed — if you
   use Playwright, include `npx playwright install --with-deps chromium` as
@@ -257,7 +265,7 @@ Common failure modes + fixes:
 | Symptom | Root cause | Fix |
 |---|---|---|
 | `fatal: not a git repository` inside container | Mirror not bind-mounted at same absolute host path | Done in stock AWF since `da07637`. If you see it, you're on a stale AWF. |
-| `alembic upgrade head` fails with `ModuleNotFoundError: <app>` | Migration ran before the app was installed | Put the dep-install step (`uv pip install -e ".[dev]"`, etc.) as `test_commands[0]` — AWF runs migration AFTER it. |
+| `alembic upgrade head` fails with `ModuleNotFoundError: <app>` | Migration ran before the app was installed, or migration used system python instead of the uv-created `/workspace/.venv` | Put the dep-install step as `test_commands[0]` so AWF runs migration AFTER it; stock AWF also auto-activates `/workspace/.venv` for every command so uv-installed packages are visible to alembic. |
 | `alembic upgrade head` exits non-zero right after agent | Alembic env-var not set | Alias the app's env-var name → `DATABASE_URL` in the template (stock AWF aliases `AIRA_DATABASE_URL`). |
 | Companion healthcheck never goes `service_healthy` | Wrong URL path | Check the app's actual health route (e.g. aira-agent is `/api/v1/health`, not `/healthz`). `curl` the real service from the host to confirm before scheduling. |
 | `gh pr create: No commits between X and Y` | Agent made no changes (or made changes but didn't commit AND AWF's auto-commit was a no-op because files weren't staged) | Widen the prompt's scope or check agent refusal; check `git log base..HEAD` in the worktree. |

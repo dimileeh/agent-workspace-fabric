@@ -119,12 +119,13 @@ class TestMigration:
         assert "sh" in first_cmd and "-lc" in first_cmd
 
         migration_cmd = fake.calls[1].args
-        assert "alembic" in migration_cmd
-        assert "upgrade" in migration_cmd
-        assert "head" in migration_cmd
+        # Migration runs through sh -lc with a venv-activate preamble, so
+        # `alembic upgrade head` is embedded in the last arg, not a separate
+        # argv entry.
+        assert "alembic upgrade head" in migration_cmd[-1]
 
         second_cmd = fake.calls[2].args
-        assert "pytest tests/ -q" in second_cmd
+        assert "pytest tests/ -q" in second_cmd[-1]
 
     @pytest.mark.unit
     async def test_skips_remaining_commands_when_migration_fails(
@@ -217,5 +218,8 @@ class TestDockerInvocation:
         assert "exec" in args and "-T" in args
         assert "-w" in args and "/workspace" in args
         # The raw command goes through sh -lc so shell metacharacters work.
+        # We prefix every command with a venv-activate preamble so uv-created
+        # .venvs are visible to subsequent tools — so check the user command
+        # is embedded inside the full sh -lc payload (last argument).
         assert "sh" in args and "-lc" in args
-        assert "echo 'hello | world'" in args
+        assert "echo 'hello | world'" in args[-1]

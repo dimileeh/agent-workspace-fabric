@@ -38,7 +38,16 @@ from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
 
-_MIGRATION_COMMAND: tuple[str, ...] = ("alembic", "upgrade", "head")
+# Every validation command runs through this preamble so a workspace-local
+# ``.venv`` (typical for ``uv pip install``) is picked up automatically.
+# Without this, ``uv pip install`` creates ``/workspace/.venv`` but subsequent
+# commands invoke ``/usr/local/bin/alembic`` / ``pytest`` which don't see the
+# venv's site-packages — classic ``ModuleNotFoundError: No module named '<app>'``.
+_VENV_ACTIVATE_PREAMBLE = (
+    '[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; '
+)
+
+_MIGRATION_SHELL = _VENV_ACTIVATE_PREAMBLE + "alembic upgrade head"
 
 
 @dataclass(frozen=True)
@@ -108,12 +117,14 @@ class ValidationRunner:
         for index, raw in enumerate(test_commands, start=1):
             # Commands are full shell strings (e.g. ``pytest -q``); we invoke
             # them under ``sh -lc`` so quoting, pipes, and env var expansion
-            # inside the container all work as the operator expects.
+            # inside the container all work as the operator expects. The
+            # venv-activate preamble makes ``uv pip install``-created venvs
+            # visible to every subsequent tool (alembic, pytest, ruff, ...).
             label = f"cmd_{index:02d}"
             result = await self._exec(
                 compose_project=compose_project,
                 compose_file=compose_file,
-                cli_args=["sh", "-lc", raw],
+                cli_args=["sh", "-lc", _VENV_ACTIVATE_PREAMBLE + raw],
                 label=label,
                 artifacts_dir=workspace_artifacts,
             )
@@ -137,7 +148,7 @@ class ValidationRunner:
                 migration = await self._exec(
                     compose_project=compose_project,
                     compose_file=compose_file,
-                    cli_args=list(_MIGRATION_COMMAND),
+                    cli_args=["sh", "-lc", _MIGRATION_SHELL],
                     label="migration",
                     artifacts_dir=workspace_artifacts,
                 )
@@ -183,11 +194,15 @@ class ValidationRunner:
         stdout_path.write_text(result.stdout, encoding="utf-8")
         stderr_path.write_text(result.stderr, encoding="utf-8")
 
-        display = (
-            " ".join(shlex.quote(a) for a in cli_args)
-            if len(cli_args) != 3 or cli_args[0] != "sh"
-            else cli_args[2]  # raw user command for sh -lc
-        )
+        if len(cli_args) == 3 and cli_args[0] == "sh":
+            # Strip the internal venv-activate preamble so the display is the
+            # user-supplied command they care about, not our plumbing.
+            shell_cmd = cli_args[2]
+            if shell_cmd.startswith(_VENV_ACTIVATE_PREAMBLE):
+                shell_cmd = shell_cmd[len(_VENV_ACTIVATE_PREAMBLE) :]
+            display = shell_cmd
+        else:
+            display = " ".join(shlex.quote(a) for a in cli_args)
         return ValidationCommandResult(
             command=display,
             returncode=result.returncode,

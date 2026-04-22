@@ -142,8 +142,16 @@ async def _materialize_companion(
     name = raw["name"]
     if raw.get("repo_url"):
         # Companion gets its own mirror + worktree, checked out at the base
-        # branch (no feature branch — we don't edit companions).
+        # branch (no feature branch — we don't edit companions). The
+        # companion_ws_id is deterministic, so a failed prior run can leave
+        # the worktree on disk; remove it first so add_worktree sees a clean
+        # slate. Companions are read-only build contexts — we don't commit
+        # back to them, so nothing is lost by re-creating them.
         companion_ws_id = f"companion__{name}"
+        await git.remove_worktree(
+            workspace_id=companion_ws_id,
+            repo_url=raw["repo_url"],
+        )
         layout = await git.add_worktree(
             workspace_id=companion_ws_id,
             repo_url=raw["repo_url"],
