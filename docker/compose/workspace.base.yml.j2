@@ -32,7 +32,9 @@ services:
       POSTGRES_PASSWORD: "{{ postgres_password }}"
       POSTGRES_DB: "{{ postgres_db }}"
     volumes:
-      - postgres_data:/var/lib/postgresql/data
+      # pgvector/pgvector:pg18 uses /var/lib/postgresql (not .../data) for its
+      # data dir — matches Dmitri's aira-agent/docker-compose.yml convention.
+      - postgres_data:/var/lib/postgresql
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U {{ postgres_user }} -d {{ postgres_db }}"]
       interval: 2s

@@ -256,6 +256,10 @@ async def _run_task(
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
+        # aira-backend requires the ``vector`` Postgres extension for embeddings;
+        # plain postgres:16-alpine doesn't include it. Use the pgvector image
+        # everywhere — harmless extra KB for tasks that don't need the extension.
+        postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
         auth_mounts=(mirror_mount, *auth_mounts),
         git_name=git_name,
