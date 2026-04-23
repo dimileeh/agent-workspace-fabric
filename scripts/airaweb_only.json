@@ -19,7 +19,7 @@
         "repo_url": "git@github.com:dimileeh/aira-agent.git",
         "branch": "development",
         "dockerfile": "Dockerfile",
-        "env_file": "~/Projects/aira/aira-agent/.env",
+        "env_file": "${AWF_AIRA_CHECKOUT_ROOT:-~/Projects/aira}/aira-agent/.env",
         "environment": {
           "AIRA_DATABASE_URL": "${POSTGRES_URL}",
           "AIRA_ENV": "development"
@@ -32,7 +32,7 @@
         "repo_url": "git@github.com:dimileeh/aira-web.git",
         "branch": "development",
         "dockerfile": "Dockerfile",
-        "env_file": "~/Projects/aira/aira-web/.env.local",
+        "env_file": "${AWF_AIRA_CHECKOUT_ROOT:-~/Projects/aira}/aira-web/.env.local",
         "environment": {
           "AGENT_SERVICE_URL": "http://backend:8000",
           "NODE_ENV": "production"

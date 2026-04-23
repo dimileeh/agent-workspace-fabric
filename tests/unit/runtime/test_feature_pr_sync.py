@@ -209,6 +209,134 @@ class TestGhCliErrors:
         assert "baserefname" in str(excinfo.value).lower() or "base" in str(excinfo.value).lower()
 
 
+class TestStateOnlyPayload:
+    """``gh pr view --json`` doesn't expose ``merged`` or ``closed`` as
+    boolean fields — only ``state`` (one of OPEN, CLOSED, MERGED).
+    Phase 1.5d originally requested those fields in the projection and
+    hit ``Unknown JSON field: merged`` at runtime (fatal: blocked
+    ``attach_feature_pr_monitor.py`` from attaching to PR #277). These
+    tests pin the real-gh shape — no ``closed`` / ``merged`` keys —
+    and verify we derive both from ``state``.
+
+    Separate class so the helpers above that still pass explicit
+    ``closed``/``merged`` keys (covering the full parse surface) keep
+    working — the parser honours explicit keys if present, falls back
+    to the state-derivation otherwise."""
+
+    @pytest.mark.unit
+    async def test_open_pr_state_only(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 277,
+                    "headRefName": "fix/sprints-ai-plan-button-guard",
+                    "baseRefName": "development",
+                    "state": "OPEN",
+                    "isDraft": False,
+                    "author": {"login": "dimileeh"},
+                    "url": "https://github.com/dimileeh/aira-web/pull/277",
+                    "title": "fix: sprints",
+                }
+            ),
+        )
+
+        result = await fetch_pr_metadata(runner=fake, repo=_REPO, pr_number=277)
+
+        assert result.state == "OPEN"
+        assert result.closed is False
+        assert result.merged is False
+
+    @pytest.mark.unit
+    async def test_closed_state_raises(self) -> None:
+        """No ``closed`` key, only ``state=CLOSED``. Parser must still
+        refuse — otherwise the CLI spins up a workspace for a PR that
+        can't transition."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 277,
+                    "headRefName": "fix/x",
+                    "baseRefName": "development",
+                    "state": "CLOSED",
+                    "isDraft": False,
+                    "author": {"login": "a"},
+                    "url": "https://github.com/x/y/pull/277",
+                    "title": "t",
+                }
+            ),
+        )
+
+        with pytest.raises(FeaturePRSyncError) as excinfo:
+            await fetch_pr_metadata(runner=fake, repo=_REPO, pr_number=277)
+        assert "closed" in str(excinfo.value).lower()
+
+    @pytest.mark.unit
+    async def test_merged_state_raises(self) -> None:
+        """Same for MERGED — derived from ``state``, not a separate key."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 277,
+                    "headRefName": "fix/x",
+                    "baseRefName": "development",
+                    "state": "MERGED",
+                    "isDraft": False,
+                    "author": {"login": "a"},
+                    "url": "https://github.com/x/y/pull/277",
+                    "title": "t",
+                }
+            ),
+        )
+
+        with pytest.raises(FeaturePRSyncError) as excinfo:
+            await fetch_pr_metadata(runner=fake, repo=_REPO, pr_number=277)
+        assert "merged" in str(excinfo.value).lower()
+
+    @pytest.mark.unit
+    async def test_gh_command_does_not_request_nonexistent_fields(self) -> None:
+        """The JSON field projection string we pass to ``gh pr view``
+        must stick to fields gh recognizes. Regression guard for the
+        concrete fix: if someone adds ``merged`` or ``closed`` to the
+        field list again, gh exits 1 with ``Unknown JSON field: ...``
+        and the whole CLI breaks."""
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "number": 1,
+                    "headRefName": "h",
+                    "baseRefName": "b",
+                    "state": "OPEN",
+                    "isDraft": False,
+                    "author": {"login": "a"},
+                    "url": "u",
+                    "title": "t",
+                }
+            ),
+        )
+
+        await fetch_pr_metadata(runner=fake, repo=_REPO, pr_number=1)
+
+        assert len(fake.calls) == 1
+        # Extract the --json arg value.
+        args = fake.calls[0].args
+        json_flag_index = args.index("--json")
+        fields = args[json_flag_index + 1].split(",")
+        assert "merged" not in fields
+        assert "closed" not in fields
+        # And the real gh fields we DO rely on are still requested.
+        assert "state" in fields
+        assert "headRefName" in fields
+        assert "baseRefName" in fields
+
+
 def _metadata(**overrides) -> FeaturePRMetadata:
     defaults = {
         "number": 277,

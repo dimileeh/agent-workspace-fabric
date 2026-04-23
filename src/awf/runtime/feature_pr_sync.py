@@ -84,10 +84,12 @@ class FeaturePRSyncError(Exception):
         super().__init__(f"{operation} failed: {stderr.strip() or '<no output>'}")
 
 
-# The set of fields we pull from ``gh pr view``. Keep in sync with
-# ``_parse_metadata`` — adding a field here without a parser update is
+# The set of fields we pull from ``gh pr view``. ``gh pr view --json``
+# does NOT accept ``merged`` or ``closed`` as field names — derive
+# both from ``state`` (one of ``OPEN`` / ``CLOSED`` / ``MERGED``) in
+# ``_parse_metadata``. Adding a field here without a parser update is
 # a silent drop on the floor.
-_PR_VIEW_JSON_FIELDS = "number,headRefName,baseRefName,state,isDraft,closed,merged,author,url,title"
+_PR_VIEW_JSON_FIELDS = "number,headRefName,baseRefName,state,isDraft,author,url,title"
 
 
 async def fetch_pr_metadata(
@@ -144,8 +146,18 @@ def _parse_metadata(payload: dict[str, Any]) -> FeaturePRMetadata:
         base_branch = payload["baseRefName"]
         state = payload["state"]
         is_draft = bool(payload.get("isDraft", False))
-        closed = bool(payload.get("closed", False))
-        merged = bool(payload.get("merged", False))
+        # ``state`` is the canonical terminal-check source — one of
+        # OPEN / CLOSED / MERGED. Earlier this derivation honoured
+        # explicit ``closed`` / ``merged`` payload keys as overrides,
+        # but that let a stubbed / legacy payload with ``state=MERGED``
+        # + ``merged=false`` slip past the refusal checks below and
+        # spin up a workspace for a PR that can't transition. Trust
+        # ``state`` authoritatively — it's what gh returns and what
+        # we've already built the rest of the parser around. Review
+        # feedback on PR #4 (CodeRabbit): "Keep terminal-state refusal
+        # canonical even when legacy keys are present".
+        closed = state == "CLOSED"
+        merged = state == "MERGED"
         url = payload["url"]
         title = payload.get("title", "")
     except (KeyError, TypeError, ValueError) as exc:
