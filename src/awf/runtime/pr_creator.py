@@ -63,9 +63,34 @@ class PullRequestCreator:
         title: str,
         body: str,
     ) -> PullRequestResult:
+        # Step 0: capture the worktree's view of the branch state so we
+        # can diagnose post-validation push failures. T39 (ws_eb8c2bd5)
+        # hit ``gh pr create: No commits between development and
+        # awf/ws_eb8c2bd5 ... Head ref must be a branch`` despite
+        # validation having passed — we need to know whether (a) the
+        # local branch had commits but push didn't move them, (b) the
+        # local branch was empty relative to base (bad commit step), or
+        # (c) HEAD was detached / on a different branch. These three
+        # logs answer all three questions:
+        await self._log_pre_push_diagnostics(
+            worktree_path=worktree_path,
+            branch_name=branch_name,
+            base_branch=base_branch,
+        )
+
         # Step 1: push the branch.
         push = await self._runner.run(
             ["git", "-C", str(worktree_path), "push", "-u", "origin", branch_name],
+        )
+        # Log the verbatim push output BEFORE the ok check. If the push
+        # silently said "Everything up-to-date" with returncode 0 (the
+        # T39 signature), we want that recorded for triage.
+        _log.info(
+            "pr_creator.push_output",
+            branch=branch_name,
+            returncode=push.returncode,
+            stdout=push.stdout.strip()[:500],
+            stderr=push.stderr.strip()[:500],
         )
         if not push.ok:
             raise PullRequestError(
@@ -105,3 +130,54 @@ class PullRequestCreator:
         url = url_match.group(0)
         _log.info("pr.created", branch=branch_name, url=url)
         return PullRequestResult(url=url, branch=branch_name)
+
+    async def _log_pre_push_diagnostics(
+        self,
+        *,
+        worktree_path: Path,
+        branch_name: str,
+        base_branch: str,
+    ) -> None:
+        """Capture the local git state right before the push fires.
+
+        Three queries, one structured log line:
+
+          * Current HEAD SHA — tells us whether HEAD has a real commit.
+          * Current branch (``--abbrev-ref HEAD``) — tells us whether we're
+            on the branch we think we're about to push, or detached, or
+            on some branch the agent accidentally switched to.
+          * Commit list ahead of base — tells us whether the branch has
+            anything to push at all. If this is empty on a workspace that
+            validated green, something between the fix-cycle commits and
+            the push reverted or lost them.
+
+        We deliberately don't raise on any of these queries failing —
+        they're diagnostic only. Normal push either succeeds (fine) or
+        fails with a real error (triaged by the push step below).
+        """
+        head_sha = await self._runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
+        current_branch = await self._runner.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"]
+        )
+        ahead_of_base = await self._runner.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "log",
+                f"origin/{base_branch}..HEAD",
+                "--oneline",
+                "--no-decorate",
+            ]
+        )
+        _log.info(
+            "pr_creator.pre_push_state",
+            worktree=str(worktree_path),
+            push_target_branch=branch_name,
+            current_branch=current_branch.stdout.strip() or "<unknown>",
+            head_sha=head_sha.stdout.strip() or "<unknown>",
+            commits_ahead_of_base=[
+                line for line in ahead_of_base.stdout.splitlines() if line.strip()
+            ],
+            base_branch=base_branch,
+        )
