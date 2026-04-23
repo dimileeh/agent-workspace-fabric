@@ -135,11 +135,16 @@ class TestDispatch:
 
 
 class TestTaskConfigDefaults:
-    """Guardrails on the ``auto_merge`` field default — the CLI expects
-    ``False`` unless overridden."""
+    """Guardrails on the ``auto_merge`` field default.
+
+    AWF's contract for feature→development PRs is "deliver a green PR
+    and land it". The default is therefore ``True``. Release PRs
+    (development→main) use the ``sync_release_pr`` task kind, whose
+    handler hardcodes ``auto_merge=False`` at a different layer —
+    the dev→main gate is where human approval lives."""
 
     @pytest.mark.unit
-    def test_auto_merge_defaults_to_false(self) -> None:
+    def test_auto_merge_defaults_to_true(self) -> None:
         cfg = run_awf.TaskConfig(
             repo_url="git@github.com:x/y.git",
             branch_base="development",
@@ -147,18 +152,18 @@ class TestTaskConfigDefaults:
             task_prompt="p",
             agent="codex",
             test_commands=[],
-        )
-        assert cfg.auto_merge is False
-
-    @pytest.mark.unit
-    def test_auto_merge_can_be_set_true(self) -> None:
-        cfg = run_awf.TaskConfig(
-            repo_url="git@github.com:x/y.git",
-            branch_base="development",
-            task_title="t",
-            task_prompt="p",
-            agent="codex",
-            test_commands=[],
-            auto_merge=True,
         )
         assert cfg.auto_merge is True
+
+    @pytest.mark.unit
+    def test_auto_merge_can_be_set_false(self) -> None:
+        cfg = run_awf.TaskConfig(
+            repo_url="git@github.com:x/y.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+            auto_merge=False,
+        )
+        assert cfg.auto_merge is False

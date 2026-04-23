@@ -115,12 +115,17 @@ class TaskConfig:
     unset, the driver queries GitHub for it and errors out if none
     exists (the scheduler should always populate this)."""
 
-    auto_merge: bool = False
-    """For ``sync_feature_pr`` only. ``True`` → monitor lands the PR
-    itself once all gates turn green; ``False`` → monitor posts a
-    "ready to merge" notification and waits for a human. Safe default
-    is ``False`` because the CLI's most common caller (failed-workspace
-    recovery) wants deliberate human review rather than silent merges."""
+    auto_merge: bool = True
+    """For ``sync_feature_pr`` only. ``True`` → monitor lands the feature
+    PR (into ``development``) once all gates turn green; ``False`` →
+    monitor posts a "ready to merge" notification and waits for a human.
+
+    Defaults to ``True``: a feature→development PR with all gates green
+    IS the "ready to ship" state — blocking on human approval defeats
+    the whole AWF premise of "tell AWF what to build, AWF delivers".
+    Release PRs (development→main) are a separate task kind
+    (``sync_release_pr``) and still hardcode ``auto_merge=False`` — the
+    dev→main gate is where human approval lives."""
 
 
 def _build_auth_mounts(host_home: Path) -> list[AuthMount]:
@@ -231,27 +236,37 @@ async def _configure_branch_push_upstream(
     branch_name: str,
     remote_branch: str,
 ) -> None:
-    """Configure a per-workspace branch so ``git push`` writes back to
-    the *remote* branch it's tracking.
+    """Configure a per-workspace branch so ``git pull`` knows its
+    upstream. Records the ``origin/<remote_branch>`` tracking target on
+    the local branch only — push routing is handled explicitly by the
+    monitor via a ``HEAD:refs/heads/<remote>`` refspec, not by git
+    config.
 
-    Used by the ``sync_release_pr`` and ``sync_feature_pr`` handlers,
-    which check out a local ref like ``release-sync/ws_<id>`` or
-    ``feature-sync/ws_<id>`` that should push to a specific remote
-    branch (``development``, the PR's head, etc.). Extracted from the
-    handlers so the three identical blocks can't drift out of sync.
-    Review feedback on PR #2 (CodeRabbit, generic CLI concern at
-    run_awf.py:487).
+    Used by ``sync_release_pr`` and ``sync_feature_pr`` where the local
+    ref (``release-sync/ws_<id>`` / ``feature-sync/ws_<id>``) diverges
+    from the remote it tracks (``development``, the PR's head, etc.).
 
-    Sets three git configs on the worktree:
+    Sets two git configs on the worktree:
       * ``branch.<branch>.remote = origin``
       * ``branch.<branch>.merge = refs/heads/<remote_branch>``
-      * ``push.default = upstream`` — so bare ``git push`` writes
-        HEAD to whatever the two above specify.
+
+    **Why no ``push.default = upstream`` anymore**: the 2026-04-23
+    aira-web incident. That line was global config (not per-branch),
+    and because the bare mirror shares ``$GIT_DIR/config`` across all
+    its worktrees, sync workspaces writing it caused *every other*
+    worktree on the mirror to resolve ``git push origin HEAD`` through
+    the ``branch.<X>.merge`` mapping. When ``<X>.merge`` was the
+    git-auto-set default ``refs/heads/development`` (every branch
+    created from ``origin/development`` gets this), four
+    feature-branch commits ended up on ``development`` instead of the
+    feature branch. The monitor now uses explicit refspecs so push
+    routing doesn't depend on these configs at all, and setting
+    ``push.default`` globally from a per-workspace function was always
+    the wrong layer.
     """
     for cfg_args in (
         [f"branch.{branch_name}.remote", "origin"],
         [f"branch.{branch_name}.merge", f"refs/heads/{remote_branch}"],
-        ["push.default", "upstream"],
     ):
         await runner.run(["git", "-C", str(worktree_path), "config", *cfg_args])
 
@@ -471,6 +486,9 @@ async def _run_task(
         persisted = await repo.get(ws_id)
         assert persisted is not None
         persisted.branch_name = branch_name
+        # Feature-branch PR: local branch == remote push target. The
+        # monitor pushes ``awf/<id>`` back to ``origin/awf/<id>``.
+        persisted.remote_push_branch = branch_name
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
         await s.commit()
@@ -671,6 +689,12 @@ async def _run_sync_release_pr(
         persisted = await repo.get(ws_id)
         assert persisted is not None
         persisted.branch_name = branch_name
+        # Release-sync: local is ``release-sync/<id>`` (per-workspace ref
+        # to avoid concurrent worktree races on the shared source branch);
+        # remote push target is ``source_branch`` (typically
+        # ``development``). Monitor's explicit refspec pushes HEAD to
+        # ``refs/heads/<source_branch>``.
+        persisted.remote_push_branch = source_branch
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
         persisted.pr_url = (
@@ -876,6 +900,10 @@ async def _run_sync_feature_pr(
         persisted = await repo.get(ws_id)
         assert persisted is not None
         persisted.branch_name = branch_name
+        # Feature-sync: local is ``feature-sync/<id>`` (per-workspace ref
+        # to avoid worktree races on the PR's head); remote push target
+        # is the PR's head branch (``source_branch``).
+        persisted.remote_push_branch = source_branch
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
         persisted.pr_url = (
@@ -977,6 +1005,31 @@ async def _run_sync_feature_pr(
         }
 
 
+_ADDITIVE_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # (table, column, SQL fragment). Additive only — safe to apply in
+    # any order because ``ALTER TABLE ADD COLUMN`` is idempotent when
+    # gated on the PRAGMA check below.
+    ("workspaces", "remote_push_branch", "VARCHAR(256)"),
+)
+
+
+def _add_missing_columns(connection: Any) -> None:
+    """Idempotently add columns that later migrations introduced to an
+    existing SQLite DB.
+
+    Driven from ``_ADDITIVE_MIGRATIONS`` rather than Alembic because
+    local ``run_awf.py`` workspaces are a dev convenience that predates
+    the alembic setup for the runtime DB. Production DBs get proper
+    migrations; this path keeps ``--keep-state`` alive for operators."""
+    import sqlalchemy as _sa
+
+    inspector = _sa.inspect(connection)
+    for table, column, sql_type in _ADDITIVE_MIGRATIONS:
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        if column not in existing:
+            connection.execute(_sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
+
+
 async def _main(config_path: Path, work_dir: Path, keep_state: bool) -> int:
     with config_path.open() as f:
         raw = json.load(f)
@@ -1004,6 +1057,13 @@ async def _main(config_path: Path, work_dir: Path, keep_state: bool) -> int:
     engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # ``create_all`` creates tables but never alters existing ones.
+        # When ``--keep-state`` points at a pre-migration SQLite DB,
+        # columns added by later migrations (e.g. ``remote_push_branch``
+        # in b2c3d4e5f6a1) are missing and the first write fails. Apply
+        # additive column migrations manually here so operators can
+        # resume an old run_awf workspace without dropping state.
+        await conn.run_sync(_add_missing_columns)
     factory = make_session_factory(engine)
 
     try:

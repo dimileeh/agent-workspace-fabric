@@ -1,0 +1,335 @@
+"""Polish coverage — sub-100% modules with 1-5 line gaps.
+
+Each test here targets a specific uncovered line or branch. Batched
+in one file to avoid scattering tiny test modules.
+
+Covers:
+
+ - ``runtime/feature_pr_sync._default_process_lister`` — direct call
+   with pgrep present and absent.
+ - ``runtime/validation.ValidationResult.first_failure`` — the
+   migration-failed branch.
+ - ``runtime/validation.ValidationRunner._format_display`` — the
+   ``sh -c`` preamble-stripping path.
+ - ``runtime/release_pr_sync`` — PR body commit-list JSON parse
+   failure fallback.
+ - ``node/provisioner._load_and_claim`` — skip_unknown log path.
+ - ``node/provisioner._mark_failed`` — from_status mismatch path.
+ - ``node/git_manager.GitManager.work_dir`` property.
+ - ``node/git_manager._slugify_repo`` — tail=.git suffix stripping +
+   empty-tail fallback.
+ - ``control/validation_fix_cycle.read_output_tail`` — OSError during stat.
+"""
+
+from __future__ import annotations
+
+import subprocess
+from collections.abc import AsyncIterator
+from pathlib import Path
+from typing import Any
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+
+from awf.control.validation_fix_cycle import read_output_tail
+from awf.db.base import Base
+from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_session_factory
+from awf.node.git_manager import GitManager, _slugify_repo
+from awf.node.provisioner import Provisioner
+from awf.runtime import feature_pr_sync
+from awf.runtime.feature_pr_sync import _default_process_lister, is_feature_pr_monitor_running
+from awf.runtime.validation import (
+    ValidationCommandResult,
+    ValidationResult,
+    ValidationRunner,
+)
+
+# ── feature_pr_sync ────────────────────────────────────────────────────────
+
+
+class TestDefaultProcessLister:
+    @pytest.mark.unit
+    def test_pgrep_match_returns_stdout(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _fake(*args: Any, **kwargs: Any) -> str:
+            return "12345 python run_awf.py --config spec.json\n"
+
+        monkeypatch.setattr(subprocess, "check_output", _fake)
+        out = _default_process_lister()
+        assert "run_awf.py" in out
+
+    @pytest.mark.unit
+    def test_pgrep_no_match_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        def _raise(*args: Any, **kwargs: Any) -> str:
+            raise subprocess.CalledProcessError(1, "pgrep")
+
+        monkeypatch.setattr(subprocess, "check_output", _raise)
+        assert _default_process_lister() == ""
+
+    @pytest.mark.unit
+    def test_is_feature_pr_monitor_running_calls_default_lister(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Covers the ``if process_lister is None: process_lister =
+        _default_process_lister`` branch plus the default path itself."""
+        # Force _default_process_lister to return a recognisable line.
+        monkeypatch.setattr(
+            feature_pr_sync,
+            "_default_process_lister",
+            lambda: "12345 python run_awf.py --config /tmp/my-spec.json\n",
+        )
+        assert is_feature_pr_monitor_running(spec_filename="my-spec.json")
+
+
+# ── validation ─────────────────────────────────────────────────────────────
+
+
+class TestValidationResult:
+    @pytest.mark.unit
+    def test_first_failure_returns_migration_on_migration_fail(self) -> None:
+        """Line 84: the migration-failed branch of first_failure."""
+        migration = ValidationCommandResult(
+            command="alembic upgrade head",
+            returncode=1,
+            duration_seconds=0.1,
+            stdout_path=Path("/tmp/m.stdout"),
+            stderr_path=Path("/tmp/m.stderr"),
+        )
+        report = ValidationResult(migration=migration, commands=())
+        assert report.all_passed is False
+        assert report.first_failure is migration
+
+
+class TestValidationDisplay:
+    """ValidationRunner formats its output's ``command`` field
+    differently depending on whether the invocation was via our
+    internal ``sh -c`` wrapper (so the preamble needs stripping) or a
+    direct argv list."""
+
+    @pytest.mark.unit
+    async def test_sh_preamble_stripped_when_starts_with_venv_activate(
+        self, tmp_path: Path
+    ) -> None:
+        """Drives the REAL ``ValidationRunner._exec`` path with a fake
+        command runner and asserts the production formatter — not a
+        reimplementation — strips the preamble. A regression in the
+        actual code (e.g. changing the prefix test) would fail here
+        instead of being silently shadowed by the test's own logic."""
+        from awf.common.commands import FakeCommandRunner
+        from awf.runtime import validation as validation_mod
+
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="ok\n")
+        runner = ValidationRunner(runner=fake, artifacts_dir=tmp_path)
+        preamble = validation_mod._VENV_ACTIVATE_PREAMBLE
+        result = await runner._exec(
+            compose_project="awf_x",
+            compose_file=Path("/tmp/c.yml"),
+            cli_args=["sh", "-c", f"{preamble}pytest -q"],
+            label="unit",
+            artifacts_dir=tmp_path,
+        )
+        assert result.command == "pytest -q"
+
+    @pytest.mark.unit
+    async def test_non_sh_args_are_quoted_via_shlex(self, tmp_path: Path) -> None:
+        """Covers validation.py line 205 — the non-sh display branch
+        runs through ``shlex.quote`` on each arg. Driven via the real
+        ``_exec`` so the production path is actually exercised."""
+        from awf.common.commands import FakeCommandRunner
+
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="")
+        runner = ValidationRunner(runner=fake, artifacts_dir=tmp_path)
+        result = await runner._exec(
+            compose_project="awf_x",
+            compose_file=Path("/tmp/c.yml"),
+            cli_args=["pytest", "-q", "tests/with spaces/"],
+            label="unit",
+            artifacts_dir=tmp_path,
+        )
+        assert "pytest -q" in result.command
+        assert "'tests/with spaces/'" in result.command or '"tests/with spaces/"' in result.command
+
+
+# ── release_pr_sync ────────────────────────────────────────────────────────
+
+
+class TestReleasePrBodyJsonParseFallback:
+    @pytest.mark.unit
+    async def test_malformed_commits_json_falls_back_to_stub_message(
+        self,
+    ) -> None:
+        """Lines 254-255: when gh returns malformed JSON, the body
+        builder must not crash — emits a sentinel instead."""
+        from awf.common.commands import FakeCommandRunner
+        from awf.common.github_client import RepoRef
+        from awf.runtime.release_pr_sync import ensure_release_pr_open
+
+        runner = FakeCommandRunner()
+        # ahead-by query → "3"
+        runner.queue_result(returncode=0, stdout="3\n")
+        # existing PR query → none open
+        runner.queue_result(returncode=0, stdout="[]\n")
+        # commits list → malformed JSON (not a list)
+        runner.queue_result(returncode=0, stdout="this is not json at all")
+        # gh pr create → returns URL
+        runner.queue_result(
+            returncode=0,
+            stdout="https://github.com/o/r/pull/42\n",
+        )
+        result = await ensure_release_pr_open(
+            runner=runner,
+            repo=RepoRef(owner="o", name="r"),
+            source_branch="development",
+            target_branch="main",
+        )
+        assert result.pr_number == 42
+        # The fallback kicked in — we can't inspect the body directly
+        # without catching the create call args; proves lines 254-255
+        # ran by confirming the create succeeded despite bad JSON.
+
+
+# ── provisioner ────────────────────────────────────────────────────────────
+
+
+@pytest.fixture
+async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'p.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield make_session_factory(engine)
+    finally:
+        await engine.dispose()
+
+
+class TestProvisionerSkipUnknown:
+    @pytest.mark.unit
+    async def test_load_and_claim_skips_unknown_workspace(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Covers lines 134-135: workspace not in DB → log + return None."""
+
+        class _Stub:
+            async def add_worktree(self, **_kw: Any) -> Any:
+                raise AssertionError("shouldn't be called")
+
+        from awf.node.provisioner import ProvisionerConfig
+
+        prov = Provisioner(
+            session_factory=factory,
+            git=_Stub(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node"),
+        )
+        async with factory() as s:
+            ws = await prov._load_and_claim(s, "ws_nonexistent")
+            assert ws is None
+
+    @pytest.mark.unit
+    async def test_mark_failed_noops_when_status_diverged(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """Covers line 170: if the workspace moved to a different state
+        between the error and the mark_failed attempt, we respect that
+        — don't force ``failed``."""
+
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url="r",
+                branch_base="b",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requires_database=False,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        from awf.node.provisioner import ProvisionerConfig
+
+        prov = Provisioner(
+            session_factory=factory,
+            git=object(),  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node"),
+        )
+        # ws.status is 'requested' (the initial state). Call _mark_failed
+        # claiming from_status=provisioning — a mismatch — so it returns
+        # without transitioning.
+        await prov._mark_failed(
+            workspace_id=ws_id,
+            failure_reason=FailureReason.infrastructure_failure,
+            message="we'd like to mark it failed, but the state diverged",
+            from_status=WorkspaceStatus.provisioning,
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            # Status preserved, not overridden.
+            assert ws.status == "requested"
+
+
+# ── git_manager ────────────────────────────────────────────────────────────
+
+
+class TestGitManagerSmallHelpers:
+    @pytest.mark.unit
+    def test_work_dir_property_exposes_init_arg(self, tmp_path: Path) -> None:
+        """Line 91: ``work_dir`` property — trivial, but verifies the
+        attribute is reachable for operators inspecting a GitManager."""
+        gm = GitManager(tmp_path / "awf-git")
+        assert gm.work_dir == tmp_path / "awf-git"
+
+
+class TestMirrorSlug:
+    @pytest.mark.unit
+    def test_strips_dot_git_suffix(self) -> None:
+        """Line 375 covers the ``tail.endswith('.git')`` branch."""
+        assert _slugify_repo("git@github.com:dimileeh/aira-web.git").startswith("aira-web")
+
+    @pytest.mark.unit
+    def test_empty_tail_falls_back_to_repo(self) -> None:
+        """Edge case: when the URL's tail reduces to an empty string
+        (after ``.git`` strip + regex sanitize), the slugifier falls
+        back to the literal ``repo`` sentinel.
+
+        We construct a URL whose last path segment is literally ``.git``
+        — after stripping the ``.git`` suffix, the tail is empty, and
+        the sub-then-truthy-fallback path fires."""
+        slug = _slugify_repo("https://example.com/.git")
+        assert slug == "repo"
+
+
+# ── validation_fix_cycle ───────────────────────────────────────────────────
+
+
+class TestReadTailOSError:
+    @pytest.mark.unit
+    def test_oserror_on_stat_returns_empty(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Lines 91-92: stat() failure (permission denied, disk full,
+        etc.) is treated as "no tail available" — the validation-fix
+        loop must not crash on an artifact stat error.
+
+        ``path.exists()`` on the happy path calls ``stat`` internally
+        and catches OSError, so a blanket monkeypatch would short-circuit
+        the function at line 87 before reaching line 90. Use a counter
+        that lets exists() see the first stat call succeed then raises
+        on the EXPLICIT stat() invocation at line 90."""
+        p = tmp_path / "artifact.stdout"
+        p.write_text("content here")
+        real_stat = Path.stat
+        state = {"first_done": False}
+
+        def _boom(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == p and state["first_done"]:
+                raise OSError("simulated disk failure")
+            state["first_done"] = True
+            return real_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "stat", _boom)
+        assert read_output_tail(p, max_chars=100) == ""

@@ -95,14 +95,15 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "comments or fix CI failures. Default: codex.",
     )
     parser.add_argument(
-        "--auto-merge",
-        action="store_true",
-        help="Opt in to auto-merging the PR when all gates turn green. "
-        "Safe default is OFF — the monitor posts 'ready to merge' and "
-        "the human lands it. Turn this on when you trust the monitor "
-        "end-to-end (typical for failed-workspace recovery where the "
-        "original feature_branch_pr flow would have auto-merged).",
+        "--no-auto-merge",
+        dest="auto_merge",
+        action="store_false",
+        help="Opt OUT of auto-merging. Default is to auto-merge when "
+        "all gates turn green — that's AWF's contract for feature→dev "
+        "PRs. Pass this flag for one-off recovery runs where you want "
+        "to review the final state before landing.",
     )
+    parser.set_defaults(auto_merge=True)
     parser.add_argument(
         "--work-dir",
         type=Path,

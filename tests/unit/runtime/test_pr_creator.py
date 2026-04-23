@@ -12,10 +12,21 @@ from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 _WORKTREE = Path("/fake/worktree")
 
 
+def _queue_pre_push_diagnostics(runner: FakeCommandRunner) -> None:
+    """Queue the 3 canned results the new pre-push diagnostic block
+    consumes (``rev-parse HEAD``, ``rev-parse --abbrev-ref HEAD``,
+    ``log origin/<base>..HEAD``). Values are deliberately realistic
+    so the log line looks sane if a test inspects it."""
+    runner.queue_result(returncode=0, stdout="abc123def4567890\n")  # rev-parse HEAD
+    runner.queue_result(returncode=0, stdout="awf/ws_xyz\n")  # current branch
+    runner.queue_result(returncode=0, stdout="abc123 some work\n")  # ahead-of-base
+
+
 class TestPushAndOpen:
     @pytest.mark.unit
     async def test_pushes_branch_then_creates_pr(self) -> None:
         runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
         runner.queue_result(returncode=0)  # git push
         runner.queue_result(
             returncode=0,
@@ -33,14 +44,17 @@ class TestPushAndOpen:
 
         assert result.url == "https://github.com/dimileeh/aira-agent/pull/42"
         assert result.branch == "awf/ws_xyz"
-        assert len(runner.calls) == 2
-        assert runner.calls[0].args[:2] == ["git", "-C"]
-        assert "push" in runner.calls[0].args
-        assert "-u" in runner.calls[0].args
-        assert "origin" in runner.calls[0].args
-        assert "awf/ws_xyz" in runner.calls[0].args
+        # 3 diagnostic queries + 1 push + 1 gh create = 5 total calls.
+        assert len(runner.calls) == 5
+        # The push is at index 3 (after the 3 diagnostics).
+        push_call = runner.calls[3]
+        assert push_call.args[:2] == ["git", "-C"]
+        assert "push" in push_call.args
+        assert "-u" in push_call.args
+        assert "origin" in push_call.args
+        assert "awf/ws_xyz" in push_call.args
 
-        gh_args = runner.calls[1].args
+        gh_args = runner.calls[4].args
         assert gh_args[:3] == ["gh", "pr", "create"]
         assert "--base" in gh_args and "development" in gh_args
         assert "--head" in gh_args and "awf/ws_xyz" in gh_args
@@ -50,6 +64,7 @@ class TestPushAndOpen:
     @pytest.mark.unit
     async def test_extracts_pr_url_even_with_leading_noise(self) -> None:
         runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
         runner.queue_result(returncode=0)
         runner.queue_result(
             returncode=0,
@@ -73,6 +88,7 @@ class TestPushAndOpen:
     @pytest.mark.unit
     async def test_push_failure_raises_before_calling_gh(self) -> None:
         runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
         runner.queue_result(returncode=128, stderr="remote: permission denied")
 
         creator = PullRequestCreator(runner)
@@ -86,12 +102,13 @@ class TestPushAndOpen:
             )
         assert exc.value.operation == "git push"
         assert exc.value.returncode == 128
-        # gh was never called.
-        assert len(runner.calls) == 1
+        # 3 diagnostic queries + 1 push = 4 calls; gh was never reached.
+        assert len(runner.calls) == 4
 
     @pytest.mark.unit
     async def test_gh_failure_raises_with_stderr(self) -> None:
         runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
         runner.queue_result(returncode=0)  # push succeeds
         runner.queue_result(returncode=1, stderr="gh: auth token expired")
 
@@ -108,8 +125,68 @@ class TestPushAndOpen:
         assert "gh: auth token expired" in exc.value.stderr
 
     @pytest.mark.unit
+    async def test_pre_push_diagnostics_run_before_push(self) -> None:
+        """The three git diagnostic queries must fire BEFORE the push
+        subprocess call — otherwise a push failure would short-circuit
+        the block we actually need for debugging."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0, stdout="deadbeef1234\n")  # rev-parse HEAD
+        runner.queue_result(returncode=0, stdout="awf/ws_abc\n")  # abbrev-ref HEAD
+        runner.queue_result(
+            returncode=0, stdout="ab12345 feat: thing\ncd67890 chore: thing\n"
+        )  # ahead-of-base
+        runner.queue_result(returncode=0)  # git push
+        runner.queue_result(
+            returncode=0,
+            stdout="https://github.com/x/y/pull/1\n",
+        )  # gh pr create
+
+        creator = PullRequestCreator(runner)
+        await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_abc",
+            base_branch="development",
+            title="t",
+            body="b",
+        )
+
+        # The first three calls are the diagnostics, in order.
+        call0, call1, call2, call3, _ = runner.calls
+        assert "rev-parse" in call0.args and "HEAD" in call0.args
+        assert "--abbrev-ref" in call1.args
+        assert "log" in call2.args and "origin/development..HEAD" in call2.args
+        # The FOURTH call is the push.
+        assert "push" in call3.args
+
+    @pytest.mark.unit
+    async def test_diagnostic_failure_does_not_block_push(self) -> None:
+        """If a diagnostic query itself errors (weird worktree state,
+        permissions), the normal push path still runs. Diagnostics are
+        observability, not control flow."""
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=128, stderr="fatal: bad object")  # rev-parse fails
+        runner.queue_result(returncode=128, stderr="fatal: bad object")  # abbrev-ref fails
+        runner.queue_result(returncode=128, stderr="fatal: bad object")  # ahead-of-base fails
+        runner.queue_result(returncode=0)  # git push still runs
+        runner.queue_result(
+            returncode=0,
+            stdout="https://github.com/x/y/pull/1\n",
+        )
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_weird",
+            base_branch="development",
+            title="t",
+            body="b",
+        )
+        assert result.url == "https://github.com/x/y/pull/1"
+
+    @pytest.mark.unit
     async def test_missing_url_in_stdout_raises(self) -> None:
         runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
         runner.queue_result(returncode=0)
         runner.queue_result(returncode=0, stdout="no url here at all\n")
 

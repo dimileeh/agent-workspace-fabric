@@ -70,6 +70,26 @@ def executor(
     )
 
 
+def _queue_pre_push_diagnostics(fake: FakeCommandRunner) -> None:
+    """Queue the three canned git results ``PullRequestCreator`` reads
+    for its pre-push diagnostic log line (``rev-parse HEAD``,
+    ``rev-parse --abbrev-ref HEAD``, ``git log origin/<base>..HEAD``).
+
+    Every test that drives the executor through the PR-creation step
+    must call this immediately before queueing the ``git push`` result,
+    because pr_creator now logs worktree state before pushing (added
+    after the T39 incident where a ``gh pr create`` rejected with "No
+    commits between development and awf/ws_...". The diagnostic block
+    captures the local branch state so we can tell a bad-commit
+    scenario apart from a stale worktree). These queued values are
+    realistic enough that the log line reads sanely if a test prints
+    captured output.
+    """
+    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
+    fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref
+    fake.queue_result(returncode=0, stdout="abc1234 commit\n")  # log ahead-of-base
+
+
 async def _seed_ready_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -121,6 +141,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+        _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(
             returncode=0,
@@ -151,6 +172,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0)  # validation
+        _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
 
@@ -213,6 +235,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+        _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(
             returncode=0,
@@ -290,6 +313,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0)  # validation ok
+        _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=128, stderr="remote: perm denied")  # push fails
 
         await executor.execute(ws_id)
@@ -352,6 +376,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0)  # git commit (re-anchor)
         fake.queue_result(returncode=0)  # merge-base is-ancestor: OK after recovery
         fake.queue_result(returncode=0, stdout="recovery tests ok")  # validation cmd
+        _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
         fake.queue_result(
             returncode=0,
@@ -479,6 +504,7 @@ class TestMonitorHandoff:
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0)  # validation cmd
+        _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # push
         fake.queue_result(
             returncode=0,
@@ -537,6 +563,7 @@ class TestIdempotency:
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0)  # validation
+        _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # push
         fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")  # gh pr create
         await executor.execute(ws_id)

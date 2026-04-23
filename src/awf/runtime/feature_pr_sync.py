@@ -222,11 +222,13 @@ def build_sync_feature_pr_task_spec(
     the CLI can safely write the result to a deterministic path for
     idempotency.
 
-    ``auto_merge`` is a deliberate per-call decision. The safe default
-    at the CLI layer is ``False`` (notify-human terminal) so unexpected
-    auto-merges never land; callers opt in explicitly for the
-    recover-my-failed-workspace case where auto-merge semantics are
-    actually wanted.
+    ``auto_merge`` is a deliberate per-call decision. Defaults at the
+    CLI layer are ``True`` for feature→development PRs (AWF's contract
+    is "deliver a green PR → land it"); callers can opt OUT via
+    ``--no-auto-merge`` for one-off recovery where they want to review
+    the final state before landing. Release PRs (development→main) are
+    a separate task kind and keep ``auto_merge=False`` — the dev→main
+    gate is where human approval lives.
     """
     repo = RepoRef.from_url(repo_url)
     return {
