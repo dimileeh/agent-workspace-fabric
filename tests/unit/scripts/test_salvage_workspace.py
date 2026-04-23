@@ -1,22 +1,24 @@
-"""Tests for ``scripts.salvage_workspace`` no-op adapter factory.
+"""Tests for ``scripts.salvage_workspace``.
 
-Scope: the closure-capture fix (CodeRabbit PR #2 feedback). Classes
-defined inside a for-loop that reference the loop variable share it by
-reference, so every factory was bound to the SAME runtime (the last
-one the loop saw) — a silent bug that would only surface when
-salvaging a workspace whose runtime wasn't the registry's final key.
-
-We don't exercise the real adapter path; just verify every factory
-reports its OWN runtime after ``_install_noop_adapter_factory`` runs.
+Covers the no-op adapter factory (closure-capture regression guard
+from CodeRabbit PR #2 feedback) and the ``_main`` CLI entry.
 """
 
 from __future__ import annotations
 
+from pathlib import Path
+from typing import Any
+
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from awf.adapters import base as _adapter_base
 from awf.adapters import registry as _registry  # noqa: F401 - populates registry
-from awf.db.enums import AgentRuntime
+from awf.db.base import Base
+from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_session_factory
+from scripts import salvage_workspace
 from scripts.salvage_workspace import _install_noop_adapter_factory, _make_noop_factory
 
 
@@ -51,3 +53,187 @@ class TestClosureCapture:
 
         assert codex_factory().name == AgentRuntime.codex
         assert claude_factory().name == AgentRuntime.claude_code
+
+    @pytest.mark.unit
+    async def test_factory_run_is_noop_with_success_message(self) -> None:
+        """The adapter's ``run`` coroutine is what actually skips the
+        agent. Must return exit 0 with the sentinel stdout so the
+        executor logs reveal which run was salvaged."""
+        factory = _make_noop_factory(AgentRuntime.codex)
+        adapter = factory()
+        result = await adapter.run(
+            compose_project="awf_x",
+            compose_file=Path("/tmp/compose.yml"),
+            prompt="anything",
+            model=None,
+        )
+        assert result.returncode == 0
+        assert "skipping agent run" in result.stdout
+        # _cli_args returns empty — this adapter never launches a CLI.
+        assert adapter._cli_args(prompt="x", model=None) == []
+
+
+# ── _main CLI ───────────────────────────────────────────────────────────────
+
+
+class _FakeExecutor:
+    def __init__(
+        self,
+        *,
+        session_factory: async_sessionmaker[AsyncSession],
+        transition_to: WorkspaceStatus = WorkspaceStatus.completed,
+        **_: Any,
+    ) -> None:
+        self._factory = session_factory
+        self._target = transition_to
+
+    async def execute(self, workspace_id: str) -> None:
+        async with self._factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            for t in (
+                WorkspaceStatus.running,
+                WorkspaceStatus.validating,
+                WorkspaceStatus.pushing,
+                WorkspaceStatus.monitoring_pr,
+                self._target,
+            ):
+                if ws.status == t.value:
+                    continue
+                await repo.transition(ws, to=t, reason_code="FAKE_SALVAGE")
+            await s.commit()
+
+
+async def _seed_salvage_workspace(db_path: Path, *, initial_status: str) -> str:
+    engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = make_session_factory(engine)
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url="git@github.com:x/y.git",
+            branch_base="development",
+            task_title="salvage me",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+            requires_database=False,
+        )
+        for t in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+        ):
+            await repo.transition(ws, to=t, reason_code="SEED")
+        ws.branch_name = "awf/ws_salvage"
+        ws.remote_push_branch = "awf/ws_salvage"
+        ws.compose_project_name = "awf_ws_salvage"
+        ws.base_commit = "d" * 40
+        if initial_status != "ready":
+            ws.status = initial_status  # bypass state machine
+            if initial_status == "failed":
+                ws.failure_reason = "agent_failure"
+                ws.failure_message = "adapter killed"
+        await s.commit()
+        ws_id = ws.id
+    await engine.dispose()
+    return ws_id
+
+
+class TestSalvageMain:
+    @pytest.mark.unit
+    async def test_happy_path_returns_zero(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ws_id = await _seed_salvage_workspace(
+            tmp_path / "awf.db", initial_status="failed"
+        )
+
+        def _exec_ctor(**kwargs: Any) -> _FakeExecutor:
+            return _FakeExecutor(session_factory=kwargs["session_factory"])
+
+        # Stub the heavy collaborators so we don't need docker/git subprocesses.
+        monkeypatch.setattr(salvage_workspace, "WorkspaceExecutor", _exec_ctor)
+        monkeypatch.setattr(salvage_workspace, "ComposeManager", lambda **k: object())
+        monkeypatch.setattr(salvage_workspace, "ValidationRunner", lambda **k: object())
+        monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *a, **k: object())
+        monkeypatch.setattr(salvage_workspace, "AsyncioSubprocessRunner", lambda: object())
+
+        rc = await salvage_workspace._main(tmp_path, ws_id)
+        assert rc == 0
+
+    @pytest.mark.unit
+    async def test_missing_db_returns_two(self, tmp_path: Path) -> None:
+        rc = await salvage_workspace._main(tmp_path, "ws_whatever")
+        assert rc == 2
+
+    @pytest.mark.unit
+    async def test_missing_workspace_returns_two(
+        self, tmp_path: Path
+    ) -> None:
+        await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="ready")
+        rc = await salvage_workspace._main(tmp_path, "ws_nonexistent")
+        assert rc == 2
+
+    @pytest.mark.unit
+    async def test_already_ready_status_does_not_rewrite(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """When the workspace is already ``ready`` the reset branch is
+        skipped — the executor just picks it up."""
+        ws_id = await _seed_salvage_workspace(
+            tmp_path / "awf.db", initial_status="ready"
+        )
+        monkeypatch.setattr(
+            salvage_workspace,
+            "WorkspaceExecutor",
+            lambda **k: _FakeExecutor(session_factory=k["session_factory"]),
+        )
+        monkeypatch.setattr(salvage_workspace, "ComposeManager", lambda **k: object())
+        monkeypatch.setattr(salvage_workspace, "ValidationRunner", lambda **k: object())
+        monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *a, **k: object())
+        monkeypatch.setattr(salvage_workspace, "AsyncioSubprocessRunner", lambda: object())
+        rc = await salvage_workspace._main(tmp_path, ws_id)
+        assert rc == 0
+
+    @pytest.mark.unit
+    async def test_executor_failed_returns_one(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        ws_id = await _seed_salvage_workspace(
+            tmp_path / "awf.db", initial_status="failed"
+        )
+        monkeypatch.setattr(
+            salvage_workspace,
+            "WorkspaceExecutor",
+            lambda **k: _FakeExecutor(
+                session_factory=k["session_factory"],
+                transition_to=WorkspaceStatus.failed,
+            ),
+        )
+        monkeypatch.setattr(salvage_workspace, "ComposeManager", lambda **k: object())
+        monkeypatch.setattr(salvage_workspace, "ValidationRunner", lambda **k: object())
+        monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *a, **k: object())
+        monkeypatch.setattr(salvage_workspace, "AsyncioSubprocessRunner", lambda: object())
+        rc = await salvage_workspace._main(tmp_path, ws_id)
+        assert rc == 1
+
+
+class TestNoOpAdapterDirect:
+    @pytest.mark.unit
+    async def test_noop_adapter_returns_canned_stdout(self) -> None:
+        """Original ``_NoOpAdapter`` is retained (not strictly used by
+        ``_install_noop_adapter_factory`` which uses the
+        ``_make_noop_factory`` path) — cover it directly so a future
+        refactor doesn't silently remove a public API."""
+        adapter = salvage_workspace._NoOpAdapter(runtime=AgentRuntime.codex)
+        assert adapter.name == AgentRuntime.codex
+        assert adapter._cli_args(prompt="x", model=None) == []
+        result = await adapter.run(
+            compose_project="p",
+            compose_file=Path("/tmp/c.yml"),
+            prompt="anything",
+        )
+        assert result.returncode == 0
+        assert "skipping agent run" in result.stdout
