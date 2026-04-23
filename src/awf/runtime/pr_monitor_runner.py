@@ -121,9 +121,7 @@ class PullRequestMonitorRunner:
 
     # ── Entry point ────────────────────────────────────────────────────────
 
-    async def run(
-        self, *, workspace_id: str, compose_project: str, compose_file: Path
-    ) -> None:
+    async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
         """Drive the monitor phase until a terminal ``MonitorAction`` fires."""
 
         for _ in range(self._runner_config.max_outer_iterations):
@@ -269,9 +267,7 @@ class PullRequestMonitorRunner:
 
         if isinstance(action, Merge):
             try:
-                merge_sha = await self._deps.gh.merge_pr(
-                    repo=repo, pr_number=pr_number
-                )
+                merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
             except GitHubClientError as exc:
                 # Branch protection often blocks merges; fall back to the
                 # release-PR flow rather than failing.
@@ -283,9 +279,7 @@ class PullRequestMonitorRunner:
                 await self._deps.gh.post_comment(
                     repo=repo,
                     pr_number=pr_number,
-                    body=ready_to_merge_comment(
-                        pr_number=pr_number, head_sha=status.head_sha
-                    ),
+                    body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
                 )
                 await self._terminate_completed(workspace_id, pr_merge_sha=None)
                 return True
@@ -296,9 +290,7 @@ class PullRequestMonitorRunner:
             await self._deps.gh.post_comment(
                 repo=repo,
                 pr_number=pr_number,
-                body=ready_to_merge_comment(
-                    pr_number=pr_number, head_sha=status.head_sha
-                ),
+                body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
             )
             await self._terminate_completed(workspace_id, pr_merge_sha=None)
             return True
@@ -333,7 +325,7 @@ class PullRequestMonitorRunner:
         threads = list(initial_threads)
         reviews = list(initial_reviews)
 
-        for pass_num in range(self._runner_config.max_fix_cycle_passes):
+        for _pass_num in range(self._runner_config.max_fix_cycle_passes):
             # 1) Address each item in the current batch.
             for t in threads:
                 verdict = await self._address_thread(
@@ -418,9 +410,7 @@ class PullRequestMonitorRunner:
         compose_project: str,
         compose_file: Path,
     ) -> Verdict:
-        prompt = address_thread_prompt(
-            pr_number=pr_number, repo_slug=repo.slug(), thread=thread
-        )
+        prompt = address_thread_prompt(pr_number=pr_number, repo_slug=repo.slug(), thread=thread)
         return await self._invoke_cli_for_verdict(
             prompt=prompt,
             compose_project=compose_project,
@@ -483,9 +473,7 @@ class PullRequestMonitorRunner:
         worktree_path = self._worktrees_root / workspace_id
 
         async def _git(*args: str) -> tuple[int, str, str]:
-            r = await self._deps.runner.run(
-                ["git", "-C", str(worktree_path), *args]
-            )
+            r = await self._deps.runner.run(["git", "-C", str(worktree_path), *args])
             return r.returncode, r.stdout, r.stderr
 
         # Defense: if a previous SyncBase attempt left the repo in a
@@ -538,9 +526,7 @@ class PullRequestMonitorRunner:
         compose_file: Path,
         workspace_id: str,
     ) -> None:
-        prompt = fix_ci_prompt(
-            pr_number=pr_number, repo_slug=repo.slug(), failures=failures
-        )
+        prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
         try:
             await self._deps.adapter.run(
                 compose_project=compose_project,
@@ -575,9 +561,7 @@ class PullRequestMonitorRunner:
             ]
         )
 
-    async def _count_base_behind(
-        self, *, worktree_path: Path, base_branch: str
-    ) -> int:
+    async def _count_base_behind(self, *, worktree_path: Path, base_branch: str) -> int:
         r = await self._deps.runner.run(
             [
                 "git",
@@ -596,9 +580,7 @@ class PullRequestMonitorRunner:
             return 0
 
     async def _rev_parse_head(self, worktree_path: Path) -> str:
-        r = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "rev-parse", "HEAD"]
-        )
+        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
         return r.stdout.strip() if r.ok else ""
 
     async def _git_push(self, *, worktree_path: Path) -> bool:
@@ -621,9 +603,7 @@ class PullRequestMonitorRunner:
         #336 to loop until iter_cap: each failed push added another
         local merge commit, the next SyncBase piled another on top, and
         the head SHA on GitHub never moved."""
-        r = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "push", "origin", "HEAD"]
-        )
+        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "push", "origin", "HEAD"])
         if r.ok:
             # git prints "Everything up-to-date" to stderr when the ref didn't move.
             return "up-to-date" not in (r.stderr or "").lower()
@@ -722,9 +702,7 @@ class PullRequestMonitorRunner:
                 ws.monitor_started_at = datetime.now(UTC)
             await s.commit()
 
-    async def _terminate_completed(
-        self, workspace_id: str, *, pr_merge_sha: str | None
-    ) -> None:
+    async def _terminate_completed(self, workspace_id: str, *, pr_merge_sha: str | None) -> None:
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
@@ -732,9 +710,7 @@ class PullRequestMonitorRunner:
                 return
             if pr_merge_sha:
                 ws.pr_merge_sha = pr_merge_sha
-            await repo.transition(
-                ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE"
-            )
+            await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
             await s.commit()
 
     async def _terminate_failed(
@@ -752,9 +728,7 @@ class PullRequestMonitorRunner:
             ws.failure_reason = FailureReason.infrastructure_failure.value
             ws.failure_message = message
             rc = reason_code.value if reason_code else "MONITOR_ABORT"
-            await repo.transition(
-                ws, to=WorkspaceStatus.failed, reason_code=rc
-            )
+            await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc)
             await s.commit()
 
 

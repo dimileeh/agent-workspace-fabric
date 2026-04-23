@@ -44,7 +44,7 @@ _log = get_logger(__name__)
 # commands invoke ``/usr/local/bin/alembic`` / ``pytest`` which don't see the
 # venv's site-packages — classic ``ModuleNotFoundError: No module named '<app>'``.
 _VENV_ACTIVATE_PREAMBLE = (
-    '[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; '
+    "[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; "
 )
 
 _MIGRATION_SHELL = _VENV_ACTIVATE_PREAMBLE + "alembic upgrade head"

@@ -28,9 +28,7 @@ _FOOTER = (
 )
 
 
-def address_thread_prompt(
-    *, pr_number: int, repo_slug: str, thread: ReviewThread
-) -> str:
+def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThread) -> str:
     """Prompt the CLI to address a single inline review thread."""
     line_hint = (
         f"line {thread.line} of {thread.path}"
@@ -59,9 +57,7 @@ def address_thread_prompt(
     )
 
 
-def address_review_comment_prompt(
-    *, pr_number: int, repo_slug: str, comment: ReviewComment
-) -> str:
+def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: ReviewComment) -> str:
     """Prompt for a review-level (outside-diff) comment — CodeRabbit summaries etc."""
     author = comment.author or "reviewer"
     return (
@@ -81,7 +77,9 @@ def sync_base_conflict_prompt(
     *, pr_number: int, repo_slug: str, base_branch: str, conflicting_files: tuple[str, ...]
 ) -> str:
     """Prompt when ``git merge origin/<base>`` fails with conflicts."""
-    files_block = "\n".join(f"  - {p}" for p in conflicting_files) or "  (run git status for the list)"
+    files_block = (
+        "\n".join(f"  - {p}" for p in conflicting_files) or "  (run git status for the list)"
+    )
     return (
         f"PR #{pr_number} ({repo_slug}) has merge conflicts with base branch "
         f"`{base_branch}`. AWF just ran `git merge origin/{base_branch}` and it "
@@ -97,9 +95,7 @@ def sync_base_conflict_prompt(
     )
 
 
-def fix_ci_prompt(
-    *, pr_number: int, repo_slug: str, failures: tuple[CheckFailure, ...]
-) -> str:
+def fix_ci_prompt(*, pr_number: int, repo_slug: str, failures: tuple[CheckFailure, ...]) -> str:
     """Prompt when CI is red. Includes truncated logs for each failing check."""
     if not failures:
         body = (
@@ -110,12 +106,7 @@ def fix_ci_prompt(
         parts = []
         for f in failures:
             log = f.log_excerpt or "(no log available)"
-            parts.append(
-                f"### {f.name} ({f.conclusion})\n\n"
-                "```\n"
-                f"{log}\n"
-                "```"
-            )
+            parts.append(f"### {f.name} ({f.conclusion})\n\n```\n{log}\n```")
         body = "\n\n".join(parts)
     return (
         f"PR #{pr_number} ({repo_slug}) has failing CI checks. Fix them. "

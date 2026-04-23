@@ -34,7 +34,6 @@ from dataclasses import dataclass, field
 from enum import StrEnum
 from typing import Literal
 
-
 # ── Wire-shape dataclasses — what the runner assembles after polling GH ────
 
 
@@ -265,9 +264,7 @@ MonitorAction = (
 # ── The decision function ──────────────────────────────────────────────────
 
 
-def decide(
-    status: PRStatus, state: MonitorState, config: MonitorConfig
-) -> MonitorAction:
+def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> MonitorAction:
     """Pure policy: which ``MonitorAction`` should the runner take next?
 
     Gate order matters:
@@ -352,10 +349,9 @@ def decide(
     # (worktree hadn't fetched origin/<base> since initial checkout) and
     # said 0, so SyncBase never fired even though GitHub correctly
     # reported BEHIND and refused the merge call.
-    if (
-        status.base_behind_count > 0
-        or status.merge_state_status
-        in (MergeStateStatus.BEHIND, MergeStateStatus.DIRTY)
+    if status.base_behind_count > 0 or status.merge_state_status in (
+        MergeStateStatus.BEHIND,
+        MergeStateStatus.DIRTY,
     ):
         return SyncBase()
 

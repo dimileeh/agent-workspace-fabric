@@ -74,9 +74,7 @@ class Workspace(Base):
     failure_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
 
     # Task kind + PR-monitor state (populated only during monitoring_pr).
-    task_kind: Mapped[str] = mapped_column(
-        String(32), nullable=False, default="feature_branch_pr"
-    )
+    task_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="feature_branch_pr")
     """One of ``TaskKind``. Defaults to ``feature_branch_pr`` — every
     existing row pre-migration is a feature PR task."""
 

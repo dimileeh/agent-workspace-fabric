@@ -13,7 +13,6 @@ from awf.runtime.release_pr_sync import (
     ensure_release_pr_open,
 )
 
-
 _REPO = RepoRef(owner="dimileeh", name="aira-agent")
 
 
@@ -69,9 +68,7 @@ class TestCreateNewPr:
             ),
         )
         # gh pr create stdout = the new PR URL.
-        fake.queue_result(
-            returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/555\n"
-        )
+        fake.queue_result(returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/555\n")
         result = await ensure_release_pr_open(runner=fake, repo=_REPO)
         assert result.pr_number == 555
         assert result.pr_url == "https://github.com/dimileeh/aira-agent/pull/555"
@@ -103,9 +100,7 @@ class TestCreateNewPr:
         fake.queue_result(
             returncode=0, stdout=json.dumps([{"sha": "abc1234", "message": "chore: x"}])
         )
-        fake.queue_result(
-            returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/1000"
-        )
+        fake.queue_result(returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/1000")
         result = await ensure_release_pr_open(runner=fake, repo=_REPO)
         create_call = next(c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"])
         title_idx = create_call.args.index("--title") + 1
@@ -124,9 +119,7 @@ class TestCreateNewPr:
                 [{"sha": f"sha{i:04d}", "message": f"commit {i}"} for i in range(70)]
             ),
         )
-        fake.queue_result(
-            returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/999\n"
-        )
+        fake.queue_result(returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/999\n")
         await ensure_release_pr_open(runner=fake, repo=_REPO)
         create_call = next(c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"])
         body_idx = create_call.args.index("--body") + 1
@@ -142,9 +135,7 @@ class TestCreateNewPr:
         fake.queue_result(returncode=0, stdout="3")  # ahead_by
         fake.queue_result(returncode=0, stdout="[]")  # no open PR
         fake.queue_result(returncode=1, stderr="api error")  # commit list fails
-        fake.queue_result(
-            returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/2"
-        )
+        fake.queue_result(returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/2")
         result = await ensure_release_pr_open(runner=fake, repo=_REPO)
         create_call = next(c for c in fake.calls if c.args[:3] == ["gh", "pr", "create"])
         body_idx = create_call.args.index("--body") + 1
@@ -161,9 +152,7 @@ class TestDryRun:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout="4")  # ahead_by
         fake.queue_result(returncode=0, stdout="[]")  # no open PR
-        result = await ensure_release_pr_open(
-            runner=fake, repo=_REPO, dry_run=True
-        )
+        result = await ensure_release_pr_open(runner=fake, repo=_REPO, dry_run=True)
         assert result.pr_number is None
         assert result.ahead_by == 4
         assert result.created is False
@@ -237,9 +226,7 @@ class TestCustomBranches:
         fake.queue_result(returncode=0, stdout="5")  # ahead_by
         fake.queue_result(returncode=0, stdout="[]")
         fake.queue_result(returncode=0, stdout="[]")  # commits
-        fake.queue_result(
-            returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/42"
-        )
+        fake.queue_result(returncode=0, stdout="https://github.com/dimileeh/aira-agent/pull/42")
         await ensure_release_pr_open(
             runner=fake,
             repo=_REPO,

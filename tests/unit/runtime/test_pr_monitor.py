@@ -28,7 +28,6 @@ from awf.runtime.pr_monitor import (
     decide,
 )
 
-
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
@@ -236,9 +235,7 @@ class TestCiFailure:
 class TestPassiveWait:
     @pytest.mark.unit
     def test_ci_pending_waits(self) -> None:
-        action = decide(
-            _status(check_state=CheckState.PENDING), MonitorState(), MonitorConfig()
-        )
+        action = decide(_status(check_state=CheckState.PENDING), MonitorState(), MonitorConfig())
         assert isinstance(action, WaitForCI)
         assert action.reason == "pending_checks"
 
@@ -285,9 +282,7 @@ class TestSyncBase:
         recomputes base_behind. Syncing base while the head's still
         diverging from reviewer intent wastes a CI run."""
         t = _thread()
-        action = decide(
-            _status(base_behind=3, inline=(t,)), MonitorState(), MonitorConfig()
-        )
+        action = decide(_status(base_behind=3, inline=(t,)), MonitorState(), MonitorConfig())
         assert isinstance(action, AddressComments)
 
 

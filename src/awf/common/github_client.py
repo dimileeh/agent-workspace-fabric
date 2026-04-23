@@ -236,7 +236,12 @@ class GitHubClient:
         )
 
     async def fetch_failing_check_logs(
-        self, *, repo: RepoRef, pr_number: int, head_sha: str, log_tail_chars: int = 3000
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,  # noqa: ARG002 - kept for API consistency with other PR-scoped calls
+        head_sha: str,
+        log_tail_chars: int = 3000,
     ) -> tuple[CheckFailure, ...]:
         """Fetch logs for failing/timed-out checks via ``gh run view``.
 

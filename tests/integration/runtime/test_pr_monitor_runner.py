@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
-from awf.common.github_client import GitHubClient, RepoRef
+from awf.common.github_client import GitHubClient
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -29,7 +29,6 @@ from awf.runtime.pr_monitor_runner import (
     PullRequestMonitorRunner,
     _parse_verdict,
 )
-
 
 # ── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -54,16 +53,10 @@ class FakeAdapter(AgentAdapter):
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:  # type: ignore[override]
         return []
 
-    def queue(
-        self, *, stdout: str = "", returncode: int = 0, raise_error: bool = False
-    ) -> None:
-        self._queued.append(
-            AgentRunResult(returncode=returncode, stdout=stdout, stderr="")
-        )
+    def queue(self, *, stdout: str = "", returncode: int = 0, raise_error: bool = False) -> None:
+        self._queued.append(AgentRunResult(returncode=returncode, stdout=stdout, stderr=""))
         if raise_error:
-            self._queued[-1] = AgentRunResult(
-                returncode=returncode, stdout=stdout, stderr="err"
-            )
+            self._queued[-1] = AgentRunResult(returncode=returncode, stdout=stdout, stderr="err")
 
     async def run(  # type: ignore[override]
         self, *, compose_project: str, compose_file: Path, prompt: str, model: str | None = None
@@ -75,9 +68,7 @@ class FakeAdapter(AgentAdapter):
         if r.returncode != 0:
             raise AgentRunError(
                 agent=AgentRuntime.claude_code,
-                result=CommandResult(
-                    returncode=r.returncode, stdout=r.stdout, stderr=r.stderr
-                ),
+                result=CommandResult(returncode=r.returncode, stdout=r.stdout, stderr=r.stderr),
             )
         return r
 
@@ -119,9 +110,7 @@ def _pr_payload(
                         "merged": merged,
                         "baseRef": {"name": "development", "target": {"oid": "base0"}},
                         "commits": {
-                            "nodes": [
-                                {"commit": {"statusCheckRollup": {"state": check_state}}}
-                            ]
+                            "nodes": [{"commit": {"statusCheckRollup": {"state": check_state}}}]
                         },
                         "reviewThreads": {"nodes": threads or []},
                         "reviews": {"nodes": reviews or []},
@@ -219,9 +208,7 @@ def _make_runner(
             poll_interval_seconds=60,
             settle_interval_seconds=30,
         ),
-        runner_config=MonitorRunnerConfig(
-            max_outer_iterations=20, max_fix_cycle_passes=3
-        ),
+        runner_config=MonitorRunnerConfig(max_outer_iterations=20, max_fix_cycle_passes=3),
         sleep=sleep_fn,
         worktrees_root=worktrees_root,
     )
@@ -582,9 +569,9 @@ class TestAddressComments:
         # Specifically assert no resolveReviewThread mutation fired.
         for c in cmd.calls:
             query_args = [a for a in c.args if a.startswith("query=")]
-            assert not any(
-                "resolveReviewThread" in q for q in query_args
-            ), "defer verdict must NOT resolve the thread"
+            assert not any("resolveReviewThread" in q for q in query_args), (
+                "defer verdict must NOT resolve the thread"
+            )
 
 
 class TestFixCyclePasses:
@@ -756,9 +743,7 @@ class TestSyncBase:
         merge_call = next(
             c
             for c in cmd.calls
-            if c.args[:2] == ["git", "-C"]
-            and "merge" in c.args
-            and "--abort" not in c.args
+            if c.args[:2] == ["git", "-C"] and "merge" in c.args and "--abort" not in c.args
         )
         assert "origin/development" in merge_call.args
 
@@ -778,9 +763,7 @@ class TestSyncBase:
         cmd.queue_result(returncode=0)  # git merge --abort (no-op)
         cmd.queue_result(returncode=0)  # fetch
         cmd.queue_result(returncode=1, stderr="CONFLICT (content): src/x")  # merge fails
-        cmd.queue_result(
-            returncode=0, stdout="UU src/x\nUU src/y\n"
-        )  # git status --porcelain
+        cmd.queue_result(returncode=0, stdout="UU src/x\nUU src/y\n")  # git status --porcelain
         adapter.queue(stdout="fixed conflicts")
         cmd.queue_result(returncode=0)  # push
         # Outer iter 2: clean merge.
@@ -828,9 +811,7 @@ class TestPushRejectRecovery:
         # fetch + reset --hard kick in.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="1\n")  # base-behind
-        cmd.queue_result(
-            returncode=0, stdout=_pr_payload(merge_state_status="DIRTY")
-        )
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merge_state_status="DIRTY"))
         cmd.queue_result(returncode=0)  # git merge --abort (defense)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge --no-edit (clean)
@@ -850,9 +831,7 @@ class TestPushRejectRecovery:
         # Outer iter 2: reset worked; GitHub now reports CLEAN; merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-        cmd.queue_result(
-            returncode=0, stdout=_pr_payload(merge_state_status="CLEAN")
-        )
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merge_state_status="CLEAN"))
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGE-SHA\n")
 
@@ -933,9 +912,7 @@ class TestPushRejectRecovery:
         reset_calls = [
             c
             for c in cmd.calls
-            if c.args[:2] == ["git", "-C"]
-            and "reset" in c.args
-            and "--hard" in c.args
+            if c.args[:2] == ["git", "-C"] and "reset" in c.args and "--hard" in c.args
         ]
         assert not reset_calls, (
             f"reset --hard must not fire on non-rejection failures; got {reset_calls}"
@@ -963,25 +940,17 @@ class TestDirtyConflictResolution:
         # Outer iter 1: GitHub says DIRTY; local rev-list says 0 behind.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind (local-stale)
-        cmd.queue_result(
-            returncode=0, stdout=_pr_payload(merge_state_status="DIRTY")
-        )  # PR state
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merge_state_status="DIRTY"))  # PR state
         cmd.queue_result(returncode=0)  # git merge --abort (no-op)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
-        cmd.queue_result(
-            returncode=1, stderr="CONFLICT (content): src/foo.py"
-        )  # git merge fails
-        cmd.queue_result(
-            returncode=0, stdout="UU src/foo.py\n"
-        )  # git status --porcelain
+        cmd.queue_result(returncode=1, stderr="CONFLICT (content): src/foo.py")  # git merge fails
+        cmd.queue_result(returncode=0, stdout="UU src/foo.py\n")  # git status --porcelain
         adapter.queue(stdout="resolved the merge conflict")
         cmd.queue_result(returncode=0)  # git push
         # Outer iter 2: CLEAN → merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
-        cmd.queue_result(
-            returncode=0, stdout=_pr_payload(merge_state_status="CLEAN")
-        )
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merge_state_status="CLEAN"))
         cmd.queue_result(returncode=0)  # gh pr merge
         cmd.queue_result(returncode=0, stdout="MERGE-SHA\n")
 
@@ -999,8 +968,7 @@ class TestDirtyConflictResolution:
         )
         # The CLI saw a conflict-resolve prompt.
         assert any(
-            "CONFLICT" in p or "merge conflicts" in p or "conflicts" in p
-            for p in adapter.calls
+            "CONFLICT" in p or "merge conflicts" in p or "conflicts" in p for p in adapter.calls
         )
         # Workspace terminated cleanly on merge.
         async with factory() as s:
@@ -1048,7 +1016,8 @@ class TestDirtyConflictResolution:
             compose_file=tmp_path / "compose.yml",
         )
         abort_calls = [
-            c for c in cmd.calls
+            c
+            for c in cmd.calls
             if c.args[:2] == ["git", "-C"] and "merge" in c.args and "--abort" in c.args
         ]
         assert len(abort_calls) == 1, "git merge --abort must fire exactly once before sync"
@@ -1346,9 +1315,7 @@ class TestAgentRunErrorResilience:
             compose_file=tmp_path / "compose.yml",
         )
         # Push was invoked despite CLI crash.
-        assert any(
-            c.args[:2] == ["git", "-C"] and "push" in c.args for c in cmd.calls
-        )
+        assert any(c.args[:2] == ["git", "-C"] and "push" in c.args for c in cmd.calls)
 
     @pytest.mark.unit
     async def test_cli_crash_during_ci_fix_still_pushes(
@@ -1386,9 +1353,7 @@ class TestAgentRunErrorResilience:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        assert any(
-            c.args[:2] == ["git", "-C"] and "push" in c.args for c in cmd.calls
-        )
+        assert any(c.args[:2] == ["git", "-C"] and "push" in c.args for c in cmd.calls)
 
 
 class TestBaseBehindEdges:

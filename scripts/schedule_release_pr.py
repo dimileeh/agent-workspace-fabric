@@ -34,7 +34,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import os
 import subprocess
 import sys
 from pathlib import Path
@@ -90,12 +89,9 @@ async def _main(
         if _monitor_already_running(
             work_dir=work_dir, repo_slug=repo.slug(), pr_number=result.pr_number
         ):
-            print(
-                f"  monitor already active for {repo.slug()}#{result.pr_number}; "
-                "skipping launch"
-            )
+            print(f"  monitor already active for {repo.slug()}#{result.pr_number}; skipping launch")
             return 0
-        print(f"  launching release-pr monitor workspace ...")
+        print("  launching release-pr monitor workspace ...")
         companions = _load_companions(companions_config) if companions_config else []
         task_spec = [
             {
@@ -150,9 +146,7 @@ async def _main(
     return 0
 
 
-def _monitor_already_running(
-    *, work_dir: Path, repo_slug: str, pr_number: int
-) -> bool:
+def _monitor_already_running(*, work_dir: Path, repo_slug: str, pr_number: int) -> bool:
     """True iff a sync_release_pr workspace for this (repo, PR) is active.
 
     Active = status in one of the non-terminal states. Checked by
@@ -192,7 +186,9 @@ if __name__ == "__main__":
         help='Repo URL or slug, e.g. "git@github.com:dimileeh/aira-agent.git" '
         'or "dimileeh/aira-agent".',
     )
-    parser.add_argument("--source", default="development", help="Source branch (default: development)")
+    parser.add_argument(
+        "--source", default="development", help="Source branch (default: development)"
+    )
     parser.add_argument("--target", default="main", help="Target branch (default: main)")
     parser.add_argument(
         "--dry-run",

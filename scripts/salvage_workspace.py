@@ -28,13 +28,12 @@ sys.path.insert(0, str(_ROOT / "src"))
 
 from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 
-from awf.adapters import base as _adapter_base  # noqa: E402
-
 # Import the concrete adapters so the registry is populated even though we
 # then override entries for no-op salvage.
 import awf.adapters.claude_code  # noqa: E402, F401
 import awf.adapters.codex  # noqa: E402, F401
 import awf.adapters.gemini  # noqa: E402, F401
+from awf.adapters import base as _adapter_base  # noqa: E402
 from awf.adapters.base import AgentAdapter, AgentRunResult  # noqa: E402
 from awf.common.commands import AsyncioSubprocessRunner  # noqa: E402
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor  # noqa: E402

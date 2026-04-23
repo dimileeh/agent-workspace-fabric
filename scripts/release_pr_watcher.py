@@ -44,9 +44,7 @@ from awf.runtime.release_pr_sync import (  # noqa: E402
 _log = get_logger(__name__)
 
 
-def _monitor_already_running(
-    *, work_dir: Path, repo_slug: str, pr_number: int
-) -> bool:
+def _monitor_already_running(*, work_dir: Path, repo_slug: str, pr_number: int) -> bool:
     """Mirror of ``schedule_release_pr.py._monitor_already_running`` — we
     duplicate a handful of lines so the watcher doesn't import the CLI
     module (which has argparse top-level execution). Both check for a
@@ -195,7 +193,7 @@ async def _run(
         # Interruptible sleep.
         try:
             await asyncio.wait_for(stop.wait(), timeout=interval)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
 
     _log.info("watcher.stopped")

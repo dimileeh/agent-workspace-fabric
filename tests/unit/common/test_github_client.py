@@ -23,7 +23,6 @@ from awf.common.github_client import (
 )
 from awf.runtime.pr_monitor import CheckState, MergeableState
 
-
 # ── RepoRef parsing ────────────────────────────────────────────────────────
 
 
@@ -75,9 +74,7 @@ def _sample_pr_payload(
                         "merged": merged,
                         "baseRef": {"name": "development", "target": {"oid": "base0"}},
                         "commits": {
-                            "nodes": [
-                                {"commit": {"statusCheckRollup": {"state": check_state}}}
-                            ]
+                            "nodes": [{"commit": {"statusCheckRollup": {"state": check_state}}}]
                         },
                         "reviewThreads": {"nodes": threads or []},
                         "reviews": {"nodes": reviews or []},
@@ -193,7 +190,12 @@ class TestFetchPrStatus:
                 reviews=[
                     {"databaseId": 1, "body": "", "state": "APPROVED", "author": None},
                     {"databaseId": 2, "body": "   ", "state": "COMMENTED", "author": None},
-                    {"databaseId": 3, "body": "real feedback", "state": "COMMENTED", "author": None},
+                    {
+                        "databaseId": 3,
+                        "body": "real feedback",
+                        "state": "COMMENTED",
+                        "author": None,
+                    },
                 ]
             ),
         )
@@ -217,12 +219,12 @@ class TestFetchPrStatus:
                         "isOutdated": False,
                         "path": "a",
                         "line": 1,
-                        "comments": {
-                            "nodes": [{"bodyText": huge_body, "author": {"login": "x"}}]
-                        },
+                        "comments": {"nodes": [{"bodyText": huge_body, "author": {"login": "x"}}]},
                     }
                 ],
-                reviews=[{"databaseId": 1, "body": huge_body, "state": "COMMENTED", "author": None}],
+                reviews=[
+                    {"databaseId": 1, "body": huge_body, "state": "COMMENTED", "author": None}
+                ],
             ),
         )
         client = GitHubClient(fake)
@@ -245,13 +247,9 @@ class TestFetchPrStatus:
             ("WAT", CheckState.NEUTRAL),
         ],
     )
-    async def test_check_state_normalisation(
-        self, gql: str, expected: CheckState
-    ) -> None:
+    async def test_check_state_normalisation(self, gql: str, expected: CheckState) -> None:
         fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0, stdout=_sample_pr_payload(check_state=gql)
-        )
+        fake.queue_result(returncode=0, stdout=_sample_pr_payload(check_state=gql))
         client = GitHubClient(fake)
         status = await client.fetch_pr_status(
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
@@ -268,9 +266,7 @@ class TestFetchPrStatus:
             ("", MergeableState.UNKNOWN),
         ],
     )
-    async def test_mergeable_normalisation(
-        self, gql: str, expected: MergeableState
-    ) -> None:
+    async def test_mergeable_normalisation(self, gql: str, expected: MergeableState) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(returncode=0, stdout=_sample_pr_payload(mergeable=gql))
         client = GitHubClient(fake)
@@ -282,9 +278,7 @@ class TestFetchPrStatus:
     @pytest.mark.unit
     async def test_closed_and_merged_flags_propagate(self) -> None:
         fake = FakeCommandRunner()
-        fake.queue_result(
-            returncode=0, stdout=_sample_pr_payload(closed=True, merged=True)
-        )
+        fake.queue_result(returncode=0, stdout=_sample_pr_payload(closed=True, merged=True))
         client = GitHubClient(fake)
         status = await client.fetch_pr_status(
             repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
@@ -325,9 +319,7 @@ class TestFetchPrStatus:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
-            stdout=json.dumps(
-                {"data": {"repository": {"pullRequest": None}}}
-            ),
+            stdout=json.dumps({"data": {"repository": {"pullRequest": None}}}),
         )
         client = GitHubClient(fake)
         with pytest.raises(GitHubClientError) as exc:
@@ -343,9 +335,7 @@ class TestFetchPrStatus:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
-            stdout=json.dumps(
-                {"errors": [{"message": "Field 'foo' doesn't exist"}]}
-            ),
+            stdout=json.dumps({"errors": [{"message": "Field 'foo' doesn't exist"}]}),
         )
         client = GitHubClient(fake)
         with pytest.raises(GitHubClientError) as exc:
@@ -487,9 +477,7 @@ class TestMutations:
         await client.resolve_thread(thread_id="T1")
         args = fake.calls[0].args
         assert args[0:3] == ["gh", "api", "graphql"]
-        assert any(
-            a.startswith("query=") and "resolveReviewThread" in a for a in args
-        )
+        assert any(a.startswith("query=") and "resolveReviewThread" in a for a in args)
         assert "threadId=T1" in args
 
     @pytest.mark.unit
@@ -520,9 +508,7 @@ class TestMutations:
         fake.queue_result(returncode=1, stderr="forbidden")
         client = GitHubClient(fake)
         with pytest.raises(GitHubClientError):
-            await client.post_comment(
-                repo=RepoRef(owner="o", name="r"), pr_number=1, body="x"
-            )
+            await client.post_comment(repo=RepoRef(owner="o", name="r"), pr_number=1, body="x")
 
     @pytest.mark.unit
     async def test_merge_pr_squash_delete_branch_default(self) -> None:
@@ -530,9 +516,7 @@ class TestMutations:
         fake.queue_result(returncode=0)  # merge
         fake.queue_result(returncode=0, stdout="MERGESHA123\n")  # sha fetch
         client = GitHubClient(fake)
-        sha = await client.merge_pr(
-            repo=RepoRef(owner="o", name="r"), pr_number=42
-        )
+        sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
         merge_args = fake.calls[0].args
         assert merge_args[:3] == ["gh", "pr", "merge"]
         assert "--squash" in merge_args
@@ -545,9 +529,7 @@ class TestMutations:
         fake.queue_result(returncode=1, stderr="branch protection blocked merge")
         client = GitHubClient(fake)
         with pytest.raises(GitHubClientError) as exc:
-            await client.merge_pr(
-                repo=RepoRef(owner="o", name="r"), pr_number=1
-            )
+            await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=1)
         assert "branch protection" in str(exc.value)
 
     @pytest.mark.unit
@@ -558,7 +540,5 @@ class TestMutations:
         fake.queue_result(returncode=0)  # merge ok
         fake.queue_result(returncode=1, stderr="some api hiccup")  # sha fetch fails
         client = GitHubClient(fake)
-        sha = await client.merge_pr(
-            repo=RepoRef(owner="o", name="r"), pr_number=42
-        )
+        sha = await client.merge_pr(repo=RepoRef(owner="o", name="r"), pr_number=42)
         assert sha == ""

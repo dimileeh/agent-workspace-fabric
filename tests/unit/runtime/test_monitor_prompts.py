@@ -24,9 +24,7 @@ class TestAddressThread:
             body_excerpt="rename this handler",
             author="coderabbit",
         )
-        prompt = address_thread_prompt(
-            pr_number=99, repo_slug="dimileeh/aira-web", thread=thread
-        )
+        prompt = address_thread_prompt(pr_number=99, repo_slug="dimileeh/aira-web", thread=thread)
         assert "#99" in prompt
         assert "dimileeh/aira-web" in prompt
         assert "src/app/api/projects/route.ts" in prompt
@@ -38,17 +36,13 @@ class TestAddressThread:
     @pytest.mark.unit
     def test_forbids_push_in_footer(self) -> None:
         thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="")
-        prompt = address_thread_prompt(
-            pr_number=1, repo_slug="a/b", thread=thread
-        )
+        prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
         assert "Do NOT push" in prompt
 
     @pytest.mark.unit
     def test_prescribes_three_verdict_shapes(self) -> None:
         thread = ReviewThread(thread_id="T", path="x", line=1, body_excerpt="")
-        prompt = address_thread_prompt(
-            pr_number=1, repo_slug="a/b", thread=thread
-        )
+        prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
         assert "FALSE POSITIVE:" in prompt
         assert "DEFER:" in prompt
         assert "fixed in commit" in prompt
@@ -56,9 +50,7 @@ class TestAddressThread:
     @pytest.mark.unit
     def test_handles_missing_file_anchor_gracefully(self) -> None:
         thread = ReviewThread(thread_id="T", path=None, line=None, body_excerpt="x")
-        prompt = address_thread_prompt(
-            pr_number=1, repo_slug="a/b", thread=thread
-        )
+        prompt = address_thread_prompt(pr_number=1, repo_slug="a/b", thread=thread)
         assert "inside the file under review" in prompt
 
 
@@ -70,9 +62,7 @@ class TestAddressReviewComment:
             body_excerpt="summary: rename helpers",
             author="coderabbit",
         )
-        prompt = address_review_comment_prompt(
-            pr_number=99, repo_slug="x/y", comment=c
-        )
+        prompt = address_review_comment_prompt(pr_number=99, repo_slug="x/y", comment=c)
         assert "#99" in prompt
         assert "x/y" in prompt
         assert "C_42" in prompt
@@ -82,17 +72,13 @@ class TestAddressReviewComment:
     @pytest.mark.unit
     def test_mentions_gh_pr_comment_for_reply(self) -> None:
         c = ReviewComment(comment_id="C", body_excerpt="x")
-        prompt = address_review_comment_prompt(
-            pr_number=1, repo_slug="a/b", comment=c
-        )
+        prompt = address_review_comment_prompt(pr_number=1, repo_slug="a/b", comment=c)
         assert "gh pr comment" in prompt
 
     @pytest.mark.unit
     def test_forbids_push(self) -> None:
         c = ReviewComment(comment_id="C", body_excerpt="")
-        prompt = address_review_comment_prompt(
-            pr_number=1, repo_slug="a/b", comment=c
-        )
+        prompt = address_review_comment_prompt(pr_number=1, repo_slug="a/b", comment=c)
         assert "Do NOT push" in prompt
 
 
@@ -136,9 +122,7 @@ class TestFixCiPrompt:
 
     @pytest.mark.unit
     def test_forbids_skipping_or_disabling_checks(self) -> None:
-        failures = (
-            CheckFailure(name="a", conclusion="FAILURE", log_excerpt=""),
-        )
+        failures = (CheckFailure(name="a", conclusion="FAILURE", log_excerpt=""),)
         prompt = fix_ci_prompt(pr_number=1, repo_slug="a/b", failures=failures)
         assert "Do not disable" in prompt
 

@@ -114,10 +114,7 @@ async def ensure_release_pr_open(
             pr_url=url,
             ahead_by=ahead,
             created=False,
-            reason=(
-                f"release PR already open ({url}); monitor will SyncBase "
-                "on its next poll"
-            ),
+            reason=(f"release PR already open ({url}); monitor will SyncBase on its next poll"),
         )
 
     if dry_run:
@@ -180,9 +177,7 @@ async def _count_commits_ahead(
     try:
         return int(text)
     except ValueError as exc:
-        raise ReleasePrSyncError(
-            operation="parse ahead_by", stderr=f"{exc}: got {text!r}"
-        ) from exc
+        raise ReleasePrSyncError(operation="parse ahead_by", stderr=f"{exc}: got {text!r}") from exc
 
 
 async def _find_open_release_pr(
@@ -243,7 +238,7 @@ async def _build_release_pr_body(
             "api",
             f"repos/{repo.slug()}/compare/{target}...{source}",
             "--jq",
-            "[.commits[] | {sha: .sha[0:7], message: (.commit.message | split(\"\\n\")[0])}]",
+            '[.commits[] | {sha: .sha[0:7], message: (.commit.message | split("\\n")[0])}]',
         ]
     )
     if not commits_result.ok:
@@ -268,7 +263,7 @@ async def _build_release_pr_body(
         f"AWF's release-PR monitor will keep this PR up to date as more "
         f"feature branches merge into `{source}`, resolve review threads "
         f"via the coding CLI inside the workspace container, and post a "
-        f"\"ready to merge\" comment when all 5 gates are green. "
+        f'"ready to merge" comment when all 5 gates are green. '
         f"**This PR will NOT auto-merge** — a human decides when to click "
         f"the merge button."
     )

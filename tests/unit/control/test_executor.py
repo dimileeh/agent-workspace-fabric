@@ -206,7 +206,9 @@ class TestFailurePaths:
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=137, stderr="")  # adapter killed mid-session
         fake.queue_result(returncode=0)  # git add -A
-        fake.queue_result(returncode=0, stdout="tests/e2e/bff/tasks.spec.ts\n")  # cached diff: real work
+        fake.queue_result(
+            returncode=0, stdout="tests/e2e/bff/tasks.spec.ts\n"
+        )  # cached diff: real work
         fake.queue_result(returncode=0)  # git commit (AWF's auto-commit)
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
@@ -390,7 +392,7 @@ class TestMonitorHandoff:
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
-        from awf.db.enums import WorkspaceStatus as _WS
+        from awf.db.enums import WorkspaceStatus as _WS  # noqa: N814
 
         class _StubMonitor:
             def __init__(self) -> None:

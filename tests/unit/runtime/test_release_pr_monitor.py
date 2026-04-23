@@ -5,7 +5,6 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunResult
 from awf.common.commands import FakeCommandRunner

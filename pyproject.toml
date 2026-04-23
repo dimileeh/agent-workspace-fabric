@@ -102,6 +102,19 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "tests/**" = ["ARG001", "ARG002"]  # test fixtures often appear unused to ruff
 "migrations/**" = ["E402", "F401"]
+# Operator CLIs implement Protocol/ABC stubs whose signatures must match the
+# production interface even when the method body ignores some params (noop
+# adapters in salvage_workspace.py, watcher stubs mirroring the release-PR
+# scheduler). Enforcing the stricter rules here would just mean splattering
+# ``# noqa`` across every stub for no safety benefit.
+"scripts/**" = [
+    "ARG001",
+    "ARG002",
+    "SIM105",  # try/except/pass preferred over contextlib.suppress for short guards
+    "SIM110",  # explicit for-loop preferred over any()/all() in CLI helpers
+    "B007",
+    "B023",
+]
 
 [tool.ruff.lint.flake8-bugbear]
 # FastAPI and Typer require these calls as argument defaults; the rule's warning

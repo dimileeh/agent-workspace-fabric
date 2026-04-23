@@ -15,14 +15,13 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
 import re
 from collections.abc import Callable
+from dataclasses import dataclass
+from pathlib import Path
 from typing import Protocol
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError, get_adapter
 from awf.common.commands import AsyncCommandRunner
@@ -43,9 +42,8 @@ class _MonitorRunnerProto(Protocol):
     the monitor stage is a clean extension seam for Phase 2 variants
     (merge queue, release-PR monitor, etc.)."""
 
-    async def run(
-        self, *, workspace_id: str, compose_project: str, compose_file: Path
-    ) -> None: ...
+    async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None: ...
+
 
 _log = get_logger(__name__)
 
