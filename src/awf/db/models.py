@@ -43,6 +43,26 @@ class Workspace(Base):
     repo_url: Mapped[str] = mapped_column(String(512), nullable=False)
     branch_base: Mapped[str] = mapped_column(String(256), nullable=False)
     branch_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    """Local branch in the worktree — what the agent commits to."""
+
+    remote_push_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    """Remote branch the monitor pushes to. For ``feature_branch_pr`` this
+    equals ``branch_name`` (push feature branch back to its own remote
+    ref). For ``sync_release_pr`` / ``sync_feature_pr`` it's the PR's
+    head branch (``development``, the PR head, etc.) — the local branch
+    name (``release-sync/<id>`` / ``feature-sync/<id>``) is a
+    per-workspace ref for race avoidance and must NOT leak to origin.
+
+    The monitor uses this with an explicit push refspec
+    (``HEAD:refs/heads/<remote_push_branch>``) so push semantics don't
+    depend on ``branch.<X>.merge`` / ``push.default`` git config, which
+    have been observed leaking across worktrees via the shared bare
+    mirror (see T39 incident 2026-04-23: four feature-branch commits
+    pushed to ``development`` on aira-web because the monitor used
+    ``git push origin HEAD`` with polluted config). Nullable for
+    backward-compat with pre-migration rows; defaults to ``branch_name``
+    at push time when unset."""
+
     base_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
 
     task_title: Mapped[str] = mapped_column(String(512), nullable=False)

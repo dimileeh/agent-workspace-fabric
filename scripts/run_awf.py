@@ -231,27 +231,37 @@ async def _configure_branch_push_upstream(
     branch_name: str,
     remote_branch: str,
 ) -> None:
-    """Configure a per-workspace branch so ``git push`` writes back to
-    the *remote* branch it's tracking.
+    """Configure a per-workspace branch so ``git pull`` knows its
+    upstream. Records the ``origin/<remote_branch>`` tracking target on
+    the local branch only — push routing is handled explicitly by the
+    monitor via a ``HEAD:refs/heads/<remote>`` refspec, not by git
+    config.
 
-    Used by the ``sync_release_pr`` and ``sync_feature_pr`` handlers,
-    which check out a local ref like ``release-sync/ws_<id>`` or
-    ``feature-sync/ws_<id>`` that should push to a specific remote
-    branch (``development``, the PR's head, etc.). Extracted from the
-    handlers so the three identical blocks can't drift out of sync.
-    Review feedback on PR #2 (CodeRabbit, generic CLI concern at
-    run_awf.py:487).
+    Used by ``sync_release_pr`` and ``sync_feature_pr`` where the local
+    ref (``release-sync/ws_<id>`` / ``feature-sync/ws_<id>``) diverges
+    from the remote it tracks (``development``, the PR's head, etc.).
 
-    Sets three git configs on the worktree:
+    Sets two git configs on the worktree:
       * ``branch.<branch>.remote = origin``
       * ``branch.<branch>.merge = refs/heads/<remote_branch>``
-      * ``push.default = upstream`` — so bare ``git push`` writes
-        HEAD to whatever the two above specify.
+
+    **Why no ``push.default = upstream`` anymore**: the 2026-04-23
+    aira-web incident. That line was global config (not per-branch),
+    and because the bare mirror shares ``$GIT_DIR/config`` across all
+    its worktrees, sync workspaces writing it caused *every other*
+    worktree on the mirror to resolve ``git push origin HEAD`` through
+    the ``branch.<X>.merge`` mapping. When ``<X>.merge`` was the
+    git-auto-set default ``refs/heads/development`` (every branch
+    created from ``origin/development`` gets this), four
+    feature-branch commits ended up on ``development`` instead of the
+    feature branch. The monitor now uses explicit refspecs so push
+    routing doesn't depend on these configs at all, and setting
+    ``push.default`` globally from a per-workspace function was always
+    the wrong layer.
     """
     for cfg_args in (
         [f"branch.{branch_name}.remote", "origin"],
         [f"branch.{branch_name}.merge", f"refs/heads/{remote_branch}"],
-        ["push.default", "upstream"],
     ):
         await runner.run(["git", "-C", str(worktree_path), "config", *cfg_args])
 
@@ -471,6 +481,9 @@ async def _run_task(
         persisted = await repo.get(ws_id)
         assert persisted is not None
         persisted.branch_name = branch_name
+        # Feature-branch PR: local branch == remote push target. The
+        # monitor pushes ``awf/<id>`` back to ``origin/awf/<id>``.
+        persisted.remote_push_branch = branch_name
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
         await s.commit()
@@ -671,6 +684,12 @@ async def _run_sync_release_pr(
         persisted = await repo.get(ws_id)
         assert persisted is not None
         persisted.branch_name = branch_name
+        # Release-sync: local is ``release-sync/<id>`` (per-workspace ref
+        # to avoid concurrent worktree races on the shared source branch);
+        # remote push target is ``source_branch`` (typically
+        # ``development``). Monitor's explicit refspec pushes HEAD to
+        # ``refs/heads/<source_branch>``.
+        persisted.remote_push_branch = source_branch
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
         persisted.pr_url = (
@@ -876,6 +895,10 @@ async def _run_sync_feature_pr(
         persisted = await repo.get(ws_id)
         assert persisted is not None
         persisted.branch_name = branch_name
+        # Feature-sync: local is ``feature-sync/<id>`` (per-workspace ref
+        # to avoid worktree races on the PR's head); remote push target
+        # is the PR's head branch (``source_branch``).
+        persisted.remote_push_branch = source_branch
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
         persisted.pr_url = (

@@ -183,6 +183,26 @@ class PullRequestMonitorRunner:
                 )
                 return
 
+            # Determine the remote push target for this workspace.
+            # ``remote_push_branch`` is the canonical destination —
+            # persisted at workspace creation (``feature_branch_pr``:
+            # same as ``branch_name``; sync kinds: the PR's head
+            # branch). Fall back to ``branch_name`` for pre-migration
+            # rows where the column may be unset (monitors created
+            # before the remote_push_branch column existed).
+            remote_branch = ws.remote_push_branch or ws.branch_name
+            if not remote_branch:
+                # No branch at all on this workspace — can't push safely.
+                # This is an upstream provisioning invariant violation.
+                await self._terminate_failed(
+                    workspace_id,
+                    message=(
+                        "monitor: workspace has no branch_name / "
+                        "remote_push_branch — cannot safely push"
+                    ),
+                )
+                return
+
             action = decide(status, state, self._config)
             terminal = await self._execute(
                 action=action,
@@ -192,6 +212,7 @@ class PullRequestMonitorRunner:
                 status=status,
                 state=state,
                 base_branch=ws.branch_base,
+                remote_branch=remote_branch,
                 compose_project=compose_project,
                 compose_file=compose_file,
             )
@@ -220,6 +241,7 @@ class PullRequestMonitorRunner:
         status: PRStatus,
         state: MonitorState,
         base_branch: str,
+        remote_branch: str,
         compose_project: str,
         compose_file: Path,
     ) -> bool:
@@ -248,6 +270,7 @@ class PullRequestMonitorRunner:
                 repo=repo,
                 pr_number=pr_number,
                 base_branch=base_branch,
+                remote_branch=remote_branch,
                 compose_project=compose_project,
                 compose_file=compose_file,
             )
@@ -262,6 +285,7 @@ class PullRequestMonitorRunner:
                 compose_project=compose_project,
                 compose_file=compose_file,
                 workspace_id=workspace_id,
+                remote_branch=remote_branch,
             )
             state.iter_count += 1
             return False
@@ -274,6 +298,7 @@ class PullRequestMonitorRunner:
                 initial_threads=action.threads,
                 initial_reviews=action.review_comments,
                 state=state,
+                remote_branch=remote_branch,
                 compose_project=compose_project,
                 compose_file=compose_file,
             )
@@ -325,6 +350,7 @@ class PullRequestMonitorRunner:
         initial_threads: tuple[ReviewThread, ...],
         initial_reviews: tuple[ReviewComment, ...],
         state: MonitorState,
+        remote_branch: str,
         compose_project: str,
         compose_file: Path,
     ) -> None:
@@ -388,7 +414,9 @@ class PullRequestMonitorRunner:
 
         # 3) Push everything we committed.
         worktree_path = self._worktrees_root / workspace_id
-        pushed = await self._git_push(worktree_path=worktree_path)
+        pushed = await self._git_push(
+            worktree_path=worktree_path, remote_branch=remote_branch
+        )
         if not pushed:
             # No local commits — CLI returned "false_positive" for
             # everything or "defer" for everything. We still want to
@@ -476,6 +504,7 @@ class PullRequestMonitorRunner:
         repo: RepoRef,
         pr_number: int,
         base_branch: str,
+        remote_branch: str,
         compose_project: str,
         compose_file: Path,
     ) -> None:
@@ -527,7 +556,7 @@ class PullRequestMonitorRunner:
                 )
 
         # Whether or not we hit conflicts, push what we have.
-        await self._git_push(worktree_path=worktree_path)
+        await self._git_push(worktree_path=worktree_path, remote_branch=remote_branch)
 
     # ── CI failure ─────────────────────────────────────────────────────────
 
@@ -540,6 +569,7 @@ class PullRequestMonitorRunner:
         compose_project: str,
         compose_file: Path,
         workspace_id: str,
+        remote_branch: str,
     ) -> None:
         prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
         try:
@@ -554,7 +584,10 @@ class PullRequestMonitorRunner:
                 workspace_id=workspace_id,
                 stderr=exc.result.stderr[:400],
             )
-        await self._git_push(worktree_path=self._worktrees_root / workspace_id)
+        await self._git_push(
+            worktree_path=self._worktrees_root / workspace_id,
+            remote_branch=remote_branch,
+        )
 
     # ── Git plumbing ───────────────────────────────────────────────────────
 
@@ -598,27 +631,45 @@ class PullRequestMonitorRunner:
         r = await self._deps.runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
         return r.stdout.strip() if r.ok else ""
 
-    async def _git_push(self, *, worktree_path: Path) -> bool:
-        """Push current branch to origin.
+    async def _git_push(self, *, worktree_path: Path, remote_branch: str) -> bool:
+        """Push current HEAD to ``origin/<remote_branch>`` with an
+        explicit refspec.
 
         Returns True iff anything new was pushed.
 
+        **Why explicit refspec, not ``git push origin HEAD``**: On
+        2026-04-23 the monitor pushed four feature-branch commits to
+        ``aira-web`` ``development`` because ``git push origin HEAD``
+        resolves against ``push.default`` + ``branch.<current>.merge``.
+        Both had been polluted by prior sync workspaces on the shared
+        bare mirror (``push.default=upstream`` globally, merge config
+        auto-set to ``refs/heads/development`` when worktrees branched
+        from ``origin/development``). Using ``HEAD:refs/heads/<remote>``
+        bypasses that entirely — the caller names the destination, git
+        ignores local config. No amount of polluted config can redirect
+        a push that spells its destination out.
+
         **Recovery on rejection**: if the push is refused because the
-        remote feature branch has advanced past local (divergence from a
-        prior monitor run whose push succeeded but whose local worktree
-        is now a stale clone), this method silently resyncs local to
-        remote — ``git fetch origin <branch>`` + ``git reset --hard
-        origin/<branch>``. GitHub is truth for pushed state; any local
-        commits that didn't make it onto the remote represent dead work
-        from the failed previous push and can be safely discarded. The
-        next outer-loop iteration then operates on an aligned worktree
-        and its SyncBase / fix-cycle commits will fast-forward cleanly.
+        remote branch has advanced past local (divergence from a prior
+        monitor run whose push succeeded but whose local worktree is
+        now a stale clone), this method silently resyncs local to
+        remote — ``git fetch origin <remote>`` + ``git reset --hard
+        origin/<remote>``. GitHub is truth for pushed state; any local
+        commits that didn't make it onto the remote represent dead
+        work from the failed previous push and can be safely discarded.
+        The next outer-loop iteration then operates on an aligned
+        worktree and its SyncBase / fix-cycle commits will fast-forward
+        cleanly.
 
         Without this recovery, a diverged worktree caused PR #335 and
         #336 to loop until iter_cap: each failed push added another
         local merge commit, the next SyncBase piled another on top, and
-        the head SHA on GitHub never moved."""
-        r = await self._deps.runner.run(["git", "-C", str(worktree_path), "push", "origin", "HEAD"])
+        the head SHA on GitHub never moved.
+        """
+        refspec = f"HEAD:refs/heads/{remote_branch}"
+        r = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "push", "origin", refspec]
+        )
         if r.ok:
             # git prints "Everything up-to-date" to stderr when the ref didn't move.
             return "up-to-date" not in (r.stderr or "").lower()
@@ -639,27 +690,14 @@ class PullRequestMonitorRunner:
             )
             return False
 
-        # Divergence — resync local to remote.
-        branch_result = await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"]
-        )
-        branch_name = (branch_result.stdout or "").strip()
-        if not branch_name or branch_name == "HEAD":
-            # Detached HEAD; can't safely identify remote branch to reset to.
-            _log.warning(
-                "monitor.push_rejected_detached_head",
-                worktree_path=str(worktree_path),
-            )
-            return False
-
         _log.warning(
             "monitor.push_rejected_resyncing_local",
             worktree_path=str(worktree_path),
-            branch=branch_name,
+            remote_branch=remote_branch,
             stderr=(r.stderr or "")[:400],
         )
         await self._deps.runner.run(
-            ["git", "-C", str(worktree_path), "fetch", "origin", branch_name]
+            ["git", "-C", str(worktree_path), "fetch", "origin", remote_branch]
         )
         await self._deps.runner.run(
             [
@@ -668,7 +706,7 @@ class PullRequestMonitorRunner:
                 str(worktree_path),
                 "reset",
                 "--hard",
-                f"origin/{branch_name}",
+                f"origin/{remote_branch}",
             ]
         )
         return False

@@ -137,7 +137,16 @@ def _queue_fix_pass(fake: FakeCommandRunner, *, changed: bool = True) -> None:
 def _queue_push_and_pr(
     fake: FakeCommandRunner, *, pr_url: str = "https://github.com/x/y/pull/1"
 ) -> None:
-    """Queue the subprocess results for push + gh pr create."""
+    """Queue the subprocess results for pr_creator's pre-push
+    diagnostics + push + gh pr create. The three diagnostic queries
+    (``rev-parse HEAD``, ``rev-parse --abbrev-ref HEAD``,
+    ``git log origin/<base>..HEAD``) were added after the T39
+    incident to capture worktree state when ``gh pr create`` rejects
+    with "No commits between development and awf/ws_...". Every test
+    that pushes must account for these 3 extra reads."""
+    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
+    fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
+    fake.queue_result(returncode=0, stdout="abc1234 work\n")  # log ahead-of-base
     fake.queue_result(returncode=0)  # git push
     fake.queue_result(returncode=0, stdout=pr_url)  # gh pr create
 

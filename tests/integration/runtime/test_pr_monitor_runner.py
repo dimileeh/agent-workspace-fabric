@@ -155,8 +155,16 @@ async def _seed_monitoring_workspace(
     *,
     agent: str = "claude_code",
     pr_number: int = 42,
+    branch_name: str | None = None,
+    remote_push_branch: str | None = None,
 ) -> str:
-    """Insert a workspace already in ``monitoring_pr`` state."""
+    """Insert a workspace already in ``monitoring_pr`` state.
+
+    ``branch_name`` defaults to ``awf/<ws.id>`` (the feature-branch-PR
+    convention). ``remote_push_branch`` defaults to ``branch_name`` —
+    which is what the monitor falls back to when the column is unset,
+    preserving backward-compat semantics for pre-migration rows.
+    """
     async with factory() as s:
         repo = WorkspaceRepository(s)
         ws = await repo.create(
@@ -178,7 +186,8 @@ async def _seed_monitoring_workspace(
             WorkspaceStatus.monitoring_pr,
         ):
             await repo.transition(ws, to=target, reason_code="X")
-        ws.branch_name = f"awf/{ws.id}"
+        ws.branch_name = branch_name or f"awf/{ws.id}"
+        ws.remote_push_branch = remote_push_branch or ws.branch_name
         ws.base_commit = "a" * 40
         ws.compose_project_name = f"awf_{ws.id}"
         ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
@@ -832,7 +841,9 @@ class TestPushRejectRecovery:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        ws_id = await _seed_monitoring_workspace(factory)
+        ws_id = await _seed_monitoring_workspace(
+            factory, branch_name="awf/test-branch"
+        )
         # Outer iter 1: DIRTY state forces SyncBase; merge creates a
         # local commit; push gets rejected (non-fast-forward); recovery
         # fetch + reset --hard kick in.
@@ -842,7 +853,10 @@ class TestPushRejectRecovery:
         cmd.queue_result(returncode=0)  # git merge --abort (defense)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0)  # git merge --no-edit (clean)
-        # Push rejected.
+        # Push rejected. (The monitor now passes the explicit remote_branch
+        # into the push command as ``HEAD:refs/heads/awf/test-branch``, so
+        # there's no ambiguous ``HEAD`` refspec that could be redirected
+        # by leaked git config — see the 2026-04-23 aira-web incident.)
         cmd.queue_result(
             returncode=1,
             stderr=(
@@ -851,8 +865,10 @@ class TestPushRejectRecovery:
                 "error: failed to push some refs ..."
             ),
         )
-        # Recovery sequence: rev-parse branch, fetch branch, reset --hard.
-        cmd.queue_result(returncode=0, stdout="awf/test-branch\n")  # rev-parse --abbrev-ref
+        # Recovery sequence: fetch branch, reset --hard. The monitor no
+        # longer needs ``rev-parse --abbrev-ref`` to discover the branch
+        # name — it already has ``remote_push_branch`` from the workspace
+        # row, which is the authoritative source.
         cmd.queue_result(returncode=0)  # git fetch origin awf/test-branch
         cmd.queue_result(returncode=0)  # git reset --hard origin/awf/test-branch
         # Outer iter 2: reset worked; GitHub now reports CLEAN; merge.
@@ -874,6 +890,18 @@ class TestPushRejectRecovery:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
+        # Assert push used an explicit refspec — no bare ``HEAD`` arg.
+        push_calls = [
+            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
+        ]
+        assert push_calls, "expected at least one push"
+        for pc in push_calls:
+            assert "HEAD:refs/heads/awf/test-branch" in pc.args, (
+                "monitor must push with an explicit "
+                "``HEAD:refs/heads/<branch>`` refspec to prevent git "
+                "config from redirecting the push to another branch "
+                "(2026-04-23 regression guard)"
+            )
         # Assert fetch + reset --hard were called on the feature branch.
         fetch_branch_calls = [
             c
@@ -1497,6 +1525,325 @@ class TestResumePreservesMonitorStartedAt:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
+
+
+class TestPushUsesExplicitRefspec:
+    """Regression guard for the 2026-04-23 aira-web incident.
+
+    On that day, four AWF feature-branch commits (``ebd3985``,
+    ``59c7258``, ``3019a76``, ``61c8520``) landed on
+    ``origin/development`` instead of the feature branch. Root cause:
+    the monitor's ``git push origin HEAD`` resolved against
+    ``push.default=upstream`` + ``branch.<X>.merge=refs/heads/development``
+    — both set globally on the shared bare mirror's config by prior
+    sync workspaces and auto-tracked-upstream at branch creation. With
+    both configs active, ``HEAD`` got redirected to ``development``.
+
+    The invariant these tests enforce: every ``git push`` issued from
+    the monitor MUST carry an explicit ``HEAD:refs/heads/<branch>``
+    refspec, so git ignores ``push.default`` and friends. If any code
+    path reverts to bare ``HEAD``, the polluted-config scenario can
+    repeat — so we assert the refspec form on every push exit.
+    """
+
+    @pytest.mark.unit
+    async def test_fix_cycle_push_uses_explicit_refspec(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(
+            factory, branch_name="awf/feature-x", remote_push_branch="awf/feature-x"
+        )
+        thread = {
+            "id": "T1",
+            "isResolved": False,
+            "isOutdated": False,
+            "path": "src/x.ts",
+            "line": 10,
+            "comments": {"nodes": [{"bodyText": "rename", "author": {"login": "cr"}}]},
+        }
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
+        adapter.queue(stdout="fixed in commit abc")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle poll
+        cmd.queue_result(returncode=0, stderr="")  # git push (under inspection)
+        cmd.queue_result(returncode=0, stdout="newhead\n")  # rev-parse HEAD
+        cmd.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {"data": {"resolveReviewThread": {"thread": {"id": "T1", "isResolved": True}}}}
+            ),
+        )
+        # Iter 2: clean so loop terminates.
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="SHA\n")
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        push_calls = [
+            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
+        ]
+        assert push_calls, "fix_cycle must push"
+        for pc in push_calls:
+            # The bare ``HEAD`` arg would mean the ambiguous form
+            # ``git push origin HEAD`` (the 2026-04-23 bug). The fix
+            # requires an explicit src:dst refspec.
+            assert "HEAD" not in pc.args, (
+                f"monitor pushed with bare ``HEAD`` — that's the 2026-04-23 bug. "
+                f"Use ``HEAD:refs/heads/<branch>`` instead. Full args: {pc.args}"
+            )
+            assert "HEAD:refs/heads/awf/feature-x" in pc.args, (
+                f"push refspec must name the remote branch explicitly. "
+                f"Full args: {pc.args}"
+            )
+
+    @pytest.mark.unit
+    async def test_sync_base_push_uses_explicit_refspec(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(
+            factory, branch_name="awf/feature-y", remote_push_branch="awf/feature-y"
+        )
+        # Iter 1: SyncBase (base-behind=2, any mergeable state).
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="2\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # merge --abort
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0)  # merge --no-edit
+        cmd.queue_result(returncode=0)  # git push (under inspection)
+        # Iter 2: clean, merge.
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="M\n")
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        push_calls = [
+            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
+        ]
+        assert push_calls
+        for pc in push_calls:
+            assert "HEAD:refs/heads/awf/feature-y" in pc.args
+
+    @pytest.mark.unit
+    async def test_ci_fix_push_uses_explicit_refspec(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(
+            factory, branch_name="awf/feature-z", remote_push_branch="awf/feature-z"
+        )
+        # Iter 1: CI failure → ReportCiFailure → push.
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(check_state="FAILURE"))
+        # gh run list (array of runs for fetch_failing_check_logs).
+        cmd.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                [
+                    {
+                        "databaseId": 1,
+                        "name": "lint",
+                        "conclusion": "FAILURE",
+                        "status": "completed",
+                    }
+                ]
+            ),
+        )
+        cmd.queue_result(returncode=0, stdout="log tail")  # gh run view --log-failed
+        adapter.queue(stdout="fixed CI")
+        cmd.queue_result(returncode=0)  # git push (under inspection)
+        # Iter 2: clean, merge.
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0, stdout=json.dumps([]))  # no failures
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="M\n")
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        push_calls = [
+            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
+        ]
+        assert push_calls
+        for pc in push_calls:
+            assert "HEAD:refs/heads/awf/feature-z" in pc.args
+
+    @pytest.mark.unit
+    async def test_sync_workspace_pushes_to_remote_not_local_branch(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """Sync workspaces (release-sync / feature-sync) use a
+        per-workspace LOCAL ref (``release-sync/ws_X``) but push to a
+        different REMOTE branch (e.g. ``development``). The monitor
+        must honour ``remote_push_branch``, not ``branch_name``."""
+        ws_id = await _seed_monitoring_workspace(
+            factory,
+            branch_name="release-sync/ws_abc",
+            remote_push_branch="development",
+        )
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="2\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # merge --abort
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0)  # merge
+        cmd.queue_result(returncode=0)  # push (under inspection)
+        # Iter 2: clean, merge.
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="M\n")
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        push_calls = [
+            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
+        ]
+        assert push_calls
+        for pc in push_calls:
+            assert "HEAD:refs/heads/development" in pc.args, (
+                "sync workspace must push to remote_push_branch "
+                "(development), not local branch_name (release-sync/ws_abc)"
+            )
+            # And emphatically NOT the local branch.
+            assert "HEAD:refs/heads/release-sync/ws_abc" not in pc.args
+
+    @pytest.mark.unit
+    async def test_remote_push_branch_falls_back_to_branch_name(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """Pre-migration rows may have ``remote_push_branch=None``.
+        The monitor must fall back to ``branch_name`` so those rows
+        keep working. New rows always set both."""
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.create(
+                repo_url="git@github.com:dimileeh/aira-web.git",
+                branch_base="development",
+                task_title="legacy",
+                task_prompt="x",
+                agent="claude_code",
+                test_commands=[],
+                requires_database=False,
+            )
+            for target in (
+                WorkspaceStatus.provisioning,
+                WorkspaceStatus.ready,
+                WorkspaceStatus.running,
+                WorkspaceStatus.validating,
+                WorkspaceStatus.pushing,
+                WorkspaceStatus.monitoring_pr,
+            ):
+                await repo.transition(ws, to=target, reason_code="X")
+            ws.branch_name = "awf/legacy-row"
+            ws.remote_push_branch = None  # legacy row, column unset
+            ws.compose_project_name = f"awf_{ws.id}"
+            ws.pr_url = "https://github.com/dimileeh/aira-web/pull/1"
+            ws.pr_number = 1
+            await s.commit()
+            ws_id = ws.id
+
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0, stdout="2\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # merge --abort
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0)  # merge
+        cmd.queue_result(returncode=0)  # push (under inspection)
+        # Iter 2: clean, merge.
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="M\n")
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        push_calls = [
+            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
+        ]
+        assert push_calls
+        for pc in push_calls:
+            assert "HEAD:refs/heads/awf/legacy-row" in pc.args
 
 
 class TestParseVerdict:
