@@ -1527,6 +1527,342 @@ class TestResumePreservesMonitorStartedAt:
             assert ws.status == WorkspaceStatus.completed.value
 
 
+class TestMonitorInvariantFailures:
+    """Failure paths at the top of ``run()`` that terminate the
+    workspace cleanly instead of crashing the background runner. These
+    are invariant violations seeded upstream; the monitor's job is to
+    fail fast with a readable message, not propagate AssertionError."""
+
+    @pytest.mark.unit
+    async def test_missing_pr_number_terminates_failed(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """If a workspace reaches ``monitoring_pr`` with ``pr_number=None``
+        (upstream provisioning bug), the monitor transitions it to
+        ``failed`` with a readable message and returns — no GitHub
+        calls, no agent runs."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.pr_number = None
+            await s.commit()
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "pr_number" in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    async def test_missing_branch_and_remote_push_branch_terminates_failed(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """Workspace with no branch_name AND no remote_push_branch.
+        Monitor must refuse to push rather than guess."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.branch_name = None
+            ws.remote_push_branch = None
+            await s.commit()
+
+        # Monitor will call fetch_base + fetch_pr_status before the
+        # branch check, so queue results for those too.
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "branch_name" in (ws.failure_message or "")
+
+
+class TestMonitorDbHelpers:
+    """Direct-call coverage for the repository-adjacent helpers that
+    tests can't hit via the full loop."""
+
+    @pytest.mark.unit
+    async def test_load_workspace_missing_raises(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        with pytest.raises(RuntimeError, match="disappeared"):
+            await runner._load_workspace("ws_nonexistent")
+
+    @pytest.mark.unit
+    async def test_persist_state_noops_when_workspace_missing(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        from awf.runtime.pr_monitor import MonitorState
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        import time as _t
+
+        # Should silently return without raising — a missing ws is a
+        # race with external termination, not an error.
+        await runner._persist_state(
+            "ws_missing",
+            MonitorState(
+                iter_count=1,
+                last_push_sha="abc",
+                threads_addressed_ids={},
+                started_at=_t.monotonic(),
+            ),
+        )
+
+    @pytest.mark.unit
+    async def test_terminate_completed_noops_when_workspace_missing(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner._terminate_completed("ws_missing", pr_merge_sha="x")
+
+    @pytest.mark.unit
+    async def test_terminate_failed_noops_when_workspace_missing(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner._terminate_failed("ws_missing", message="gone")
+
+    @pytest.mark.unit
+    async def test_load_state_handles_naive_datetime(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """Some DB backends (SQLite with certain dialect settings) return
+        naive datetimes. The loader must treat them as UTC so elapsed
+        math doesn't go sideways."""
+        from datetime import datetime as _dt
+
+        ws_id = await _seed_monitoring_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_started_at = _dt(2026, 4, 23, 10, 0, 0)  # naive
+            await s.commit()
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            state = runner._load_state(ws)
+            # If tzinfo wasn't applied, we'd have gotten a naive/aware
+            # subtract TypeError — reaching here proves the branch ran.
+            assert state.iter_count == 0
+
+
+class TestMaxOuterIterationsSafetyNet:
+    """If ``max_outer_iterations`` is exhausted without the decision
+    core reaching a terminal action, the runner terminates the
+    workspace instead of silently returning — a decision-loop bug
+    would otherwise leave the workspace wedged in ``monitoring_pr``
+    forever."""
+
+    @pytest.mark.unit
+    async def test_iter_exhaustion_terminates_failed(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        # Queue results for one passive iteration (WaitForCI). Since the
+        # fake WaitForCI just sleeps and returns without transitioning,
+        # we'll spin until max_outer_iterations exhausts.
+        for _ in range(3):
+            cmd.queue_result(returncode=0)  # fetch base
+            cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+            cmd.queue_result(
+                returncode=0,
+                # PENDING status so decide() returns WaitForCI forever.
+                stdout=_pr_payload(check_state="PENDING"),
+            )
+
+        runner = PullRequestMonitorRunner(
+            session_factory=factory,
+            runner=cmd,
+            adapter=adapter,
+            gh=GitHubClient(cmd),
+            monitor_config=MonitorConfig(
+                iter_cap=10,
+                auto_merge=True,
+                poll_interval_seconds=60,
+                settle_interval_seconds=30,
+            ),
+            runner_config=MonitorRunnerConfig(
+                max_outer_iterations=3,  # tight cap so the safety net fires
+                max_fix_cycle_passes=3,
+            ),
+            sleep=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "max_outer_iterations" in (ws.failure_message or "")
+
+
+class TestReviewCommentAddressing:
+    """The fix-cycle branch that exercises review-level comments (as
+    distinct from inline threads). PR #338 review feedback: review
+    comments need their own verdict path."""
+
+    @pytest.mark.unit
+    async def test_fix_cycle_addresses_review_comments(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        # PR has a review-level comment (not a thread) with unresolved
+        # feedback. The decide logic produces AddressComments with
+        # review_comments populated.
+        # Review-level (outside-diff) comment. The gh client looks for
+        # ``databaseId`` + non-empty ``body`` to materialise a
+        # ReviewComment.
+        review = {
+            "databaseId": 4999999,
+            "body": "please clean this up — outside-diff review comment",
+            "author": {"login": "cr"},
+            "state": "COMMENTED",
+        }
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(reviews=[review]))
+        adapter.queue(stdout="fixed review comment")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle poll
+        cmd.queue_result(returncode=0)  # git push
+        cmd.queue_result(returncode=0, stdout="newhead\n")  # rev-parse HEAD
+        # Iter 2: clean, merge
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="M\n")
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            # Review comment was addressed (recorded in state via the
+            # databaseId-derived comment_id).
+            assert "4999999" in ws.monitor_threads_addressed
+
+
 class TestPushUsesExplicitRefspec:
     """Regression guard for the 2026-04-23 aira-web incident.
 
