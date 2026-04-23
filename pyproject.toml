@@ -149,6 +149,13 @@ disallow_untyped_defs = true
 check_untyped_defs = true
 no_implicit_optional = true
 plugins = ["pydantic.mypy"]
+# Only type-check production code. Tests use dynamic fixtures, stub
+# injection, and deliberately incomplete annotations (the pattern
+# ``def test_x(foo):`` is ubiquitous and useful); scripts are operator
+# CLIs that trade type-strictness for readability at the
+# subprocess/argparse boundary. Restricting ``files`` here makes the
+# bare ``mypy`` invocation in CI walk only ``src/``.
+files = ["src/"]
 
 [[tool.mypy.overrides]]
 module = ["docker", "docker.*"]

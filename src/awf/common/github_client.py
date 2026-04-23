@@ -401,7 +401,7 @@ class GitHubClient:
                 returncode=0,
                 stderr=json.dumps(payload["errors"])[:1000],
             )
-        return payload
+        return payload  # type: ignore[no-any-return]  # json.loads returns Any; the explicit dict type is the caller's contract
 
     async def _gh_json(self, args: list[str], *, operation: str) -> Any:
         result = await self._runner.run(args)

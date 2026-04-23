@@ -35,6 +35,7 @@ from awf.common.commands import AsyncCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
@@ -47,6 +48,7 @@ from awf.runtime.pr_monitor import (
     Abort,
     AbortReason,
     AddressComments,
+    CheckFailure,
     Merge,
     MonitorAction,
     MonitorConfig,
@@ -521,7 +523,7 @@ class PullRequestMonitorRunner:
         *,
         repo: RepoRef,
         pr_number: int,
-        failures: tuple,
+        failures: tuple[CheckFailure, ...],
         compose_project: str,
         compose_file: Path,
         workspace_id: str,
@@ -660,14 +662,14 @@ class PullRequestMonitorRunner:
 
     # ── DB state management ───────────────────────────────────────────────
 
-    async def _load_workspace(self, workspace_id: str):  # noqa: ANN202 - model type
+    async def _load_workspace(self, workspace_id: str) -> Workspace:
         async with self._deps.session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
             if ws is None:
                 raise RuntimeError(f"workspace {workspace_id} disappeared mid-monitor")
             return ws
 
-    def _load_state(self, ws) -> MonitorState:  # noqa: ANN001 - model type
+    def _load_state(self, ws: Workspace) -> MonitorState:
         started_raw = ws.monitor_started_at
         # ``MonitorState.started_at`` is monotonic; tests prefer wall-clock
         # semantics so we reconstruct by subtracting the elapsed seconds.
@@ -756,7 +758,7 @@ def _parse_verdict(stdout: str) -> Verdict:
     return "fix_committed"
 
 
-def _with_ci_failures(status: PRStatus, failures: tuple) -> PRStatus:
+def _with_ci_failures(status: PRStatus, failures: tuple[CheckFailure, ...]) -> PRStatus:
     """Immutable-replace ci_failures on a ``PRStatus`` (frozen dataclass)."""
     # Import dataclasses.replace locally to keep the top-level imports tight.
     from dataclasses import replace

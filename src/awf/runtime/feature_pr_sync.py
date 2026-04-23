@@ -134,7 +134,7 @@ async def fetch_pr_metadata(
     return _parse_metadata(payload)
 
 
-def _parse_metadata(payload: dict) -> FeaturePRMetadata:
+def _parse_metadata(payload: dict[str, Any]) -> FeaturePRMetadata:
     """Convert the raw gh JSON into a ``FeaturePRMetadata``. Refuses
     terminal PRs (closed/merged) with a clear error so the CLI can
     exit 1 without spawning a workspace."""

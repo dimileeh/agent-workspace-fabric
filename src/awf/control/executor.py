@@ -229,6 +229,11 @@ class WorkspaceExecutor:
             # produces a single commit on top of base that contains the
             # cumulative diff, and the branch is reattached to a valid
             # ancestry so the PR can be opened normally.
+            #
+            # Invariant: ``ws.base_commit`` is always populated by
+            # ``_claim_ready`` before this block runs. The ``assert`` both
+            # documents and satisfies mypy.
+            assert ws.base_commit is not None
             ancestor = await _git_in_worktree(
                 ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
             )

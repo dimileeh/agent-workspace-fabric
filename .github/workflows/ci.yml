@@ -33,7 +33,10 @@ jobs:
         run: .venv/bin/ruff format --check .
 
       - name: Type check (mypy)
-        run: .venv/bin/mypy src/ tests/
+        # No path args — relies on ``files = ["src/"]`` in pyproject.toml.
+        # Tests use dynamic fixtures + stub injection; running ``--strict``
+        # against them generates noise without catching real bugs.
+        run: .venv/bin/mypy
 
       - name: Unit tests with coverage
         run: .venv/bin/pytest tests/unit/ -v --cov=awf --cov-report=term-missing --cov-report=xml
