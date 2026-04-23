@@ -40,7 +40,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Adapter registry side-effect import (populates get_adapter).
 import awf.adapters.registry  # noqa: F401
+from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncioSubprocessRunner
+from awf.common.github_client import GitHubClient, RepoRef
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
@@ -52,8 +54,6 @@ from awf.node.compose_manager import (
     ComposeManager,
     WorkspaceComposeSpec,
 )
-from awf.adapters.base import AgentAdapter
-from awf.common.github_client import GitHubClient, RepoRef
 from awf.node.git_manager import GitManager
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor
@@ -113,6 +113,13 @@ class TaskConfig:
     ``<source_branch> → <branch_base>`` release PR to monitor. If
     unset, the driver queries GitHub for it and errors out if none
     exists (the scheduler should always populate this)."""
+
+    auto_merge: bool = False
+    """For ``sync_feature_pr`` only. ``True`` → monitor lands the PR
+    itself once all gates turn green; ``False`` → monitor posts a
+    "ready to merge" notification and waits for a human. Safe default
+    is ``False`` because the CLI's most common caller (failed-workspace
+    recovery) wants deliberate human review rather than silent merges."""
 
 
 def _build_auth_mounts(host_home: Path) -> list[AuthMount]:
@@ -216,6 +223,15 @@ async def _run_task(
     # already-open development→main PR.
     if cfg.task_kind == "sync_release_pr":
         return await _run_sync_release_pr(
+            cfg,
+            work_dir=work_dir,
+            session_factory=session_factory,
+            auth_mounts=auth_mounts,
+            git_name=git_name,
+            git_email=git_email,
+        )
+    if cfg.task_kind == "sync_feature_pr":
+        return await _run_sync_feature_pr(
             cfg,
             work_dir=work_dir,
             session_factory=session_factory,
@@ -494,7 +510,9 @@ async def _run_sync_release_pr(
         persisted.branch_name = branch_name
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
-        persisted.pr_url = f"https://github.com/{RepoRef.from_url(cfg.repo_url).slug()}/pull/{cfg.pr_number}"
+        persisted.pr_url = (
+            f"https://github.com/{RepoRef.from_url(cfg.repo_url).slug()}/pull/{cfg.pr_number}"
+        )
         persisted.pr_number = cfg.pr_number
         await s.commit()
 
@@ -562,6 +580,235 @@ async def _run_sync_release_pr(
     )
     print(
         f"[{cfg.task_title[:40]}] release-monitor running for PR #{cfg.pr_number} ...",
+        flush=True,
+    )
+    compose_file = work_dir / "compose" / "compose" / ws_id / "compose.yml"
+    await monitor.run(
+        workspace_id=ws_id,
+        compose_project=f"awf_{ws_id}",
+        compose_file=compose_file,
+    )
+
+    # Step 7: final state.
+    async with session_factory() as s:
+        persisted = await WorkspaceRepository(s).get(ws_id)
+        assert persisted is not None
+        return {
+            "workspace_id": ws_id,
+            "title": cfg.task_title,
+            "status": persisted.status,
+            "pr_url": persisted.pr_url,
+            "failure_reason": persisted.failure_reason,
+            "failure_message": persisted.failure_message,
+            "branch": persisted.branch_name,
+            "base_commit": persisted.base_commit,
+        }
+
+
+async def _run_sync_feature_pr(
+    cfg: TaskConfig,
+    *,
+    work_dir: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+    auth_mounts: list[AuthMount],
+    git_name: str,
+    git_email: str,
+) -> dict[str, Any]:
+    """Attach an AWF PR monitor to an already-open feature PR.
+
+    Shares 95% of its shape with ``_run_sync_release_pr`` — the
+    differences are:
+
+      - **Source branch.** Here it's the PR's actual head branch
+        (``cfg.source_branch``, populated by
+        ``scripts/attach_feature_pr_monitor.py``). No fallback to
+        ``development`` — a feature PR without a head branch name is
+        a programming error upstream.
+      - **Worktree ref prefix.** ``feature-sync/ws_<id>`` (vs
+        ``release-sync/ws_<id>``) so grep-based operator inspection
+        can tell the two kinds apart at a glance.
+      - **Monitor factory.** Selected by ``cfg.auto_merge``: the two
+        existing factories differ only in the ``auto_merge`` toggle,
+        so we pick the matching one rather than plumbing a third.
+    """
+    from awf.runtime.release_pr_monitor import (
+        build_feature_pr_monitor,
+        build_release_pr_monitor,
+    )
+
+    if cfg.pr_number is None:
+        raise ValueError(
+            "sync_feature_pr requires cfg.pr_number — the CLI "
+            "(attach_feature_pr_monitor.py) must populate it before invoking run_awf"
+        )
+    if not cfg.source_branch:
+        raise ValueError(
+            "sync_feature_pr requires cfg.source_branch — the PR's head "
+            "branch must be resolved upfront (fetch_pr_metadata)"
+        )
+    source_branch = cfg.source_branch
+    target_branch = cfg.branch_base
+
+    runner = AsyncioSubprocessRunner()
+    git = GitManager(work_dir / "git")
+    compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
+
+    # Step 1: workspace row.
+    async with session_factory() as s:
+        ws = await WorkspaceRepository(s).create(
+            repo_url=cfg.repo_url,
+            branch_base=target_branch,
+            task_title=cfg.task_title,
+            task_prompt=cfg.task_prompt,
+            agent=cfg.agent,
+            test_commands=[],
+            requires_database=cfg.requires_database,
+        )
+        ws.task_kind = "sync_feature_pr"
+        await s.commit()
+        ws_id = ws.id
+
+    print(
+        f"[{cfg.task_title[:40]}] workspace = {ws_id} (sync_feature_pr, "
+        f"auto_merge={cfg.auto_merge})",
+        flush=True,
+    )
+
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        persisted = await repo.get(ws_id)
+        assert persisted is not None
+        await repo.transition(
+            persisted,
+            to=WorkspaceStatus.provisioning,
+            reason_code="DRIVER_SYNC_FEATURE",
+        )
+        await s.commit()
+
+    # Step 2: worktree on the PR's head branch. Same per-workspace-ref
+    # trick as release-sync (avoids "branch checked out in two
+    # worktrees" git error when concurrent attaches run on the same
+    # head branch) — the ref ``feature-sync/<ws_id>`` tracks
+    # ``origin/<head_branch>`` and push.default=upstream makes
+    # ``git push`` write back to the PR's branch.
+    branch_name = f"feature-sync/{ws_id}"
+    layout = await git.add_worktree(
+        workspace_id=ws_id,
+        repo_url=cfg.repo_url,
+        base_branch=source_branch,
+        new_branch=branch_name,
+    )
+    await runner.run(
+        [
+            "git",
+            "-C",
+            str(layout.worktree_path),
+            "config",
+            f"branch.{branch_name}.remote",
+            "origin",
+        ]
+    )
+    await runner.run(
+        [
+            "git",
+            "-C",
+            str(layout.worktree_path),
+            "config",
+            f"branch.{branch_name}.merge",
+            f"refs/heads/{source_branch}",
+        ]
+    )
+    await runner.run(
+        [
+            "git",
+            "-C",
+            str(layout.worktree_path),
+            "config",
+            "push.default",
+            "upstream",
+        ]
+    )
+    base_commit = await git.head_sha(workspace_id=ws_id)
+
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        persisted = await repo.get(ws_id)
+        assert persisted is not None
+        persisted.branch_name = branch_name
+        persisted.base_commit = base_commit
+        persisted.compose_project_name = f"awf_{ws_id}"
+        persisted.pr_url = (
+            f"https://github.com/{RepoRef.from_url(cfg.repo_url).slug()}/pull/{cfg.pr_number}"
+        )
+        persisted.pr_number = cfg.pr_number
+        await s.commit()
+
+    # Step 3: materialize companions (same as feature-branch / release-sync).
+    postgres_password = "awf_dev_" + ws_id[-8:]
+    postgres_url = f"postgresql+asyncpg://awf:{postgres_password}@postgres:5432/awf"
+    companion_services: list[CompanionService] = []
+    for comp_raw in cfg.companions or []:
+        resolved = dict(comp_raw)
+        if resolved.get("environment"):
+            resolved["environment"] = {
+                k: (v.replace("${POSTGRES_URL}", postgres_url) if isinstance(v, str) else v)
+                for k, v in resolved["environment"].items()
+            }
+        companion_services.append(await _materialize_companion(resolved, git=git))
+
+    # Step 4: compose up.
+    mirror_mount = AuthMount(
+        source=str(layout.mirror_path),
+        target=str(layout.mirror_path),
+        mode="rw",
+    )
+    spec = WorkspaceComposeSpec(
+        workspace_id=ws_id,
+        worktree_host_path=layout.worktree_path,
+        postgres_image="pgvector/pgvector:pg18",
+        postgres_password=postgres_password,
+        auth_mounts=(mirror_mount, *auth_mounts),
+        git_name=git_name,
+        git_email=git_email,
+        companions=tuple(companion_services),
+    )
+    print(f"[{cfg.task_title[:40]}] compose up ...", flush=True)
+    await compose.up(spec, wait=True)
+    print(f"[{cfg.task_title[:40]}] compose up OK", flush=True)
+
+    # Step 5: walk the state machine directly to monitoring_pr — the
+    # code is already on the PR; no agent run, no validation, no push.
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        persisted = await repo.get(ws_id)
+        assert persisted is not None
+        for to_state, reason in [
+            (WorkspaceStatus.ready, "SYNC_STACK_READY"),
+            (WorkspaceStatus.running, "SYNC_SKIP_AGENT"),
+            (WorkspaceStatus.validating, "SYNC_SKIP_VALIDATE"),
+            (WorkspaceStatus.pushing, "SYNC_SKIP_PUSH"),
+            (WorkspaceStatus.monitoring_pr, "SYNC_FEATURE_ATTACH_MONITOR"),
+        ]:
+            await repo.transition(persisted, to=to_state, reason_code=reason)
+        await s.commit()
+
+    # Step 6: attach the PR monitor, toggling auto_merge per the spec.
+    from awf.adapters.base import get_adapter
+
+    agent_runtime = AgentRuntime(cfg.agent)
+    adapter = get_adapter(agent_runtime, runner=runner, default_model=None)
+    gh = GitHubClient(runner)
+    factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
+    monitor = factory(
+        session_factory=session_factory,
+        runner=runner,
+        adapter=adapter,
+        gh=gh,
+        worktrees_root=work_dir / "git" / "worktrees",
+    )
+    print(
+        f"[{cfg.task_title[:40]}] feature-pr-monitor running for PR "
+        f"#{cfg.pr_number} (auto_merge={cfg.auto_merge}) ...",
         flush=True,
     )
     compose_file = work_dir / "compose" / "compose" / ws_id / "compose.yml"
