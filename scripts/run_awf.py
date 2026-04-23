@@ -290,9 +290,18 @@ def _expand_host_path(path: str) -> str:
     # Pre-expand ``${VAR:-default}`` BEFORE ``os.path.expandvars`` runs,
     # because expandvars doesn't understand the :- syntax and would
     # leave it literal.
+    #
+    # Shell ``:-`` semantics: use ``default`` when VAR is UNSET *OR*
+    # SET-TO-EMPTY. ``os.environ.get(var, default)`` only handles the
+    # UNSET case — a VAR exported as empty would return ``""`` and we'd
+    # end up with a bogus path like ``"/aira-agent/.env"`` that
+    # silently bind-mounts the filesystem root. Use ``or`` to collapse
+    # both "missing" and "empty" to the default, matching bash. (The
+    # non-colon variant ``${VAR-default}`` IS unset-only, but callers
+    # who want that can use plain ``${VAR}`` + expandvars.)
     def _resolve_fallback(match: re.Match[str]) -> str:
         var_name, default = match.group(1), match.group(2)
-        return os.environ.get(var_name, default)
+        return os.environ.get(var_name) or default
 
     with_fallbacks = _DEFAULT_FALLBACK_PATTERN.sub(_resolve_fallback, path)
     # Then the standard ${VAR} / $VAR expansion (for specs that

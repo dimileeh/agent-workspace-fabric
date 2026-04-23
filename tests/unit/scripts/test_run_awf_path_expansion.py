@@ -85,6 +85,21 @@ class TestShellFallbackSyntax:
         assert expanded == "/custom/aira/aira-agent/.env"
 
     @pytest.mark.unit
+    def test_empty_env_var_falls_back_bash_semantics(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Shell ``${VAR:-default}`` uses the default when VAR is set
+        but EMPTY, not just when unset. Without this contract a docker
+        envfile that exported ``AWF_AIRA_CHECKOUT_ROOT=`` (for any
+        reason — pipeline bug, human typo) would make
+        ``_expand_host_path`` produce ``/aira-agent/.env`` and we'd
+        bind-mount filesystem root into the container. Regression
+        guard for PR #4 review feedback (CodeRabbit Major):
+        ``os.environ.get(var, default)`` was handling only the unset
+        case; replaced with ``or default`` to cover both."""
+        monkeypatch.setenv("AWF_AIRA_CHECKOUT_ROOT", "")
+        expanded = _expand_host_path("${AWF_AIRA_CHECKOUT_ROOT:-/opt/aira}/aira-agent/.env")
+        assert expanded == "/opt/aira/aira-agent/.env"
+
+    @pytest.mark.unit
     def test_fallback_itself_gets_tilde_expanded(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """The default value inside ``${VAR:-default}`` should also
         go through ``~`` expansion — that's the whole point of
