@@ -152,42 +152,72 @@ async def _main(
 
 
 def _monitor_already_running(*, work_dir: Path, repo_slug: str, pr_number: int) -> bool:
-    """True iff a sync_release_pr workspace for this (repo, PR) is active
-    in the SAME ``work_dir``.
+    """True iff a sync_release_pr workspace for this (repo, PR) is
+    active in this ``work_dir``'s AWF DB.
 
-    Scoped by ``work_dir`` (not just repo+PR) because two AWF installs
-    can legitimately run side-by-side on the same host — e.g. an
-    operator testing a local branch in ``/tmp/awf-dev`` while
-    production sits in ``/tmp/awf-realrun``. The old filename-only
-    match would have made one install's scheduler suppress the
-    other's launch. Review feedback on PR #2 (CodeRabbit): "use
-    work_dir in the duplicate-monitor check".
+    Active = any workspace row where ``task_kind='sync_release_pr'``,
+    ``repo_url`` matches, ``pr_number`` matches, and ``status`` is
+    NOT terminal (not in ``{completed, failed}``).
 
-    Active = ``run_awf.py`` process whose ``--config`` argument points
-    inside ``<work_dir>/release-pr-specs/`` with the deterministic
-    spec filename for this (repo, PR). A proper implementation would
-    query the AWF DB, but the scheduler runs outside the driver's
-    process so a file/process check is sufficient for MVP — the
-    scheduler's whole job is to avoid spawning duplicates."""
-    spec_filename = f"{repo_slug.replace('/', '__')}-pr{pr_number}.json"
-    # Full config path the launcher passes to run_awf.py. Matching the
-    # full path (not just the filename) is what makes this work_dir-
-    # scoped: the same spec filename under a different work_dir won't
-    # match.
-    expected_arg = str(work_dir / "release-pr-specs" / spec_filename)
-    try:
-        # pgrep -af matches both the command and its args.
-        out = subprocess.check_output(
-            ["pgrep", "-af", "run_awf.py"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    Originally a process-based ``pgrep run_awf.py`` check. That was
+    fragile: a run_awf.py that crashes fast (e.g. docker network pool
+    exhausted at compose-up — we hit this in production) leaves a
+    ``provisioning`` workspace row behind but NO process. Next tick
+    the pgrep check finds nothing, spawns another workspace that
+    also dies, and the scheduler spins forever creating orphan rows.
+
+    DB-based check sees the stuck ``provisioning`` row and correctly
+    reports "already active" so the next tick skips re-spawning. When
+    combined with the driver's ``_run_task_with_failure_guard`` —
+    which marks orphaned rows failed on exception — the scheduler
+    spawns exactly one retry after each terminal failure, not a
+    retry-storm.
+    """
+    # SQLite DB lives at ``<work_dir>/awf.db``. The scheduler may run
+    # before any workspace has been provisioned (no DB yet) — treat
+    # that as "no monitor running" and let the launch proceed.
+    db_path = work_dir / "awf.db"
+    if not db_path.exists():
         return False
-    for line in out.splitlines():
-        if expected_arg in line:
-            return True
-    return False
+    # Use a plain sync sqlite3 connection — the scheduler isn't inside
+    # the async driver's event loop and doesn't need to pull in the
+    # whole SQLAlchemy stack for a single SELECT.
+    import sqlite3
+
+    repo_url_variants = _repo_url_variants(repo_slug)
+    placeholders = ",".join("?" for _ in repo_url_variants)
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as conn:
+            cur = conn.execute(
+                f"""SELECT 1 FROM workspaces
+                    WHERE task_kind = 'sync_release_pr'
+                      AND pr_number = ?
+                      AND repo_url IN ({placeholders})
+                      AND status NOT IN ('completed', 'failed')
+                    LIMIT 1""",
+                (pr_number, *repo_url_variants),
+            )
+            row = cur.fetchone()
+    except sqlite3.DatabaseError:
+        # Malformed / locked DB → don't let that stop the scheduler.
+        # Worst case we spawn a duplicate, which is what we had before.
+        return False
+    return row is not None
+
+
+def _repo_url_variants(repo_slug: str) -> tuple[str, ...]:
+    """Return the repo-URL forms the AWF DB might have stored.
+
+    The driver accepts SSH (``git@github.com:owner/name.git``) and
+    HTTPS (``https://github.com/owner/name``) forms. We check both so
+    the idempotency query doesn't miss a workspace that was recorded
+    with the other flavor."""
+    return (
+        f"git@github.com:{repo_slug}.git",
+        f"git@github.com:{repo_slug}",
+        f"https://github.com/{repo_slug}.git",
+        f"https://github.com/{repo_slug}",
+    )
 
 
 def _load_companions(companions_path: Path) -> list[dict]:

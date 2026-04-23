@@ -273,6 +273,91 @@ def _expand_host_path(path: str) -> str:
     return str(Path(os.path.expandvars(path)).expanduser())
 
 
+async def _run_task_with_failure_guard(
+    cfg: TaskConfig,
+    *,
+    work_dir: Path,
+    session_factory: async_sessionmaker[AsyncSession],
+    auth_mounts: list[AuthMount],
+    git_name: str,
+    git_email: str,
+) -> dict[str, Any]:
+    """Wrap ``_run_task`` so an unhandled exception in the handler
+    still transitions the workspace row to ``failed``.
+
+    Without this guard, a crash in compose-up / git-add-worktree / any
+    other provisioning step leaves the DB row stuck in a non-terminal
+    state forever (observed in production: runaway watcher spawned 122
+    workspaces, each crashed on ``all predefined address pools have
+    been fully subnetted``, none got marked failed, DB-based
+    idempotency checks downstream thought each was still running).
+
+    The guard identifies the stuck workspace by querying the DB for
+    the MOST RECENT row matching this task's ``repo_url`` + ``task_title``
+    that's in a non-terminal state. It's a heuristic — the ``_run_*``
+    handlers don't currently expose the workspace id they created to
+    the caller — but it's robust enough: each handler creates exactly
+    one workspace at task start, and by the time an exception
+    propagates up, that row is the latest non-terminal one for the
+    pair.
+    """
+    try:
+        return await _run_task(
+            cfg,
+            work_dir=work_dir,
+            session_factory=session_factory,
+            auth_mounts=auth_mounts,
+            git_name=git_name,
+            git_email=git_email,
+        )
+    except BaseException as exc:
+        # Any exception — compose failure, git error, KeyboardInterrupt.
+        # Mark the orphaned workspace row failed so downstream
+        # idempotency checks (the scheduler's DB-based
+        # ``_monitor_already_running``) don't see a phantom "active"
+        # workspace that will never transition on its own.
+        await _mark_orphan_workspace_failed(
+            session_factory=session_factory,
+            repo_url=cfg.repo_url,
+            task_title=cfg.task_title,
+            message=f"driver crashed mid-provision: {exc!r}"[:2000],
+        )
+        raise
+
+
+async def _mark_orphan_workspace_failed(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    repo_url: str,
+    task_title: str,
+    message: str,
+) -> None:
+    """Mark the most recent non-terminal workspace for this
+    (repo_url, task_title) as failed. No-op if none found."""
+    from sqlalchemy import select
+
+    from awf.db.models import Workspace
+
+    async with session_factory() as s:
+        result = await s.execute(
+            select(Workspace)
+            .where(
+                Workspace.repo_url == repo_url,
+                Workspace.task_title == task_title,
+                Workspace.status.notin_(("completed", "failed")),
+            )
+            .order_by(Workspace.created_at.desc())
+            .limit(1)
+        )
+        ws = result.scalar_one_or_none()
+        if ws is None:
+            return
+        ws.status = WorkspaceStatus.failed.value
+        ws.failure_reason = "infrastructure_failure"
+        ws.failure_message = message
+        await s.commit()
+
+
 async def _run_task(
     cfg: TaskConfig,
     *,
@@ -887,7 +972,7 @@ async def _main(config_path: Path, work_dir: Path, keep_state: bool) -> int:
     try:
         results = await asyncio.gather(
             *(
-                _run_task(
+                _run_task_with_failure_guard(
                     t,
                     work_dir=work_dir,
                     session_factory=factory,
