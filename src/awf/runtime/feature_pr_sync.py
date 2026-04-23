@@ -146,13 +146,18 @@ def _parse_metadata(payload: dict[str, Any]) -> FeaturePRMetadata:
         base_branch = payload["baseRefName"]
         state = payload["state"]
         is_draft = bool(payload.get("isDraft", False))
-        # ``gh pr view --json`` doesn't expose ``closed`` / ``merged``
-        # as separate boolean fields — derive both from ``state``,
-        # which is the canonical one-of {OPEN, CLOSED, MERGED}. Tests
-        # that stub the gh payload with explicit ``closed`` / ``merged``
-        # keys still work because we honour them if present.
-        closed = bool(payload.get("closed", state == "CLOSED"))
-        merged = bool(payload.get("merged", state == "MERGED"))
+        # ``state`` is the canonical terminal-check source — one of
+        # OPEN / CLOSED / MERGED. Earlier this derivation honoured
+        # explicit ``closed`` / ``merged`` payload keys as overrides,
+        # but that let a stubbed / legacy payload with ``state=MERGED``
+        # + ``merged=false`` slip past the refusal checks below and
+        # spin up a workspace for a PR that can't transition. Trust
+        # ``state`` authoritatively — it's what gh returns and what
+        # we've already built the rest of the parser around. Review
+        # feedback on PR #4 (CodeRabbit): "Keep terminal-state refusal
+        # canonical even when legacy keys are present".
+        closed = state == "CLOSED"
+        merged = state == "MERGED"
         url = payload["url"]
         title = payload.get("title", "")
     except (KeyError, TypeError, ValueError) as exc:

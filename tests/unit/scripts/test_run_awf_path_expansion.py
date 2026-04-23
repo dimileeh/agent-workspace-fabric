@@ -63,3 +63,51 @@ class TestExpandHostPath:
         assert _expand_host_path("~/${AIRA_SUBPATH}/x.env") == str(
             Path("~/Projects/aira/x.env").expanduser()
         )
+
+
+class TestShellFallbackSyntax:
+    """``${VAR:-default}`` lets specs self-describe their default so
+    an operator without the env var set still gets a sensible path.
+    Review feedback on PR #4 (CodeRabbit + gemini): ``~/Projects/aira``
+    isn't fully portable; an operator whose monorepo lives elsewhere
+    needs to override cleanly without hacking the spec."""
+
+    @pytest.mark.unit
+    def test_fallback_used_when_env_var_unset(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AWF_AIRA_CHECKOUT_ROOT", raising=False)
+        expanded = _expand_host_path("${AWF_AIRA_CHECKOUT_ROOT:-/opt/aira}/aira-agent/.env")
+        assert expanded == "/opt/aira/aira-agent/.env"
+
+    @pytest.mark.unit
+    def test_env_var_wins_over_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AWF_AIRA_CHECKOUT_ROOT", "/custom/aira")
+        expanded = _expand_host_path("${AWF_AIRA_CHECKOUT_ROOT:-/opt/aira}/aira-agent/.env")
+        assert expanded == "/custom/aira/aira-agent/.env"
+
+    @pytest.mark.unit
+    def test_fallback_itself_gets_tilde_expanded(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The default value inside ``${VAR:-default}`` should also
+        go through ``~`` expansion — that's the whole point of
+        providing ``~/Projects/aira`` as the default: operators with
+        the standard layout get a valid path, no env var required."""
+        monkeypatch.delenv("AWF_AIRA_CHECKOUT_ROOT", raising=False)
+        expanded = _expand_host_path("${AWF_AIRA_CHECKOUT_ROOT:-~/Projects/aira}/aira-agent/.env")
+        assert expanded == str(Path("~/Projects/aira/aira-agent/.env").expanduser())
+        assert not expanded.startswith("~")
+
+    @pytest.mark.unit
+    def test_empty_fallback_stays_empty_when_var_unset(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Edge case: ``${VAR:-}`` means "empty string if unset". The
+        resulting path would be bogus but we still parse cleanly
+        (shell semantics, not ours to second-guess)."""
+        monkeypatch.delenv("AWF_MISSING_ENV_VAR", raising=False)
+        assert _expand_host_path("${AWF_MISSING_ENV_VAR:-}/x") == "/x"
+
+    @pytest.mark.unit
+    def test_no_fallback_still_works(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Pre-existing ``${VAR}/path`` without ``:-`` still expands
+        exactly as before — the fallback is optional."""
+        monkeypatch.setenv("AWF_PATH_ONLY", "/just/path")
+        assert _expand_host_path("${AWF_PATH_ONLY}/x.env") == "/just/path/x.env"

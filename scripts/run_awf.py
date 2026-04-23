@@ -31,6 +31,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -255,22 +256,49 @@ async def _configure_branch_push_upstream(
         await runner.run(["git", "-C", str(worktree_path), "config", *cfg_args])
 
 
+_DEFAULT_FALLBACK_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*):-([^}]*)\}")
+
+
 def _expand_host_path(path: str) -> str:
-    """Expand ``~`` and ``$VAR`` / ``${VAR}`` in a host-side path string.
+    """Expand ``~``, ``$VAR`` / ``${VAR}``, and ``${VAR:-default}`` in a
+    host-side path string.
 
     Companion specs reference host files by path (typically ``.env``
-    files on the operator's machine). Hardcoding absolute paths like
-    ``/home/dimileeh/Projects/aira/aira-agent/.env`` locks the spec to
-    one developer's filesystem; ``~/Projects/aira/aira-agent/.env`` and
-    ``${AWF_AIRA_CHECKOUT_ROOT}/aira-agent/.env`` both survive being
-    checked into the repo and run on someone else's machine.
+    files on the operator's machine). The progression of portability
+    options:
 
-    Review feedback on PR #2 (CodeRabbit): "hardcoded absolute paths
-    are machine-specific". Fix here, at the loader seam, so every
-    companion spec gets the same treatment without each having to
-    duplicate the expansion logic.
+      * Hardcoded absolute — ``/home/dimileeh/Projects/aira/…`` —
+        locks the spec to one developer's filesystem.
+      * ``~/...`` — portable across Unix users but assumes the same
+        directory structure under each HOME.
+      * ``${VAR}/...`` — needs the operator to set VAR; silently
+        fails if unset (``expandvars`` leaves ``${VAR}`` literal and
+        we'd try to open a nonexistent file).
+      * ``${VAR:-default}/...`` — best of both worlds: operator can
+        override with VAR, spec works out of the box if VAR is unset.
+        Shell syntax, so spec authors already know it.
+
+    Review feedback on PRs #2, #4 (CodeRabbit + gemini, repeated):
+    the plain ``~/Projects/aira`` path wasn't fully portable. This
+    helper now understands the shell ``${VAR:-default}`` idiom, so
+    a spec can say ``${AWF_AIRA_CHECKOUT_ROOT:-~/Projects/aira}/…``
+    and an operator on a machine without that env var + without the
+    exact directory gets a clear error ("no such file") instead of
+    a silent broken mount.
     """
-    return str(Path(os.path.expandvars(path)).expanduser())
+
+    # Pre-expand ``${VAR:-default}`` BEFORE ``os.path.expandvars`` runs,
+    # because expandvars doesn't understand the :- syntax and would
+    # leave it literal.
+    def _resolve_fallback(match: re.Match[str]) -> str:
+        var_name, default = match.group(1), match.group(2)
+        return os.environ.get(var_name, default)
+
+    with_fallbacks = _DEFAULT_FALLBACK_PATTERN.sub(_resolve_fallback, path)
+    # Then the standard ${VAR} / $VAR expansion (for specs that
+    # deliberately don't want a fallback).
+    expanded = os.path.expandvars(with_fallbacks)
+    return str(Path(expanded).expanduser())
 
 
 async def _run_task_with_failure_guard(
