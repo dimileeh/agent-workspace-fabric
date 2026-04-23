@@ -80,7 +80,10 @@ class TestParseArgs:
         assert ns.repo == _REPO_URL
         assert ns.pr == 277
         assert ns.agent == "codex"  # default matches the other scripts
-        assert ns.auto_merge is False  # safe default
+        # Default is auto-merge ON for feature→dev PRs (AWF's contract is
+        # "deliver the feature, land it when green"). Callers pass
+        # ``--no-auto-merge`` for one-off recovery runs.
+        assert ns.auto_merge is True
         assert ns.companions is None
 
     @pytest.mark.unit
@@ -89,9 +92,9 @@ class TestParseArgs:
         assert ns.agent == "claude_code"
 
     @pytest.mark.unit
-    def test_auto_merge_flag(self) -> None:
-        ns = cli.parse_args(["--repo", _REPO_URL, "--pr", "277", "--auto-merge"])
-        assert ns.auto_merge is True
+    def test_no_auto_merge_flag_disables_it(self) -> None:
+        ns = cli.parse_args(["--repo", _REPO_URL, "--pr", "277", "--no-auto-merge"])
+        assert ns.auto_merge is False
 
     @pytest.mark.unit
     def test_companions_path(self, tmp_path: Path) -> None:

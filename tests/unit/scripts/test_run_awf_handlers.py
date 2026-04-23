@@ -243,9 +243,16 @@ def patch_handlers(
         monitors.append(m)
         return m
 
+    # Patch at the source module because the sync handlers import these
+    # lazily inside their own function bodies — patching on ``run_awf``
+    # alone only catches the feature_branch_pr path's import.
     monkeypatch.setattr(
         "awf.runtime.release_pr_monitor.build_release_pr_monitor",
         _build_release_monitor,
+    )
+    monkeypatch.setattr(
+        "awf.runtime.release_pr_monitor.build_feature_pr_monitor",
+        _build_feature_monitor,
     )
     monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _build_feature_monitor)
 
@@ -579,6 +586,147 @@ class TestSyncFeaturePrHandler:
                 git_name="t",
                 git_email="t@e.com",
             )
+
+    @pytest.mark.unit
+    async def test_default_auto_merge_true_routes_to_feature_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """AWF's contract: a green feature→development PR lands
+        automatically. ``TaskConfig.auto_merge`` defaults to ``True`` so
+        the handler routes to ``build_feature_pr_monitor`` (hardcodes
+        ``auto_merge=True``) instead of ``build_release_pr_monitor``
+        (hardcodes ``auto_merge=False`` → NotifyHuman). Regression shield
+        for PR #277, which got stuck at "ready to merge" because the
+        default was ``False``."""
+        which_builder_ran: list[str] = []
+
+        class _TinyMonitor:
+            def __init__(self, *, session_factory: async_sessionmaker[AsyncSession]) -> None:
+                self._factory = session_factory
+
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                async with self._factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="T")
+                    await s.commit()
+
+        def _tiny_release(**kwargs: Any) -> _TinyMonitor:
+            which_builder_ran.append("release")
+            return _TinyMonitor(session_factory=kwargs["session_factory"])
+
+        def _tiny_feature(**kwargs: Any) -> _TinyMonitor:
+            which_builder_ran.append("feature")
+            return _TinyMonitor(session_factory=kwargs["session_factory"])
+
+        monkeypatch.setattr(
+            "awf.runtime.release_pr_monitor.build_release_pr_monitor", _tiny_release
+        )
+        monkeypatch.setattr(
+            "awf.runtime.release_pr_monitor.build_feature_pr_monitor", _tiny_feature
+        )
+        monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _tiny_feature)
+        monkeypatch.setattr(run_awf, "GitManager", lambda p: _FakeGitManager(p))
+        monkeypatch.setattr(run_awf, "ComposeManager", _FakeComposeManager)
+        monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
+
+        async def _noop_config(**_kw: Any) -> None:
+            pass
+
+        monkeypatch.setattr(run_awf, "_configure_branch_push_upstream", _noop_config)
+
+        # Default auto_merge — explicitly NOT set on TaskConfig.
+        await run_awf._run_task(
+            _cfg(
+                task_kind="sync_feature_pr",
+                branch_base="development",
+                source_branch="fix/some-head",
+                pr_number=888,
+            ),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="t",
+            git_email="t@e.com",
+        )
+        assert which_builder_ran == ["feature"], (
+            "default auto_merge must route to build_feature_pr_monitor "
+            "(which hardcodes auto_merge=True). Anything else reopens "
+            "the PR #277 bug where feature→dev PRs got stuck as "
+            "NotifyHuman forever."
+        )
+
+    @pytest.mark.unit
+    async def test_explicit_auto_merge_false_routes_to_release_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        """Opt-out still works: ``auto_merge=False`` routes to the
+        release monitor (notify-human terminal). Needed for one-off
+        recovery invocations."""
+        which_builder_ran: list[str] = []
+
+        class _TinyMonitor:
+            def __init__(self, *, session_factory: async_sessionmaker[AsyncSession]) -> None:
+                self._factory = session_factory
+
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                async with self._factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="T")
+                    await s.commit()
+
+        def _tiny_release(**kwargs: Any) -> _TinyMonitor:
+            which_builder_ran.append("release")
+            return _TinyMonitor(session_factory=kwargs["session_factory"])
+
+        def _tiny_feature(**kwargs: Any) -> _TinyMonitor:
+            which_builder_ran.append("feature")
+            return _TinyMonitor(session_factory=kwargs["session_factory"])
+
+        monkeypatch.setattr(
+            "awf.runtime.release_pr_monitor.build_release_pr_monitor", _tiny_release
+        )
+        monkeypatch.setattr(
+            "awf.runtime.release_pr_monitor.build_feature_pr_monitor", _tiny_feature
+        )
+        monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _tiny_feature)
+        monkeypatch.setattr(run_awf, "GitManager", lambda p: _FakeGitManager(p))
+        monkeypatch.setattr(run_awf, "ComposeManager", _FakeComposeManager)
+        monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
+
+        async def _noop_config(**_kw: Any) -> None:
+            pass
+
+        monkeypatch.setattr(run_awf, "_configure_branch_push_upstream", _noop_config)
+
+        await run_awf._run_task(
+            _cfg(
+                task_kind="sync_feature_pr",
+                branch_base="development",
+                source_branch="fix/some-head",
+                pr_number=777,
+                auto_merge=False,
+            ),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="t",
+            git_email="t@e.com",
+        )
+        assert which_builder_ran == ["release"]
 
     @pytest.mark.unit
     async def test_missing_pr_number_raises(

@@ -115,12 +115,17 @@ class TaskConfig:
     unset, the driver queries GitHub for it and errors out if none
     exists (the scheduler should always populate this)."""
 
-    auto_merge: bool = False
-    """For ``sync_feature_pr`` only. ``True`` → monitor lands the PR
-    itself once all gates turn green; ``False`` → monitor posts a
-    "ready to merge" notification and waits for a human. Safe default
-    is ``False`` because the CLI's most common caller (failed-workspace
-    recovery) wants deliberate human review rather than silent merges."""
+    auto_merge: bool = True
+    """For ``sync_feature_pr`` only. ``True`` → monitor lands the feature
+    PR (into ``development``) once all gates turn green; ``False`` →
+    monitor posts a "ready to merge" notification and waits for a human.
+
+    Defaults to ``True``: a feature→development PR with all gates green
+    IS the "ready to ship" state — blocking on human approval defeats
+    the whole AWF premise of "tell AWF what to build, AWF delivers".
+    Release PRs (development→main) are a separate task kind
+    (``sync_release_pr``) and still hardcode ``auto_merge=False`` — the
+    dev→main gate is where human approval lives."""
 
 
 def _build_auth_mounts(host_home: Path) -> list[AuthMount]:
