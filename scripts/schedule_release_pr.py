@@ -126,11 +126,16 @@ async def _main(
         # Fire-and-forget — run_awf.py is a long-running monitor; don't
         # block this scheduler tick on it.
         log_path = work_dir / f"release-monitor-{result.pr_number}.log"
-        python_bin = _ROOT / ".venv" / "bin" / "python"
+        # Spawn run_awf.py using whichever Python is currently running
+        # this scheduler. Hardcoding ``_ROOT / ".venv" / "bin" / "python"``
+        # only works when the caller's venv lives at exactly that path;
+        # ``uv``, system python, and operator-local virtualenvs would
+        # all break that assumption. Review feedback on PR #2
+        # (CodeRabbit): "use the current interpreter".
         run_awf = _ROOT / "scripts" / "run_awf.py"
         subprocess.Popen(  # noqa: S603 - deliberately spawning a long-running child
             [
-                str(python_bin),
+                sys.executable,
                 str(run_awf),
                 "--config",
                 str(spec_path),
@@ -147,28 +152,72 @@ async def _main(
 
 
 def _monitor_already_running(*, work_dir: Path, repo_slug: str, pr_number: int) -> bool:
-    """True iff a sync_release_pr workspace for this (repo, PR) is active.
+    """True iff a sync_release_pr workspace for this (repo, PR) is
+    active in this ``work_dir``'s AWF DB.
 
-    Active = status in one of the non-terminal states. Checked by
-    scanning process list for running ``run_awf.py`` invocations whose
-    config path matches our deterministic spec filename. A proper
-    implementation would query the AWF DB, but the scheduler runs
-    outside the driver's process so a file/process check is sufficient
-    for MVP — the scheduler's whole job is to avoid spawning duplicates."""
-    spec_filename = f"{repo_slug.replace('/', '__')}-pr{pr_number}.json"
-    try:
-        # pgrep -af matches both the command and its args.
-        out = subprocess.check_output(
-            ["pgrep", "-af", "run_awf.py"],
-            text=True,
-            stderr=subprocess.DEVNULL,
-        )
-    except (subprocess.CalledProcessError, FileNotFoundError):
+    Active = any workspace row where ``task_kind='sync_release_pr'``,
+    ``repo_url`` matches, ``pr_number`` matches, and ``status`` is
+    NOT terminal (not in ``{completed, failed}``).
+
+    Originally a process-based ``pgrep run_awf.py`` check. That was
+    fragile: a run_awf.py that crashes fast (e.g. docker network pool
+    exhausted at compose-up — we hit this in production) leaves a
+    ``provisioning`` workspace row behind but NO process. Next tick
+    the pgrep check finds nothing, spawns another workspace that
+    also dies, and the scheduler spins forever creating orphan rows.
+
+    DB-based check sees the stuck ``provisioning`` row and correctly
+    reports "already active" so the next tick skips re-spawning. When
+    combined with the driver's ``_run_task_with_failure_guard`` —
+    which marks orphaned rows failed on exception — the scheduler
+    spawns exactly one retry after each terminal failure, not a
+    retry-storm.
+    """
+    # SQLite DB lives at ``<work_dir>/awf.db``. The scheduler may run
+    # before any workspace has been provisioned (no DB yet) — treat
+    # that as "no monitor running" and let the launch proceed.
+    db_path = work_dir / "awf.db"
+    if not db_path.exists():
         return False
-    for line in out.splitlines():
-        if spec_filename in line:
-            return True
-    return False
+    # Use a plain sync sqlite3 connection — the scheduler isn't inside
+    # the async driver's event loop and doesn't need to pull in the
+    # whole SQLAlchemy stack for a single SELECT.
+    import sqlite3
+
+    repo_url_variants = _repo_url_variants(repo_slug)
+    placeholders = ",".join("?" for _ in repo_url_variants)
+    try:
+        with sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5) as conn:
+            cur = conn.execute(
+                f"""SELECT 1 FROM workspaces
+                    WHERE task_kind = 'sync_release_pr'
+                      AND pr_number = ?
+                      AND repo_url IN ({placeholders})
+                      AND status NOT IN ('completed', 'failed')
+                    LIMIT 1""",
+                (pr_number, *repo_url_variants),
+            )
+            row = cur.fetchone()
+    except sqlite3.DatabaseError:
+        # Malformed / locked DB → don't let that stop the scheduler.
+        # Worst case we spawn a duplicate, which is what we had before.
+        return False
+    return row is not None
+
+
+def _repo_url_variants(repo_slug: str) -> tuple[str, ...]:
+    """Return the repo-URL forms the AWF DB might have stored.
+
+    The driver accepts SSH (``git@github.com:owner/name.git``) and
+    HTTPS (``https://github.com/owner/name``) forms. We check both so
+    the idempotency query doesn't miss a workspace that was recorded
+    with the other flavor."""
+    return (
+        f"git@github.com:{repo_slug}.git",
+        f"git@github.com:{repo_slug}",
+        f"https://github.com/{repo_slug}.git",
+        f"https://github.com/{repo_slug}",
+    )
 
 
 def _load_companions(companions_path: Path) -> list[dict]:

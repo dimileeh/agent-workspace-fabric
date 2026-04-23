@@ -495,6 +495,74 @@ class TestTerminalSuccess:
             )
 
 
+# ── Deferred feedback gate ─────────────────────────────────────────────────
+
+
+class TestDeferredFeedbackGate:
+    """Regression tests for the Major bug CodeRabbit flagged on PR #2:
+    the pre-fix filter treated threads marked ``"defer"`` as "addressed"
+    at step 2, so a PR with only-deferred unresolved threads looked
+    clean to the merge gate and auto-merged silently. The fix adds a
+    dedicated gate: if any deferred thread is still unresolved on
+    GitHub, return NotifyHuman regardless of ``auto_merge``."""
+
+    @pytest.mark.unit
+    def test_deferred_thread_still_open_blocks_merge(self) -> None:
+        """The exact scenario: CI green, nothing to merge against,
+        only thing left is a thread the agent deferred. Must NOT merge."""
+        state = MonitorState(threads_addressed_ids={"T1": "defer"})
+        status = _status(inline=(_thread(tid="T1"),))
+        action = decide(state=state, status=status, config=MonitorConfig(auto_merge=True))
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_deferred_review_comment_still_open_blocks_merge(self) -> None:
+        """Same contract for top-level review comments (CodeRabbit posts
+        these as ``ReviewComment`` not ``ReviewThread`` — both paths
+        must honour defer)."""
+        state = MonitorState(threads_addressed_ids={"C1": "defer"})
+        status = _status(reviews=(_review(cid="C1"),))
+        action = decide(state=state, status=status, config=MonitorConfig(auto_merge=True))
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_resolved_deferred_thread_unblocks_merge(self) -> None:
+        """Happy path: agent deferred T1; the maintainer then resolved
+        T1 on GitHub. Next poll GitHub reports T1 no longer in
+        ``unresolved_inline_threads`` → the defer gate finds no
+        deferred-still-open thread → Merge proceeds."""
+        state = MonitorState(threads_addressed_ids={"T1": "defer"})
+        status = _status(inline=())  # maintainer resolved it
+        action = decide(state=state, status=status, config=MonitorConfig(auto_merge=True))
+        assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_fix_committed_thread_does_not_trigger_defer_gate(self) -> None:
+        """Sanity: only ``defer`` should route through NotifyHuman. A
+        thread marked ``fix_committed`` would already have been
+        resolved on GitHub, but even if it somehow lingers
+        unresolved, it must not be treated as deferred."""
+        state = MonitorState(threads_addressed_ids={"T1": "fix_committed"})
+        # If it ever appeared unresolved — which would be a different
+        # bug — it must either re-trigger AddressComments OR merge,
+        # NEVER be confused with a defer.
+        status_gone = _status(inline=())
+        assert isinstance(
+            decide(status=status_gone, state=state, config=MonitorConfig(auto_merge=True)),
+            Merge,
+        )
+
+    @pytest.mark.unit
+    def test_release_variant_still_ends_in_notify_human(self) -> None:
+        """Release-PR variant (``auto_merge=False``) already returns
+        NotifyHuman unconditionally — the defer gate must not corrupt
+        that path (verifying no regression on the release-PR variant)."""
+        state = MonitorState(threads_addressed_ids={"T1": "defer"})
+        status = _status(inline=(_thread(tid="T1"),))
+        action = decide(state=state, status=status, config=MonitorConfig(auto_merge=False))
+        assert isinstance(action, NotifyHuman)
+
+
 # ── Iteration accounting — decide() doesn't mutate state ──────────────────
 
 

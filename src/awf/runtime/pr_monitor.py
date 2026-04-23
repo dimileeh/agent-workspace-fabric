@@ -371,6 +371,29 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return NotifyHuman()
 
+    # 7.5. Deferred feedback still unresolved on GitHub → block auto-merge.
+    #
+    # "Defer" means the coding CLI decided a reviewer comment needs human
+    # follow-up (design question, out-of-scope, etc.) — NOT that the
+    # thread has been addressed. The previous code filtered such threads
+    # out of ``new_threads`` (step 2) AND let merge proceed at step 8,
+    # silently merging past feedback the maintainer never saw. Now we
+    # explicitly check: if any thread we marked ``defer`` is still
+    # unresolved on GitHub (i.e. the human hasn't resolved it either),
+    # hand off to NotifyHuman regardless of ``auto_merge`` so the
+    # deferred question can't slip through. Review feedback on PR #2
+    # (CodeRabbit, Major): "Deferred feedback still disappears from the
+    # merge gate".
+    deferred_still_open = any(
+        state.threads_addressed_ids.get(t.thread_id) == "defer"
+        for t in status.unresolved_inline_threads
+    ) or any(
+        state.threads_addressed_ids.get(c.comment_id) == "defer"
+        for c in status.unresolved_review_comments
+    )
+    if deferred_still_open:
+        return NotifyHuman()
+
     # 8. All green — terminal success action.
     if config.auto_merge:
         return Merge()

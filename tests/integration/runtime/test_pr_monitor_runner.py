@@ -523,7 +523,7 @@ class TestAddressComments:
             assert ws.monitor_threads_addressed["T_fp"] == "false_positive"
 
     @pytest.mark.unit
-    async def test_defer_verdict_does_not_resolve_thread(
+    async def test_defer_verdict_does_not_resolve_thread_and_blocks_merge(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -531,6 +531,19 @@ class TestAddressComments:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
+        """Two contracts around ``DEFER``:
+
+        1. The thread is NOT resolved on GitHub — "defer" means the
+           agent couldn't decide, a human has to. Resolving would
+           sweep the question under the rug.
+        2. The merge gate MUST NOT fire while a deferred thread is
+           still unresolved on GitHub. Previously (the bug CodeRabbit
+           flagged on PR #2) the filter in ``decide()`` treated
+           deferred threads as "addressed" at step 2 and let step 8
+           merge silently. Now a dedicated gate at step 7.5 returns
+           NotifyHuman instead — the maintainer sees the "ready to
+           review" comment AND the deferred thread still standing.
+        """
         ws_id = await _seed_monitoring_workspace(factory)
         thread = {
             "id": "T_defer",
@@ -546,14 +559,15 @@ class TestAddressComments:
         adapter.queue(stdout="DEFER: need design input from maintainer")
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle
         cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
-        # No resolve_thread call queued — test checks we didn't hit it.
-        # After a second outer iteration the thread is "addressed" in state
-        # so decide() returns Merge; queue the merge.
+        # No resolve_thread call queued — contract #1.
+        # Second outer iteration: thread still unresolved on GitHub.
+        # decide() should now hit the deferred-still-open gate and
+        # return NotifyHuman — queue the ``gh pr comment`` call, NOT a
+        # merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # still there
-        cmd.queue_result(returncode=0)  # merge (thread addressed in state, gate passes)
-        cmd.queue_result(returncode=0, stdout="M\n")
+        cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman terminal)
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
@@ -566,12 +580,25 @@ class TestAddressComments:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        # Specifically assert no resolveReviewThread mutation fired.
+        # Contract #1: no resolveReviewThread mutation fired.
         for c in cmd.calls:
             query_args = [a for a in c.args if a.startswith("query=")]
             assert not any("resolveReviewThread" in q for q in query_args), (
                 "defer verdict must NOT resolve the thread"
             )
+        # Contract #2: no merge call fired. The merge would look like
+        # ``gh pr merge ...``; the NotifyHuman path is ``gh pr comment``.
+        assert not any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls), (
+            "deferred-still-open must block merge — maintainer-driven only"
+        )
+        # Workspace ended in a terminal state (NotifyHuman → completed-ish).
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status in (
+                WorkspaceStatus.completed.value,
+                WorkspaceStatus.failed.value,
+            ), "monitor must terminate the workspace after NotifyHuman, not loop forever"
 
 
 class TestFixCyclePasses:

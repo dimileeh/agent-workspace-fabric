@@ -72,14 +72,20 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
             print("Workspace has no pr_number; nothing to re-monitor.", file=sys.stderr)
             return 2
         # Bypass state-machine: we're deliberately re-entering the monitor
-        # phase after a premature completion. Reset iter_count to give the
-        # "just finish merge" phase a fresh budget; KEEP
-        # monitor_threads_addressed so we don't re-poke CodeRabbit threads
-        # we already resolved.
+        # phase after a premature completion. Reset iter_count AND
+        # ``monitor_started_at`` so the wall-clock budget starts fresh
+        # from this remonitor call — otherwise ``decide()`` keeps
+        # comparing ``now()`` against the original entry timestamp and
+        # an old workspace re-entered after its wall-clock cap has
+        # already elapsed aborts on the first tick. KEEP
+        # ``monitor_threads_addressed`` so we don't re-poke CodeRabbit
+        # threads we already resolved. Review feedback on PR #2
+        # (CodeRabbit): flag the wall-clock-cap reset pattern.
         ws.status = WorkspaceStatus.monitoring_pr.value
         ws.failure_reason = None
         ws.failure_message = None
         ws.monitor_iter_count = 0
+        ws.monitor_started_at = None
         await s.commit()
         agent_runtime = AgentRuntime(ws.agent)
         compose_project = ws.compose_project_name or f"awf_{workspace_id}"
