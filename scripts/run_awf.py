@@ -164,22 +164,36 @@ async def _materialize_companion(
     raw: dict[str, Any],
     *,
     git: GitManager,
+    owner_workspace_id: str,
 ) -> CompanionService:
     """Resolve one JSON companion block to a CompanionService.
 
     If ``repo_url`` is set, we clone it to a dedicated companion worktree
-    under ``<work_dir>/companions/<name>`` and use that as the build context.
-    Otherwise ``build_context`` is taken verbatim (must already exist).
+    under ``<work_dir>/companions/<workspace_id>__<name>`` and use that
+    as the build context. Otherwise ``build_context`` is taken verbatim
+    (must already exist).
+
+    ``owner_workspace_id`` scopes the companion's worktree ID so two
+    concurrent workspaces each materializing a companion with the same
+    NAME (e.g. both need a ``backend`` companion from aira-agent) don't
+    stomp on a shared ``companion__backend`` path. The previous naming
+    was ``companion__{name}`` — dangerous under ``asyncio.gather()``,
+    where two ``_run_task()`` coroutines race to ``remove_worktree`` +
+    ``add_worktree`` at the same filesystem path. Review feedback on
+    PR #2 (CodeRabbit, Critical): "Scope companion worktree IDs to
+    the owning workspace".
     """
     name = raw["name"]
     if raw.get("repo_url"):
         # Companion gets its own mirror + worktree, checked out at the base
         # branch (no feature branch — we don't edit companions). The
-        # companion_ws_id is deterministic, so a failed prior run can leave
-        # the worktree on disk; remove it first so add_worktree sees a clean
-        # slate. Companions are read-only build contexts — we don't commit
-        # back to them, so nothing is lost by re-creating them.
-        companion_ws_id = f"companion__{name}"
+        # companion_ws_id is deterministic per (owner_workspace, name)
+        # so a failed prior run's worktree can be removed cleanly; a
+        # concurrent workspace with a same-named companion lands in a
+        # different path. Companions are read-only build contexts — we
+        # don't commit back to them, so nothing is lost by re-creating
+        # them.
+        companion_ws_id = f"companion__{owner_workspace_id}__{name}"
         await git.remove_worktree(
             workspace_id=companion_ws_id,
             repo_url=raw["repo_url"],
@@ -188,7 +202,7 @@ async def _materialize_companion(
             workspace_id=companion_ws_id,
             repo_url=raw["repo_url"],
             base_branch=raw.get("branch", "development"),
-            new_branch=f"awf-companion/{name}-{os.getpid()}",
+            new_branch=f"awf-companion/{owner_workspace_id}-{name}",
         )
         build_context = str(layout.worktree_path)
     else:
@@ -207,6 +221,38 @@ async def _materialize_companion(
         ports=tuple((cp, hp) for cp, hp in (raw.get("ports") or [])),
         command=raw.get("command"),
     )
+
+
+async def _configure_branch_push_upstream(
+    *,
+    runner: AsyncioSubprocessRunner,
+    worktree_path: Path,
+    branch_name: str,
+    remote_branch: str,
+) -> None:
+    """Configure a per-workspace branch so ``git push`` writes back to
+    the *remote* branch it's tracking.
+
+    Used by the ``sync_release_pr`` and ``sync_feature_pr`` handlers,
+    which check out a local ref like ``release-sync/ws_<id>`` or
+    ``feature-sync/ws_<id>`` that should push to a specific remote
+    branch (``development``, the PR's head, etc.). Extracted from the
+    handlers so the three identical blocks can't drift out of sync.
+    Review feedback on PR #2 (CodeRabbit, generic CLI concern at
+    run_awf.py:487).
+
+    Sets three git configs on the worktree:
+      * ``branch.<branch>.remote = origin``
+      * ``branch.<branch>.merge = refs/heads/<remote_branch>``
+      * ``push.default = upstream`` — so bare ``git push`` writes
+        HEAD to whatever the two above specify.
+    """
+    for cfg_args in (
+        [f"branch.{branch_name}.remote", "origin"],
+        [f"branch.{branch_name}.merge", f"refs/heads/{remote_branch}"],
+        ["push.default", "upstream"],
+    ):
+        await runner.run(["git", "-C", str(worktree_path), "config", *cfg_args])
 
 
 def _expand_host_path(path: str) -> str:
@@ -321,7 +367,9 @@ async def _run_task(
                 k: (v.replace("${POSTGRES_URL}", postgres_url) if isinstance(v, str) else v)
                 for k, v in resolved["environment"].items()
             }
-        companion_services.append(await _materialize_companion(resolved, git=git))
+        companion_services.append(
+            await _materialize_companion(resolved, git=git, owner_workspace_id=ws_id)
+        )
 
     # Step 4: compose up with auth mounts + companions.
     # ── git-in-container ──────────────────────────────────────────────────
@@ -488,38 +536,11 @@ async def _run_sync_release_pr(
         base_branch=source_branch,
         new_branch=branch_name,
     )
-    # Configure the per-workspace branch to push to the source branch.
-    await runner.run(
-        [
-            "git",
-            "-C",
-            str(layout.worktree_path),
-            "config",
-            f"branch.{branch_name}.remote",
-            "origin",
-        ]
-    )
-    await runner.run(
-        [
-            "git",
-            "-C",
-            str(layout.worktree_path),
-            "config",
-            f"branch.{branch_name}.merge",
-            f"refs/heads/{source_branch}",
-        ]
-    )
-    # push.default = upstream makes ``git push`` (with no refspec) push
-    # HEAD to ``merge``-configured upstream — i.e. origin/<source_branch>.
-    await runner.run(
-        [
-            "git",
-            "-C",
-            str(layout.worktree_path),
-            "config",
-            "push.default",
-            "upstream",
-        ]
+    await _configure_branch_push_upstream(
+        runner=runner,
+        worktree_path=layout.worktree_path,
+        branch_name=branch_name,
+        remote_branch=source_branch,
     )
     base_commit = await git.head_sha(workspace_id=ws_id)
 
@@ -547,7 +568,9 @@ async def _run_sync_release_pr(
                 k: (v.replace("${POSTGRES_URL}", postgres_url) if isinstance(v, str) else v)
                 for k, v in resolved["environment"].items()
             }
-        companion_services.append(await _materialize_companion(resolved, git=git))
+        companion_services.append(
+            await _materialize_companion(resolved, git=git, owner_workspace_id=ws_id)
+        )
 
     # Step 4: compose up (agent container + postgres + companions).
     mirror_mount = AuthMount(
@@ -718,35 +741,11 @@ async def _run_sync_feature_pr(
         base_branch=source_branch,
         new_branch=branch_name,
     )
-    await runner.run(
-        [
-            "git",
-            "-C",
-            str(layout.worktree_path),
-            "config",
-            f"branch.{branch_name}.remote",
-            "origin",
-        ]
-    )
-    await runner.run(
-        [
-            "git",
-            "-C",
-            str(layout.worktree_path),
-            "config",
-            f"branch.{branch_name}.merge",
-            f"refs/heads/{source_branch}",
-        ]
-    )
-    await runner.run(
-        [
-            "git",
-            "-C",
-            str(layout.worktree_path),
-            "config",
-            "push.default",
-            "upstream",
-        ]
+    await _configure_branch_push_upstream(
+        runner=runner,
+        worktree_path=layout.worktree_path,
+        branch_name=branch_name,
+        remote_branch=source_branch,
     )
     base_commit = await git.head_sha(workspace_id=ws_id)
 
@@ -774,7 +773,9 @@ async def _run_sync_feature_pr(
                 k: (v.replace("${POSTGRES_URL}", postgres_url) if isinstance(v, str) else v)
                 for k, v in resolved["environment"].items()
             }
-        companion_services.append(await _materialize_companion(resolved, git=git))
+        companion_services.append(
+            await _materialize_companion(resolved, git=git, owner_workspace_id=ws_id)
+        )
 
     # Step 4: compose up.
     mirror_mount = AuthMount(
