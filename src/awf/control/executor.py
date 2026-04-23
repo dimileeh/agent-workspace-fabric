@@ -26,6 +26,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter, AgentRunError, get_adapter
 from awf.common.commands import AsyncCommandRunner
 from awf.common.logging import get_logger
+from awf.control.validation_fix_cycle import (
+    ValidationFixContext,
+    build_fix_prompt,
+    read_output_tail,
+)
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
@@ -60,6 +65,13 @@ class ExecutorConfig:
 
     default_models: dict[AgentRuntime, str]
     """Default LLM model to pass each adapter when the request doesn't set one."""
+
+    max_validation_fix_passes: int = 5
+    """Maximum fix attempts on validation failure. After the initial agent
+    run + validation, if validation fails, the executor re-invokes the
+    coding CLI with a fix prompt (failing command + stdout/stderr tails)
+    and re-validates. ``0`` disables the loop (single-shot legacy
+    behaviour); the default mirrors the PR monitor's fix-cycle cap."""
 
 
 class WorkspaceExecutor:
@@ -170,6 +182,26 @@ class WorkspaceExecutor:
         # and we fail with a specific reason rather than pushing nothing.
         worktree_host = self._config.worktrees_root / workspace_id
 
+        # ``base_commit`` is set by the provisioner before a workspace ever
+        # reaches ``ready`` — if it's missing here something went wrong
+        # upstream and every ``rev-list``/``merge-base`` below would
+        # inject the literal string "None" into a git command. Fail
+        # cleanly instead of passing "None..HEAD" to git
+        # (review feedback on #2: gemini, coderabbit).
+        if ws.base_commit is None:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "workspace has no base_commit — provisioning must set "
+                    "this before the agent run; cannot verify feature-branch "
+                    "commits without it"
+                ),
+            )
+            return
+        base_commit: str = ws.base_commit
+
         async def _git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
             return await self._runner.run(["git", "-C", str(worktree_host), *args])
 
@@ -198,9 +230,9 @@ class WorkspaceExecutor:
                     )
             # Regardless of whether we just committed, verify HEAD has advanced
             # past the base commit. If not, the agent produced no change.
-            rev_count = await _git_in_worktree(["rev-list", "--count", f"{ws.base_commit}..HEAD"])
+            rev_count = await _git_in_worktree(["rev-list", "--count", f"{base_commit}..HEAD"])
             if not rev_count.ok or int(rev_count.stdout.strip() or "0") == 0:
-                base_short = ws.base_commit[:10] if ws.base_commit else "unknown"
+                base_short = base_commit[:10] if base_commit else "unknown"
                 message = (
                     f"agent exited without producing any commits on the feature branch "
                     f"(base={base_short})"
@@ -230,26 +262,23 @@ class WorkspaceExecutor:
             # cumulative diff, and the branch is reattached to a valid
             # ancestry so the PR can be opened normally.
             #
-            # Invariant: ``ws.base_commit`` is always populated by
+            # Invariant: ``base_commit`` is always populated by
             # ``_claim_ready`` before this block runs. The ``assert`` both
             # documents and satisfies mypy.
-            assert ws.base_commit is not None
-            ancestor = await _git_in_worktree(
-                ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
-            )
+            ancestor = await _git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
             if not ancestor.ok:
                 _log.warning(
                     "executor.orphan_history_detected",
                     workspace_id=workspace_id,
-                    base_commit=ws.base_commit,
+                    base_commit=base_commit,
                 )
-                reset = await _git_in_worktree(["reset", "--soft", ws.base_commit])
+                reset = await _git_in_worktree(["reset", "--soft", base_commit])
                 if reset.ok:
                     recovery_msg = f"awf: {ws.task_title} (recovered from orphan)"[:72]
                     recovery_body = (
                         f"AWF detected orphan history on workspace {workspace_id} "
                         f"(agent: {ws.agent}) and squashed the cumulative diff "
-                        f"onto base commit {ws.base_commit[:10]}.\n"
+                        f"onto base commit {base_commit[:10]}.\n"
                     )
                     recover_commit = await self._runner.run(
                         [
@@ -265,7 +294,7 @@ class WorkspaceExecutor:
                     )
                     if recover_commit.ok:
                         ancestor = await _git_in_worktree(
-                            ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
+                            ["merge-base", "--is-ancestor", base_commit, "HEAD"]
                         )
                 if not ancestor.ok:
                     await self._mark_failed(
@@ -274,7 +303,7 @@ class WorkspaceExecutor:
                         failure_reason=FailureReason.agent_failure,
                         message=(
                             "agent severed git history — HEAD does not descend from "
-                            f"base commit {ws.base_commit[:10] if ws.base_commit else 'unknown'}, "
+                            f"base commit {base_commit[:10] if base_commit else 'unknown'}, "
                             "and automatic recovery (reset --soft + fresh commit) also failed. "
                             "The coding CLI likely ran `git checkout --orphan` or reinitialised "
                             "the repo; inspect the worktree manually."
@@ -284,7 +313,7 @@ class WorkspaceExecutor:
                 _log.info(
                     "executor.orphan_history_recovered",
                     workspace_id=workspace_id,
-                    base_commit=ws.base_commit,
+                    base_commit=base_commit,
                 )
         except Exception as exc:  # unexpected — mark infrastructure
             _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
@@ -296,34 +325,136 @@ class WorkspaceExecutor:
             )
             return
 
-        # ── Step 2: validation (tests + optional Alembic) ───────────────────
+        # ── Step 2: validation (tests + optional Alembic), with fix-cycle ──
         await self._transition(workspace_id, to=WorkspaceStatus.validating, reason="AGENT_RUN_OK")
 
-        val_result = await self._validation.run(
-            workspace_id=workspace_id,
-            compose_project=compose_project,
-            compose_file=compose_file,
-            test_commands=list(ws.test_commands),
-            requires_database=ws.requires_database,
-        )
-        if not val_result.all_passed:
+        max_fix_passes = self._config.max_validation_fix_passes
+        test_commands_tuple = tuple(ws.test_commands)
+        last_failure_message: str | None = None
+        for pass_number in range(max_fix_passes + 1):
+            # pass_number == 0 is the initial run (already-committed agent
+            # work). 1..N are fix attempts driven by the retry prompt.
+            val_result = await self._validation.run(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                test_commands=list(ws.test_commands),
+                requires_database=ws.requires_database,
+            )
+            if val_result.all_passed:
+                if pass_number > 0:
+                    _log.info(
+                        "executor.validation_recovered",
+                        workspace_id=workspace_id,
+                        fix_passes_used=pass_number,
+                    )
+                break
+
             first_fail = val_result.first_failure
             _log.info(
                 "executor.validation_failed",
                 workspace_id=workspace_id,
                 failed_command=first_fail.command if first_fail else None,
+                fix_pass=pass_number,
+                max_fix_passes=max_fix_passes,
             )
-            await self._mark_failed(
+            last_failure_message = (
+                f"validation failed: {first_fail.command}" if first_fail else "validation failed"
+            )
+
+            if pass_number >= max_fix_passes or first_fail is None:
+                # Exhausted our budget (or no failure details to anchor a
+                # fix prompt on) — mark failed and let the operator triage.
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.validation_failure,
+                    message=(
+                        last_failure_message
+                        + (f" (after {max_fix_passes} fix attempts)" if max_fix_passes > 0 else "")
+                    )[:2000],
+                )
+                return
+
+            # Fire a fix pass: re-invoke the coding CLI with the failure
+            # context, then re-commit whatever it changed.
+            fix_context = ValidationFixContext(
+                failed_command=first_fail.command,
+                returncode=first_fail.returncode,
+                stdout_tail=read_output_tail(first_fail.stdout_path),
+                stderr_tail=read_output_tail(first_fail.stderr_path),
+                pass_number=pass_number + 1,
+                total_passes=max_fix_passes,
+                test_commands=test_commands_tuple,
+            )
+            fix_prompt = build_fix_prompt(fix_context)
+            _log.info(
+                "executor.fix_pass_start",
                 workspace_id=workspace_id,
-                from_status=WorkspaceStatus.validating,
-                failure_reason=FailureReason.validation_failure,
-                message=(
-                    f"validation failed: {first_fail.command}"
-                    if first_fail
-                    else "validation failed"
-                )[:2000],
+                pass_number=pass_number + 1,
+                max_fix_passes=max_fix_passes,
+                failed_command=first_fail.command,
             )
-            return
+            try:
+                await adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=fix_prompt,
+                    model=default_model,
+                )
+            except AgentRunError as exc:
+                # Coding CLI exited non-zero on the fix pass. Mirrors the
+                # initial-run behaviour: log, remember the note, fall
+                # through to commit any salvaged work, then continue the
+                # loop (next validation will tell us if it's pushable).
+                _log.warning(
+                    "executor.fix_pass_agent_nonzero_exit",
+                    workspace_id=workspace_id,
+                    pass_number=pass_number + 1,
+                    returncode=exc.result.returncode,
+                )
+
+            # Commit whatever the fix pass produced. Simpler than the
+            # initial post-agent commit block — orphan-history recovery
+            # isn't possible here (HEAD already descends from base after
+            # the initial run succeeded); zero-change fix passes are
+            # allowed (agent may think no change was needed, which next
+            # validation will confirm or refute).
+            fix_add = await _git_in_worktree(["add", "-A"])
+            if not fix_add.ok:
+                _log.warning(
+                    "executor.fix_pass_add_failed",
+                    workspace_id=workspace_id,
+                    stderr=fix_add.stderr[:400],
+                )
+            fix_cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
+            if fix_cached.stdout.strip():
+                commit_msg = f"awf: fix pass {pass_number + 1} for {ws.task_title}"[:72]
+                commit_body = (
+                    f"AWF validation fix pass {pass_number + 1} of "
+                    f"{max_fix_passes} for workspace {workspace_id} "
+                    f"(agent: {ws.agent}). Failed command: "
+                    f"{first_fail.command}."
+                )
+                fix_commit = await self._runner.run(
+                    [
+                        "git",
+                        "-C",
+                        str(worktree_host),
+                        "commit",
+                        "-m",
+                        commit_msg,
+                        "-m",
+                        commit_body,
+                    ],
+                )
+                if not fix_commit.ok:
+                    _log.warning(
+                        "executor.fix_pass_commit_failed",
+                        workspace_id=workspace_id,
+                        stderr=fix_commit.stderr[:400],
+                    )
+            # Loop back to re-validate.
 
         # ── Step 3: push + open PR ──────────────────────────────────────────
         await self._transition(workspace_id, to=WorkspaceStatus.pushing, reason="VALIDATION_OK")

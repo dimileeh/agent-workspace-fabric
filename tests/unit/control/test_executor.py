@@ -230,10 +230,34 @@ class TestFailurePaths:
     @pytest.mark.unit
     async def test_validation_failure_marks_failed_with_reason(
         self,
-        executor: WorkspaceExecutor,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
     ) -> None:
+        """With the fix-cycle loop disabled (``max_validation_fix_passes=0``),
+        a single validation failure still marks the workspace failed with
+        the ``validation_failure`` reason — the pre-fix-cycle contract
+        this test was originally written for."""
+        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+        pr = PullRequestCreator(fake)
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=compose,
+            validation=validation,
+            pr_creator=pr,
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                default_models={
+                    AgentRuntime.codex: "gpt-5",
+                    AgentRuntime.claude_code: "sonnet",
+                    AgentRuntime.gemini: "gemini-2.5-pro",
+                },
+                max_validation_fix_passes=0,
+            ),
+        )
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)  # adapter ok
         fake.queue_result(returncode=0)  # git add
