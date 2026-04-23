@@ -1,9 +1,12 @@
 """Validation runner — executes test commands inside the workspace container.
 
-Contract for Task 6:
-    1. If ``requires_database``, run ``alembic upgrade head`` inside the
-       agent container first. If it fails, ValidationResult.all_passed is
-       False and the individual test commands do NOT run.
+Contract:
+    1. If ``requires_database`` is True, run ``alembic upgrade head`` AFTER
+       the first test command (which is the convention for dep-install).
+       This is deliberate: dep install must happen first so Alembic + the
+       app package are importable. If the app doesn't need this pattern,
+       set ``requires_database=False`` and put migration in test_commands
+       yourself.
     2. Run each command in ``test_commands`` sequentially via ``docker
        compose exec -T -w /workspace agent sh -lc <command>``.
     3. Capture stdout + stderr for each command to per-workspace artifact
@@ -13,6 +16,14 @@ Contract for Task 6:
 
 We route through ``AsyncCommandRunner`` so tests inject FakeCommandRunner
 and don't require a real docker daemon.
+
+Migration ordering rationale:
+    The naive ordering "migration first, then tests" fails for any repo
+    whose migration runner depends on installed Python deps (Alembic +
+    the app package). Running migration AFTER the first test command
+    (which is by convention ``uv pip install -e ".[dev]"`` or similar)
+    sidesteps that dependency chain without requiring every caller to
+    duplicate the migration line in their test_commands.
 """
 
 from __future__ import annotations
@@ -27,7 +38,16 @@ from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
 
-_MIGRATION_COMMAND: tuple[str, ...] = ("alembic", "upgrade", "head")
+# Every validation command runs through this preamble so a workspace-local
+# ``.venv`` (typical for ``uv pip install``) is picked up automatically.
+# Without this, ``uv pip install`` creates ``/workspace/.venv`` but subsequent
+# commands invoke ``/usr/local/bin/alembic`` / ``pytest`` which don't see the
+# venv's site-packages — classic ``ModuleNotFoundError: No module named '<app>'``.
+_VENV_ACTIVATE_PREAMBLE = (
+    "[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; "
+)
+
+_MIGRATION_SHELL = _VENV_ACTIVATE_PREAMBLE + "alembic upgrade head"
 
 
 @dataclass(frozen=True)
@@ -92,35 +112,19 @@ class ValidationRunner:
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
 
         migration: ValidationCommandResult | None = None
-        if requires_database:
-            migration = await self._exec(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                cli_args=list(_MIGRATION_COMMAND),
-                label="migration",
-                artifacts_dir=workspace_artifacts,
-            )
-            if not migration.ok:
-                _log.warning(
-                    "validation.migration_failed",
-                    workspace_id=workspace_id,
-                    returncode=migration.returncode,
-                )
-                # Short-circuit: running test commands against a broken schema
-                # produces misleading failures. Let the caller see the migration
-                # error as the first/only failure.
-                return ValidationResult(migration=migration, commands=[])
-
         cmd_results: list[ValidationCommandResult] = []
+
         for index, raw in enumerate(test_commands, start=1):
             # Commands are full shell strings (e.g. ``pytest -q``); we invoke
             # them under ``sh -lc`` so quoting, pipes, and env var expansion
-            # inside the container all work as the operator expects.
+            # inside the container all work as the operator expects. The
+            # venv-activate preamble makes ``uv pip install``-created venvs
+            # visible to every subsequent tool (alembic, pytest, ruff, ...).
             label = f"cmd_{index:02d}"
             result = await self._exec(
                 compose_project=compose_project,
                 compose_file=compose_file,
-                cli_args=["sh", "-lc", raw],
+                cli_args=["sh", "-lc", _VENV_ACTIVATE_PREAMBLE + raw],
                 label=label,
                 artifacts_dir=workspace_artifacts,
             )
@@ -134,7 +138,27 @@ class ValidationRunner:
                 )
                 # Stop at first failure — there's no point running later
                 # commands when an earlier one (e.g. lint) failed.
-                break
+                return ValidationResult(migration=migration, commands=cmd_results)
+
+            # Migration runs AFTER the first successful command (typically a
+            # dep-install) so Alembic + the app package are importable. If the
+            # migration fails, skip remaining test commands: they'd run against
+            # a broken schema and the output would be noise.
+            if index == 1 and requires_database:
+                migration = await self._exec(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    cli_args=["sh", "-lc", _MIGRATION_SHELL],
+                    label="migration",
+                    artifacts_dir=workspace_artifacts,
+                )
+                if not migration.ok:
+                    _log.warning(
+                        "validation.migration_failed",
+                        workspace_id=workspace_id,
+                        returncode=migration.returncode,
+                    )
+                    return ValidationResult(migration=migration, commands=cmd_results)
 
         return ValidationResult(migration=migration, commands=cmd_results)
 
@@ -170,11 +194,15 @@ class ValidationRunner:
         stdout_path.write_text(result.stdout, encoding="utf-8")
         stderr_path.write_text(result.stderr, encoding="utf-8")
 
-        display = (
-            " ".join(shlex.quote(a) for a in cli_args)
-            if len(cli_args) != 3 or cli_args[0] != "sh"
-            else cli_args[2]  # raw user command for sh -lc
-        )
+        if len(cli_args) == 3 and cli_args[0] == "sh":
+            # Strip the internal venv-activate preamble so the display is the
+            # user-supplied command they care about, not our plumbing.
+            shell_cmd = cli_args[2]
+            if shell_cmd.startswith(_VENV_ACTIVATE_PREAMBLE):
+                shell_cmd = shell_cmd[len(_VENV_ACTIVATE_PREAMBLE) :]
+            display = shell_cmd
+        else:
+            display = " ".join(shlex.quote(a) for a in cli_args)
         return ValidationCommandResult(
             command=display,
             returncode=result.returncode,

@@ -43,9 +43,13 @@ class TestValidTransitions:
             (WorkspaceStatus.validating, WorkspaceStatus.pushing),
             (WorkspaceStatus.validating, WorkspaceStatus.failed),
             (WorkspaceStatus.validating, WorkspaceStatus.cancelled),
+            (WorkspaceStatus.pushing, WorkspaceStatus.monitoring_pr),
             (WorkspaceStatus.pushing, WorkspaceStatus.completed),
             (WorkspaceStatus.pushing, WorkspaceStatus.failed),
             (WorkspaceStatus.pushing, WorkspaceStatus.cancelled),
+            (WorkspaceStatus.monitoring_pr, WorkspaceStatus.completed),
+            (WorkspaceStatus.monitoring_pr, WorkspaceStatus.failed),
+            (WorkspaceStatus.monitoring_pr, WorkspaceStatus.cancelled),
             (WorkspaceStatus.completed, WorkspaceStatus.destroying),
             (WorkspaceStatus.failed, WorkspaceStatus.destroying),
             (WorkspaceStatus.cancelled, WorkspaceStatus.destroying),
@@ -83,6 +87,11 @@ class TestInvalidTransitions:
             (WorkspaceStatus.completed, WorkspaceStatus.running),
             # Cannot self-transition.
             (WorkspaceStatus.running, WorkspaceStatus.running),
+            # monitoring_pr is a dead-end for its own inputs — only the
+            # monitor owns transitions out, and only to completed/failed/cancelled.
+            (WorkspaceStatus.monitoring_pr, WorkspaceStatus.monitoring_pr),
+            (WorkspaceStatus.monitoring_pr, WorkspaceStatus.pushing),
+            (WorkspaceStatus.monitoring_pr, WorkspaceStatus.validating),
         ],
     )
     def test_rejected(self, src: WorkspaceStatus, dst: WorkspaceStatus) -> None:

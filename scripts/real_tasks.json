@@ -7,10 +7,10 @@
     "agent": "claude_code",
     "test_commands": [
       "npm ci",
-      "npx playwright install --with-deps chromium",
+      "npx playwright install chromium",
       "npx tsc --noEmit",
       "npm run lint",
-      "npx playwright test tests/e2e/bff/ --reporter=line"
+      "npx playwright test --config=playwright.bff.config.ts --reporter=line"
     ],
     "requires_database": false,
     "companions": [
@@ -25,7 +25,7 @@
           "AIRA_ENV": "development"
         },
         "depends_on": ["postgres"],
-        "healthcheck_cmd": "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/healthz\", timeout=2).status==200 else 1)'"
+        "healthcheck_cmd": "python -c 'import urllib.request,sys; sys.exit(0 if urllib.request.urlopen(\"http://localhost:8000/api/v1/health\", timeout=2).status==200 else 1)'"
       },
       {
         "name": "web",

@@ -15,12 +15,15 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 
 from __future__ import annotations
 
+import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.base import AgentRunError, get_adapter
+from awf.adapters.base import AgentAdapter, AgentRunError, get_adapter
 from awf.common.commands import AsyncCommandRunner
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
@@ -29,6 +32,18 @@ from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationRunner
+
+
+class _MonitorRunnerProto(Protocol):
+    """Minimum surface the executor needs from a PR monitor runner.
+
+    Declared as a Protocol so the executor doesn't structurally depend
+    on ``PullRequestMonitorRunner`` — tests can pass a tiny stub, and
+    the monitor stage is a clean extension seam for Phase 2 variants
+    (merge queue, release-PR monitor, etc.)."""
+
+    async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None: ...
+
 
 _log = get_logger(__name__)
 
@@ -59,13 +74,33 @@ class WorkspaceExecutor:
         validation: ValidationRunner,
         pr_creator: PullRequestCreator,
         config: ExecutorConfig,
+        pr_monitor: _MonitorRunnerProto | None = None,
+        pr_monitor_factory: Callable[[AgentAdapter], _MonitorRunnerProto] | None = None,
     ) -> None:
+        """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
+        optional hooks that wire the ``monitoring_pr`` stage:
+
+        * ``pr_monitor`` — a pre-constructed monitor. Used by tests that
+          hand in a stub (the production monitor needs the per-task agent
+          adapter, which the executor only has mid-``execute``).
+        * ``pr_monitor_factory`` — a callable the executor invokes AFTER
+          the adapter is resolved. Production path: ``run_awf.py`` passes
+          a factory that builds a ``PullRequestMonitorRunner`` from the
+          adapter, GitHub client, and worktree paths.
+
+        If both are None the monitor stage is skipped and the executor
+        preserves the original ``pushing → completed`` contract (the
+        executor_tests no-monitor scenarios still pass)."""
+        if pr_monitor is not None and pr_monitor_factory is not None:
+            raise ValueError("pr_monitor and pr_monitor_factory are mutually exclusive")
         self._session_factory = session_factory
         self._runner = runner
         self._compose = compose
         self._validation = validation
         self._pr_creator = pr_creator
         self._config = config
+        self._pr_monitor = pr_monitor
+        self._pr_monitor_factory = pr_monitor_factory
 
     async def execute(self, workspace_id: str) -> None:
         """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
@@ -93,20 +128,29 @@ class WorkspaceExecutor:
                 prompt=ws.task_prompt,
                 model=default_model,
             )
+            agent_exit_note = None
         except AgentRunError as exc:
-            _log.error(
-                "executor.agent_failed",
+            # Do NOT bail out yet. A CLI that exits non-zero — typically
+            # ``claude_code`` hitting a 1-hour internal session cap and
+            # returning 137 (SIGKILL), or a timeout against a flaky
+            # dependency — may have left valuable uncommitted work in the
+            # worktree. Coding CLIs in general don't commit on their own;
+            # AWF's post-agent auto-commit is the only thing that captures
+            # their edits. Log the exit code, remember it for the final
+            # failure message, but let the commit + validate pipeline run.
+            # If there's nothing to commit, the existing no-work check
+            # fails the workspace with ``agent_failure`` below. If there
+            # IS work, validation decides whether it's pushable.
+            agent_exit_note = (
+                f"agent CLI exited {exc.result.returncode} ({exc.reason_code}); "
+                f"continuing to salvage any uncommitted work"
+            )
+            _log.warning(
+                "executor.agent_nonzero_exit_salvaging",
                 workspace_id=workspace_id,
                 agent=ws.agent,
                 returncode=exc.result.returncode,
             )
-            await self._mark_failed(
-                workspace_id=workspace_id,
-                from_status=WorkspaceStatus.running,
-                failure_reason=FailureReason.agent_failure,
-                message=str(exc)[:2000],
-            )
-            return
         except Exception as exc:  # unexpected — surface with generic reason
             _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
             await self._mark_failed(
@@ -156,16 +200,92 @@ class WorkspaceExecutor:
             # past the base commit. If not, the agent produced no change.
             rev_count = await _git_in_worktree(["rev-list", "--count", f"{ws.base_commit}..HEAD"])
             if not rev_count.ok or int(rev_count.stdout.strip() or "0") == 0:
+                base_short = ws.base_commit[:10] if ws.base_commit else "unknown"
+                message = (
+                    f"agent exited without producing any commits on the feature branch "
+                    f"(base={base_short})"
+                )
+                if agent_exit_note is not None:
+                    message = f"{message}; {agent_exit_note}"
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
                     failure_reason=FailureReason.agent_failure,
-                    message=(
-                        "agent exited without producing any commits on the feature branch "
-                        f"(base={ws.base_commit[:10] if ws.base_commit else 'unknown'})"
-                    ),
+                    message=message,
                 )
                 return
+
+            # Some agents sever git history (e.g. by accidentally running
+            # ``git checkout --orphan`` or by re-initialising the repo).
+            # rev-list counts HIGH in that case (every HEAD commit is "new"
+            # w.r.t. base because there's no shared ancestor), so the
+            # previous check wouldn't notice. Without this guard, the push
+            # succeeds but ``gh pr create`` dies with a cryptic
+            # ``branch has no history in common with <base>`` error.
+            #
+            # Recovery: ``git reset --soft <base>`` moves HEAD to the base
+            # commit while leaving the index untouched — the index still
+            # reflects the orphan's tree. A fresh ``git commit`` then
+            # produces a single commit on top of base that contains the
+            # cumulative diff, and the branch is reattached to a valid
+            # ancestry so the PR can be opened normally.
+            #
+            # Invariant: ``ws.base_commit`` is always populated by
+            # ``_claim_ready`` before this block runs. The ``assert`` both
+            # documents and satisfies mypy.
+            assert ws.base_commit is not None
+            ancestor = await _git_in_worktree(
+                ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
+            )
+            if not ancestor.ok:
+                _log.warning(
+                    "executor.orphan_history_detected",
+                    workspace_id=workspace_id,
+                    base_commit=ws.base_commit,
+                )
+                reset = await _git_in_worktree(["reset", "--soft", ws.base_commit])
+                if reset.ok:
+                    recovery_msg = f"awf: {ws.task_title} (recovered from orphan)"[:72]
+                    recovery_body = (
+                        f"AWF detected orphan history on workspace {workspace_id} "
+                        f"(agent: {ws.agent}) and squashed the cumulative diff "
+                        f"onto base commit {ws.base_commit[:10]}.\n"
+                    )
+                    recover_commit = await self._runner.run(
+                        [
+                            "git",
+                            "-C",
+                            str(worktree_host),
+                            "commit",
+                            "-m",
+                            recovery_msg,
+                            "-m",
+                            recovery_body,
+                        ],
+                    )
+                    if recover_commit.ok:
+                        ancestor = await _git_in_worktree(
+                            ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
+                        )
+                if not ancestor.ok:
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.agent_failure,
+                        message=(
+                            "agent severed git history — HEAD does not descend from "
+                            f"base commit {ws.base_commit[:10] if ws.base_commit else 'unknown'}, "
+                            "and automatic recovery (reset --soft + fresh commit) also failed. "
+                            "The coding CLI likely ran `git checkout --orphan` or reinitialised "
+                            "the repo; inspect the worktree manually."
+                        ),
+                    )
+                    return
+                _log.info(
+                    "executor.orphan_history_recovered",
+                    workspace_id=workspace_id,
+                    base_commit=ws.base_commit,
+                )
         except Exception as exc:  # unexpected — mark infrastructure
             _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
             await self._mark_failed(
@@ -234,15 +354,48 @@ class WorkspaceExecutor:
             )
             return
 
-        # ── Step 4: persist PR URL + transition to completed ────────────────
+        # ── Step 4: persist PR URL + (optionally) hand off to monitor ──────
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             persisted = await repo.get(workspace_id)
             if persisted is None:  # pragma: no cover - destroyed mid-flight
                 return
             persisted.pr_url = pr.url
-            await repo.transition(persisted, to=WorkspaceStatus.completed, reason_code="PR_OPENED")
-            await session.commit()
+            persisted.pr_number = _extract_pr_number(pr.url)
+            # Resolve which monitor (if any) to hand off to. Pre-constructed
+            # ``pr_monitor`` wins (tests); otherwise the factory builds one
+            # from the per-task adapter now that we have it.
+            monitor: _MonitorRunnerProto | None = self._pr_monitor
+            if monitor is None and self._pr_monitor_factory is not None:
+                monitor = self._pr_monitor_factory(adapter)
+
+            if monitor is not None:
+                # Hand off to the monitor — it will transition to completed
+                # (on merge) or failed (on abort / cap / close).
+                await repo.transition(
+                    persisted, to=WorkspaceStatus.monitoring_pr, reason_code="PR_OPENED"
+                )
+                await session.commit()
+            else:
+                # No monitor wired (legacy executor path / unit-test shim) —
+                # preserve the original ``pushing → completed`` contract.
+                await repo.transition(
+                    persisted, to=WorkspaceStatus.completed, reason_code="PR_OPENED"
+                )
+                await session.commit()
+
+        if monitor is not None:
+            _log.info(
+                "executor.handoff_to_pr_monitor",
+                workspace_id=workspace_id,
+                pr_url=pr.url,
+            )
+            await monitor.run(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+            )
+            return
 
         _log.info(
             "executor.completed",
@@ -304,6 +457,22 @@ class WorkspaceExecutor:
                 reason_code=failure_reason.value.upper(),
             )
             await session.commit()
+
+
+_PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:/|$)")
+
+
+def _extract_pr_number(pr_url: str) -> int | None:
+    """Parse the PR number from a GitHub PR URL.
+
+    Matches both the canonical ``https://github.com/<owner>/<repo>/pull/123``
+    and the trailing-slash variant. Returns ``None`` if the URL doesn't look
+    like a PR URL — the monitor then simply won't run (executor logs a
+    warning via the transition to ``monitoring_pr`` still succeeding; the
+    monitor itself asserts on pr_number and terminates with a clear failure).
+    """
+    match = _PR_NUMBER_RE.search(pr_url)
+    return int(match.group(1)) if match else None
 
 
 def _build_pr_body(ws: Workspace) -> str:

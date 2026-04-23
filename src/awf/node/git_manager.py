@@ -118,9 +118,8 @@ class GitManager:
             # ``git clone --mirror`` sets ``remote.origin.mirror=true`` which
             # refuses refspec pushes from any worktree attached to this bare
             # repo (``fatal: --mirror can't be combined with refspecs``). Strip
-            # the flag — the fetch refspec (+refs/*:refs/*) still pulls all
-            # refs on ``remote update`` and individual worktrees can now push
-            # their feature branches normally.
+            # the flag so individual worktrees can push their feature branches
+            # normally.
             await self._run(
                 [
                     "git",
@@ -131,6 +130,74 @@ class GitManager:
                     "remote.origin.mirror",
                 ],
                 operation="mirror.strip_mirror_flag",
+            )
+            # Stripping ``mirror=true`` is not enough on its own. ``git clone
+            # --mirror`` also sets the fetch refspec to ``+refs/*:refs/*`` —
+            # every remote ref lives directly under ``refs/heads/*`` locally,
+            # and ``git remote update --prune`` will therefore DELETE any
+            # local branch that isn't on the remote. That includes the AWF
+            # feature branches we create with ``git worktree add -b``. When
+            # two workspaces run in parallel against the same repo (or when
+            # companion materialisation triggers ``remote update --prune``
+            # on the main workspace's mirror), a pruned branch ref turns the
+            # worktree's HEAD into a dangling symbolic reference, and the
+            # next commit becomes an orphan root — which then fails
+            # ``gh pr create`` with "no history in common". Switch to a
+            # standard non-mirror refspec so prune only affects remote
+            # tracking refs (``refs/remotes/origin/*``), never local branches.
+            await self._run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(mirror_path),
+                    "config",
+                    "remote.origin.fetch",
+                    "+refs/heads/*:refs/remotes/origin/*",
+                ],
+                operation="mirror.rewrite_fetch_refspec",
+            )
+            # The initial clone already populated refs/heads/* with every
+            # server branch. Those will go stale once the refspec changes
+            # (future fetches only update refs/remotes/origin/*). Delete them
+            # so the only heads in the mirror are AWF-created feature
+            # branches, and ``origin/<branch>`` is the canonical up-to-date
+            # tip for resolving base commits.
+            listing = await self._run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(mirror_path),
+                    "for-each-ref",
+                    "--format=%(refname)",
+                    "refs/heads/",
+                ],
+                operation="mirror.list_local_heads",
+            )
+            for ref in (line.strip() for line in listing.stdout.splitlines()):
+                if not ref:
+                    continue
+                await self._run(
+                    [
+                        "git",
+                        "--git-dir",
+                        str(mirror_path),
+                        "update-ref",
+                        "-d",
+                        ref,
+                    ],
+                    operation="mirror.delete_stale_local_head",
+                )
+            # Fetch fresh remote-tracking refs so ``origin/<branch>`` works.
+            await self._run(
+                [
+                    "git",
+                    "--git-dir",
+                    str(mirror_path),
+                    "fetch",
+                    "origin",
+                    "--prune",
+                ],
+                operation="mirror.initial_fetch_tracking",
             )
             return mirror_path
 
@@ -163,6 +230,14 @@ class GitManager:
                 reason_code="GIT_WORKTREE_ALREADY_EXISTS",
             )
 
+        # ``ensure_mirror`` now only tracks ``refs/remotes/origin/*`` — local
+        # heads are reserved for AWF-created feature branches. Base-branch
+        # lookups must therefore go through the remote-tracking ref so we
+        # see the latest server tip even across long-running sessions, and
+        # so ``remote update --prune`` (which prunes only tracking refs
+        # under the new refspec) never targets the worktree's own branch.
+        tracking_ref = f"origin/{base_branch}"
+
         lock = self._mirror_locks.setdefault(repo_url, asyncio.Lock())
         async with lock:
             try:
@@ -173,7 +248,7 @@ class GitManager:
                         str(mirror_path),
                         "rev-parse",
                         "--verify",
-                        base_branch,
+                        tracking_ref,
                     ],
                     operation="mirror.rev-parse",
                 )
@@ -196,7 +271,7 @@ class GitManager:
                     "-b",
                     new_branch,
                     str(worktree_path),
-                    base_branch,
+                    tracking_ref,
                 ],
                 operation="worktree.add",
             )

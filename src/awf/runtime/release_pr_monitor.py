@@ -1,0 +1,108 @@
+"""Release-PR monitor — thin façade over ``PullRequestMonitorRunner``.
+
+A release PR (development → main, typically) must NOT be auto-merged —
+only a human can land that. This module exposes a ``run_release_monitor``
+helper that drives the same monitor loop as a feature PR but with
+``auto_merge=False``. The decision core in ``pr_monitor.decide`` flips
+its terminal success action to ``NotifyHuman``, and the runner posts a
+"ready to merge" comment instead of calling ``gh pr merge``.
+
+Usage:
+
+    runner = build_pr_monitor_runner(..., auto_merge=False)
+    await runner.run(workspace_id=..., compose_project=..., compose_file=...)
+
+This module doesn't introduce any new state transitions or DB columns —
+it's a pure configuration of the same runner. Kept as its own module so
+callers (API / CLI / ``run_awf.py``) have an obvious entry point to
+import and so the distinction shows up in grep/docs.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.adapters.base import AgentAdapter
+from awf.common.commands import AsyncCommandRunner
+from awf.common.github_client import GitHubClient
+from awf.runtime.pr_monitor import MonitorConfig
+from awf.runtime.pr_monitor_runner import (
+    MonitorRunnerConfig,
+    PullRequestMonitorRunner,
+)
+
+
+def build_release_pr_monitor(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    runner: AsyncCommandRunner,
+    adapter: AgentAdapter,
+    gh: GitHubClient,
+    worktrees_root: Path,
+    iter_cap: int = 10,
+    wall_clock_cap_seconds: float = 6 * 3600,
+    poll_interval_seconds: float = 60.0,
+    settle_interval_seconds: float = 30.0,
+    max_outer_iterations: int = 10_000,
+    max_fix_cycle_passes: int = 5,
+) -> PullRequestMonitorRunner:
+    """Instantiate a ``PullRequestMonitorRunner`` preconfigured for
+    release PRs — the single divergence from a feature PR is
+    ``auto_merge=False``."""
+    return PullRequestMonitorRunner(
+        session_factory=session_factory,
+        runner=runner,
+        adapter=adapter,
+        gh=gh,
+        monitor_config=MonitorConfig(
+            iter_cap=iter_cap,
+            wall_clock_cap_seconds=wall_clock_cap_seconds,
+            auto_merge=False,  # the point of this whole module
+            poll_interval_seconds=poll_interval_seconds,
+            settle_interval_seconds=settle_interval_seconds,
+        ),
+        runner_config=MonitorRunnerConfig(
+            max_outer_iterations=max_outer_iterations,
+            max_fix_cycle_passes=max_fix_cycle_passes,
+        ),
+        worktrees_root=worktrees_root,
+    )
+
+
+def build_feature_pr_monitor(
+    *,
+    session_factory: async_sessionmaker[AsyncSession],
+    runner: AsyncCommandRunner,
+    adapter: AgentAdapter,
+    gh: GitHubClient,
+    worktrees_root: Path,
+    iter_cap: int = 10,
+    wall_clock_cap_seconds: float = 6 * 3600,
+    poll_interval_seconds: float = 60.0,
+    settle_interval_seconds: float = 30.0,
+    max_outer_iterations: int = 10_000,
+    max_fix_cycle_passes: int = 5,
+) -> PullRequestMonitorRunner:
+    """Instantiate a ``PullRequestMonitorRunner`` for feature→development
+    work. ``auto_merge=True``; on green gates the monitor squash-merges
+    and deletes the branch."""
+    return PullRequestMonitorRunner(
+        session_factory=session_factory,
+        runner=runner,
+        adapter=adapter,
+        gh=gh,
+        monitor_config=MonitorConfig(
+            iter_cap=iter_cap,
+            wall_clock_cap_seconds=wall_clock_cap_seconds,
+            auto_merge=True,
+            poll_interval_seconds=poll_interval_seconds,
+            settle_interval_seconds=settle_interval_seconds,
+        ),
+        runner_config=MonitorRunnerConfig(
+            max_outer_iterations=max_outer_iterations,
+            max_fix_cycle_passes=max_fix_cycle_passes,
+        ),
+        worktrees_root=worktrees_root,
+    )

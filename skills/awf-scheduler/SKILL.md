@@ -105,8 +105,9 @@ Pass these as bind mounts:
 | Host source | Container target | Mode | Why |
 |---|---|---|---|
 | `~/.codex` | `/home/agent/.codex` | **rw** | Codex writes model-list cache + refresh tokens; `ro` → `ERROR failed to write models cache: Read-only file system`. |
-| `~/.claude` | `/home/agent/.claude` | **rw** | Claude Code rotates OAuth tokens. |
-| `~/.gemini` | `/home/agent/.gemini` | **rw** | Same story. |
+| `~/.claude` | `/home/agent/.claude` | **rw** | Claude Code session state, backups, skills cache. |
+| `~/.claude.json` | `/home/agent/.claude.json` | **rw** | Claude Code's top-level config is a SINGLE FILE alongside the dir above. Without this mount the session dies mid-run with `Claude configuration file not found at: /home/agent/.claude.json` — Claude atomically rewrites the file on token refresh and can't find its own backup without the file-level bind. |
+| `~/.gemini` | `/home/agent/.gemini` | **rw** | Same story as Codex/Claude. |
 | `~/.config/gh` | `/home/agent/.config/gh` | ro | Stable OAuth/PAT; no state change mid-task. |
 | `~/.gitconfig` | `/home/agent/.gitconfig` | ro | Identity + aliases only. |
 | `~/.ssh` | `/home/agent/.ssh` | ro | Keys for `git push`. |
@@ -185,21 +186,40 @@ For any task whose backend uses pgvector / embeddings, keep the default.
 
 ## 8 — Test commands: ordering + env assumptions
 
-- If `requires_database: true`, AWF runs `alembic upgrade head` **before**
-  the test commands. A migration failure short-circuits — your tests never
-  run. Make sure `AIRA_DATABASE_URL` (or whatever name your Alembic
-  `env.py` reads) is set in the agent container. AWF sets both
-  `DATABASE_URL` and `AIRA_DATABASE_URL` to the same stack-local URL.
+- **First command MUST be dependency install**: `npm ci` for Node,
+  `uv pip install -e ".[dev]"` for Python, etc. Assume nothing is
+  preinstalled beyond the base agent runtime.
+- If `requires_database: true`, AWF runs `alembic upgrade head`
+  **immediately AFTER the first test command** — not before. Reason: for
+  any repo whose Alembic `env.py` imports the app package, migration can't
+  run until the app is installed. Running migration after `test_commands[0]`
+  sidesteps that without forcing every caller to duplicate an install line.
+  - If `test_commands[0]` fails, migration is skipped (there's nothing to
+    migrate against).
+  - If migration fails, remaining test commands are skipped (they'd run
+    against a broken schema, and the output would be noise).
+- Make sure `AIRA_DATABASE_URL` (or whatever name your Alembic `env.py`
+  reads) is set in the agent container. AWF sets both `DATABASE_URL` and
+  `AIRA_DATABASE_URL` to the same stack-local URL.
 - Test commands run inside the agent container via `docker compose exec -T
   -w /workspace agent sh -lc <command>`. Shell metacharacters (pipes,
   `&&`, `$VAR`) work. First failing command stops the sequence.
-- **First command is usually dependency install**: `npm ci` for Node,
-  `uv pip install -e ".[dev]"` for Python, etc. Assume nothing is
-  preinstalled beyond the base agent runtime.
+- **Venv auto-activation**: AWF prefixes every validation command (and the
+  migration) with a check for `/workspace/.venv/bin/activate` and sources
+  it when present. This matters because `uv pip install -e ".[dev]"` (or
+  `python -m venv`) creates a `.venv` in the repo root, and subsequent
+  calls to `alembic` / `pytest` / `ruff` via `/usr/local/bin/*` wouldn't
+  otherwise see the venv's site-packages — classic
+  `ModuleNotFoundError: No module named '<your_app>'`. Nothing extra to
+  do in your task spec; just write the commands naturally.
 - Agent runtime ships: Python 3.12, Node 22, git, jq, ripgrep, tini, the
-  three coding CLIs. Playwright browsers are NOT pre-installed — if you
-  use Playwright, include `npx playwright install --with-deps chromium` as
-  an early test command (adds ~2 min first run).
+  three coding CLIs, and the Linux system libraries Playwright's chromium
+  browser needs at runtime (libnss3, libatk-bridge2.0-0, libxkbcommon0,
+  etc). Playwright's *browser binaries* are NOT pre-installed — add
+  `npx playwright install chromium` as a test command (≈30 s download).
+  Do NOT use `--with-deps`: it tries to `su root` + `apt install`, and
+  the agent container runs as the unprivileged `agent` user with no
+  root password (fails with `su: Authentication failure`).
 
 ## 9 — Model selection
 
@@ -232,6 +252,94 @@ Don't set polling timeouts shorter than the expected stage — if you poll
 every 30 s and the backend image build takes 5 min, your first status
 check should be after 8 min.
 
+## 10.5 — PR monitor (after the PR is opened)
+
+Every AWF workspace that opens a feature-branch PR continues running in
+a new state — ``monitoring_pr`` — until the PR is **merged** into its
+base branch (feature-PR variant) or **declared ready for the human**
+(release-PR variant for ``development → main``).
+
+You don't have to do anything in the task spec to opt in — if an AWF
+orchestrator is wired with a ``PullRequestMonitorRunner`` (stock run
+launches it automatically), monitoring is the default. What matters is
+what the task prompt does and doesn't need to say.
+
+### What the task prompt does NOT need to cover
+
+The monitor owns the 5 post-PR gates:
+
+1. Inline (diff) comments resolved on GitHub (``resolveReviewThread`` GraphQL mutation).
+2. Review-level outside-diff comments evaluated + resolved.
+3. CI green — every required check SUCCESS or SKIPPED.
+4. No merge conflicts.
+5. Base branch merged into feature branch before the PR merges into base.
+
+Do NOT tell the agent to "address reviewer comments" or "merge your own
+PR" in the prompt — the agent CLI runs once, produces the initial
+commits, and exits. AWF re-invokes the same CLI inside the same
+container when comments arrive, with targeted prompts the monitor
+generates.
+
+### Per-comment decision shape the CLI produces
+
+When the monitor hands a review thread or review-level comment to the
+CLI, it expects a reply in one of three shapes:
+
+| Reply prefix | Meaning | What AWF does next |
+|---|---|---|
+| `fixed in commit <sha>` (or anything that isn't one of the markers below) | CLI made the fix, committed locally | AWF pushes after the comment burst settles, then resolves the thread |
+| `FALSE POSITIVE: <reason>` | CLI disagrees with the reviewer and replies inline | AWF resolves the thread with the reviewer's reply already posted |
+| `DEFER: <what you need>` | CLI can't address without more info | AWF leaves the thread unresolved and marks the verdict; repeated deferrals stop the monitor |
+
+The CLI also posts the reply on GitHub itself (``gh pr review-thread
+reply`` or ``gh pr comment``) — AWF's resolve call happens AFTER the
+reply is visible to the reviewer.
+
+### Commit-then-push-on-settle
+
+The monitor does NOT push after every fix. A reviewer bot like
+CodeRabbit typically drops 5–20 inline comments in one burst within 30 s
+of a push. The monitor addresses every comment in that burst locally,
+waits a 30 s settle window for more, and only pushes once the burst is
+quiet. One push → one CI run → minimum cost.
+
+### Caps (defaults; tune via ``MonitorConfig`` if policy requires)
+
+- 10 non-passive iterations (``AddressComments`` / ``SyncBase`` /
+  ``ReportCiFailure``). ``WaitForCI`` passes don't count.
+- 6-hour wall-clock cap from entering ``monitoring_pr``.
+- ``iter_cap`` hit → workspace transitions to ``failed`` with
+  ``monitor: abort (iter_cap_reached)`` in ``failure_message``.
+
+### Release PR (``development → main``)
+
+Dev-to-main PRs must NEVER be auto-merged. Use the
+``monitor_release_pr`` task kind (planned field — currently selected
+via ``build_release_pr_monitor`` instead of
+``build_feature_pr_monitor``). Everything else is identical to the
+feature flow — comment resolution, CI fixes, base sync — except:
+
+- No ``gh pr merge`` call. Ever.
+- When all 5 gates are green, AWF posts a "✅ Ready to merge at commit
+  `<sha>`" comment on the PR and transitions to ``completed``.
+- If new commits land after the ready comment, the monitor re-verifies
+  all 5 gates and re-posts on the new head SHA.
+
+### Branch-protection fallback
+
+If GitHub's branch protection rejects the ``gh pr merge`` call (token
+lacks permission, required reviews not met in the repo's ruleset, etc.),
+the monitor falls back to the release-PR behaviour: posts the
+"ready to merge" comment and exits ``completed``. Operator sees the PR
+flagged as ready and does the final click.
+
+### Auth
+
+Uses the same ``~/.config/gh`` mount as ``gh pr create``. No new auth.
+If you need a finer-grained token for release-PR merging, pass it via
+``~/.config/gh`` on the host — AWF inherits whatever ``gh`` was logged
+in as.
+
 ## 11 — What to do when validation fails
 
 **Do NOT manually intervene** — do NOT `git push` from the worktree
@@ -250,7 +358,9 @@ Common failure modes + fixes:
 | Symptom | Root cause | Fix |
 |---|---|---|
 | `fatal: not a git repository` inside container | Mirror not bind-mounted at same absolute host path | Done in stock AWF since `da07637`. If you see it, you're on a stale AWF. |
+| `alembic upgrade head` fails with `ModuleNotFoundError: <app>` | Migration ran before the app was installed, or migration used system python instead of the uv-created `/workspace/.venv` | Put the dep-install step as `test_commands[0]` so AWF runs migration AFTER it; stock AWF also auto-activates `/workspace/.venv` for every command so uv-installed packages are visible to alembic. |
 | `alembic upgrade head` exits non-zero right after agent | Alembic env-var not set | Alias the app's env-var name → `DATABASE_URL` in the template (stock AWF aliases `AIRA_DATABASE_URL`). |
+| Companion healthcheck never goes `service_healthy` | Wrong URL path | Check the app's actual health route (e.g. aira-agent is `/api/v1/health`, not `/healthz`). `curl` the real service from the host to confirm before scheduling. |
 | `gh pr create: No commits between X and Y` | Agent made no changes (or made changes but didn't commit AND AWF's auto-commit was a no-op because files weren't staged) | Widen the prompt's scope or check agent refusal; check `git log base..HEAD` in the worktree. |
 | `failed to parse compose.yml` | Usually: a healthcheck command with mixed quoting rendered into a flow scalar | AWF template uses `tojson` filter; if you hand-rolled the compose, switch to block form. |
 | Healthcheck never goes `service_healthy` | Wrong URL in the healthcheck command | Query the real service for its health path; update the spec. |

@@ -62,8 +62,42 @@ class Workspace(Base):
 
     # Terminal-state metadata
     pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    """Extracted from ``pr_url`` when the PR is opened; the monitor loop
+    uses it for GraphQL queries + ``gh pr ...`` calls."""
+
+    pr_merge_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """The squash-merge commit SHA recorded when the monitor merges the PR.
+    Empty for release-PR monitors (they never merge)."""
+
     failure_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
     failure_message: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+
+    # Task kind + PR-monitor state (populated only during monitoring_pr).
+    task_kind: Mapped[str] = mapped_column(String(32), nullable=False, default="feature_branch_pr")
+    """One of ``TaskKind``. Defaults to ``feature_branch_pr`` — every
+    existing row pre-migration is a feature PR task."""
+
+    monitor_iter_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    """Counts non-passive monitor iterations (AddressComments / SyncBase /
+    ReportCiFailure). Bumps against ``iter_cap`` to bound runaway cost."""
+
+    monitor_threads_addressed: Mapped[dict[str, str]] = mapped_column(
+        JSON, nullable=False, default=dict
+    )
+    """Persisted ``MonitorState.threads_addressed_ids`` — map of
+    thread/comment ID → verdict (fix_committed / false_positive / defer).
+    Survives a mid-loop crash so the monitor doesn't re-address on resume."""
+
+    monitor_last_commit_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    """HEAD SHA after the most recent monitor push. Compared against
+    ``PRStatus.head_sha`` to detect "CLI said it fixed but didn't actually
+    commit"."""
+
+    monitor_started_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """Wall-clock start of the monitor phase, for wall-clock-cap arithmetic."""
 
     # Idempotency
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
