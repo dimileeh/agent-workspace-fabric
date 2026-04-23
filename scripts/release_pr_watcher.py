@@ -44,9 +44,40 @@ from awf.runtime.release_pr_sync import (  # noqa: E402
 _log = get_logger(__name__)
 
 
+def _monitor_already_running(
+    *, work_dir: Path, repo_slug: str, pr_number: int
+) -> bool:
+    """Mirror of ``schedule_release_pr.py._monitor_already_running`` — we
+    duplicate a handful of lines so the watcher doesn't import the CLI
+    module (which has argparse top-level execution). Both check for a
+    running ``run_awf.py`` process whose spec filename matches."""
+    import subprocess
+
+    spec_filename = f"{repo_slug.replace('/', '__')}-pr{pr_number}.json"
+    try:
+        out = subprocess.check_output(
+            ["pgrep", "-af", "run_awf.py"],
+            text=True,
+            stderr=subprocess.DEVNULL,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return False
+    return any(spec_filename in line for line in out.splitlines())
+
+
 async def _tick_one(
-    *, runner: AsyncioSubprocessRunner, repo_url: str, source: str, target: str
+    *,
+    runner: AsyncioSubprocessRunner,
+    repo_url: str,
+    source: str,
+    target: str,
+    work_dir: Path,
+    attach_monitor: bool,
+    agent: str,
+    companions_path: Path | None,
 ) -> None:
+    import subprocess
+
     repo = RepoRef.from_url(repo_url)
     try:
         result = await ensure_release_pr_open(
@@ -71,10 +102,58 @@ async def _tick_one(
         created=result.created,
         reason=result.reason,
     )
+    if not attach_monitor or result.pr_number is None:
+        return
+    if _monitor_already_running(
+        work_dir=work_dir, repo_slug=repo.slug(), pr_number=result.pr_number
+    ):
+        _log.debug(
+            "watcher.monitor_already_running",
+            repo=repo.slug(),
+            pr_number=result.pr_number,
+        )
+        return
+    # Delegate to schedule_release_pr.py in attach-monitor mode so we
+    # reuse its spec-writing + process-spawning logic exactly. This
+    # keeps a single code path for "spawn a monitor" whether it was
+    # triggered by the watcher or by a human running the CLI manually.
+    _log.info(
+        "watcher.spawning_monitor",
+        repo=repo.slug(),
+        pr_number=result.pr_number,
+    )
+    scheduler = Path(__file__).resolve().parent / "schedule_release_pr.py"
+    python_bin = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
+    args = [
+        str(python_bin),
+        str(scheduler),
+        "--repo",
+        repo_url,
+        "--source",
+        source,
+        "--target",
+        target,
+        "--attach-monitor",
+        "--work-dir",
+        str(work_dir),
+        "--agent",
+        agent,
+    ]
+    if companions_path is not None:
+        args.extend(["--companions", str(companions_path)])
+    subprocess.run(args, check=False)  # noqa: S603 - controlled args
 
 
 async def _run(
-    *, repos: list[str], source: str, target: str, interval: float
+    *,
+    repos: list[str],
+    source: str,
+    target: str,
+    interval: float,
+    work_dir: Path,
+    attach_monitor: bool,
+    agent: str,
+    companions_path: Path | None,
 ) -> int:
     runner = AsyncioSubprocessRunner()
     stop = asyncio.Event()
@@ -100,7 +179,16 @@ async def _run(
         # per-tick, and each repo's gh calls are independent.
         await asyncio.gather(
             *(
-                _tick_one(runner=runner, repo_url=r, source=source, target=target)
+                _tick_one(
+                    runner=runner,
+                    repo_url=r,
+                    source=source,
+                    target=target,
+                    work_dir=work_dir,
+                    attach_monitor=attach_monitor,
+                    agent=agent,
+                    companions_path=companions_path,
+                )
                 for r in repos
             )
         )
@@ -130,6 +218,27 @@ if __name__ == "__main__":
         default=60.0,
         help="Seconds between ticks. Default 60.",
     )
+    parser.add_argument(
+        "--work-dir",
+        type=Path,
+        default=Path("/tmp/awf-realrun"),
+        help="AWF work directory.",
+    )
+    parser.add_argument(
+        "--attach-monitor",
+        action="store_true",
+        help="After opening / detecting a release PR, also launch a "
+        "sync_release_pr AWF workspace that attaches the release-PR "
+        "monitor. With this flag the watcher becomes a full "
+        "open-PR-and-monitor pipeline; without it, it only opens/detects.",
+    )
+    parser.add_argument("--agent", default="codex")
+    parser.add_argument(
+        "--companions",
+        type=Path,
+        default=None,
+        help="Path to a JSON file with companion service specs.",
+    )
     args = parser.parse_args()
     sys.exit(
         asyncio.run(
@@ -138,6 +247,10 @@ if __name__ == "__main__":
                 source=args.source,
                 target=args.target,
                 interval=args.interval,
+                work_dir=args.work_dir,
+                attach_monitor=args.attach_monitor,
+                agent=args.agent,
+                companions_path=args.companions,
             )
         )
     )
