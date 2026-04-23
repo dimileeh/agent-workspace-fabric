@@ -70,6 +70,52 @@ class _NoOpAdapter(AgentAdapter):
         )
 
 
+def _make_noop_factory(runtime_value: AgentRuntime) -> type[AgentAdapter]:
+    """Build a no-op adapter class bound to *this* runtime value.
+
+    Extracted from the registry-install loop specifically to sidestep
+    the classic Python closure-capture pitfall: classes defined inside
+    a ``for runtime in ...`` loop share the enclosing ``runtime``
+    variable by REFERENCE, so every class ends up pointing at whatever
+    runtime the loop variable last held — all three registered classes
+    would report the same ``name``. Review feedback on PR #2
+    (CodeRabbit): "closure capture in for-loop".
+
+    Returning a class from a function closes ``runtime_value`` by
+    value because it's a fresh local in this frame, one per call.
+    """
+
+    class _Factory(AgentAdapter):  # type: ignore[misc]
+        runtime = runtime_value  # type: ignore[assignment]
+
+        def __init__(self, *, runner: object = None, default_model: str | None = None) -> None:
+            # runner / default_model accepted for signature compat, unused.
+            self._runtime = runtime_value
+
+        @property
+        def name(self) -> AgentRuntime:
+            return self._runtime
+
+        def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+            return []
+
+        async def run(
+            self,
+            *,
+            compose_project: str,
+            compose_file: Path,
+            prompt: str,
+            model: str | None = None,
+        ) -> AgentRunResult:
+            return AgentRunResult(
+                returncode=0,
+                stdout="[salvage] skipping agent run — worktree already holds completed work",
+                stderr="",
+            )
+
+    return _Factory
+
+
 def _install_noop_adapter_factory() -> None:
     """Replace every entry in the adapter registry with a no-op factory.
 
@@ -78,37 +124,7 @@ def _install_noop_adapter_factory() -> None:
     regardless of which runtime was configured for the workspace.
     """
     for runtime in list(_adapter_base._REGISTRY.keys()):
-        captured = runtime
-
-        class _Factory(AgentAdapter):  # type: ignore[misc]
-            runtime = captured  # type: ignore[assignment]
-
-            def __init__(self, *, runner: object = None, default_model: str | None = None) -> None:
-                # runner / default_model accepted for signature compat, unused.
-                self._runtime = captured
-
-            @property
-            def name(self) -> AgentRuntime:
-                return self._runtime
-
-            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
-                return []
-
-            async def run(
-                self,
-                *,
-                compose_project: str,
-                compose_file: Path,
-                prompt: str,
-                model: str | None = None,
-            ) -> AgentRunResult:
-                return AgentRunResult(
-                    returncode=0,
-                    stdout="[salvage] skipping agent run — worktree already holds completed work",
-                    stderr="",
-                )
-
-        _adapter_base._REGISTRY[runtime] = _Factory
+        _adapter_base._REGISTRY[runtime] = _make_noop_factory(runtime)
 
 
 async def _main(work_dir: Path, workspace_id: str) -> int:

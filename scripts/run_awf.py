@@ -194,17 +194,37 @@ async def _materialize_companion(
     else:
         build_context = raw["build_context"]
 
+    env_file_raw = raw.get("env_file")
+    env_file = _expand_host_path(env_file_raw) if env_file_raw else None
     return CompanionService(
         name=name,
         build_context=build_context,
         dockerfile=raw.get("dockerfile", "Dockerfile"),
-        env_file=raw.get("env_file"),
+        env_file=env_file,
         environment=tuple((k, v) for k, v in (raw.get("environment") or {}).items()),
         depends_on=tuple(raw.get("depends_on") or ("postgres",)),
         healthcheck_cmd=raw.get("healthcheck_cmd"),
         ports=tuple((cp, hp) for cp, hp in (raw.get("ports") or [])),
         command=raw.get("command"),
     )
+
+
+def _expand_host_path(path: str) -> str:
+    """Expand ``~`` and ``$VAR`` / ``${VAR}`` in a host-side path string.
+
+    Companion specs reference host files by path (typically ``.env``
+    files on the operator's machine). Hardcoding absolute paths like
+    ``/home/dimileeh/Projects/aira/aira-agent/.env`` locks the spec to
+    one developer's filesystem; ``~/Projects/aira/aira-agent/.env`` and
+    ``${AWF_AIRA_CHECKOUT_ROOT}/aira-agent/.env`` both survive being
+    checked into the repo and run on someone else's machine.
+
+    Review feedback on PR #2 (CodeRabbit): "hardcoded absolute paths
+    are machine-specific". Fix here, at the loader seam, so every
+    companion spec gets the same treatment without each having to
+    duplicate the expansion logic.
+    """
+    return str(Path(os.path.expandvars(path)).expanduser())
 
 
 async def _run_task(

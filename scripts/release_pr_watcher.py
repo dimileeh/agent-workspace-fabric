@@ -74,8 +74,6 @@ async def _tick_one(
     agent: str,
     companions_path: Path | None,
 ) -> None:
-    import subprocess
-
     repo = RepoRef.from_url(repo_url)
     try:
         result = await ensure_release_pr_open(
@@ -121,9 +119,8 @@ async def _tick_one(
         pr_number=result.pr_number,
     )
     scheduler = Path(__file__).resolve().parent / "schedule_release_pr.py"
-    python_bin = Path(__file__).resolve().parents[1] / ".venv" / "bin" / "python"
     args = [
-        str(python_bin),
+        sys.executable,
         str(scheduler),
         "--repo",
         repo_url,
@@ -139,7 +136,35 @@ async def _tick_one(
     ]
     if companions_path is not None:
         args.extend(["--companions", str(companions_path)])
-    subprocess.run(args, check=False)  # noqa: S603 - controlled args
+    # Run the scheduler via asyncio so we neither block the watcher's
+    # event loop nor silently drop the scheduler's exit status.
+    # ``subprocess.run`` on the sync path would pause every other
+    # repo's tick while this scheduler executed; ``asyncio.create_sub
+    # process_exec`` lets the loop continue servicing the other
+    # coroutines scheduled by ``gather()`` in ``_run``. Review
+    # feedback on PR #2 (CodeRabbit): "don't block the event loop or
+    # ignore scheduler launch failures".
+    proc = await asyncio.create_subprocess_exec(
+        *args,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0:
+        _log.warning(
+            "watcher.scheduler_launch_failed",
+            repo=repo.slug(),
+            pr_number=result.pr_number,
+            returncode=proc.returncode,
+            stderr=stderr.decode("utf-8", errors="replace")[:400],
+        )
+    else:
+        _log.info(
+            "watcher.scheduler_launched",
+            repo=repo.slug(),
+            pr_number=result.pr_number,
+            stdout_snippet=stdout.decode("utf-8", errors="replace")[:200],
+        )
 
 
 async def _run(

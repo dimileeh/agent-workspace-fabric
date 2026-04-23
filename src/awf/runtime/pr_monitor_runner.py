@@ -135,7 +135,20 @@ class PullRequestMonitorRunner:
             state = self._load_state(ws)
             repo = RepoRef.from_url(ws.repo_url)
             pr_number = ws.pr_number
-            assert pr_number is not None, "pr_number must be set before monitoring"
+            if pr_number is None:
+                # A workspace in ``monitoring_pr`` without a PR number is
+                # an upstream invariant violation (the executor/sync
+                # handlers set pr_number before transitioning here).
+                # Fail cleanly instead of crashing the background runner
+                # with AssertionError — review feedback on PR #2 (gemini).
+                await self._terminate_failed(
+                    workspace_id,
+                    message=(
+                        "monitor: workspace reached monitoring_pr without a "
+                        "pr_number — upstream provisioning must populate it"
+                    ),
+                )
+                return
 
             # Refresh the worktree's remote-tracking ref BEFORE counting
             # how far behind we are. Without this, origin/<base> is frozen

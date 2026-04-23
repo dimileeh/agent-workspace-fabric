@@ -126,11 +126,16 @@ async def _main(
         # Fire-and-forget — run_awf.py is a long-running monitor; don't
         # block this scheduler tick on it.
         log_path = work_dir / f"release-monitor-{result.pr_number}.log"
-        python_bin = _ROOT / ".venv" / "bin" / "python"
+        # Spawn run_awf.py using whichever Python is currently running
+        # this scheduler. Hardcoding ``_ROOT / ".venv" / "bin" / "python"``
+        # only works when the caller's venv lives at exactly that path;
+        # ``uv``, system python, and operator-local virtualenvs would
+        # all break that assumption. Review feedback on PR #2
+        # (CodeRabbit): "use the current interpreter".
         run_awf = _ROOT / "scripts" / "run_awf.py"
         subprocess.Popen(  # noqa: S603 - deliberately spawning a long-running child
             [
-                str(python_bin),
+                sys.executable,
                 str(run_awf),
                 "--config",
                 str(spec_path),
@@ -147,15 +152,29 @@ async def _main(
 
 
 def _monitor_already_running(*, work_dir: Path, repo_slug: str, pr_number: int) -> bool:
-    """True iff a sync_release_pr workspace for this (repo, PR) is active.
+    """True iff a sync_release_pr workspace for this (repo, PR) is active
+    in the SAME ``work_dir``.
 
-    Active = status in one of the non-terminal states. Checked by
-    scanning process list for running ``run_awf.py`` invocations whose
-    config path matches our deterministic spec filename. A proper
-    implementation would query the AWF DB, but the scheduler runs
-    outside the driver's process so a file/process check is sufficient
-    for MVP — the scheduler's whole job is to avoid spawning duplicates."""
+    Scoped by ``work_dir`` (not just repo+PR) because two AWF installs
+    can legitimately run side-by-side on the same host — e.g. an
+    operator testing a local branch in ``/tmp/awf-dev`` while
+    production sits in ``/tmp/awf-realrun``. The old filename-only
+    match would have made one install's scheduler suppress the
+    other's launch. Review feedback on PR #2 (CodeRabbit): "use
+    work_dir in the duplicate-monitor check".
+
+    Active = ``run_awf.py`` process whose ``--config`` argument points
+    inside ``<work_dir>/release-pr-specs/`` with the deterministic
+    spec filename for this (repo, PR). A proper implementation would
+    query the AWF DB, but the scheduler runs outside the driver's
+    process so a file/process check is sufficient for MVP — the
+    scheduler's whole job is to avoid spawning duplicates."""
     spec_filename = f"{repo_slug.replace('/', '__')}-pr{pr_number}.json"
+    # Full config path the launcher passes to run_awf.py. Matching the
+    # full path (not just the filename) is what makes this work_dir-
+    # scoped: the same spec filename under a different work_dir won't
+    # match.
+    expected_arg = str(work_dir / "release-pr-specs" / spec_filename)
     try:
         # pgrep -af matches both the command and its args.
         out = subprocess.check_output(
@@ -166,7 +185,7 @@ def _monitor_already_running(*, work_dir: Path, repo_slug: str, pr_number: int) 
     except (subprocess.CalledProcessError, FileNotFoundError):
         return False
     for line in out.splitlines():
-        if spec_filename in line:
+        if expected_arg in line:
             return True
     return False
 
