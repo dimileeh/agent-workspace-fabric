@@ -182,6 +182,26 @@ class WorkspaceExecutor:
         # and we fail with a specific reason rather than pushing nothing.
         worktree_host = self._config.worktrees_root / workspace_id
 
+        # ``base_commit`` is set by the provisioner before a workspace ever
+        # reaches ``ready`` — if it's missing here something went wrong
+        # upstream and every ``rev-list``/``merge-base`` below would
+        # inject the literal string "None" into a git command. Fail
+        # cleanly instead of passing "None..HEAD" to git
+        # (review feedback on #2: gemini, coderabbit).
+        if ws.base_commit is None:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "workspace has no base_commit — provisioning must set "
+                    "this before the agent run; cannot verify feature-branch "
+                    "commits without it"
+                ),
+            )
+            return
+        base_commit: str = ws.base_commit
+
         async def _git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
             return await self._runner.run(["git", "-C", str(worktree_host), *args])
 
@@ -210,9 +230,9 @@ class WorkspaceExecutor:
                     )
             # Regardless of whether we just committed, verify HEAD has advanced
             # past the base commit. If not, the agent produced no change.
-            rev_count = await _git_in_worktree(["rev-list", "--count", f"{ws.base_commit}..HEAD"])
+            rev_count = await _git_in_worktree(["rev-list", "--count", f"{base_commit}..HEAD"])
             if not rev_count.ok or int(rev_count.stdout.strip() or "0") == 0:
-                base_short = ws.base_commit[:10] if ws.base_commit else "unknown"
+                base_short = base_commit[:10] if base_commit else "unknown"
                 message = (
                     f"agent exited without producing any commits on the feature branch "
                     f"(base={base_short})"
@@ -242,26 +262,23 @@ class WorkspaceExecutor:
             # cumulative diff, and the branch is reattached to a valid
             # ancestry so the PR can be opened normally.
             #
-            # Invariant: ``ws.base_commit`` is always populated by
+            # Invariant: ``base_commit`` is always populated by
             # ``_claim_ready`` before this block runs. The ``assert`` both
             # documents and satisfies mypy.
-            assert ws.base_commit is not None
-            ancestor = await _git_in_worktree(
-                ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
-            )
+            ancestor = await _git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
             if not ancestor.ok:
                 _log.warning(
                     "executor.orphan_history_detected",
                     workspace_id=workspace_id,
-                    base_commit=ws.base_commit,
+                    base_commit=base_commit,
                 )
-                reset = await _git_in_worktree(["reset", "--soft", ws.base_commit])
+                reset = await _git_in_worktree(["reset", "--soft", base_commit])
                 if reset.ok:
                     recovery_msg = f"awf: {ws.task_title} (recovered from orphan)"[:72]
                     recovery_body = (
                         f"AWF detected orphan history on workspace {workspace_id} "
                         f"(agent: {ws.agent}) and squashed the cumulative diff "
-                        f"onto base commit {ws.base_commit[:10]}.\n"
+                        f"onto base commit {base_commit[:10]}.\n"
                     )
                     recover_commit = await self._runner.run(
                         [
@@ -277,7 +294,7 @@ class WorkspaceExecutor:
                     )
                     if recover_commit.ok:
                         ancestor = await _git_in_worktree(
-                            ["merge-base", "--is-ancestor", ws.base_commit, "HEAD"]
+                            ["merge-base", "--is-ancestor", base_commit, "HEAD"]
                         )
                 if not ancestor.ok:
                     await self._mark_failed(
@@ -286,7 +303,7 @@ class WorkspaceExecutor:
                         failure_reason=FailureReason.agent_failure,
                         message=(
                             "agent severed git history — HEAD does not descend from "
-                            f"base commit {ws.base_commit[:10] if ws.base_commit else 'unknown'}, "
+                            f"base commit {base_commit[:10] if base_commit else 'unknown'}, "
                             "and automatic recovery (reset --soft + fresh commit) also failed. "
                             "The coding CLI likely ran `git checkout --orphan` or reinitialised "
                             "the repo; inspect the worktree manually."
@@ -296,7 +313,7 @@ class WorkspaceExecutor:
                 _log.info(
                     "executor.orphan_history_recovered",
                     workspace_id=workspace_id,
-                    base_commit=ws.base_commit,
+                    base_commit=base_commit,
                 )
         except Exception as exc:  # unexpected — mark infrastructure
             _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
