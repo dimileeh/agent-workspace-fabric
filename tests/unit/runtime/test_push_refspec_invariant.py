@@ -110,15 +110,60 @@ def test_no_bare_push_origin_head_in_codebase() -> None:  # noqa: N802 — histo
 def test_monitor_git_push_arguments_carry_refspec() -> None:
     """Narrower assertion on the exact function that caused the
     incident: ``pr_monitor_runner._git_push``. The push command it
-    issues must include a ``refs/heads/`` refspec."""
+    issues must include a ``refs/heads/`` refspec.
+
+    We parse the function's AST and scan only the string constants in
+    its body — not its docstring. Otherwise a future regression could
+    leave ``HEAD:refs/heads/`` in the docstring while the actual code
+    reverted to bare ``git push origin HEAD`` and this test would
+    silently pass."""
     from awf.runtime import pr_monitor_runner
 
     source = Path(pr_monitor_runner.__file__).read_text(encoding="utf-8")
-    # Inside the _git_push body we expect the refspec string. Absence
-    # would mean the fix got reverted.
-    assert "HEAD:refs/heads/" in source, (
-        "pr_monitor_runner must push via an explicit"
-        " ``HEAD:refs/heads/<branch>`` refspec — reverting to"
+    tree = ast.parse(source)
+    # Locate ``_git_push`` (async method on ``PullRequestMonitorRunner``).
+    target: ast.AsyncFunctionDef | None = None
+    for node in ast.walk(tree):
+        if isinstance(node, ast.AsyncFunctionDef) and node.name == "_git_push":
+            target = node
+            break
+    assert target is not None, "_git_push not found in pr_monitor_runner"
+
+    # Strip docstring — first statement if it's a bare string expression.
+    body = target.body
+    if (
+        body
+        and isinstance(body[0], ast.Expr)
+        and isinstance(body[0].value, ast.Constant)
+        and isinstance(body[0].value.value, str)
+    ):
+        body = body[1:]
+
+    code_module = ast.Module(body=body, type_ignores=[])
+    found_refspec = False
+    for node in ast.walk(code_module):
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and "HEAD:refs/heads/" in node.value
+        ):
+            found_refspec = True
+            break
+        # f-strings: the literal prefix sits inside JoinedStr/Constant.
+        if isinstance(node, ast.JoinedStr):
+            for part in node.values:
+                if (
+                    isinstance(part, ast.Constant)
+                    and isinstance(part.value, str)
+                    and "HEAD:refs/heads/" in part.value
+                ):
+                    found_refspec = True
+                    break
+        if found_refspec:
+            break
+    assert found_refspec, (
+        "_git_push body must contain an explicit"
+        " ``HEAD:refs/heads/<branch>`` refspec string — reverting to"
         " ``push origin HEAD`` reopens the 2026-04-23 bug."
     )
 

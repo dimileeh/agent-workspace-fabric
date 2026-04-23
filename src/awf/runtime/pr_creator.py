@@ -29,6 +29,25 @@ _log = get_logger(__name__)
 # future gh versions without tight-coupling to a specific release.
 _PR_URL_PATTERN = re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/pull/\d+")
 
+# Redact credentials embedded in URLs before logging. Git/gh can emit
+# ``https://user:token@host`` in stderr under certain auth failures;
+# those strings must never land in log storage. Matches both user-only
+# (``https://user@host``) and user+password (``https://user:pwd@host``)
+# forms and replaces the credential section with ``***``.
+_URL_CREDENTIAL_PATTERN = re.compile(r"(https?://)[^/@\s]+(?::[^/@\s]+)?@")
+
+# Bound the diagnostic log's list of commits-ahead-of-base. A feature
+# branch with hundreds of commits (rare but possible for long-running
+# workstreams) would otherwise emit an unbounded list that could
+# exceed log-backend payload limits.
+_MAX_DIAGNOSTIC_COMMITS = 50
+
+
+def _redact_credentials(text: str) -> str:
+    """Replace ``https://user[:pwd]@host`` patterns with ``https://***@host``
+    so push/pr-create stderr can be safely logged."""
+    return _URL_CREDENTIAL_PATTERN.sub(r"\1***@", text)
+
 
 @dataclass(frozen=True)
 class PullRequestResult:
@@ -85,12 +104,17 @@ class PullRequestCreator:
         # Log the verbatim push output BEFORE the ok check. If the push
         # silently said "Everything up-to-date" with returncode 0 (the
         # T39 signature), we want that recorded for triage.
+        #
+        # stderr/stdout passed through ``_redact_credentials`` first:
+        # git can surface ``https://user:token@host`` in auth-failure
+        # stderr (e.g. "fatal: unable to access '…@github.com/…'"),
+        # and embedded credentials must not hit log storage.
         _log.info(
             "pr_creator.push_output",
             branch=branch_name,
             returncode=push.returncode,
-            stdout=push.stdout.strip()[:500],
-            stderr=push.stderr.strip()[:500],
+            stdout=_redact_credentials(push.stdout.strip())[:500],
+            stderr=_redact_credentials(push.stderr.strip())[:500],
         )
         if not push.ok:
             raise PullRequestError(
@@ -170,14 +194,29 @@ class PullRequestCreator:
                 "--no-decorate",
             ]
         )
+        # Include each diagnostic's exit code so the log reader can
+        # tell "command failed; stdout empty" apart from "command
+        # succeeded; state genuinely unknown". Without the rc, an
+        # ``rev-parse HEAD`` failure produced the same log shape as a
+        # legitimately-empty worktree, which cost triage time during
+        # the T39 incident.
+        commits = [line for line in ahead_of_base.stdout.splitlines() if line.strip()]
+        truncated = len(commits) > _MAX_DIAGNOSTIC_COMMITS
         _log.info(
             "pr_creator.pre_push_state",
             worktree=str(worktree_path),
             push_target_branch=branch_name,
             current_branch=current_branch.stdout.strip() or "<unknown>",
+            current_branch_rc=current_branch.returncode,
             head_sha=head_sha.stdout.strip() or "<unknown>",
-            commits_ahead_of_base=[
-                line for line in ahead_of_base.stdout.splitlines() if line.strip()
-            ],
+            head_sha_rc=head_sha.returncode,
+            # Bound the list to ``_MAX_DIAGNOSTIC_COMMITS`` so a branch
+            # hundreds of commits ahead of base doesn't blow past
+            # log-backend payload limits. ``commits_ahead_total`` lets
+            # the reader know the full count even when truncated.
+            commits_ahead_of_base=commits[:_MAX_DIAGNOSTIC_COMMITS],
+            commits_ahead_total=len(commits),
+            commits_ahead_truncated=truncated,
+            commits_ahead_rc=ahead_of_base.returncode,
             base_branch=base_branch,
         )

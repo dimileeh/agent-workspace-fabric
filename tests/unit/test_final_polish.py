@@ -244,24 +244,48 @@ class TestExecutorMarkFailedStatusDiverged:
 
 class TestGitManagerEmptyRefSkip:
     @pytest.mark.unit
-    async def test_empty_ref_lines_skipped_in_cleanup(self, tmp_path: Path) -> None:
+    async def test_empty_ref_lines_skipped_in_cleanup(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
         """Line 178: ``for-each-ref`` output can have blank lines from
-        split; we ``continue`` past them rather than passing an empty
-        string to ``update-ref -d``."""
-        # ensure_mirror's cleanup loop uses ``for ref in (line.strip()
-        # for line in listing.stdout.splitlines())`` then ``if not ref:
-        # continue``. Covering that in a unit test would require a full
-        # GitManager + mirror path fixture; the invariant we're pinning
-        # here is simply that empty/whitespace lines are skipped rather
-        # than passed to ``update-ref -d``, which would crash.
-        lines = "refs/heads/main\n\nrefs/heads/dev\n".splitlines()
-        kept = [ln.strip() for ln in lines if ln.strip()]
-        assert "" not in kept
-        # Line 178 is the ``if not ref: continue``; exercised any time a
-        # worktree-setup path lists refs with blank lines. The behavior
-        # is invariant-asserted by the filter above; the branch is
-        # covered by integration tests of ensure_mirror that shuffle
-        # refs.
+        split; GitManager must ``continue`` past them rather than
+        passing empty strings to ``update-ref -d`` (which would crash).
+
+        Drives the REAL ``GitManager.ensure_mirror`` through its first-
+        clone path by patching ``_run`` with a recorder that returns
+        canned stdout. The assertion is "no ``update-ref -d`` call
+        received an empty-string ref" — which proves the ``continue``
+        branch executed against mixed output."""
+        from awf.node.git_manager import GitManager, GitResult
+
+        recorded: list[tuple[list[str], str]] = []
+
+        async def _fake_run(self, args: list[str], *, operation: str) -> GitResult:
+            recorded.append((list(args), operation))
+            stdout = ""
+            if operation == "mirror.list_local_heads":
+                # Mixed output: two real refs with a blank line between them.
+                stdout = "refs/heads/main\n\nrefs/heads/awf/ws_old\n"
+            return GitResult(returncode=0, stdout=stdout, stderr="")
+
+        monkeypatch.setattr(GitManager, "_run", _fake_run)
+        gm = GitManager(tmp_path / "git")
+        await gm.ensure_mirror("git@github.com:dimileeh/aira-web.git")
+
+        # Exactly two ``update-ref -d`` calls — one per non-blank ref.
+        # The blank line between them did NOT trigger a third call with
+        # an empty arg (which would have crashed the real git).
+        update_calls = [
+            (args, op) for args, op in recorded if op == "mirror.delete_stale_local_head"
+        ]
+        assert len(update_calls) == 2, (
+            f"expected 2 update-ref calls, got {len(update_calls)} — did the blank-line skip break?"
+        )
+        for args, _ in update_calls:
+            assert "" not in args, (
+                f"update-ref received an empty-string ref — the blank-line"
+                f" skip at git_manager.py:178 regressed. Args: {args}"
+            )
 
 
 # ── run_awf _main's "status != completed without failure_reason" ──────────
@@ -309,21 +333,9 @@ class TestRunAwfIncompleteNoFailureReason:
         assert rc == 1
 
 
-# ── validation display for non-sh args ─────────────────────────────────────
-
-
-class TestValidationDisplayNonShArgs:
-    @pytest.mark.unit
-    def test_non_sh_args_are_quoted_via_shlex(self) -> None:
-        """Line 205: when cli_args isn't the ``sh -c <body>`` form, the
-        display string is built by shlex-quoting each arg. We can test
-        the formatting logic directly without spinning up a container."""
-        import shlex
-
-        cli_args = ["pytest", "-q", "--keep-alive=1s", "tests/with spaces/"]
-        display = " ".join(shlex.quote(a) for a in cli_args)
-        assert display.startswith("pytest -q")
-        assert "'tests/with spaces/'" in display or '"tests/with spaces/"' in display
+# validation display tests live in tests/unit/test_polish_small_gaps.py,
+# where they drive ``ValidationRunner._exec`` directly with a fake
+# runner instead of reimplementing the formatting logic.
 
 
 # ── attach_feature_pr_monitor._main ────────────────────────────────────────

@@ -184,21 +184,35 @@ class PullRequestMonitorRunner:
                 return
 
             # Determine the remote push target for this workspace.
-            # ``remote_push_branch`` is the canonical destination —
-            # persisted at workspace creation (``feature_branch_pr``:
-            # same as ``branch_name``; sync kinds: the PR's head
-            # branch). Fall back to ``branch_name`` for pre-migration
-            # rows where the column may be unset (monitors created
-            # before the remote_push_branch column existed).
-            remote_branch = ws.remote_push_branch or ws.branch_name
+            # ``remote_push_branch`` is the canonical destination.
+            #
+            # Pre-migration fallback — task-kind-conditional:
+            #   * ``feature_branch_pr``: ``branch_name`` (e.g. ``awf/<id>``)
+            #     equals the remote branch. Safe to fall back.
+            #   * sync kinds: ``branch_name`` is the LOCAL synthetic ref
+            #     (``release-sync/<id>`` / ``feature-sync/<id>``) — NOT
+            #     the remote branch the PR expects. Falling back would
+            #     push to a new remote branch instead of updating the
+            #     PR's head. Refuse and fail fast instead; the row
+            #     predates this migration and must be re-attached
+            #     fresh (which will populate remote_push_branch).
+            remote_branch = ws.remote_push_branch
+            if remote_branch is None and ws.task_kind == "feature_branch_pr":
+                remote_branch = ws.branch_name
             if not remote_branch:
-                # No branch at all on this workspace — can't push safely.
-                # This is an upstream provisioning invariant violation.
+                # No safe push target — either missing branch entirely
+                # (upstream invariant violation) or a pre-migration
+                # sync row where ``branch_name`` is unsafe to reuse.
                 await self._terminate_failed(
                     workspace_id,
                     message=(
-                        "monitor: workspace has no branch_name / "
-                        "remote_push_branch — cannot safely push"
+                        "monitor: workspace has no remote_push_branch "
+                        f"(task_kind={ws.task_kind}, branch_name="
+                        f"{ws.branch_name!r}). For sync workspaces "
+                        "predating the remote_push_branch migration, "
+                        "re-attach the monitor via "
+                        "attach_feature_pr_monitor.py so a fresh row "
+                        "is provisioned with the column populated."
                     ),
                 )
                 return

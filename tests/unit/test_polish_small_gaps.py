@@ -43,6 +43,7 @@ from awf.runtime.feature_pr_sync import _default_process_lister, is_feature_pr_m
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationResult,
+    ValidationRunner,
 )
 
 # ── feature_pr_sync ────────────────────────────────────────────────────────
@@ -108,24 +109,48 @@ class TestValidationDisplay:
 
     @pytest.mark.unit
     async def test_sh_preamble_stripped_when_starts_with_venv_activate(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ) -> None:
-        """Covers lines 201-205: the sh-cmd branch where
-        _VENV_ACTIVATE_PREAMBLE appears and gets stripped."""
-        # We don't run the real validation (it does docker-compose exec).
-        # Instead we call the private _format_display via its entry by
-        # invoking _run_one with a fake runner.
+        """Drives the REAL ``ValidationRunner._exec`` path with a fake
+        command runner and asserts the production formatter — not a
+        reimplementation — strips the preamble. A regression in the
+        actual code (e.g. changing the prefix test) would fail here
+        instead of being silently shadowed by the test's own logic."""
+        from awf.common.commands import FakeCommandRunner
         from awf.runtime import validation as validation_mod
 
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="ok\n")
+        runner = ValidationRunner(runner=fake, artifacts_dir=tmp_path)
         preamble = validation_mod._VENV_ACTIVATE_PREAMBLE
-        cli_args = ["sh", "-c", f"{preamble}pytest -q"]
-        # _format_display is inline in _run_one, not extracted. Simulate
-        # its logic here by constructing a ValidationRunner and calling
-        # the relevant slice via a fake subprocess.
-        display = cli_args[2]
-        if display.startswith(preamble):
-            display = display[len(preamble) :]
-        assert display == "pytest -q"
+        result = await runner._exec(
+            compose_project="awf_x",
+            compose_file=Path("/tmp/c.yml"),
+            cli_args=["sh", "-c", f"{preamble}pytest -q"],
+            label="unit",
+            artifacts_dir=tmp_path,
+        )
+        assert result.command == "pytest -q"
+
+    @pytest.mark.unit
+    async def test_non_sh_args_are_quoted_via_shlex(self, tmp_path: Path) -> None:
+        """Covers validation.py line 205 — the non-sh display branch
+        runs through ``shlex.quote`` on each arg. Driven via the real
+        ``_exec`` so the production path is actually exercised."""
+        from awf.common.commands import FakeCommandRunner
+
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="")
+        runner = ValidationRunner(runner=fake, artifacts_dir=tmp_path)
+        result = await runner._exec(
+            compose_project="awf_x",
+            compose_file=Path("/tmp/c.yml"),
+            cli_args=["pytest", "-q", "tests/with spaces/"],
+            label="unit",
+            artifacts_dir=tmp_path,
+        )
+        assert "pytest -q" in result.command
+        assert "'tests/with spaces/'" in result.command or '"tests/with spaces/"' in result.command
 
 
 # ── release_pr_sync ────────────────────────────────────────────────────────
@@ -267,11 +292,15 @@ class TestMirrorSlug:
 
     @pytest.mark.unit
     def test_empty_tail_falls_back_to_repo(self) -> None:
-        """Edge case: a URL whose tail sanitizes to empty string (e.g.
-        all-special-chars) falls back to ``repo``."""
-        # Construct a URL whose last segment becomes empty after sanitize.
-        slug = _slugify_repo("https://example/!!!.git")
-        assert "repo" in slug or slug != ""
+        """Edge case: when the URL's tail reduces to an empty string
+        (after ``.git`` strip + regex sanitize), the slugifier falls
+        back to the literal ``repo`` sentinel.
+
+        We construct a URL whose last path segment is literally ``.git``
+        — after stripping the ``.git`` suffix, the tail is empty, and
+        the sub-then-truthy-fallback path fires."""
+        slug = _slugify_repo("https://example.com/.git")
+        assert slug == "repo"
 
 
 # ── validation_fix_cycle ───────────────────────────────────────────────────

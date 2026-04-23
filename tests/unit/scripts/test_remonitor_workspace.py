@@ -3,9 +3,11 @@ re-enters the PR monitor on a workspace previously terminated
 completed/failed.
 
 We drive ``_main`` end-to-end with a monkey-patched feature-PR monitor
-builder (so the real ``run`` never fires GitHub calls) and an
-in-memory SQLite DB. Each test asserts on the observable state
-transitions + the CLI's exit code."""
+builder (so the real ``run`` never fires GitHub calls) and a
+file-backed SQLite DB at ``work_dir / "awf.db"`` (matching
+production, which persists state across ``run_awf.py`` invocations —
+``:memory:`` would not reflect the real wiring). Each test asserts
+on the observable state transitions + the CLI's exit code."""
 
 from __future__ import annotations
 

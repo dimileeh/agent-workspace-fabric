@@ -313,6 +313,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
         fake.queue_result(returncode=0)  # validation ok
+        _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=128, stderr="remote: perm denied")  # push fails
 
         await executor.execute(ws_id)

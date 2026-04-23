@@ -1005,6 +1005,31 @@ async def _run_sync_feature_pr(
         }
 
 
+_ADDITIVE_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
+    # (table, column, SQL fragment). Additive only — safe to apply in
+    # any order because ``ALTER TABLE ADD COLUMN`` is idempotent when
+    # gated on the PRAGMA check below.
+    ("workspaces", "remote_push_branch", "VARCHAR(256)"),
+)
+
+
+def _add_missing_columns(connection: Any) -> None:
+    """Idempotently add columns that later migrations introduced to an
+    existing SQLite DB.
+
+    Driven from ``_ADDITIVE_MIGRATIONS`` rather than Alembic because
+    local ``run_awf.py`` workspaces are a dev convenience that predates
+    the alembic setup for the runtime DB. Production DBs get proper
+    migrations; this path keeps ``--keep-state`` alive for operators."""
+    import sqlalchemy as _sa
+
+    inspector = _sa.inspect(connection)
+    for table, column, sql_type in _ADDITIVE_MIGRATIONS:
+        existing = {c["name"] for c in inspector.get_columns(table)}
+        if column not in existing:
+            connection.execute(_sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
+
+
 async def _main(config_path: Path, work_dir: Path, keep_state: bool) -> int:
     with config_path.open() as f:
         raw = json.load(f)
@@ -1032,6 +1057,13 @@ async def _main(config_path: Path, work_dir: Path, keep_state: bool) -> int:
     engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        # ``create_all`` creates tables but never alters existing ones.
+        # When ``--keep-state`` points at a pre-migration SQLite DB,
+        # columns added by later migrations (e.g. ``remote_push_branch``
+        # in b2c3d4e5f6a1) are missing and the first write fails. Apply
+        # additive column migrations manually here so operators can
+        # resume an old run_awf workspace without dropping state.
+        await conn.run_sync(_add_missing_columns)
     factory = make_session_factory(engine)
 
     try:
