@@ -72,6 +72,13 @@ def read_output_tail(path: Path, *, max_chars: int = DEFAULT_TAIL_CHARS) -> str:
     stdout / stderr artifact for embedding in the fix prompt. Failure
     signals live at the tail of test logs, hence "tail".
 
+    Implementation note: opens the file in binary mode and ``seek()``s
+    to ``-max_chars`` from the end rather than reading the whole file
+    into memory. A noisy failing test run can produce multi-MB
+    artifacts; every fix-cycle pass reads two of them (stdout +
+    stderr), so the naive ``read_bytes`` grows O(artifact_size) per
+    retry. Tail-seeking keeps it O(max_chars) regardless of file size.
+
     Defensive: missing files return ``""`` (a failed validation run
     should always have written its artifact, but don't crash the
     whole retry loop if there's a race); non-UTF-8 bytes fall back to
@@ -79,13 +86,18 @@ def read_output_tail(path: Path, *, max_chars: int = DEFAULT_TAIL_CHARS) -> str:
     """
     if not path.exists():
         return ""
-    # Read bytes then decode with replace — validation artifacts can
-    # contain terminal color codes and occasional binary garbage.
-    data = path.read_bytes()
-    if not data:
+    try:
+        size = path.stat().st_size
+    except OSError:
         return ""
-    if len(data) > max_chars:
-        data = data[-max_chars:]
+    if size == 0:
+        return ""
+    # Read only the trailing slice — bounded memory regardless of file size.
+    to_read = min(size, max_chars)
+    with path.open("rb") as f:
+        if size > to_read:
+            f.seek(-to_read, 2)  # 2 = SEEK_END
+        data = f.read(to_read)
     return data.decode("utf-8", errors="replace")
 
 
