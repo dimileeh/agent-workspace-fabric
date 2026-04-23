@@ -602,16 +602,81 @@ class PullRequestMonitorRunner:
         return r.stdout.strip() if r.ok else ""
 
     async def _git_push(self, *, worktree_path: Path) -> bool:
-        """Push current branch to origin. Returns True iff anything new
-        was pushed (rough signal: ``rc == 0`` and stderr wasn't
-        ``Everything up-to-date``)."""
+        """Push current branch to origin.
+
+        Returns True iff anything new was pushed.
+
+        **Recovery on rejection**: if the push is refused because the
+        remote feature branch has advanced past local (divergence from a
+        prior monitor run whose push succeeded but whose local worktree
+        is now a stale clone), this method silently resyncs local to
+        remote — ``git fetch origin <branch>`` + ``git reset --hard
+        origin/<branch>``. GitHub is truth for pushed state; any local
+        commits that didn't make it onto the remote represent dead work
+        from the failed previous push and can be safely discarded. The
+        next outer-loop iteration then operates on an aligned worktree
+        and its SyncBase / fix-cycle commits will fast-forward cleanly.
+
+        Without this recovery, a diverged worktree caused PR #335 and
+        #336 to loop until iter_cap: each failed push added another
+        local merge commit, the next SyncBase piled another on top, and
+        the head SHA on GitHub never moved."""
         r = await self._deps.runner.run(
             ["git", "-C", str(worktree_path), "push", "origin", "HEAD"]
         )
-        if not r.ok:
+        if r.ok:
+            # git prints "Everything up-to-date" to stderr when the ref didn't move.
+            return "up-to-date" not in (r.stderr or "").lower()
+
+        # Non-zero exit. Is it a divergence rejection?
+        stderr_lower = (r.stderr or "").lower()
+        is_rejection = (
+            "[rejected]" in stderr_lower
+            or "non-fast-forward" in stderr_lower
+            or "fetch first" in stderr_lower
+        )
+        if not is_rejection:
+            # Auth, network, disk, etc. — caller retries on next poll;
+            # DON'T blow away local state.
+            _log.warning(
+                "monitor.push_failed_non_divergence",
+                stderr=(r.stderr or "")[:400],
+            )
             return False
-        # git prints "Everything up-to-date" to stderr when the ref didn't move.
-        return "up-to-date" not in (r.stderr or "").lower()
+
+        # Divergence — resync local to remote.
+        branch_result = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"]
+        )
+        branch_name = (branch_result.stdout or "").strip()
+        if not branch_name or branch_name == "HEAD":
+            # Detached HEAD; can't safely identify remote branch to reset to.
+            _log.warning(
+                "monitor.push_rejected_detached_head",
+                worktree_path=str(worktree_path),
+            )
+            return False
+
+        _log.warning(
+            "monitor.push_rejected_resyncing_local",
+            worktree_path=str(worktree_path),
+            branch=branch_name,
+            stderr=(r.stderr or "")[:400],
+        )
+        await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "fetch", "origin", branch_name]
+        )
+        await self._deps.runner.run(
+            [
+                "git",
+                "-C",
+                str(worktree_path),
+                "reset",
+                "--hard",
+                f"origin/{branch_name}",
+            ]
+        )
+        return False
 
     # ── DB state management ───────────────────────────────────────────────
 

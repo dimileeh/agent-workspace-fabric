@@ -805,6 +805,143 @@ class TestSyncBase:
         assert any("CONFLICT" in p or "conflicts" in p for p in adapter.calls)
 
 
+class TestPushRejectRecovery:
+    """Push is rejected when local diverged from remote. Without
+    recovery, the monitor loops retrying SyncBase while local commits
+    pile up, eventually hitting iter_cap. Recovery: fetch the feature
+    branch + reset local hard to remote (GitHub is truth for pushed
+    state), then next outer-loop iteration works on a fresh aligned
+    worktree."""
+
+    @pytest.mark.unit
+    async def test_push_rejection_triggers_fetch_and_reset_hard(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        # Outer iter 1: DIRTY state forces SyncBase; merge creates a
+        # local commit; push gets rejected (non-fast-forward); recovery
+        # fetch + reset --hard kick in.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="1\n")  # base-behind
+        cmd.queue_result(
+            returncode=0, stdout=_pr_payload(merge_state_status="DIRTY")
+        )
+        cmd.queue_result(returncode=0)  # git merge --abort (defense)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0)  # git merge --no-edit (clean)
+        # Push rejected.
+        cmd.queue_result(
+            returncode=1,
+            stderr=(
+                "To github.com:dimileeh/aira-agent.git\n"
+                " ! [rejected]        awf/test -> awf/test (fetch first)\n"
+                "error: failed to push some refs ..."
+            ),
+        )
+        # Recovery sequence: rev-parse branch, fetch branch, reset --hard.
+        cmd.queue_result(returncode=0, stdout="awf/test-branch\n")  # rev-parse --abbrev-ref
+        cmd.queue_result(returncode=0)  # git fetch origin awf/test-branch
+        cmd.queue_result(returncode=0)  # git reset --hard origin/awf/test-branch
+        # Outer iter 2: reset worked; GitHub now reports CLEAN; merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(
+            returncode=0, stdout=_pr_payload(merge_state_status="CLEAN")
+        )
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGE-SHA\n")
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # Assert fetch + reset --hard were called on the feature branch.
+        fetch_branch_calls = [
+            c
+            for c in cmd.calls
+            if c.args[:2] == ["git", "-C"]
+            and "fetch" in c.args
+            and any(a == "awf/test-branch" for a in c.args)
+        ]
+        assert fetch_branch_calls, "must fetch the feature branch for resync"
+        reset_calls = [
+            c
+            for c in cmd.calls
+            if c.args[:2] == ["git", "-C"]
+            and "reset" in c.args
+            and "--hard" in c.args
+            and any("origin/awf/test-branch" in a for a in c.args)
+        ]
+        assert reset_calls, "must reset --hard to origin/<branch>"
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+    @pytest.mark.unit
+    async def test_non_rejection_push_failure_does_not_trigger_recovery(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """Auth / network / other push failures must NOT silently
+        ``reset --hard`` — we'd wipe legitimate local state."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="1\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merge_state_status="BEHIND"))
+        cmd.queue_result(returncode=0)  # git merge --abort
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0)  # git merge (clean)
+        cmd.queue_result(returncode=128, stderr="ssh: Permission denied (publickey)")
+        # Iter 2: cap at 1 so it bails fast.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="1\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merge_state_status="BEHIND"))
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            iter_cap=1,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        # No reset --hard should have happened (auth failure is not a
+        # divergence signal).
+        reset_calls = [
+            c
+            for c in cmd.calls
+            if c.args[:2] == ["git", "-C"]
+            and "reset" in c.args
+            and "--hard" in c.args
+        ]
+        assert not reset_calls, (
+            f"reset --hard must not fire on non-rejection failures; got {reset_calls}"
+        )
+
+
 class TestDirtyConflictResolution:
     @pytest.mark.unit
     async def test_github_dirty_triggers_cli_conflict_resolve_and_recovery(
