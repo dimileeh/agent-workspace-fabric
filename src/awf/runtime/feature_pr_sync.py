@@ -84,10 +84,12 @@ class FeaturePRSyncError(Exception):
         super().__init__(f"{operation} failed: {stderr.strip() or '<no output>'}")
 
 
-# The set of fields we pull from ``gh pr view``. Keep in sync with
-# ``_parse_metadata`` — adding a field here without a parser update is
+# The set of fields we pull from ``gh pr view``. ``gh pr view --json``
+# does NOT accept ``merged`` or ``closed`` as field names — derive
+# both from ``state`` (one of ``OPEN`` / ``CLOSED`` / ``MERGED``) in
+# ``_parse_metadata``. Adding a field here without a parser update is
 # a silent drop on the floor.
-_PR_VIEW_JSON_FIELDS = "number,headRefName,baseRefName,state,isDraft,closed,merged,author,url,title"
+_PR_VIEW_JSON_FIELDS = "number,headRefName,baseRefName,state,isDraft,author,url,title"
 
 
 async def fetch_pr_metadata(
@@ -144,8 +146,13 @@ def _parse_metadata(payload: dict[str, Any]) -> FeaturePRMetadata:
         base_branch = payload["baseRefName"]
         state = payload["state"]
         is_draft = bool(payload.get("isDraft", False))
-        closed = bool(payload.get("closed", False))
-        merged = bool(payload.get("merged", False))
+        # ``gh pr view --json`` doesn't expose ``closed`` / ``merged``
+        # as separate boolean fields — derive both from ``state``,
+        # which is the canonical one-of {OPEN, CLOSED, MERGED}. Tests
+        # that stub the gh payload with explicit ``closed`` / ``merged``
+        # keys still work because we honour them if present.
+        closed = bool(payload.get("closed", state == "CLOSED"))
+        merged = bool(payload.get("merged", state == "MERGED"))
         url = payload["url"]
         title = payload.get("title", "")
     except (KeyError, TypeError, ValueError) as exc:
