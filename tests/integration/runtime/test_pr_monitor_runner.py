@@ -841,9 +841,7 @@ class TestPushRejectRecovery:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        ws_id = await _seed_monitoring_workspace(
-            factory, branch_name="awf/test-branch"
-        )
+        ws_id = await _seed_monitoring_workspace(factory, branch_name="awf/test-branch")
         # Outer iter 1: DIRTY state forces SyncBase; merge creates a
         # local commit; push gets rejected (non-fast-forward); recovery
         # fetch + reset --hard kick in.
@@ -891,9 +889,7 @@ class TestPushRejectRecovery:
             compose_file=tmp_path / "compose.yml",
         )
         # Assert push used an explicit refspec — no bare ``HEAD`` arg.
-        push_calls = [
-            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
-        ]
+        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
         assert push_calls, "expected at least one push"
         for pc in push_calls:
             assert "HEAD:refs/heads/awf/test-branch" in pc.args, (
@@ -1933,9 +1929,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [
-            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
-        ]
+        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
         assert push_calls, "fix_cycle must push"
         for pc in push_calls:
             # The bare ``HEAD`` arg would mean the ambiguous form
@@ -1946,8 +1940,7 @@ class TestPushUsesExplicitRefspec:
                 f"Use ``HEAD:refs/heads/<branch>`` instead. Full args: {pc.args}"
             )
             assert "HEAD:refs/heads/awf/feature-x" in pc.args, (
-                f"push refspec must name the remote branch explicitly. "
-                f"Full args: {pc.args}"
+                f"push refspec must name the remote branch explicitly. Full args: {pc.args}"
             )
 
     @pytest.mark.unit
@@ -1988,9 +1981,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [
-            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
-        ]
+        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
         assert push_calls
         for pc in push_calls:
             assert "HEAD:refs/heads/awf/feature-y" in pc.args
@@ -2047,9 +2038,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [
-            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
-        ]
+        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
         assert push_calls
         for pc in push_calls:
             assert "HEAD:refs/heads/awf/feature-z" in pc.args
@@ -2097,9 +2086,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [
-            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
-        ]
+        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
         assert push_calls
         for pc in push_calls:
             assert "HEAD:refs/heads/development" in pc.args, (
@@ -2174,9 +2161,7 @@ class TestPushUsesExplicitRefspec:
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
         )
-        push_calls = [
-            c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args
-        ]
+        push_calls = [c for c in cmd.calls if c.args[:2] == ["git", "-C"] and "push" in c.args]
         assert push_calls
         for pc in push_calls:
             assert "HEAD:refs/heads/awf/legacy-row" in pc.args

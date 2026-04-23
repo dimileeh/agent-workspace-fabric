@@ -39,9 +39,7 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.node.compose_manager import AuthMount
 from scripts import run_awf
-
 
 # ── Fakes ──────────────────────────────────────────────────────────────────
 
@@ -152,9 +150,7 @@ class _FakeMonitor:
         self._factory = session_factory
         self.calls: list[dict[str, Any]] = []
 
-    async def run(
-        self, *, workspace_id: str, compose_project: str, compose_file: Path
-    ) -> None:
+    async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
         self.calls.append(
             {
                 "workspace_id": workspace_id,
@@ -251,9 +247,7 @@ def patch_handlers(
         "awf.runtime.release_pr_monitor.build_release_pr_monitor",
         _build_release_monitor,
     )
-    monkeypatch.setattr(
-        run_awf, "build_feature_pr_monitor", _build_feature_monitor
-    )
+    monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _build_feature_monitor)
 
     # ValidationRunner + PullRequestCreator + GitHubClient get constructed
     # but their methods aren't exercised because the fake executor never
@@ -261,7 +255,9 @@ def patch_handlers(
 
     # _configure_branch_push_upstream runs git-config via the fake runner;
     # the FakeRunner.run raises on call, so short-circuit it.
-    async def _noop_config(*, runner: Any, worktree_path: Any, branch_name: str, remote_branch: str) -> None:
+    async def _noop_config(
+        *, runner: Any, worktree_path: Any, branch_name: str, remote_branch: str
+    ) -> None:
         pass
 
     monkeypatch.setattr(run_awf, "_configure_branch_push_upstream", _noop_config)
@@ -806,7 +802,9 @@ class TestMainEntry:
         # DB exists (recreated empty by SQLAlchemy), but is NOT the
         # stale placeholder.
         assert stale_db.exists()
-        assert stale_db.stat().st_mtime_ns != stale_stat or stale_db.read_text() != "stale placeholder"
+        assert (
+            stale_db.stat().st_mtime_ns != stale_stat or stale_db.read_text() != "stale placeholder"
+        )
 
 
 class TestBuildAuthMounts:

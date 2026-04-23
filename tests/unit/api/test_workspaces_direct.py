@@ -50,24 +50,22 @@ async def session(tmp_path: Path) -> AsyncIterator[AsyncSession]:
 
 
 def _payload(**overrides: object) -> WorkspaceCreateRequest:
-    defaults = dict(
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        branch_base="development",
-        task_title="direct test",
-        task_prompt="do a thing",
-        agent=AgentRuntime.codex,
-        test_commands=["pytest -q"],
-        requires_database=False,
-    )
+    defaults: dict[str, object] = {
+        "repo_url": "git@github.com:dimileeh/aira-web.git",
+        "branch_base": "development",
+        "task_title": "direct test",
+        "task_prompt": "do a thing",
+        "agent": AgentRuntime.codex,
+        "test_commands": ["pytest -q"],
+        "requires_database": False,
+    }
     defaults.update(overrides)
-    return WorkspaceCreateRequest(**defaults)
+    return WorkspaceCreateRequest(**defaults)  # type: ignore[arg-type]
 
 
 class TestCreateDirect:
     @pytest.mark.unit
-    async def test_creates_new_workspace_without_idempotency(
-        self, session: AsyncSession
-    ) -> None:
+    async def test_creates_new_workspace_without_idempotency(self, session: AsyncSession) -> None:
         result = await create_workspace(
             payload=_payload(),
             idempotency_key=None,

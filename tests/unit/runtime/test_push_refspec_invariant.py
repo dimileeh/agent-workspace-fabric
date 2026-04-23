@@ -76,7 +76,7 @@ def _literal_strings(elts: list[ast.expr]) -> list[str | None]:
     return out
 
 
-def test_no_bare_push_origin_HEAD_in_codebase() -> None:
+def test_no_bare_push_origin_head_in_codebase() -> None:  # noqa: N802 — historical name retained
     """No ``git push origin HEAD`` without an explicit refspec anywhere.
 
     Flags list literals where an element is exactly ``"HEAD"`` and the
@@ -103,8 +103,7 @@ def test_no_bare_push_origin_HEAD_in_codebase() -> None:
                     )
     assert not offenders, (
         "Found bare ``git push origin HEAD`` without refspec — that's"
-        " the 2026-04-23 aira-web regression. Offenders:\n  "
-        + "\n  ".join(offenders)
+        " the 2026-04-23 aira-web regression. Offenders:\n  " + "\n  ".join(offenders)
     )
 
 

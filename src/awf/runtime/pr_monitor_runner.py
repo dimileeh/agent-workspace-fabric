@@ -414,9 +414,7 @@ class PullRequestMonitorRunner:
 
         # 3) Push everything we committed.
         worktree_path = self._worktrees_root / workspace_id
-        pushed = await self._git_push(
-            worktree_path=worktree_path, remote_branch=remote_branch
-        )
+        pushed = await self._git_push(worktree_path=worktree_path, remote_branch=remote_branch)
         if not pushed:
             # No local commits — CLI returned "false_positive" for
             # everything or "defer" for everything. We still want to

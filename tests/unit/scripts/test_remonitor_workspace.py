@@ -9,7 +9,6 @@ transitions + the CLI's exit code."""
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
 
@@ -81,9 +80,7 @@ class _FakeMonitor:
         self._factory = session_factory
         self.calls: list[dict[str, Any]] = []
 
-    async def run(
-        self, *, workspace_id: str, compose_project: str, compose_file: Path
-    ) -> None:
+    async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
         self.calls.append(
             {
                 "workspace_id": workspace_id,
@@ -95,18 +92,14 @@ class _FakeMonitor:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
             assert ws is not None
-            await repo.transition(
-                ws, to=WorkspaceStatus.completed, reason_code="FAKE_MON"
-            )
+            await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="FAKE_MON")
             await s.commit()
 
 
 class _FakeFailingMonitor(_FakeMonitor):
     """Drives workspace to ``failed`` — covers the exit-code=1 path."""
 
-    async def run(
-        self, *, workspace_id: str, compose_project: str, compose_file: Path
-    ) -> None:
+    async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
         self.calls.append(
             {
                 "workspace_id": workspace_id,

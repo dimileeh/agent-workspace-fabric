@@ -33,9 +33,7 @@ from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
 
-_TEMPLATE = (
-    Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
-)
+_TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
 @pytest.fixture
@@ -117,7 +115,8 @@ class TestConstructorValidation:
     ) -> None:
         """Line 107: supplying both pr_monitor and pr_monitor_factory
         is a programming error — the executor can only use one."""
-        from awf.db.session import make_engine, make_session_factory as _mk
+        from awf.db.session import make_engine
+        from awf.db.session import make_session_factory as _mk
 
         engine = make_engine("sqlite+aiosqlite:///:memory:")
         factory = _mk(engine)
@@ -209,9 +208,7 @@ class TestUnexpectedErrorDuringAgentRun:
             ) -> Any:
                 raise RuntimeError("adapter internal bug")
 
-        monkeypatch.setitem(
-            adapter_base._REGISTRY, AgentRuntime.codex, _BoomAdapter
-        )
+        monkeypatch.setitem(adapter_base._REGISTRY, AgentRuntime.codex, _BoomAdapter)
 
         executor = _make_executor(fake, factory, tmp_path)
         await executor.execute(ws_id)
@@ -293,13 +290,9 @@ class TestPrMonitorFactoryPath:
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0, stdout="abc commit\n")
         fake.queue_result(returncode=0)  # git push
-        fake.queue_result(
-            returncode=0, stdout="https://github.com/x/y/pull/42\n"
-        )  # gh pr create
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/42\n")  # gh pr create
 
-        executor = _make_executor(
-            fake, factory, tmp_path, pr_monitor_factory=_monitor_factory
-        )
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
         await executor.execute(ws_id)
 
         assert len(factory_calls) == 1  # factory called with adapter exactly once

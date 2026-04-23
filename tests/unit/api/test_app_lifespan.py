@@ -68,14 +68,14 @@ class TestLifespan:
             async def run_sync(self, fn) -> None:
                 created_all[0] = True
 
-            async def __aenter__(self) -> "_FakeConn":
+            async def __aenter__(self) -> _FakeConn:
                 return self
 
             async def __aexit__(self, *args) -> None:
                 pass
 
         class _FakeEngine:
-            def begin(self) -> "_FakeConn":
+            def begin(self) -> _FakeConn:
                 return _FakeConn()
 
             async def dispose(self) -> None:
@@ -90,8 +90,8 @@ class TestLifespan:
             await orig_dispose()
 
         engine.dispose = _track_dispose  # type: ignore[method-assign]
-        monkeypatch.setattr(app_mod, "make_engine", lambda url: engine)
-        monkeypatch.setattr(app_mod, "make_session_factory", lambda e: lambda: None)
+        monkeypatch.setattr(app_mod, "make_engine", lambda _url: engine)
+        monkeypatch.setattr(app_mod, "make_session_factory", lambda _e: lambda: None)
         # Non-sqlite URL so the ``startswith("sqlite")`` branch is False.
         monkeypatch.setenv("AWF_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
 

@@ -23,8 +23,6 @@ Covers:
 
 from __future__ import annotations
 
-import json
-import os
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -45,18 +43,14 @@ from awf.runtime.feature_pr_sync import _default_process_lister, is_feature_pr_m
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationResult,
-    ValidationRunner,
 )
-
 
 # ── feature_pr_sync ────────────────────────────────────────────────────────
 
 
 class TestDefaultProcessLister:
     @pytest.mark.unit
-    def test_pgrep_match_returns_stdout(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_pgrep_match_returns_stdout(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _fake(*args: Any, **kwargs: Any) -> str:
             return "12345 python run_awf.py --config spec.json\n"
 
@@ -65,9 +59,7 @@ class TestDefaultProcessLister:
         assert "run_awf.py" in out
 
     @pytest.mark.unit
-    def test_pgrep_no_match_returns_empty(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_pgrep_no_match_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def _raise(*args: Any, **kwargs: Any) -> str:
             raise subprocess.CalledProcessError(1, "pgrep")
 
@@ -132,7 +124,7 @@ class TestValidationDisplay:
         # the relevant slice via a fake subprocess.
         display = cli_args[2]
         if display.startswith(preamble):
-            display = display[len(preamble):]
+            display = display[len(preamble) :]
         assert display == "pytest -q"
 
 
@@ -146,7 +138,7 @@ class TestReleasePrBodyJsonParseFallback:
     ) -> None:
         """Lines 254-255: when gh returns malformed JSON, the body
         builder must not crash — emits a sentinel instead."""
-        from awf.common.commands import CommandResult, FakeCommandRunner
+        from awf.common.commands import FakeCommandRunner
         from awf.common.github_client import RepoRef
         from awf.runtime.release_pr_sync import ensure_release_pr_open
 

@@ -116,7 +116,5 @@ class TestConfigureBranchPushUpstream:
             branch_name="feature-sync/abc",
             remote_branch="fix/upstream-branch",
         )
-        merge_write = next(
-            c for c in runner.calls if "branch.feature-sync/abc.merge" in c.args
-        )
+        merge_write = next(c for c in runner.calls if "branch.feature-sync/abc.merge" in c.args)
         assert "refs/heads/fix/upstream-branch" in merge_write.args

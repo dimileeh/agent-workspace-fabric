@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import os
 import pytest
 
 from awf.common.commands import AsyncioSubprocessRunner
@@ -75,9 +74,7 @@ class TestIds:
 
 class TestSettings:
     @pytest.mark.unit
-    def test_get_settings_returns_cached_instance(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_get_settings_returns_cached_instance(self, monkeypatch: pytest.MonkeyPatch) -> None:
         # Clear cache so the test drives a fresh Settings() call.
         get_settings.cache_clear()
         # Explicit env to satisfy any required field in future extensions.

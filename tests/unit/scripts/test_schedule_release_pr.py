@@ -8,7 +8,6 @@ spec file, and fire-and-forgetting ``run_awf.py``."""
 from __future__ import annotations
 
 import json
-import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -70,9 +69,7 @@ def stub_popen(monkeypatch: pytest.MonkeyPatch):
 
 class TestScheduleMain:
     @pytest.mark.unit
-    async def test_sync_error_returns_one(
-        self, stub_ensure: Any, tmp_path: Path
-    ) -> None:
+    async def test_sync_error_returns_one(self, stub_ensure: Any, tmp_path: Path) -> None:
         stub_ensure.raise_error = schedule_release_pr.ReleasePrSyncError(
             operation="gh pr list",
             stderr="auth expired",
@@ -122,9 +119,7 @@ class TestScheduleMain:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         stub_ensure.result = _FakeEnsureResult(pr_number=278, created=True)
-        monkeypatch.setattr(
-            schedule_release_pr, "_monitor_already_running", lambda **k: False
-        )
+        monkeypatch.setattr(schedule_release_pr, "_monitor_already_running", lambda **_k: False)
         rc = await schedule_release_pr._main(
             repo_url="git@github.com:dimileeh/aira-web.git",
             source_branch="development",
@@ -137,9 +132,7 @@ class TestScheduleMain:
         )
         assert rc == 0
 
-        spec_file = (
-            tmp_path / "release-pr-specs" / "dimileeh__aira-web-pr278.json"
-        )
+        spec_file = tmp_path / "release-pr-specs" / "dimileeh__aira-web-pr278.json"
         assert spec_file.exists()
         spec = json.loads(spec_file.read_text())
         assert len(spec) == 1
@@ -165,9 +158,7 @@ class TestScheduleMain:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         stub_ensure.result = _FakeEnsureResult(pr_number=500)
-        monkeypatch.setattr(
-            schedule_release_pr, "_monitor_already_running", lambda **k: True
-        )
+        monkeypatch.setattr(schedule_release_pr, "_monitor_already_running", lambda **_k: True)
         rc = await schedule_release_pr._main(
             repo_url="git@github.com:x/y.git",
             source_branch="development",
@@ -190,9 +181,7 @@ class TestScheduleMain:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         stub_ensure.result = _FakeEnsureResult(pr_number=100, created=True)
-        monkeypatch.setattr(
-            schedule_release_pr, "_monitor_already_running", lambda **k: False
-        )
+        monkeypatch.setattr(schedule_release_pr, "_monitor_already_running", lambda **_k: False)
         companions_file = tmp_path / "companions.json"
         companions_file.write_text(
             json.dumps(
@@ -215,9 +204,7 @@ class TestScheduleMain:
             companions_config=companions_file,
         )
         assert rc == 0
-        spec_file = (
-            tmp_path / "release-pr-specs" / "dimileeh__aira-web-pr100.json"
-        )
+        spec_file = tmp_path / "release-pr-specs" / "dimileeh__aira-web-pr100.json"
         spec = json.loads(spec_file.read_text())
         assert len(spec[0]["companions"]) == 1
         assert spec[0]["companions"][0]["name"] == "backend"

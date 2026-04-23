@@ -146,18 +146,16 @@ class TestSalvageMain:
     async def test_happy_path_returns_zero(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        ws_id = await _seed_salvage_workspace(
-            tmp_path / "awf.db", initial_status="failed"
-        )
+        ws_id = await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="failed")
 
         def _exec_ctor(**kwargs: Any) -> _FakeExecutor:
             return _FakeExecutor(session_factory=kwargs["session_factory"])
 
         # Stub the heavy collaborators so we don't need docker/git subprocesses.
         monkeypatch.setattr(salvage_workspace, "WorkspaceExecutor", _exec_ctor)
-        monkeypatch.setattr(salvage_workspace, "ComposeManager", lambda **k: object())
-        monkeypatch.setattr(salvage_workspace, "ValidationRunner", lambda **k: object())
-        monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *a, **k: object())
+        monkeypatch.setattr(salvage_workspace, "ComposeManager", lambda **_k: object())
+        monkeypatch.setattr(salvage_workspace, "ValidationRunner", lambda **_k: object())
+        monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *_a, **_k: object())
         monkeypatch.setattr(salvage_workspace, "AsyncioSubprocessRunner", lambda: object())
 
         rc = await salvage_workspace._main(tmp_path, ws_id)
@@ -169,9 +167,7 @@ class TestSalvageMain:
         assert rc == 2
 
     @pytest.mark.unit
-    async def test_missing_workspace_returns_two(
-        self, tmp_path: Path
-    ) -> None:
+    async def test_missing_workspace_returns_two(self, tmp_path: Path) -> None:
         await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="ready")
         rc = await salvage_workspace._main(tmp_path, "ws_nonexistent")
         assert rc == 2
@@ -182,17 +178,15 @@ class TestSalvageMain:
     ) -> None:
         """When the workspace is already ``ready`` the reset branch is
         skipped — the executor just picks it up."""
-        ws_id = await _seed_salvage_workspace(
-            tmp_path / "awf.db", initial_status="ready"
-        )
+        ws_id = await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="ready")
         monkeypatch.setattr(
             salvage_workspace,
             "WorkspaceExecutor",
-            lambda **k: _FakeExecutor(session_factory=k["session_factory"]),
+            lambda **_k: _FakeExecutor(session_factory=_k["session_factory"]),
         )
-        monkeypatch.setattr(salvage_workspace, "ComposeManager", lambda **k: object())
-        monkeypatch.setattr(salvage_workspace, "ValidationRunner", lambda **k: object())
-        monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *a, **k: object())
+        monkeypatch.setattr(salvage_workspace, "ComposeManager", lambda **_k: object())
+        monkeypatch.setattr(salvage_workspace, "ValidationRunner", lambda **_k: object())
+        monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *_a, **_k: object())
         monkeypatch.setattr(salvage_workspace, "AsyncioSubprocessRunner", lambda: object())
         rc = await salvage_workspace._main(tmp_path, ws_id)
         assert rc == 0
@@ -201,20 +195,18 @@ class TestSalvageMain:
     async def test_executor_failed_returns_one(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        ws_id = await _seed_salvage_workspace(
-            tmp_path / "awf.db", initial_status="failed"
-        )
+        ws_id = await _seed_salvage_workspace(tmp_path / "awf.db", initial_status="failed")
         monkeypatch.setattr(
             salvage_workspace,
             "WorkspaceExecutor",
-            lambda **k: _FakeExecutor(
-                session_factory=k["session_factory"],
+            lambda **_k: _FakeExecutor(
+                session_factory=_k["session_factory"],
                 transition_to=WorkspaceStatus.failed,
             ),
         )
-        monkeypatch.setattr(salvage_workspace, "ComposeManager", lambda **k: object())
-        monkeypatch.setattr(salvage_workspace, "ValidationRunner", lambda **k: object())
-        monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *a, **k: object())
+        monkeypatch.setattr(salvage_workspace, "ComposeManager", lambda **_k: object())
+        monkeypatch.setattr(salvage_workspace, "ValidationRunner", lambda **_k: object())
+        monkeypatch.setattr(salvage_workspace, "PullRequestCreator", lambda *_a, **_k: object())
         monkeypatch.setattr(salvage_workspace, "AsyncioSubprocessRunner", lambda: object())
         rc = await salvage_workspace._main(tmp_path, ws_id)
         assert rc == 1

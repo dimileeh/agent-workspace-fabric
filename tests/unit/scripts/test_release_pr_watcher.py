@@ -17,7 +17,6 @@ import pytest
 
 from scripts import release_pr_watcher
 
-
 # ── _monitor_already_running ───────────────────────────────────────────────
 
 
@@ -50,7 +49,7 @@ class TestMonitorAlreadyRunning:
         monkeypatch.setattr(
             subprocess,
             "check_output",
-            lambda *a, **k: "12345 python unrelated.py\n",
+            lambda *_a, **_k: "12345 python unrelated.py\n",
         )
         assert not release_pr_watcher._monitor_already_running(
             work_dir=tmp_path, repo_slug="dimileeh/aira-web", pr_number=999
@@ -223,9 +222,7 @@ class TestTickOne:
         """``ensure_release_pr_open`` can return ``pr_number=None`` when
         no PR is needed (e.g. source not ahead of target)."""
         stub_ensure.raise_error = None
-        stub_ensure.result = _FakeEnsureResult(
-            ahead_by=0, pr_number=None, reason="no_diff"
-        )
+        stub_ensure.result = _FakeEnsureResult(ahead_by=0, pr_number=None, reason="no_diff")
         await release_pr_watcher._tick_one(
             runner=_NoopRunner(),  # type: ignore[arg-type]
             repo_url="git@github.com:x/y.git",
@@ -251,7 +248,7 @@ class TestTickOne:
         monkeypatch.setattr(
             release_pr_watcher,
             "_monitor_already_running",
-            lambda **k: True,
+            lambda **_k: True,
         )
         await release_pr_watcher._tick_one(
             runner=_NoopRunner(),  # type: ignore[arg-type]
@@ -278,7 +275,7 @@ class TestTickOne:
         monkeypatch.setattr(
             release_pr_watcher,
             "_monitor_already_running",
-            lambda **k: False,
+            lambda **_k: False,
         )
         await release_pr_watcher._tick_one(
             runner=_NoopRunner(),  # type: ignore[arg-type]
@@ -314,7 +311,7 @@ class TestTickOne:
         monkeypatch.setattr(
             release_pr_watcher,
             "_monitor_already_running",
-            lambda **k: False,
+            lambda **_k: False,
         )
         companions = tmp_path / "companions.json"
         companions.write_text("[]")
@@ -347,7 +344,7 @@ class TestTickOne:
         monkeypatch.setattr(
             release_pr_watcher,
             "_monitor_already_running",
-            lambda **k: False,
+            lambda **_k: False,
         )
         stub_subprocess_exec.returncode = 2
         stub_subprocess_exec.stderr = b"spec file not writable"
@@ -498,9 +495,7 @@ class TestRunLoop:
             assert stop_from_outside.is_set()
 
         monkeypatch.setattr(release_pr_watcher.asyncio, "Event", _capture_event)
-        monkeypatch.setattr(
-            release_pr_watcher, "_tick_one", _tick_once_then_verify_and_stop
-        )
+        monkeypatch.setattr(release_pr_watcher, "_tick_one", _tick_once_then_verify_and_stop)
 
         rc = await release_pr_watcher._run(
             repos=["git@github.com:x/a.git"],
