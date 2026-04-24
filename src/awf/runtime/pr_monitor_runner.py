@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -846,7 +847,12 @@ class PullRequestMonitorRunner:
                 "deferred_human_items": human_items,
             }
             out_path = self._artifacts_root / f"{workspace_id}.defer-signal.json"
-            out_path.write_text(json.dumps(payload, indent=2))
+            # Atomic publish: write to a sibling temp file, then rename.
+            # Pollers treat presence of out_path as the terminal signal, so
+            # they must never observe a partially-written JSON payload.
+            tmp_path = out_path.with_suffix(f".json.{os.getpid()}.tmp")
+            tmp_path.write_text(json.dumps(payload, indent=2))
+            os.replace(tmp_path, out_path)
         except Exception as exc:
             _log.warning(
                 "monitor.defer_signal_write_failed",
