@@ -56,6 +56,10 @@ from awf.node.compose_manager import (
     WorkspaceComposeSpec,
 )
 from awf.node.git_manager import GitManager
+from awf.profiles.compose import profile_agent_environment, profile_services
+from awf.profiles.models import WorkspaceProfile
+from awf.profiles.registry import aira_profile
+from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor
 from awf.runtime.validation import ValidationRunner
@@ -98,6 +102,8 @@ class TaskConfig:
     agent: str
     test_commands: list[str]
     requires_database: bool = False
+    profile_ref: str | None = "auto"
+    profile: dict[str, Any] | None = None
     companions: list[dict[str, Any]] | None = None
     task_kind: str = "feature_branch_pr"
     """One of the values in ``awf.db.enums.TaskKind``. ``feature_branch_pr``
@@ -126,6 +132,59 @@ class TaskConfig:
     Release PRs (development→main) are a separate task kind
     (``sync_release_pr``) and still hardcode ``auto_merge=False`` — the
     dev→main gate is where human approval lives."""
+
+
+def _resolve_task_profile(
+    cfg: TaskConfig,
+    *,
+    worktree_path: Path,
+) -> WorkspaceProfile:
+    profile = resolve_workspace_profile(
+        worktree_path=worktree_path,
+        inline_profile=cfg.profile,
+        profile_ref=cfg.profile_ref,
+        validation_commands=cfg.test_commands,
+    ).profile
+    return _with_legacy_aira_postgres_if_needed(profile, cfg)
+
+
+def _with_legacy_aira_postgres_if_needed(
+    profile: WorkspaceProfile,
+    cfg: TaskConfig,
+) -> WorkspaceProfile:
+    """Preserve old companion specs that assume a ``postgres`` service.
+
+    Universal AWF no longer emits Postgres by default. Some checked-in Aira
+    task specs predate profiles and express their requirement indirectly via
+    companion ``depends_on: ["postgres"]`` or ``${POSTGRES_URL}`` env values.
+    Keep that compatibility in the local runner by making the sidecar explicit
+    in the resolved profile snapshot.
+    """
+    if any(s.name == "postgres" for s in profile.services):
+        return profile
+    companions = cfg.companions or []
+    needs_postgres = cfg.requires_database or any(
+        "postgres" in (c.get("depends_on") or ())
+        or any("${POSTGRES_URL}" in str(v) for v in (c.get("environment") or {}).values())
+        for c in companions
+    )
+    if not needs_postgres:
+        return profile
+    postgres_profile = aira_profile()
+    return profile.model_copy(
+        deep=True,
+        update={
+            "services": [postgres_profile.services[0], *profile.services],
+            "runtime": profile.runtime.model_copy(
+                update={
+                    "environment": {
+                        **postgres_profile.runtime.environment,
+                        **profile.runtime.environment,
+                    }
+                }
+            ),
+        },
+    )
 
 
 def _build_auth_mounts(host_home: Path) -> list[AuthMount]:
@@ -456,6 +515,8 @@ async def _run_task(
             task_title=cfg.task_title,
             task_prompt=cfg.task_prompt,
             agent=cfg.agent,
+            profile_ref=cfg.profile_ref,
+            requested_profile=cfg.profile,
             test_commands=cfg.test_commands,
             requires_database=cfg.requires_database,
         )
@@ -480,6 +541,7 @@ async def _run_task(
         new_branch=branch_name,
     )
     base_commit = await git.head_sha(workspace_id=ws_id)
+    profile = _resolve_task_profile(cfg, worktree_path=layout.worktree_path)
 
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -491,6 +553,7 @@ async def _run_task(
         persisted.remote_push_branch = branch_name
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
+        persisted.resolved_profile = profile.model_dump(mode="json", by_alias=True)
         await s.commit()
 
     # Step 3: clone + resolve any companion repos. Companions may reference a
@@ -530,6 +593,9 @@ async def _run_task(
         # aira-backend requires the ``vector`` Postgres extension for embeddings;
         # plain postgres:16-alpine doesn't include it. Use the pgvector image
         # everywhere — harmless extra KB for tasks that don't need the extension.
+        agent_environment=profile_agent_environment(profile),
+        docker_mode=profile.docker.mode.value,
+        services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
         auth_mounts=(mirror_mount, *auth_mounts),
@@ -643,6 +709,8 @@ async def _run_sync_release_pr(
             task_title=cfg.task_title,
             task_prompt=cfg.task_prompt,
             agent=cfg.agent,
+            profile_ref=cfg.profile_ref,
+            requested_profile=cfg.profile,
             test_commands=[],
             requires_database=cfg.requires_database,
         )
@@ -684,6 +752,7 @@ async def _run_sync_release_pr(
         remote_branch=source_branch,
     )
     base_commit = await git.head_sha(workspace_id=ws_id)
+    profile = _resolve_task_profile(cfg, worktree_path=layout.worktree_path)
 
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -698,6 +767,7 @@ async def _run_sync_release_pr(
         persisted.remote_push_branch = source_branch
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
+        persisted.resolved_profile = profile.model_dump(mode="json", by_alias=True)
         persisted.pr_url = (
             f"https://github.com/{RepoRef.from_url(cfg.repo_url).slug()}/pull/{cfg.pr_number}"
         )
@@ -728,6 +798,9 @@ async def _run_sync_release_pr(
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
+        agent_environment=profile_agent_environment(profile),
+        docker_mode=profile.docker.mode.value,
+        services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
         auth_mounts=(mirror_mount, *auth_mounts),
@@ -852,6 +925,8 @@ async def _run_sync_feature_pr(
             task_title=cfg.task_title,
             task_prompt=cfg.task_prompt,
             agent=cfg.agent,
+            profile_ref=cfg.profile_ref,
+            requested_profile=cfg.profile,
             test_commands=[],
             requires_database=cfg.requires_database,
         )
@@ -896,6 +971,7 @@ async def _run_sync_feature_pr(
         remote_branch=source_branch,
     )
     base_commit = await git.head_sha(workspace_id=ws_id)
+    profile = _resolve_task_profile(cfg, worktree_path=layout.worktree_path)
 
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -908,6 +984,7 @@ async def _run_sync_feature_pr(
         persisted.remote_push_branch = source_branch
         persisted.base_commit = base_commit
         persisted.compose_project_name = f"awf_{ws_id}"
+        persisted.resolved_profile = profile.model_dump(mode="json", by_alias=True)
         persisted.pr_url = (
             f"https://github.com/{RepoRef.from_url(cfg.repo_url).slug()}/pull/{cfg.pr_number}"
         )
@@ -938,6 +1015,9 @@ async def _run_sync_feature_pr(
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
+        agent_environment=profile_agent_environment(profile),
+        docker_mode=profile.docker.mode.value,
+        services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
         auth_mounts=(mirror_mount, *auth_mounts),
@@ -1048,6 +1128,9 @@ _ADDITIVE_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     # any order because ``ALTER TABLE ADD COLUMN`` is idempotent when
     # gated on the PRAGMA check below.
     ("workspaces", "remote_push_branch", "VARCHAR(256)"),
+    ("workspaces", "profile_ref", "VARCHAR(128)"),
+    ("workspaces", "requested_profile", "JSON"),
+    ("workspaces", "resolved_profile", "JSON"),
 )
 
 

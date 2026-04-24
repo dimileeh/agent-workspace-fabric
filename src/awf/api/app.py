@@ -77,5 +77,6 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
 
     app.include_router(health.router)
     app.include_router(workspaces.router)
+    app.include_router(workspaces.router_v2)
 
     return app

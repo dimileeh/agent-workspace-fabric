@@ -8,11 +8,12 @@ REST + MCP stay in lockstep. Keep them narrow: business objects live in
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.profiles.models import WorkspaceProfile
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -37,6 +38,60 @@ class WorkspaceCreateRequest(BaseModel):
     requires_database: bool = False
 
 
+class WorkspaceV2Repo(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    url: Annotated[str, Field(min_length=1, max_length=512)]
+    base_branch: Annotated[str, Field(default="main", min_length=1, max_length=256)]
+
+
+class WorkspaceV2Task(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    title: Annotated[str, Field(min_length=1, max_length=512)]
+    prompt: Annotated[str, Field(min_length=1, max_length=16384)]
+    kind: Annotated[str, Field(default="feature_branch_pr", max_length=32)]
+    agent: AgentRuntime = Field(default=AgentRuntime.codex)
+    external_id: Annotated[str | None, Field(default=None, max_length=128)]
+
+
+class WorkspaceV2Workspace(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    profile_ref: Annotated[str | None, Field(default="auto", max_length=128)]
+    profile: WorkspaceProfile | None = None
+
+
+class WorkspaceV2Validation(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    commands: list[str] = Field(default_factory=list)
+    requested_tier: int = Field(default=1, ge=1, le=3)
+
+
+class WorkspaceV2Resources(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    cpu: float | None = Field(default=None, gt=0)
+    memory: Annotated[str | None, Field(default=None, max_length=32)]
+
+
+class WorkspaceCreateV2Request(BaseModel):
+    """Clean v2 workspace creation contract."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    repo: WorkspaceV2Repo
+    task: WorkspaceV2Task
+    workspace: WorkspaceV2Workspace = Field(
+        default_factory=lambda: WorkspaceV2Workspace(profile_ref="auto", profile=None)
+    )
+    validation: WorkspaceV2Validation = Field(default_factory=lambda: WorkspaceV2Validation())
+    resources: WorkspaceV2Resources = Field(
+        default_factory=lambda: WorkspaceV2Resources(cpu=None, memory=None)
+    )
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -57,6 +112,9 @@ class WorkspaceResponse(BaseModel):
 
     agent: AgentRuntime
     env_profile: str | None
+    profile_ref: str | None
+    requested_profile: dict[str, Any] | None
+    resolved_profile: dict[str, Any] | None
 
     test_commands: list[str]
     requires_database: bool

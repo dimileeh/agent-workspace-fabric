@@ -10,6 +10,8 @@ SQLAlchemy calls everywhere. Rules:
 
 from __future__ import annotations
 
+from typing import Any
+
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -41,6 +43,9 @@ class WorkspaceRepository:
         requires_database: bool = False,
         task_external_id: str | None = None,
         env_profile: str | None = None,
+        profile_ref: str | None = None,
+        requested_profile: dict[str, Any] | None = None,
+        resolved_profile: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
     ) -> Workspace:
         """Create a new workspace in ``requested`` status and emit a creation event.
@@ -58,6 +63,9 @@ class WorkspaceRepository:
             task_external_id=task_external_id,
             agent=agent,
             env_profile=env_profile,
+            profile_ref=profile_ref,
+            requested_profile=requested_profile,
+            resolved_profile=resolved_profile,
             test_commands=test_commands,
             requires_database=requires_database,
             idempotency_key=idempotency_key,

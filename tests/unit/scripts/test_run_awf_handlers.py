@@ -217,7 +217,14 @@ def patch_handlers(
     """Swap every heavy-I/O collaborator in ``scripts.run_awf`` with a
     fake. Returns a dict of hooks the test can inspect."""
     monkeypatch.setattr(run_awf, "GitManager", fake_gitmanager_cls)
-    monkeypatch.setattr(run_awf, "ComposeManager", _FakeComposeManager)
+    compose_instances: list[_FakeComposeManager] = []
+
+    def _compose_ctor(*, work_dir: Path, template_path: Path) -> _FakeComposeManager:
+        inst = _FakeComposeManager(work_dir=work_dir, template_path=template_path)
+        compose_instances.append(inst)
+        return inst
+
+    monkeypatch.setattr(run_awf, "ComposeManager", _compose_ctor)
     monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
 
     executors: list[_FakeExecutor] = []
@@ -273,6 +280,7 @@ def patch_handlers(
         "git_factory": fake_gitmanager_cls,
         "executors": executors,
         "monitors": monitors,
+        "compose_instances": compose_instances,
     }
 
 
@@ -377,6 +385,10 @@ class TestFeatureBranchPrHandler:
         assert main_add["new_branch"] == f"awf/{ws_id}"
         assert "backend" in companion_add["new_branch"]
         assert ws_id in companion_add["new_branch"]  # owner-scoped path fix
+        # Legacy companion specs that depend on postgres now get an explicit
+        # profile service rather than relying on the base template.
+        compose_spec = patch_handlers["compose_instances"][0].ups[0]
+        assert any(s.name == "postgres" for s in compose_spec.services)
 
     @pytest.mark.unit
     async def test_result_shape_contains_contract_fields(

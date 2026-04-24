@@ -35,6 +35,8 @@ from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeManager
+from awf.profiles.models import WorkspaceProfile
+from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationRunner
 
@@ -134,6 +136,27 @@ class WorkspaceExecutor:
             agent = AgentRuntime(ws.agent)
             default_model = self._config.default_models.get(agent)
             adapter = get_adapter(agent, runner=self._runner, default_model=default_model)
+            profile = _profile_for_workspace(ws, worktree_path=worktree_path)
+            setup_result = await self._validation.run_profile_phases(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+                phase_names=("setup", "pre_agent"),
+            )
+            if not setup_result.all_passed:
+                first_fail = setup_result.first_failure
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=_failure_reason_for_phase(first_fail),
+                    message=(
+                        f"profile setup failed: {first_fail.command}"
+                        if first_fail is not None
+                        else "profile setup failed"
+                    )[:2000],
+                )
+                return
             await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -470,18 +493,23 @@ class WorkspaceExecutor:
         await self._transition(workspace_id, to=WorkspaceStatus.validating, reason="AGENT_RUN_OK")
 
         max_fix_passes = self._config.max_validation_fix_passes
-        test_commands_tuple = tuple(ws.test_commands)
+        profile = _profile_for_workspace(ws, worktree_path=worktree_path)
+        validation_commands = [
+            command.command
+            for _, command in profile.phases.commands_for(("post_agent", "validate"))
+        ]
+        test_commands_tuple = tuple(validation_commands)
         last_failure_message: str | None = None
         for pass_number in range(max_fix_passes + 1):
             # pass_number == 0 is the initial run (already-committed agent
             # work). 1..N are fix attempts driven by the retry prompt.
-            val_result = await self._validation.run(
+            val_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
-                test_commands=list(ws.test_commands),
-                requires_database=ws.requires_database,
-                workspace_worktree=worktree_path,
+                profile=profile,
+                phase_names=("post_agent", "validate"),
+                run_healthchecks=True,
             )
             if val_result.all_passed:
                 if pass_number > 0:
@@ -510,7 +538,7 @@ class WorkspaceExecutor:
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.validating,
-                    failure_reason=FailureReason.validation_failure,
+                    failure_reason=_failure_reason_for_phase(first_fail),
                     message=(
                         last_failure_message
                         + (f" (after {max_fix_passes} fix attempts)" if max_fix_passes > 0 else "")
@@ -757,5 +785,35 @@ def _build_pr_body(ws: Workspace) -> str:
         f"{external_id}\n\n"
         f"### Task\n{ws.task_prompt}\n\n"
         f"---\nValidation: "
-        f"{len(ws.test_commands)} test command(s) passed inside the workspace container.\n"
+        f"{_validation_command_count(ws)} profile command(s) passed inside the workspace container.\n"
     )
+
+
+def _profile_for_workspace(ws: Workspace, *, worktree_path: Path) -> WorkspaceProfile:
+    if ws.resolved_profile:
+        return WorkspaceProfile.model_validate(ws.resolved_profile)
+    return resolve_workspace_profile(
+        worktree_path=worktree_path,
+        inline_profile=ws.requested_profile,
+        profile_ref=ws.profile_ref or ws.env_profile or "auto",
+        validation_commands=list(ws.test_commands),
+    ).profile
+
+
+def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
+    phase = getattr(first_fail, "phase", None)
+    reason_code = getattr(first_fail, "reason_code", None)
+    if phase == "healthcheck":
+        return FailureReason.health_check_failure
+    if reason_code == "PHASE_TIMEOUT":
+        return FailureReason.phase_timeout
+    if phase in {"setup", "pre_agent"}:
+        return FailureReason.service_startup_failure
+    return FailureReason.validation_failure
+
+
+def _validation_command_count(ws: Workspace) -> int:
+    if ws.resolved_profile:
+        profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+        return len(profile.phases.post_agent) + len(profile.phases.validate_commands)
+    return len(ws.test_commands)

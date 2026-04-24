@@ -21,13 +21,16 @@ from awf.api.schemas import (
     ErrorResponse,
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
+    WorkspaceCreateV2Request,
     WorkspaceResponse,
 )
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
+router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
 
 
 @router.post(
@@ -71,6 +74,81 @@ async def create_workspace(
         requires_database=payload.requires_database,
         idempotency_key=idempotency_key,
     )
+
+    return _accepted(ws.id, ws.status, ws.version, ws.created_at)
+
+
+@router_v2.post(
+    "",
+    response_model=WorkspaceAcceptedResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={409: {"model": ErrorResponse}},
+)
+async def create_workspace_v2(
+    payload: WorkspaceCreateV2Request,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceAcceptedResponse | JSONResponse:
+    repo = WorkspaceRepository(session)
+
+    if idempotency_key is not None:
+        existing = await repo.get_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            if not _payloads_match_v2(existing, payload):
+                return JSONResponse(
+                    status_code=status.HTTP_409_CONFLICT,
+                    content=ErrorResponse(
+                        error_code="IDEMPOTENCY_CONFLICT",
+                        message=(
+                            "Idempotency-Key previously used with a different payload; "
+                            "supply a fresh key or replay with the original body."
+                        ),
+                    ).model_dump(),
+                )
+            return _accepted(existing.id, existing.status, existing.version, existing.created_at)
+
+    requested_profile = (
+        payload.workspace.profile.model_dump(mode="json", by_alias=True)
+        if payload.workspace.profile is not None
+        else None
+    )
+    resolved_profile = None
+    if payload.workspace.profile is not None or (
+        payload.workspace.profile_ref and payload.workspace.profile_ref != "auto"
+    ):
+        try:
+            resolved = resolve_workspace_profile(
+                worktree_path=None,
+                inline_profile=payload.workspace.profile,
+                profile_ref=payload.workspace.profile_ref,
+                validation_commands=payload.validation.commands,
+            )
+        except ProfileResolutionError as exc:
+            return JSONResponse(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                content=ErrorResponse(
+                    error_code="INVALID_PROFILE",
+                    message=str(exc),
+                ).model_dump(),
+            )
+        resolved_profile = resolved.profile.model_dump(mode="json", by_alias=True)
+
+    ws = await repo.create(
+        repo_url=payload.repo.url,
+        branch_base=payload.repo.base_branch,
+        task_title=payload.task.title,
+        task_prompt=payload.task.prompt,
+        task_external_id=payload.task.external_id,
+        agent=payload.task.agent.value,
+        env_profile=None,
+        profile_ref=payload.workspace.profile_ref,
+        requested_profile=requested_profile,
+        resolved_profile=resolved_profile,
+        test_commands=payload.validation.commands,
+        requires_database=False,
+        idempotency_key=idempotency_key,
+    )
+    ws.task_kind = payload.task.kind
 
     return _accepted(ws.id, ws.status, ws.version, ws.created_at)
 
@@ -128,4 +206,24 @@ def _payloads_match(existing: Workspace, payload: WorkspaceCreateRequest) -> boo
         and existing.agent == payload.agent.value
         and list(existing.test_commands) == list(payload.test_commands)
         and existing.requires_database == payload.requires_database
+    )
+
+
+def _payloads_match_v2(existing: Workspace, payload: WorkspaceCreateV2Request) -> bool:
+    requested_profile = (
+        payload.workspace.profile.model_dump(mode="json", by_alias=True)
+        if payload.workspace.profile is not None
+        else None
+    )
+    return (
+        existing.repo_url == payload.repo.url
+        and existing.branch_base == payload.repo.base_branch
+        and existing.task_title == payload.task.title
+        and existing.task_prompt == payload.task.prompt
+        and existing.task_external_id == payload.task.external_id
+        and existing.agent == payload.task.agent.value
+        and existing.task_kind == payload.task.kind
+        and existing.profile_ref == payload.workspace.profile_ref
+        and existing.requested_profile == requested_profile
+        and list(existing.test_commands) == list(payload.validation.commands)
     )
