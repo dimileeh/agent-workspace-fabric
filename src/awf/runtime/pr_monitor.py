@@ -311,9 +311,13 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     4.  CI FAILURE → ReportCiFailure.
     5.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
-    6.  Mergeable == CONFLICTING after addressing everything → Abort (the
-        coding CLI can't fix a structural conflict it doesn't know about).
-    7.  All green → Merge (or NotifyHuman if auto_merge=False).
+    6.  Legacy ``mergeable == CONFLICTING`` (without richer
+        mergeStateStatus) → SyncBase, same treatment as DIRTY.
+    7.  ``merge_state_status`` BLOCKED / HAS_HOOKS (branch protection or
+        required-review) → NotifyHuman regardless of auto_merge.
+    7.5. Deferred HUMAN feedback still unresolved on GitHub →
+        NotifyHuman. Deferred BOT feedback does not block.
+    8.  All green → Merge (or NotifyHuman if auto_merge=False).
     """
 
     # 0. Terminal upstream states short-circuit everything.
