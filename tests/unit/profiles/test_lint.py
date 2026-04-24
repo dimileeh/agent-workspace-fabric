@@ -79,6 +79,23 @@ def test_lint_missing_timeout_warning() -> None:
 
 
 @pytest.mark.unit
+def test_lint_missing_timeout_uses_phase_alias() -> None:
+    profile = WorkspaceProfile(
+        name="test",
+        phases={
+            "validate": [ProfileCommand(command="test", timeout_seconds=None)],
+        },
+    )
+    issues = lint_profile(profile)
+    assert any(
+        i.code == "missing-command-timeout"
+        and i.message == "Command in phase 'validate' is missing explicit timeout_seconds"
+        and i.field_path == "phases.validate.0.timeout_seconds"
+        for i in issues
+    )
+
+
+@pytest.mark.unit
 def test_lint_dangerous_secret_target() -> None:
     profile = WorkspaceProfile(
         name="test",

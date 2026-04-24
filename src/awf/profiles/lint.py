@@ -4,7 +4,7 @@ from enum import StrEnum
 
 from pydantic import BaseModel
 
-from .models import DockerMode, WorkspaceProfile
+from .models import DockerMode, ProfilePhaseSet, WorkspaceProfile
 
 
 class LintSeverity(StrEnum):
@@ -50,11 +50,9 @@ def lint_profile(profile: WorkspaceProfile) -> list[LintIssue]:
             )
 
     # 3. Profile phase commands should have explicit timeout_seconds and should warn when missing
-    for phase_name in ["setup", "pre_agent", "post_agent", "validate_commands", "cleanup"]:
+    for phase_name, phase_field in ProfilePhaseSet.model_fields.items():
         commands = getattr(profile.phases, phase_name)
-        # validate_commands is aliased to 'validate' in some places,
-        # but the attribute on ProfilePhaseSet is validate_commands.
-        field_alias = "validate" if phase_name == "validate_commands" else phase_name
+        field_alias = phase_field.alias or phase_name
         for i, cmd in enumerate(commands):
             if cmd.timeout_seconds is None:
                 issues.append(
