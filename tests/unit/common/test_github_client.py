@@ -56,9 +56,11 @@ def _sample_pr_payload(
     closed: bool = False,
     merged: bool = False,
     mergeable: str = "MERGEABLE",
+    merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
+    comments: list[dict] | None = None,
 ) -> str:
     """Build a canned ``gh api graphql`` stdout for one PR."""
     return json.dumps(
@@ -69,6 +71,7 @@ def _sample_pr_payload(
                         "number": 42,
                         "headRefOid": "abc123",
                         "mergeable": mergeable,
+                        "mergeStateStatus": merge_state_status,
                         "isDraft": False,
                         "closed": closed,
                         "merged": merged,
@@ -78,6 +81,7 @@ def _sample_pr_payload(
                         },
                         "reviewThreads": {"nodes": threads or []},
                         "reviews": {"nodes": reviews or []},
+                        "comments": {"nodes": comments or []},
                     }
                 }
             }
@@ -138,6 +142,88 @@ class TestFetchPrStatus:
         c = status.unresolved_review_comments[0]
         assert c.comment_id == "9001"
         assert c.body_excerpt == "Summary with suggestions"
+        assert c.blocks_merge is False
+
+    @pytest.mark.unit
+    async def test_parses_blocking_review_skipped_issue_comment(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 77,
+                        "body": (
+                            "> [!IMPORTANT]\n"
+                            "> ## Review skipped\n\n"
+                            "Auto reviews are disabled on base/target branches "
+                            "other than the configured development branch.\n\n"
+                            "- [ ] Trigger review"
+                        ),
+                        "isMinimized": False,
+                        "author": {"login": "coderabbitai"},
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+        assert len(status.unresolved_review_comments) == 1
+        c = status.unresolved_review_comments[0]
+        assert c.comment_id == "issue:77"
+        assert c.author == "coderabbitai"
+        assert "Review skipped" in c.body_excerpt
+        assert c.blocks_merge is True
+
+    @pytest.mark.unit
+    async def test_ignores_non_blocking_bot_issue_comments(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 78,
+                        "body": "Finishing touches and review summary.",
+                        "isMinimized": False,
+                        "author": {"login": "coderabbitai"},
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+        assert status.unresolved_review_comments == ()
+
+    @pytest.mark.unit
+    async def test_parses_human_issue_comment_as_review_comment(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 79,
+                        "body": "Please wait for the product owner to check this.",
+                        "isMinimized": False,
+                        "author": {"login": "octocat"},
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+        assert len(status.unresolved_review_comments) == 1
+        c = status.unresolved_review_comments[0]
+        assert c.comment_id == "issue:79"
+        assert c.author == "octocat"
+        assert c.blocks_merge is False
 
     @pytest.mark.unit
     async def test_filters_out_resolved_and_outdated_threads(self) -> None:

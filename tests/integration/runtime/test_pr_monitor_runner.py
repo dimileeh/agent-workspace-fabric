@@ -95,6 +95,7 @@ def _pr_payload(
     check_state: str = "SUCCESS",
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
+    comments: list[dict] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -114,6 +115,7 @@ def _pr_payload(
                         },
                         "reviewThreads": {"nodes": threads or []},
                         "reviews": {"nodes": reviews or []},
+                        "comments": {"nodes": comments or []},
                     }
                 }
             }
@@ -215,6 +217,7 @@ def _make_runner(
             auto_merge=auto_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
+            pre_merge_settle_seconds=0,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations, max_fix_cycle_passes=3
@@ -2026,6 +2029,7 @@ class TestMaxOuterIterationsSafetyNet:
                 auto_merge=True,
                 poll_interval_seconds=60,
                 settle_interval_seconds=30,
+                pre_merge_settle_seconds=0,
             ),
             runner_config=MonitorRunnerConfig(
                 max_outer_iterations=3,  # tight cap so the safety net fires

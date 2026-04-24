@@ -86,6 +86,7 @@ def pr_payload(
     check_state: str = "SUCCESS",
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
+    comments: list[dict] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -105,6 +106,7 @@ def pr_payload(
                         },
                         "reviewThreads": {"nodes": threads or []},
                         "reviews": {"nodes": reviews or []},
+                        "comments": {"nodes": comments or []},
                     }
                 }
             }
@@ -135,6 +137,21 @@ def review_node(*, cid: int, author: str, body: str = "see below") -> dict:
         "databaseId": cid,
         "body": body,
         "state": "COMMENTED",
+        "author": {"login": author},
+    }
+
+
+def issue_comment_node(
+    *,
+    cid: int,
+    author: str,
+    body: str,
+    minimized: bool = False,
+) -> dict:
+    return {
+        "databaseId": cid,
+        "body": body,
+        "isMinimized": minimized,
         "author": {"login": author},
     }
 
@@ -182,6 +199,7 @@ def make_runner(
     sleep_fn: RecordedSleep,
     worktrees_root: Path,
     auto_merge: bool = True,
+    pre_merge_settle_seconds: float = 0,
     artifacts_root: Path | None = None,
 ) -> PullRequestMonitorRunner:
     kwargs: dict = {
@@ -193,6 +211,7 @@ def make_runner(
             auto_merge=auto_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
+            pre_merge_settle_seconds=pre_merge_settle_seconds,
         ),
         "runner_config": MonitorRunnerConfig(max_outer_iterations=20, max_fix_cycle_passes=3),
         "sleep": sleep_fn,

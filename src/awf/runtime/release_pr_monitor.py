@@ -44,6 +44,7 @@ def build_release_pr_monitor(
     artifacts_root: Path | None = None,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
+    pre_merge_settle_seconds: float = 90.0,
     max_outer_iterations: int = 10_000,
     max_fix_cycle_passes: int = 5,
 ) -> PullRequestMonitorRunner:
@@ -59,6 +60,7 @@ def build_release_pr_monitor(
             auto_merge=False,  # the point of this whole module
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,
+            pre_merge_settle_seconds=pre_merge_settle_seconds,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations,
@@ -79,6 +81,7 @@ def build_feature_pr_monitor(
     artifacts_root: Path | None = None,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
+    pre_merge_settle_seconds: float = 90.0,
     max_outer_iterations: int = 10_000,
     max_fix_cycle_passes: int = 5,
 ) -> PullRequestMonitorRunner:
@@ -94,6 +97,7 @@ def build_feature_pr_monitor(
             auto_merge=True,
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,
+            pre_merge_settle_seconds=pre_merge_settle_seconds,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations,

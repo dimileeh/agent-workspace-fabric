@@ -100,6 +100,14 @@ query($owner: String!, $repo: String!, $number: Int!) {
           author { login }
         }
       }
+      comments(first: 100) {
+        nodes {
+          databaseId
+          body
+          isMinimized
+          author { login }
+        }
+      }
     }
   }
 }
@@ -218,6 +226,30 @@ class GitHubClient:
                     body_excerpt=body[:400],
                     author=_dig(node, "author", "login"),
                     is_resolved=False,
+                )
+            )
+
+        # ── Top-level PR comments ──────────────────────────────────────
+        # Review bots sometimes report gating state as an issue comment
+        # instead of a review object. PR #15 exposed the failure mode:
+        # CodeRabbit posted "Review skipped" + an unchecked "Trigger
+        # review" checklist, but the monitor only queried review objects
+        # and therefore merged as if no reviewer work remained.
+        for node in _dig(pr, "comments", "nodes") or []:
+            body = node.get("body") or ""
+            if node.get("isMinimized") or not body.strip():
+                continue
+            author = _dig(node, "author", "login")
+            blocks_merge = _is_merge_blocking_issue_comment(body)
+            if not blocks_merge and _is_known_bot_comment_author(author):
+                continue
+            reviews.append(
+                ReviewComment(
+                    comment_id=f"issue:{node['databaseId']}",
+                    body_excerpt=body[:400],
+                    author=author,
+                    is_resolved=False,
+                    blocks_merge=blocks_merge,
                 )
             )
 
@@ -482,3 +514,28 @@ def _tail(text: str, n: int) -> str:
     if len(text) <= n:
         return text
     return "…[truncated]…\n" + text[-n:]
+
+
+_KNOWN_BOT_COMMENT_AUTHORS = frozenset(
+    {
+        "coderabbitai",
+        "gemini-code-assist",
+        "greptile-apps",
+        "chatgpt-codex-connector",
+        "github-actions",
+    }
+)
+
+
+def _is_known_bot_comment_author(login: str | None) -> bool:
+    if not login:
+        return False
+    lowered = login.lower()
+    return lowered in _KNOWN_BOT_COMMENT_AUTHORS or lowered.endswith("[bot]")
+
+
+def _is_merge_blocking_issue_comment(body: str) -> bool:
+    lower = body.lower()
+    return "review skipped" in lower and (
+        "trigger review" in lower or "auto reviews are disabled" in lower
+    )

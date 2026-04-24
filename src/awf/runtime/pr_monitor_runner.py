@@ -161,32 +161,13 @@ class PullRequestMonitorRunner:
                 )
                 return
 
-            # Refresh the worktree's remote-tracking ref BEFORE counting
-            # how far behind we are. Without this, origin/<base> is frozen
-            # at the time of the initial ``git worktree add`` and the
-            # count silently returns 0 even after the base branch has
-            # advanced on GitHub — the exact bug that let PR #335 / #336
-            # exit as "ready to merge" when they were BEHIND.
-            await self._fetch_base(
-                worktree_path=self._worktrees_root / workspace_id,
-                base_branch=ws.branch_base,
-            )
-            base_behind = await self._count_base_behind(
-                worktree_path=self._worktrees_root / workspace_id,
-                base_branch=ws.branch_base,
-            )
             try:
-                status = await self._deps.gh.fetch_pr_status(
-                    repo=repo, pr_number=pr_number, base_behind_count=base_behind
+                status = await self._fetch_status_for_decision(
+                    repo=repo,
+                    pr_number=pr_number,
+                    workspace_id=workspace_id,
+                    base_branch=ws.branch_base,
                 )
-                # If we got FAILURE we want the per-check logs for the prompt.
-                if status.check_state.value == "FAILURE":
-                    failures = await self._deps.gh.fetch_failing_check_logs(
-                        repo=repo,
-                        pr_number=pr_number,
-                        head_sha=status.head_sha,
-                    )
-                    status = _with_ci_failures(status, failures)
             except GitHubClientError as exc:
                 await self._terminate_failed(
                     workspace_id,
@@ -371,6 +352,49 @@ class PullRequestMonitorRunner:
             return False
 
         if isinstance(action, Merge):
+            if self._config.pre_merge_settle_seconds > 0:
+                await self._deps.sleep(self._config.pre_merge_settle_seconds)
+                try:
+                    fresh_status = await self._fetch_status_for_decision(
+                        repo=repo,
+                        pr_number=pr_number,
+                        workspace_id=workspace_id,
+                        base_branch=base_branch,
+                    )
+                except GitHubClientError as exc:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=f"monitor: github error during pre-merge recheck: {exc}"[:2000],
+                    )
+                    return True
+                fresh_action = decide(fresh_status, state, self._config)
+                if not isinstance(fresh_action, Merge):
+                    _log.info(
+                        "monitor.pre_merge_recheck_changed_action",
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        original_action="Merge",
+                        fresh_action=type(fresh_action).__name__,
+                        head_sha=fresh_status.head_sha[:10],
+                        unresolved_threads=len(fresh_status.unresolved_inline_threads),
+                        unresolved_reviews=len(fresh_status.unresolved_review_comments),
+                        check_state=fresh_status.check_state.value,
+                        merge_state=fresh_status.merge_state_status.value,
+                    )
+                    return await self._execute(
+                        action=fresh_action,
+                        workspace_id=workspace_id,
+                        repo=repo,
+                        pr_number=pr_number,
+                        status=fresh_status,
+                        state=state,
+                        base_branch=base_branch,
+                        remote_branch=remote_branch,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                    )
+                status = fresh_status
+
             try:
                 merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
             except GitHubClientError as exc:
@@ -812,6 +836,39 @@ class PullRequestMonitorRunner:
             ]
         )
         return False
+
+    async def _fetch_status_for_decision(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        workspace_id: str,
+        base_branch: str,
+    ) -> PRStatus:
+        """Fetch the full PR snapshot used by the decision core.
+
+        Includes the local base-behind calculation and, for failing CI,
+        per-check logs. The same path is used for the main loop and the
+        pre-merge recheck so the final merge gate cannot accidentally use
+        weaker data than ordinary polling.
+        """
+        worktree_path = self._worktrees_root / workspace_id
+        await self._fetch_base(worktree_path=worktree_path, base_branch=base_branch)
+        base_behind = await self._count_base_behind(
+            worktree_path=worktree_path,
+            base_branch=base_branch,
+        )
+        status = await self._deps.gh.fetch_pr_status(
+            repo=repo, pr_number=pr_number, base_behind_count=base_behind
+        )
+        if status.check_state.value == "FAILURE":
+            failures = await self._deps.gh.fetch_failing_check_logs(
+                repo=repo,
+                pr_number=pr_number,
+                head_sha=status.head_sha,
+            )
+            status = _with_ci_failures(status, failures)
+        return status
 
     # ── Defer-signal artifact ─────────────────────────────────────────────
 

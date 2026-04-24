@@ -23,6 +23,7 @@ from awf.db.session import make_engine, make_session_factory
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
+    issue_comment_node,
     make_runner,
     pr_payload,
     seed_monitoring_workspace,
@@ -340,4 +341,59 @@ class TestMonitorActionLogging:
         # guard against.
         assert saw_merge_log_before_call == [True], (
             "expected the Merge monitor.action log to be emitted before `gh pr merge` was invoked"
+        )
+
+    @pytest.mark.unit
+    async def test_pre_merge_recheck_can_block_merge_on_late_review_comment(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        blocking_comment = issue_comment_node(
+            cid=77,
+            author="coderabbitai",
+            body=(
+                "## Review skipped\n\n"
+                "Auto reviews are disabled on base/target branches other than development.\n"
+                "- [ ] Trigger review"
+            ),
+        )
+
+        # Initial poll looks mergeable.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        # Final quiet-window recheck sees late bot/checklist feedback.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
+        cmd.queue_result(returncode=0)  # gh pr comment from NotifyHuman
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            pre_merge_settle_seconds=90,
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        assert sleep_fn.calls == [90]
+        assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["Merge", "NotifyHuman"]
+        assert any(
+            r.get("event") == "monitor.pre_merge_recheck_changed_action"
+            and r.get("fresh_action") == "NotifyHuman"
+            for r in captured
         )
