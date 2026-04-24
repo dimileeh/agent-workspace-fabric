@@ -263,7 +263,12 @@ class PullRequestMonitorRunner:
         terminal state (merged / notified / aborted / short-circuited)."""
 
         if isinstance(action, ShortCircuitCompleted):
-            await self._terminate_completed(workspace_id, pr_merge_sha=None)
+            await self._terminate_completed(
+                workspace_id,
+                pr_merge_sha=None,
+                compose_project=compose_project,
+                compose_file=compose_file,
+            )
             return True
 
         if isinstance(action, Abort):
@@ -335,9 +340,19 @@ class PullRequestMonitorRunner:
                     pr_number=pr_number,
                     body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
                 )
-                await self._terminate_completed(workspace_id, pr_merge_sha=None)
+                await self._terminate_completed(
+                    workspace_id,
+                    pr_merge_sha=None,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                )
                 return True
-            await self._terminate_completed(workspace_id, pr_merge_sha=merge_sha)
+            await self._terminate_completed(
+                workspace_id,
+                pr_merge_sha=merge_sha,
+                compose_project=compose_project,
+                compose_file=compose_file,
+            )
             return True
 
         if isinstance(action, NotifyHuman):
@@ -346,7 +361,12 @@ class PullRequestMonitorRunner:
                 pr_number=pr_number,
                 body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
             )
-            await self._terminate_completed(workspace_id, pr_merge_sha=None)
+            await self._terminate_completed(
+                workspace_id,
+                pr_merge_sha=None,
+                compose_project=compose_project,
+                compose_file=compose_file,
+            )
             return True
 
         # If we got here the MonitorAction union gained a variant without
@@ -767,7 +787,14 @@ class PullRequestMonitorRunner:
                 ws.monitor_started_at = datetime.now(UTC)
             await s.commit()
 
-    async def _terminate_completed(self, workspace_id: str, *, pr_merge_sha: str | None) -> None:
+    async def _terminate_completed(
+        self,
+        workspace_id: str,
+        *,
+        pr_merge_sha: str | None,
+        compose_project: str | None = None,
+        compose_file: Path | None = None,
+    ) -> None:
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
@@ -777,6 +804,85 @@ class PullRequestMonitorRunner:
                 ws.pr_merge_sha = pr_merge_sha
             await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
             await s.commit()
+        # Tear down the workspace's compose stack now that its PR was
+        # merged (or short-circuited because it was already merged).
+        # Running stacks hold network subnets from Docker's finite
+        # default pool; leaking them is what caused the 2026-04-24
+        # ``all predefined address pools have been fully subnetted``
+        # storm that took AWF offline for ~8 hours. User's rule: only
+        # tear down on COMPLETED, never on FAILED — failed workspaces
+        # stay up for operator inspection.
+        #
+        # Best-effort: any error here is logged but never masks the
+        # completion signal. The DB transition already landed above.
+        if compose_project and compose_file is not None:
+            await self._teardown_compose_stack(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+            )
+
+    async def _teardown_compose_stack(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+    ) -> None:
+        """Run ``docker compose down --remove-orphans --volumes`` for a
+        terminated workspace. Truly never raises.
+
+        The entire call is wrapped in a blanket ``except Exception``
+        because the failure modes here include ``FileNotFoundError``
+        (no ``docker`` on PATH — happens on dev laptops without the
+        daemon), ``asyncio.CancelledError`` during shutdown, and
+        transient I/O errors from the subprocess runner itself. None
+        of those are reasons to fail a workspace that already merged
+        its PR — the completion signal has already landed in the DB
+        before this method runs."""
+        try:
+            r = await self._deps.runner.run(
+                [
+                    "docker",
+                    "compose",
+                    "--project-name",
+                    compose_project,
+                    "--file",
+                    str(compose_file),
+                    "down",
+                    "--remove-orphans",
+                    "--volumes",
+                ]
+            )
+        except Exception as exc:
+            # docker binary missing, transient I/O, cancellation — any of
+            # these would otherwise propagate and crash the monitor
+            # runner. Log and swallow; the DB transition already
+            # completed.
+            _log.warning(
+                "monitor.compose_teardown_raised",
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                error=repr(exc)[:400],
+            )
+            return
+
+        if r.ok:
+            _log.info(
+                "monitor.compose_teardown_ok",
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+            )
+        else:
+            # Compose may already be gone (operator tore it down
+            # manually, or an earlier teardown in a retry loop).
+            _log.warning(
+                "monitor.compose_teardown_failed",
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                returncode=r.returncode,
+                stderr=(r.stderr or "")[:400],
+            )
 
     async def _terminate_failed(
         self,
