@@ -37,7 +37,9 @@ import awf.adapters.gemini  # noqa: E402, F401
 from awf.adapters.base import get_adapter  # noqa: E402
 from awf.common.commands import AsyncioSubprocessRunner  # noqa: E402
 from awf.common.github_client import GitHubClient  # noqa: E402
+from awf.common.ids import new_event_id  # noqa: E402
 from awf.db.enums import AgentRuntime, WorkspaceStatus  # noqa: E402
+from awf.db.models import WorkspaceEvent  # noqa: E402
 from awf.db.repositories import WorkspaceRepository  # noqa: E402
 from awf.db.session import make_session_factory  # noqa: E402
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor  # noqa: E402
@@ -81,11 +83,27 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
         # ``monitor_threads_addressed`` so we don't re-poke CodeRabbit
         # threads we already resolved. Review feedback on PR #2
         # (CodeRabbit): flag the wall-clock-cap reset pattern.
+        #
+        # We append a ``WorkspaceEvent`` by hand because the state-machine
+        # assert_transition refuses ``completed → monitoring_pr``. Without
+        # this, the workspace_events log has a gap between the original
+        # MONITOR_DONE entry and whatever the re-attached monitor emits
+        # next — operators auditing lifecycle would not see the reset.
+        old_state = ws.status
         ws.status = WorkspaceStatus.monitoring_pr.value
         ws.failure_reason = None
         ws.failure_message = None
         ws.monitor_iter_count = 0
         ws.monitor_started_at = None
+        ws.events.append(
+            WorkspaceEvent(
+                id=new_event_id(),
+                event_type="workspace.remonitor_reset",
+                old_state=old_state,
+                new_state=WorkspaceStatus.monitoring_pr.value,
+                reason_code="OPERATOR_REMONITOR",
+            )
+        )
         await s.commit()
         agent_runtime = AgentRuntime(ws.agent)
         compose_project = ws.compose_project_name or f"awf_{workspace_id}"

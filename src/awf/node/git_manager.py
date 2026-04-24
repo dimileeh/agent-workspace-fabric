@@ -21,6 +21,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import re
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -76,15 +77,46 @@ class WorktreeLayout:
 class GitManager:
     """Manages bare mirrors and per-workspace worktrees on the local filesystem."""
 
+    # Lock registry scoped by event loop. Must be class-level, not
+    # instance-level: ``scripts/run_awf.py`` constructs one ``GitManager``
+    # per task inside ``asyncio.gather(...)``. If the dict were an
+    # instance attribute, two concurrent tasks targeting the same repo
+    # would get INDEPENDENT locks and race on ``git clone --mirror`` /
+    # ``worktree add`` / ``worktree prune`` — the exact corruption the
+    # lock exists to prevent.
+    #
+    # We key first by running loop, then by resolved mirror path, rather
+    # than keeping a flat ``{path → Lock}`` dict, because ``asyncio.Lock``
+    # binds to its creating loop on first acquire and re-acquiring from a
+    # different loop raises ``RuntimeError``. Production runs one
+    # ``asyncio.run``, but pytest-asyncio creates a fresh loop per test —
+    # a flat registry would hand the second test a stale lock from the
+    # first. The WeakKeyDictionary drops the inner dict automatically
+    # when a loop is garbage-collected. ``mirror_path.resolve()`` as the
+    # inner key ensures symlinks / relative-vs-absolute forms of the
+    # same physical path share a lock.
+    _mirror_locks: weakref.WeakKeyDictionary[asyncio.AbstractEventLoop, dict[str, asyncio.Lock]] = (
+        weakref.WeakKeyDictionary()
+    )
+
     def __init__(self, work_dir: Path) -> None:
         self._work_dir = work_dir
         self._mirrors_dir = work_dir / "mirrors"
         self._worktrees_dir = work_dir / "worktrees"
-        # Per-repo-URL lock so two concurrent ``ensure_mirror`` calls for the same
-        # repo serialize (the first clones; the second sees the mirror already
-        # present and only fetches). Without this, parallel provisioning of
-        # workspaces against the same repo races on the initial clone.
-        self._mirror_locks: dict[str, asyncio.Lock] = {}
+
+    @classmethod
+    def _lock_for_mirror(cls, mirror_path: Path) -> asyncio.Lock:
+        """Return the per-loop lock for ``mirror_path``, creating it on
+        first use. Safe across multiple ``asyncio.run`` invocations
+        (tests, multi-loop callers) because each loop gets its own
+        inner dict and the inner dict + its Locks are GC'd when the
+        loop goes away."""
+        loop = asyncio.get_running_loop()
+        loop_locks = cls._mirror_locks.get(loop)
+        if loop_locks is None:
+            loop_locks = {}
+            cls._mirror_locks[loop] = loop_locks
+        return loop_locks.setdefault(str(mirror_path.resolve()), asyncio.Lock())
 
     @property
     def work_dir(self) -> Path:
@@ -101,7 +133,7 @@ class GitManager:
         """
         self._mirrors_dir.mkdir(parents=True, exist_ok=True)
         mirror_path = self._mirror_path(repo_url)
-        lock = self._mirror_locks.setdefault(repo_url, asyncio.Lock())
+        lock = self._lock_for_mirror(mirror_path)
 
         async with lock:
             if mirror_path.exists():
@@ -238,7 +270,7 @@ class GitManager:
         # under the new refspec) never targets the worktree's own branch.
         tracking_ref = f"origin/{base_branch}"
 
-        lock = self._mirror_locks.setdefault(repo_url, asyncio.Lock())
+        lock = self._lock_for_mirror(mirror_path)
         async with lock:
             try:
                 await self._run(
@@ -287,30 +319,39 @@ class GitManager:
 
         We also run ``worktree prune`` so metadata is cleaned up even if the
         directory was deleted out-of-band.
+
+        The per-mirror lock is held for both operations because the mirror's
+        ``$GIT_DIR/worktrees/`` admin dir is a single file git mutates on
+        every worktree add / remove / prune. Without the lock, a concurrent
+        ``add_worktree`` (e.g. one workspace tearing down while another
+        provisions against the same mirror) can see a half-pruned registry
+        and end up with a dangling worktree entry or a corrupted HEAD ref.
         """
         mirror_path = self._mirror_path(repo_url)
         worktree_path = self._worktrees_dir / workspace_id
 
-        if worktree_path.exists():
-            # ``--force`` because a failed task may leave dirty state.
-            await self._run(
-                [
-                    "git",
-                    "--git-dir",
-                    str(mirror_path),
-                    "worktree",
-                    "remove",
-                    "--force",
-                    str(worktree_path),
-                ],
-                operation="worktree.remove",
-            )
+        lock = self._lock_for_mirror(mirror_path)
+        async with lock:
+            if worktree_path.exists():
+                # ``--force`` because a failed task may leave dirty state.
+                await self._run(
+                    [
+                        "git",
+                        "--git-dir",
+                        str(mirror_path),
+                        "worktree",
+                        "remove",
+                        "--force",
+                        str(worktree_path),
+                    ],
+                    operation="worktree.remove",
+                )
 
-        if mirror_path.exists():
-            await self._run(
-                ["git", "--git-dir", str(mirror_path), "worktree", "prune"],
-                operation="worktree.prune",
-            )
+            if mirror_path.exists():
+                await self._run(
+                    ["git", "--git-dir", str(mirror_path), "worktree", "prune"],
+                    operation="worktree.prune",
+                )
 
     async def head_sha(self, *, workspace_id: str) -> str:
         """Return the current HEAD SHA of the workspace's worktree.

@@ -236,12 +236,16 @@ async def orchestrate_attach(
 
         # Spawn run_awf.py detached. We pass --keep-state so the shared
         # SQLite DB in work_dir isn't wiped on startup.
+        #
+        # ``sys.executable`` (not a hardcoded ``.venv/bin/python``) so the
+        # script works under ``uv run``, system python, or a venv rooted
+        # anywhere other than ``<repo>/.venv`` — sibling scheduler scripts
+        # already follow this pattern.
         log_path = work_dir / f"feature-pr-monitor-{pr_number}.log"
-        python_bin = _ROOT / ".venv" / "bin" / "python"
         run_awf = _ROOT / "scripts" / "run_awf.py"
         handle = spawn(
             [
-                str(python_bin),
+                sys.executable,
                 str(run_awf),
                 "--config",
                 str(spec_path),

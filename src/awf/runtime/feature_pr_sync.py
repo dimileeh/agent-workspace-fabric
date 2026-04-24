@@ -184,7 +184,7 @@ def _parse_metadata(payload: dict[str, Any]) -> FeaturePRMetadata:
             operation="fetch_pr_metadata",
             stderr=f"PR #{number} is already merged — no monitor to attach",
         )
-    if closed or state == "CLOSED":
+    if closed:
         raise FeaturePRSyncError(
             operation="fetch_pr_metadata",
             stderr=f"PR #{number} is closed — no monitor to attach",

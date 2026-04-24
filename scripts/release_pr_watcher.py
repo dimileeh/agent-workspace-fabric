@@ -181,13 +181,30 @@ async def _run(
     runner = AsyncioSubprocessRunner()
     stop = asyncio.Event()
 
-    def _handle_signal(signum: int, _frame: object) -> None:  # type: ignore[no-untyped-def]
-        _log.info("watcher.shutdown_signal", signum=signum)
+    def _handle_signal(sig: signal.Signals) -> None:
+        _log.info("watcher.shutdown_signal", signum=int(sig))
         stop.set()
 
-    # SIGTERM from orchestrators, SIGINT from Ctrl+C.
-    signal.signal(signal.SIGTERM, _handle_signal)
-    signal.signal(signal.SIGINT, _handle_signal)
+    # SIGTERM from orchestrators, SIGINT from Ctrl+C. Use the asyncio-native
+    # registration path so the handler runs on the event loop (safe to call
+    # ``stop.set()``) rather than from a C-level signal handler, where the
+    # scheduling hop to the loop can be delayed by whatever coroutine is
+    # currently holding the thread — per CPython asyncio docs.
+    #
+    # ``loop.add_signal_handler`` raises ``NotImplementedError`` on
+    # Windows event loops per the asyncio docs. The watcher is Linux-only
+    # in production, but the fallback keeps dev-on-Windows usable: drop
+    # back to ``signal.signal`` + ``call_soon_threadsafe`` so the C-level
+    # handler hops to the loop safely.
+    loop = asyncio.get_running_loop()
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(sig, _handle_signal, sig)
+        except NotImplementedError:
+            signal.signal(
+                sig,
+                lambda _signum, _frame, s=sig: loop.call_soon_threadsafe(_handle_signal, s),
+            )
 
     _log.info(
         "watcher.start",
