@@ -64,7 +64,12 @@ class TestCodexAdapter:
             "exec",
             "--dangerously-bypass-approvals-and-sandbox",
         ]
-        assert args[-1] == _PROMPT
+        # AWF prepends a contract preamble ("do not switch branches")
+        # before the user-supplied prompt; the last argv element is
+        # therefore the wrapped form. Check the user prompt is the
+        # trailing substring so the assertion survives preamble edits.
+        assert args[-1].endswith(_PROMPT)
+        assert "AWF workspace contract" in args[-1]
         assert "--model" in args and "gpt-5" in args
         assert "-c" in args
         assert any(a.startswith("model_reasoning_effort=") for a in args)
@@ -120,7 +125,12 @@ class TestClaudeCodeAdapter:
         ]
         # -p signals non-interactive print mode.
         assert args[-2] == "-p"
-        assert args[-1] == _PROMPT
+        # AWF prepends a contract preamble ("do not switch branches")
+        # before the user-supplied prompt; the last argv element is
+        # therefore the wrapped form. Check the user prompt is the
+        # trailing substring so the assertion survives preamble edits.
+        assert args[-1].endswith(_PROMPT)
+        assert "AWF workspace contract" in args[-1]
         assert "--model" in args and "sonnet" in args
 
 
@@ -141,7 +151,12 @@ class TestGeminiAdapter:
         gemini_start = args.index("gemini")
         assert args[gemini_start : gemini_start + 2] == ["gemini", "--yolo"]
         assert args[-2] == "-p"
-        assert args[-1] == _PROMPT
+        # AWF prepends a contract preamble ("do not switch branches")
+        # before the user-supplied prompt; the last argv element is
+        # therefore the wrapped form. Check the user prompt is the
+        # trailing substring so the assertion survives preamble edits.
+        assert args[-1].endswith(_PROMPT)
+        assert "AWF workspace contract" in args[-1]
         assert "-m" in args and "gemini-2.5-pro" in args
 
 

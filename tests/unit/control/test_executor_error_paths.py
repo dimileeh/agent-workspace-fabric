@@ -220,6 +220,208 @@ class TestUnexpectedErrorDuringAgentRun:
             assert "unexpected error" in (ws.failure_message or "")
 
 
+class TestBranchDriftRecovery:
+    """2026-04-24 incident (T41 Phase 3, ws_9ca6134a): agent CLI
+    switched to a custom branch and committed there. pr_creator
+    pushed the original empty branch → PR ended up empty.
+
+    Fix: executor detects branch drift before the commit step and
+    fast-forwards the expected branch to the agent's HEAD."""
+
+    @pytest.mark.unit
+    async def test_drift_with_clean_worktree_is_recovered(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Clean-worktree drift path: agent switched and committed,
+        left nothing uncommitted. Recovery: switch back + ff-merge."""
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")  # adapter
+        fake.queue_result(returncode=0, stdout="awf/feature-x\n")  # abbrev-ref → drifted
+        fake.queue_result(returncode=0, stdout="deadbeef12345\n")  # rev-parse HEAD
+        fake.queue_result(returncode=0, stdout="")  # status --porcelain (clean)
+        fake.queue_result(returncode=0)  # git switch awf/x
+        fake.queue_result(returncode=0)  # git merge --ff-only deadbeef12345
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="a.py\n")  # diff --cached
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        fake.queue_result(returncode=0, stdout="sha\n")  # pre-push rev-parse HEAD
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # pre-push abbrev-ref
+        fake.queue_result(returncode=0, stdout="ab commit\n")  # pre-push log
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+        argvs = [c.args for c in fake.calls]
+        # ff-only merge (not reset --hard) — preserves working tree.
+        merge_calls = [
+            a for a in argvs if "merge" in a and "--ff-only" in a and "deadbeef12345" in a
+        ]
+        assert len(merge_calls) == 1, f"expected one ``merge --ff-only``; got {argvs}"
+        # No ``reset --hard`` against the agent head — reset would wipe WIP.
+        reset_calls = [a for a in argvs if "reset" in a and "--hard" in a and "deadbeef12345" in a]
+        assert reset_calls == [], (
+            f"drift recovery must not ``reset --hard`` the agent's HEAD — "
+            f"that would wipe any WIP the agent left. Use ``merge --ff-only``. "
+            f"Full argvs: {argvs}"
+        )
+        switch_calls = [a for a in argvs if "switch" in a and "awf/x" in a]
+        assert len(switch_calls) == 1
+        # No stash activity when the worktree was clean.
+        stash_calls = [a for a in argvs if "stash" in a]
+        assert stash_calls == []
+
+    @pytest.mark.unit
+    async def test_drift_with_uncommitted_wip_preserves_it(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """CodeRabbit + gemini feedback on PR #7: if the agent drifted
+        to ``feature-x``, committed some work, AND left other edits
+        uncommitted, the naive ``reset --hard`` would wipe the WIP.
+        Recovery must stash WIP → switch → ff-merge → pop."""
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")  # adapter
+        fake.queue_result(returncode=0, stdout="awf/feature-x\n")  # abbrev-ref
+        fake.queue_result(returncode=0, stdout="deadbeef12345\n")  # rev-parse HEAD
+        fake.queue_result(
+            returncode=0, stdout=" M src/wip.py\n?? new-untracked.txt\n"
+        )  # status: HAS WIP (both modified and untracked)
+        fake.queue_result(returncode=0, stdout="Saved working directory")  # stash push
+        fake.queue_result(returncode=0)  # git switch awf/x
+        fake.queue_result(returncode=0)  # git merge --ff-only deadbeef12345
+        fake.queue_result(returncode=0, stdout="On branch awf/x")  # stash pop
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="a.py\n")
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="tests ok")
+        fake.queue_result(returncode=0, stdout="sha\n")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0, stdout="ab commit\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+        argvs = [c.args for c in fake.calls]
+        # Stash push BEFORE switch, pop AFTER merge.
+        stash_push_calls = [a for a in argvs if "stash" in a and "push" in a]
+        stash_pop_calls = [a for a in argvs if "stash" in a and "pop" in a]
+        assert len(stash_push_calls) == 1, f"WIP must be stashed before switch; got {argvs}"
+        assert len(stash_pop_calls) == 1, f"WIP must be popped after ff-merge; got {argvs}"
+        # stash push includes --include-untracked
+        assert "--include-untracked" in stash_push_calls[0]
+
+    @pytest.mark.unit
+    async def test_drift_stash_pop_conflict_surfaces(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """If ``git stash pop`` conflicts (agent's WIP and the
+        fast-forwarded commits touch the same regions), surface it as
+        a workspace failure rather than silently leave the operator
+        with a dirty tree and no signal."""
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/feature-x\n")
+        fake.queue_result(returncode=0, stdout="abc123\n")
+        fake.queue_result(returncode=0, stdout=" M conflicted.py\n")
+        fake.queue_result(returncode=0, stdout="Saved")  # stash push ok
+        fake.queue_result(returncode=0)  # switch ok
+        fake.queue_result(returncode=0)  # ff-merge ok
+        fake.queue_result(
+            returncode=1, stderr="CONFLICT (content): Merge conflict in conflicted.py"
+        )  # stash pop FAILS
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "stash pop" in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    async def test_no_drift_skips_recovery(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # current == expected
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="a.py\n")
+        fake.queue_result(returncode=0)  # commit
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="tests ok")
+        fake.queue_result(returncode=0, stdout="sha\n")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0, stdout="ab commit\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        argvs = [c.args for c in fake.calls]
+        switch_calls = [a for a in argvs if "switch" in a]
+        reset_hard_calls = [a for a in argvs if "reset" in a and "--hard" in a]
+        assert switch_calls == []
+        assert reset_hard_calls == []
+
+    @pytest.mark.unit
+    async def test_drift_recovery_switch_fails_marks_workspace_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """If the recovery itself fails (expected branch missing,
+        corrupted refs), fail loudly rather than fall back to the
+        no-op push that created the original incident."""
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/something-else\n")  # abbrev-ref
+        fake.queue_result(returncode=0, stdout="abc123\n")  # rev-parse HEAD
+        fake.queue_result(returncode=0, stdout="")  # status (clean)
+        fake.queue_result(returncode=1, stderr="fatal: invalid reference: awf/x")  # switch FAILS
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "branch drift" in (ws.failure_message or "")
+
+
 class TestCommitStepRuntimeError:
     @pytest.mark.unit
     async def test_nonzero_git_commit_raises_and_marks_failed(
@@ -233,6 +435,7 @@ class TestCommitStepRuntimeError:
         by the generic except → mark infrastructure_failure."""
         ws_id = await _seed_ready(factory)
         fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (non-empty)
         fake.queue_result(
