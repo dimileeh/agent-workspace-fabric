@@ -481,6 +481,7 @@ class WorkspaceExecutor:
                 compose_file=compose_file,
                 test_commands=list(ws.test_commands),
                 requires_database=ws.requires_database,
+                workspace_worktree=worktree_path,
             )
             if val_result.all_passed:
                 if pass_number > 0:

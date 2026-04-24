@@ -107,6 +107,7 @@ class ValidationRunner:
         compose_file: Path,
         test_commands: list[str],
         requires_database: bool = False,
+        workspace_worktree: Path | None = None,
     ) -> ValidationResult:
         workspace_artifacts = self._artifacts_dir / workspace_id
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
@@ -145,6 +146,28 @@ class ValidationRunner:
             # migration fails, skip remaining test commands: they'd run against
             # a broken schema and the output would be noise.
             if index == 1 and requires_database:
+                # ``requires_database=True`` means "the companion stack needs
+                # Postgres running" — not "run Alembic here." Non-Python
+                # workspaces (aira-web, etc.) have no ``alembic.ini`` at the
+                # worktree root; their companion backend handles its own
+                # migrations via its own entrypoint. Skip the workspace-side
+                # step for them rather than burn fix-passes on a shell error.
+                # When ``workspace_worktree`` is not provided (e.g. legacy
+                # unit tests that assert the historical migration behavior)
+                # we fall back to the old "just run it" path.
+                if (
+                    workspace_worktree is not None
+                    and not (workspace_worktree / "alembic.ini").is_file()
+                ):
+                    _log.info(
+                        "validation.migration_skipped_no_alembic_ini",
+                        workspace_id=workspace_id,
+                        reason=(
+                            "requires_database=True but workspace has no "
+                            "alembic.ini — skipping migration step"
+                        ),
+                    )
+                    continue
                 migration = await self._exec(
                     compose_project=compose_project,
                     compose_file=compose_file,
