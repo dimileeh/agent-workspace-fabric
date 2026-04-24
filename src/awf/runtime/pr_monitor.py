@@ -304,20 +304,30 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     Gate order matters:
 
     0.  Terminal states: merged → ShortCircuitCompleted, closed → Abort.
-    1.  Unresolved comments (inline + review) → AddressComments.
+    1.  Base behind / DIRTY → SyncBase (BEFORE addressing comments so a
+        PR on a fast-moving base doesn't loop forever on new bot-review
+        cycles without ever integrating base updates — if bots keep
+        commenting, AddressComments would fire every iteration and
+        SyncBase would never get its turn; PR #344/#345 hit this with
+        5 bot reviewers).
+    2.  Unresolved comments (inline + review) → AddressComments.
         The batch only contains threads/comments we HAVEN'T already
         addressed (``state.threads_addressed_ids``). If every comment
         is already in that dict we fall through — the runner is
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
-    2.  CI FAILURE → ReportCiFailure.
-    3.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
+    3.  CI FAILURE → ReportCiFailure.
+    4.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
-    4.  Base behind → SyncBase.
-    5.  mergeStateStatus BLOCKED / HAS_HOOKS → NotifyHuman.
-    6.  Human-defer on unresolved threads → NotifyHuman.
-    7.  All green → Merge (or NotifyHuman if auto_merge=False).
+    5.  Legacy ``mergeable == CONFLICTING`` (without BEHIND/DIRTY) →
+        SyncBase. The coding CLI gets a chance to resolve via the
+        `git merge origin/<base>` + fix cycle; runs AFTER comments so
+        a mergeable-CONFLICTING PR's conflict + comments can be fixed
+        in one CLI pass.
+    6.  mergeStateStatus BLOCKED / HAS_HOOKS → NotifyHuman.
+    7.  Human-defer on unresolved threads → NotifyHuman.
+    8.  All green → Merge (or NotifyHuman if auto_merge=False).
 
     There is NO iteration or wall-clock budget gate — volume is not a
     terminal condition. A PR that attracts 500 comment cycles is fine
@@ -332,7 +342,36 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
 
-    # 1. Unresolved comments, filtered to those we haven't handled yet.
+    # 1. Base-behind / DIRTY check runs BEFORE comments. Rationale: on a
+    # PR with an active bot-review fleet (Greptile/CodeRabbit/Bugbot/
+    # Codex/etc.) every push triggers a new wave of comments —
+    # AddressComments would fire every single iteration and we'd never
+    # integrate base updates, leaving the PR stuck on BEHIND
+    # indefinitely. SyncBase only adds a merge commit; the feature work
+    # is unchanged, and any freshly-arrived review comments are still
+    # there for the next iteration's AddressComments gate. PR #344/#345
+    # hit this with 5 bot reviewers.
+    #
+    # Three signals route here:
+    #   * local rev-list says base has advanced (base_behind_count > 0)
+    #   * GitHub's mergeStateStatus == BEHIND
+    #   * GitHub's mergeStateStatus == DIRTY (conflict already detected
+    #     server-side; SyncBase's ``git merge`` path reproduces it
+    #     locally and invokes the coding CLI with a conflict-resolve
+    #     prompt — the CLI's fix commit + push lands a CLEAN state on
+    #     the next poll). If the CLI can't resolve after repeated
+    #     attempts, the monitor keeps re-trying indefinitely — the
+    #     operator must close / rebase the PR to break the loop.
+    #
+    # The PR #335/#336 stale-rev-list bug was fixed by adding the
+    # merge_state_status fallback — either signal alone triggers sync.
+    if status.base_behind_count > 0 or status.merge_state_status in (
+        MergeStateStatus.BEHIND,
+        MergeStateStatus.DIRTY,
+    ):
+        return SyncBase()
+
+    # 2. Unresolved comments, filtered to those we haven't handled yet.
     new_threads = tuple(
         t
         for t in status.unresolved_inline_threads
@@ -346,7 +385,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 
-    # 2. CI failures.
+    # 3. CI failures.
     if status.check_state == CheckState.FAILURE:
         if not status.ci_failures:
             # Failure reported by GraphQL but no per-check log available.
@@ -356,7 +395,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return ReportCiFailure(failures=())
         return ReportCiFailure(failures=status.ci_failures)
 
-    # 3. CI still running, or GitHub is still computing state → passive wait.
+    # 4. CI still running, or GitHub is still computing state → passive wait.
     if status.check_state == CheckState.PENDING:
         return WaitForCI(reason="pending_checks")
     if (
@@ -365,35 +404,16 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return WaitForCI(reason="unknown_mergeable_state")
 
-    # 4. Base behind OR hard conflict → integrate base into head. Three
-    # signals route here:
-    #   * local rev-list says base has advanced
-    #   * GitHub's mergeStateStatus == BEHIND
-    #   * GitHub's mergeStateStatus == DIRTY (conflict already detected
-    #     server-side; SyncBase's ``git merge`` path reproduces it
-    #     locally and invokes the coding CLI with a conflict-resolve
-    #     prompt — the CLI's fix commit + push lands a CLEAN state on
-    #     the next poll). If the CLI can't resolve after repeated
-    #     attempts, the monitor keeps re-trying indefinitely — the
-    #     operator must close / rebase the PR to break the loop.
-    #
-    # This was the PR #335 / #336 bug: the local count was stale
-    # (worktree hadn't fetched origin/<base> since initial checkout) and
-    # said 0, so SyncBase never fired even though GitHub correctly
-    # reported BEHIND and refused the merge call.
-    if status.base_behind_count > 0 or status.merge_state_status in (
-        MergeStateStatus.BEHIND,
-        MergeStateStatus.DIRTY,
-    ):
-        return SyncBase()
-
-    # Legacy ``mergeable == CONFLICTING`` without the richer
+    # 5. Legacy ``mergeable == CONFLICTING`` without the richer
     # mergeStateStatus signal — same treatment as DIRTY: let SyncBase
-    # attempt to reproduce + resolve.
+    # attempt to reproduce + resolve. Runs AFTER comments because a
+    # mergeable CONFLICTING PR is often resolvable in the same pass as
+    # comment fixes; contrast with BEHIND/DIRTY (step 1) which must run
+    # first to break the push→comment→push loop.
     if status.mergeable == MergeableState.CONFLICTING:
         return SyncBase()
 
-    # 5. Branch protection / required-review blocker → hand off to human
+    # 6. Branch protection / required-review blocker → hand off to human
     # regardless of auto_merge setting. Monitor can't bypass branch
     # protection; the only useful action is to tell the maintainer the
     # PR is otherwise ready.
@@ -403,7 +423,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return NotifyHuman()
 
-    # 6. Deferred HUMAN feedback still unresolved on GitHub → block
+    # 7. Deferred HUMAN feedback still unresolved on GitHub → block
     # auto-merge. Deferred BOT feedback does not block.
     #
     # "Defer" means the coding CLI decided a reviewer comment needs
@@ -428,7 +448,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if has_human_defer:
         return NotifyHuman()
 
-    # 7. All green — terminal success action.
+    # 8. All green — terminal success action.
     if config.auto_merge:
         return Merge()
     return NotifyHuman()
