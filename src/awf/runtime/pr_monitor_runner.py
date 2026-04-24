@@ -15,8 +15,10 @@ The loop:
     arriving, and only push once a short settle window passes with no
     new activity. After the push, resolve the threads we addressed.
 6.  Persist updated state.
-7.  ``Merge`` / ``NotifyHuman`` / ``Abort`` / ``ShortCircuitCompleted``
-    are terminal — the runner transitions the workspace and returns.
+7.  ``Merge`` / ``Abort`` / ``ShortCircuitCompleted`` are terminal — the
+    runner transitions the workspace and returns. ``NotifyHuman`` is a
+    live wait state: the runner posts a deduped status comment and keeps
+    polling until the PR is merged, closed, or becomes actionable again.
 """
 
 from __future__ import annotations
@@ -406,30 +408,15 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     stderr=exc.stderr,
                 )
-                await self._deps.gh.post_comment(
+                await self._post_human_notification_once(
                     repo=repo,
                     pr_number=pr_number,
-                    body=ready_to_merge_comment(
-                        pr_number=pr_number,
-                        head_sha=status.head_sha,
-                        blocker_reason=_merge_rejection_reason(exc.stderr),
-                    ),
-                )
-                self._write_defer_signal(
-                    workspace_id=workspace_id,
-                    pr_number=pr_number,
-                    terminal_action="Merge",
-                    merged=False,
                     status=status,
                     state=state,
+                    blocker_reason=_merge_rejection_reason(exc.stderr),
                 )
-                await self._terminate_completed(
-                    workspace_id,
-                    pr_merge_sha=None,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                )
-                return True
+                await self._deps.sleep(self._config.poll_interval_seconds)
+                return False
             self._write_defer_signal(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
@@ -447,34 +434,57 @@ class PullRequestMonitorRunner:
             return True
 
         if isinstance(action, NotifyHuman):
-            await self._deps.gh.post_comment(
+            await self._post_human_notification_once(
                 repo=repo,
                 pr_number=pr_number,
-                body=ready_to_merge_comment(
-                    pr_number=pr_number,
-                    head_sha=status.head_sha,
-                    blocker_reason=_notify_human_reason(status, state),
-                ),
-            )
-            self._write_defer_signal(
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                terminal_action="NotifyHuman",
-                merged=False,
                 status=status,
                 state=state,
             )
-            await self._terminate_completed(
-                workspace_id,
-                pr_merge_sha=None,
-                compose_project=compose_project,
-                compose_file=compose_file,
-            )
-            return True
+            await self._deps.sleep(self._config.poll_interval_seconds)
+            return False
 
         # If we got here the MonitorAction union gained a variant without
         # a dispatch arm — fail loudly so tests catch it.
         raise RuntimeError(f"unhandled monitor action: {action!r}")  # pragma: no cover
+
+    async def _post_human_notification_once(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        status: PRStatus,
+        state: MonitorState,
+        blocker_reason: str | None = None,
+    ) -> None:
+        """Post a human-facing status comment once per HEAD/reason.
+
+        ``NotifyHuman`` no longer completes the workspace. Without a
+        dedupe key, a live monitor would spam the same PR every poll while
+        waiting for a manual merge, a branch-protection setting, or a
+        review-bot checklist to clear.
+        """
+        reason = (
+            blocker_reason if blocker_reason is not None else _notify_human_reason(status, state)
+        )
+        key = _notification_key(head_sha=status.head_sha, blocker_reason=reason)
+        if state.threads_addressed_ids.get(key) == "notified":
+            _log.info(
+                "monitor.notify_human_already_posted",
+                pr_number=pr_number,
+                head_sha=status.head_sha[:10],
+                reason=reason,
+            )
+            return
+        await self._deps.gh.post_comment(
+            repo=repo,
+            pr_number=pr_number,
+            body=ready_to_merge_comment(
+                pr_number=pr_number,
+                head_sha=status.head_sha,
+                blocker_reason=reason,
+            ),
+        )
+        state.mark_addressed(key, "notified")
 
     # ── AddressComments / fix_cycle ────────────────────────────────────────
 
@@ -539,7 +549,7 @@ class PullRequestMonitorRunner:
             new_reviews = [
                 c
                 for c in status.unresolved_review_comments
-                if c.comment_id not in state.threads_addressed_ids
+                if not c.blocks_merge and c.comment_id not in state.threads_addressed_ids
             ]
             if not new_threads and not new_reviews:
                 break  # burst settled
@@ -1148,6 +1158,11 @@ def _merge_rejection_reason(stderr: str) -> str:
     if detail:
         return f"GitHub rejected the merge attempt: {detail}"
     return "GitHub rejected the merge attempt"
+
+
+def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
+    reason = blocker_reason or "ready-to-merge"
+    return f"__awf_notify__:{head_sha}:{reason}"
 
 
 def _collect_defer_items(

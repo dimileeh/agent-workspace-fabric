@@ -4,8 +4,9 @@ A release PR (development → main, typically) must NOT be auto-merged —
 only a human can land that. This module exposes a ``run_release_monitor``
 helper that drives the same monitor loop as a feature PR but with
 ``auto_merge=False``. The decision core in ``pr_monitor.decide`` flips
-its terminal success action to ``NotifyHuman``, and the runner posts a
-"ready to merge" comment instead of calling ``gh pr merge``.
+its green-gates action to ``NotifyHuman``; the runner posts a "ready to
+merge" comment instead of calling ``gh pr merge`` and then keeps polling
+until the PR is actually merged or closed.
 
 Usage:
 

@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
+from awf.common.commands import FakeCommandRunner
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -264,3 +265,70 @@ class TestRemonitor:
         rc = await remonitor_workspace._main(tmp_path, ws_id)
         assert rc == 0
         assert patch_monitor_builder[0].calls[0]["compose_project"] == f"awf_{ws_id}"
+
+    @pytest.mark.unit
+    async def test_no_auto_merge_uses_release_monitor(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        built_feature: list[_FakeMonitor] = []
+        built_release: list[_FakeMonitor] = []
+
+        def _build_feature(**kwargs: Any) -> _FakeMonitor:
+            m = _FakeMonitor(session_factory=kwargs["session_factory"])
+            built_feature.append(m)
+            return m
+
+        def _build_release(**kwargs: Any) -> _FakeMonitor:
+            m = _FakeMonitor(session_factory=kwargs["session_factory"])
+            built_release.append(m)
+            return m
+
+        monkeypatch.setattr(remonitor_workspace, "build_feature_pr_monitor", _build_feature)
+        monkeypatch.setattr(remonitor_workspace, "build_release_pr_monitor", _build_release)
+        ws_id = await _seed_workspace(tmp_path / "awf.db")
+        (tmp_path / "compose" / "compose" / ws_id).mkdir(parents=True)
+        (tmp_path / "compose" / "compose" / ws_id / "compose.yml").write_text("x")
+
+        rc = await remonitor_workspace._main(tmp_path, ws_id, auto_merge=False)
+
+        assert rc == 0
+        assert built_feature == []
+        assert len(built_release) == 1
+
+    @pytest.mark.unit
+    async def test_push_pending_head_uses_explicit_refspec_and_records_sha(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        db_path = tmp_path / "awf.db"
+        ws_id = await _seed_workspace(db_path)
+        engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
+        factory = make_session_factory(engine)
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0)
+        runner.queue_result(returncode=0, stdout="newhead123\n")
+
+        await remonitor_workspace._push_pending_head(
+            runner=runner,
+            factory=factory,
+            workspace_id=ws_id,
+            worktree_path=tmp_path / "git" / "worktrees" / ws_id,
+            remote_push_branch="awf/ws_x",
+        )
+
+        assert runner.calls[0].args == [
+            "git",
+            "-C",
+            str(tmp_path / "git" / "worktrees" / ws_id),
+            "push",
+            "origin",
+            "HEAD:refs/heads/awf/ws_x",
+        ]
+        assert runner.calls[1].args[-2:] == ["rev-parse", "HEAD"]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.monitor_last_commit_sha == "newhead123"
+        await engine.dispose()

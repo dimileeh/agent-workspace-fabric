@@ -24,8 +24,9 @@ Design notes:
   thread is already addressed, ``decide`` skips to the other gates.
 * **Release-PR variant** (``task_kind="monitor_release_pr"``) differs in
   exactly one place: when all 5 gates are green it returns
-  ``NotifyHuman`` instead of ``Merge``. The caller flips
-  ``config.auto_merge`` accordingly.
+  ``NotifyHuman`` instead of ``Merge``. The runner treats that as a live
+  wait state, not a terminal completion, and keeps polling until the PR
+  is actually merged or closed.
 """
 
 from __future__ import annotations
@@ -181,8 +182,8 @@ class MonitorConfig:
     conditions. In practice the cap fired on legitimate PRs with heavy
     bot review (5 reviewers × N cycles each > 10 iterations), stranding
     green-CI PRs behind an Abort. Policy now: the monitor drives every
-    PR to ``Merge`` / ``NotifyHuman`` no matter the volume; the only
-    terminal NotifyHuman paths are branch-protection and human-defer."""
+    PR until it is merged or closed no matter the volume; NotifyHuman is
+    only a live wait state for branch-protection and human-defer."""
 
     auto_merge: bool = True  # False = release-PR variant
     # Only used by the RUNNER, not decide(); listed here so the full config
@@ -252,7 +253,12 @@ class Merge:
 
 @dataclass(frozen=True)
 class NotifyHuman:
-    """Release-PR variant: post a 'ready to merge' comment, exit completed."""
+    """Post a human-attention comment and keep monitoring.
+
+    This is deliberately not terminal. A monitor owns the PR until it is
+    merged, closed, or fails; human-attention comments are just status
+    notifications while the workspace remains alive.
+    """
 
 
 @dataclass(frozen=True)
@@ -319,15 +325,17 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         commenting, AddressComments would fire every iteration and
         SyncBase would never get its turn; PR #344/#345 hit this with
         5 bot reviewers).
-    2.  Policy/checklist blockers that cannot be code-fixed →
-        NotifyHuman.
-    3.  Unresolved comments (inline + review) → AddressComments.
+    2.  Unresolved comments (inline + review) → AddressComments.
         The batch only contains threads/comments we HAVEN'T already
         addressed (``state.threads_addressed_ids``). If every comment
         is already in that dict we fall through — the runner is
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
+        Policy/checklist blockers are excluded from this batch because
+        the coding CLI cannot fix them.
+    3.  Policy/checklist blockers that cannot be code-fixed →
+        NotifyHuman.
     4.  CI FAILURE → ReportCiFailure.
     5.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
@@ -348,8 +356,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     There is NO iteration or wall-clock budget gate — volume is not a
     terminal condition. A PR that attracts 500 comment cycles is fine
     as long as the monitor keeps making progress; the only way to exit
-    is Merge, ShortCircuitCompleted, Abort(pr_closed_externally), or
-    NotifyHuman.
+    is Merge, ShortCircuitCompleted, or Abort(pr_closed_externally).
     """
 
     # 0. Terminal upstream states short-circuit everything.
@@ -387,15 +394,10 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return SyncBase()
 
-    # 2. Policy/checklist blockers that cannot be code-fixed must stop
-    # auto-merge immediately. Example: CodeRabbit can post a top-level
-    # "review skipped" comment with an unchecked "Trigger review" task
-    # when the PR base branch is outside its configured review set. Treating
-    # that as a normal bot nit lets AWF merge a PR that was never reviewed.
-    if any(c.blocks_merge for c in status.unresolved_review_comments):
-        return NotifyHuman()
-
-    # 3. Unresolved comments, filtered to those we haven't handled yet.
+    # 2. Unresolved comments, filtered to those we haven't handled yet.
+    # Policy/checklist blockers remain visible to the merge gate, but are
+    # not sent to the coding CLI: no code edit can click a review-bot
+    # "Trigger review" checkbox or change organization review settings.
     new_threads = tuple(
         t
         for t in status.unresolved_inline_threads
@@ -404,10 +406,20 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     new_reviews = tuple(
         c
         for c in status.unresolved_review_comments
-        if c.comment_id not in state.threads_addressed_ids
+        if not c.blocks_merge and c.comment_id not in state.threads_addressed_ids
     )
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
+
+    # 3. Policy/checklist blockers that cannot be code-fixed must stop
+    # auto-merge, but they must not terminate the monitor. Example:
+    # CodeRabbit can post a top-level "review skipped" comment with an
+    # unchecked "Trigger review" task when the PR base branch is outside
+    # its configured review set. The runner posts a single human-attention
+    # comment and keeps polling so later code-review comments are still
+    # handled.
+    if any(c.blocks_merge for c in status.unresolved_review_comments):
+        return NotifyHuman()
 
     # 4. CI failures.
     if status.check_state == CheckState.FAILURE:

@@ -220,11 +220,19 @@ class GitHubClient:
             body = node.get("body") or ""
             if not body.strip():
                 continue
+            author = _dig(node, "author", "login")
+            state = (node.get("state") or "").upper()
+            if (
+                state != "CHANGES_REQUESTED"
+                and _is_known_bot_comment_author(author)
+                and _is_non_actionable_bot_review_body(body)
+            ):
+                continue
             reviews.append(
                 ReviewComment(
                     comment_id=str(node["databaseId"]),
                     body_excerpt=body[:400],
-                    author=_dig(node, "author", "login"),
+                    author=author,
                     is_resolved=False,
                 )
             )
@@ -238,6 +246,8 @@ class GitHubClient:
         for node in _dig(pr, "comments", "nodes") or []:
             body = node.get("body") or ""
             if node.get("isMinimized") or not body.strip():
+                continue
+            if _is_awf_status_issue_comment(body):
                 continue
             author = _dig(node, "author", "login")
             blocks_merge = _is_merge_blocking_issue_comment(body)
@@ -539,3 +549,24 @@ def _is_merge_blocking_issue_comment(body: str) -> bool:
     return "review skipped" in lower and (
         "trigger review" in lower or "auto reviews are disabled" in lower
     )
+
+
+def _is_awf_status_issue_comment(body: str) -> bool:
+    lower = " ".join(body.lower().split())
+    return (
+        "awf did not auto-merge because" in lower
+        or "all 5 awf gates are green" in lower
+        or "after the blocker is cleared or a new commit lands, awf will re-verify" in lower
+        or lower.startswith("fixed in commit ")
+        or lower.startswith("false positive:")
+        or lower.startswith("defer:")
+    )
+
+
+def _is_non_actionable_bot_review_body(body: str) -> bool:
+    lower = " ".join(body.lower().split())
+    if "no feedback" in lower or "no actionable feedback" in lower:
+        return True
+    if lower.startswith("## code review") and ("this pull request" in lower or "this pr" in lower):
+        return True
+    return lower.startswith(("this pull request introduces", "this pr introduces"))

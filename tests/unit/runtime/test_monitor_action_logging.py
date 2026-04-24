@@ -19,6 +19,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.db.base import Base
+from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -116,6 +118,10 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # gh pr comment
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
         runner = make_runner(
             factory=factory,
             cmd=cmd,
@@ -131,8 +137,138 @@ class TestMonitorActionLogging:
                 compose_file=tmp_path / "compose.yml",
             )
         entries = _action_entries(captured)
-        assert len(entries) == 1
+        assert len(entries) == 2
         assert entries[0]["action"] == "NotifyHuman"
+        assert entries[1]["action"] == "ShortCircuitCompleted"
+        assert sleep_fn.calls == [60]
+
+    @pytest.mark.unit
+    async def test_notify_human_keeps_polling_and_addresses_later_comments(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        late_thread = thread_node(
+            tid="T_late",
+            author="gemini-code-assist",
+            body="late actionable review",
+        )
+        # Poll 1: all green, but release/manual mode posts a human notice.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        cmd.queue_result(returncode=0)  # gh pr comment
+        # Poll 2: a review comment arrived after the human notice.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[late_thread]))
+        adapter.queue(stdout="fixed")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle re-poll
+        cmd.queue_result(returncode=0)  # git push
+        cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
+        cmd.queue_result(returncode=0)  # resolveReviewThread
+        # Poll 3: maintainer merged externally; only now may the workspace complete.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            auto_merge=False,
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
+        assert len(adapter.calls) == 1
+        assert "late actionable review" in adapter.calls[0]
+        assert sleep_fn.calls == [60, 30]
+        comment_calls = [
+            call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]
+        ]
+        assert len(comment_calls) == 1
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+    @pytest.mark.unit
+    async def test_policy_blocker_waits_alive_and_addresses_later_comments(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        blocking_comment = issue_comment_node(
+            cid=77,
+            author="coderabbitai",
+            body=(
+                "## Review skipped\n\n"
+                "Auto reviews are disabled on base/target branches other than development.\n"
+                "- [ ] Trigger review"
+            ),
+        )
+        late_thread = thread_node(
+            tid="T_after_notify",
+            author="gemini-code-assist",
+            body="new review feedback after AWF notified human",
+        )
+        # Poll 1: only a non-code policy blocker exists, so AWF notifies.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
+        cmd.queue_result(returncode=0)  # gh pr comment
+        # Poll 2: actionable comments arrive after the notification.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(
+            returncode=0,
+            stdout=pr_payload(comments=[blocking_comment], threads=[late_thread]),
+        )
+        adapter.queue(stdout="fixed")
+        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
+        cmd.queue_result(returncode=0)  # git push
+        cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
+        cmd.queue_result(returncode=0)  # resolveReviewThread
+        # Poll 3: external merge is the terminal condition.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
+        assert len(adapter.calls) == 1
+        assert "new review feedback after AWF notified human" in adapter.calls[0]
 
     @pytest.mark.unit
     async def test_short_circuit_completed_emits_log_line(
@@ -372,6 +508,12 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
         cmd.queue_result(returncode=0)  # gh pr comment from NotifyHuman
+        # The monitor stays alive after NotifyHuman; finish by observing an
+        # external merge on the next poll.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
 
         runner = make_runner(
             factory=factory,
@@ -388,10 +530,10 @@ class TestMonitorActionLogging:
                 compose_file=tmp_path / "compose.yml",
             )
 
-        assert sleep_fn.calls == [90]
+        assert sleep_fn.calls == [90, 60]
         assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
         actions = [e["action"] for e in _action_entries(captured)]
-        assert actions == ["Merge", "NotifyHuman"]
+        assert actions == ["Merge", "NotifyHuman", "ShortCircuitCompleted"]
         comment_calls = [
             call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]
         ]
