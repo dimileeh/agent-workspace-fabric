@@ -303,13 +303,18 @@ of a push. The monitor addresses every comment in that burst locally,
 waits a 30 s settle window for more, and only pushes once the burst is
 quiet. One push → one CI run → minimum cost.
 
-### Caps (defaults; tune via ``MonitorConfig`` if policy requires)
+### No iteration or wall-clock budget caps
 
-- 10 non-passive iterations (``AddressComments`` / ``SyncBase`` /
-  ``ReportCiFailure``). ``WaitForCI`` passes don't count.
-- 6-hour wall-clock cap from entering ``monitoring_pr``.
-- ``iter_cap`` hit → workspace transitions to ``failed`` with
-  ``monitor: abort (iter_cap_reached)`` in ``failure_message``.
+The monitor takes full responsibility for driving a PR to a terminal
+action (``Merge`` / ``NotifyHuman`` / ``Abort(pr_closed_externally)``
+/ ``ShortCircuitCompleted``). Volume is not a terminal condition — a
+PR that attracts 500 review cycles is fine as long as the monitor
+keeps making progress.
+
+If the monitor PROCESS dies (OOM, Docker restart), the PR is
+stranded. The ``awf-watchdog`` CLI (``awf-watchdog start --work-dir
+<dir>``) periodically scans open ``awf/`` PRs and re-attaches the
+monitor for any PR whose ``run_awf.py`` process isn't in ``ps``.
 
 ### Release PR (``development → main``)
 

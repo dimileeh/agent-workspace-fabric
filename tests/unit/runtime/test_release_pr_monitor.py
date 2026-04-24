@@ -70,10 +70,8 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
         adapter=_StubAdapter(),
         gh=GitHubClient(cmd),
         worktrees_root=tmp_path,
-        iter_cap=3,
         poll_interval_seconds=15,
         settle_interval_seconds=7,
     )
-    assert runner._config.iter_cap == 3
     assert runner._config.poll_interval_seconds == 15
     assert runner._config.settle_interval_seconds == 7

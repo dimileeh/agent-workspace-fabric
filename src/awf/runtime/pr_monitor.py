@@ -15,8 +15,9 @@ Design notes:
   things to do. The runner calls it once, acts, then calls it again. This
   keeps the loop simple and the decision table testable.
 * **Iteration accounting is the runner's problem, not ours**. ``decide``
-  just inspects ``state.iter_count`` against ``config.iter_cap``; bumping
-  the counter happens in the runner after an action executes.
+  ignores ``state.iter_count`` entirely — the counter exists for
+  structured-log context, not as a terminal gate. Bumping happens in
+  the runner after an action executes.
 * **Thread dedup is the caller's problem**. ``decide`` returns a
   ``batch`` of threads on ``AddressComments`` consisting *only* of threads
   whose IDs are absent from ``state.threads_addressed_ids``. If every
@@ -168,10 +169,16 @@ class MonitorState:
 
 @dataclass(frozen=True)
 class MonitorConfig:
-    """Caps + intervals — knobs exposed for policy without changing the logic."""
+    """Intervals + policy knobs — no iteration or wall-clock budget caps.
 
-    iter_cap: int = 10
-    wall_clock_cap_seconds: float = 6 * 3600  # 6 hours
+    Earlier versions carried ``iter_cap=10`` and
+    ``wall_clock_cap_seconds=6*3600``; both were terminal abort
+    conditions. In practice the cap fired on legitimate PRs with heavy
+    bot review (5 reviewers × N cycles each > 10 iterations), stranding
+    green-CI PRs behind an Abort. Policy now: the monitor drives every
+    PR to ``Merge`` / ``NotifyHuman`` no matter the volume; the only
+    terminal NotifyHuman paths are branch-protection and human-defer."""
+
     auto_merge: bool = True  # False = release-PR variant
     # Only used by the RUNNER, not decide(); listed here so the full config
     # travels in one object.
@@ -184,10 +191,12 @@ class MonitorConfig:
 
 class AbortReason(StrEnum):
     """Reason codes for why the monitor gave up. Propagate into
-    ``Workspace.failure_reason``-style fields so operators can triage."""
+    ``Workspace.failure_reason``-style fields so operators can triage.
 
-    iter_cap_reached = "iter_cap_reached"
-    wall_clock_cap_reached = "wall_clock_cap_reached"
+    No ``iter_cap_reached`` / ``wall_clock_cap_reached`` — volume is
+    not a terminal condition; bots can leave thousands of review
+    cycles and the monitor must keep servicing the PR."""
+
     pr_closed_externally = "pr_closed_externally"
     no_progress_on_comments = "no_progress_on_comments"
     merge_conflict_unresolvable = "merge_conflict_unresolvable"
@@ -295,29 +304,41 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     Gate order matters:
 
     0.  Terminal states: merged → ShortCircuitCompleted, closed → Abort.
-    1.  Budget: iter_cap / wall_clock_cap → Abort.
-    2.  Base behind → SyncBase (BEFORE addressing comments so a PR on a
-        fast-moving base doesn't loop forever on new bot-review cycles
-        without ever integrating base updates — if bots keep commenting,
-        AddressComments would fire every iteration and SyncBase would
-        never get its turn; PR #344/#345 hit this with 5 bot reviewers).
-    3.  Unresolved comments (inline + review) → AddressComments.
+    1.  Base behind / DIRTY → SyncBase (BEFORE addressing comments so a
+        PR on a fast-moving base doesn't loop forever on new bot-review
+        cycles without ever integrating base updates — if bots keep
+        commenting, AddressComments would fire every iteration and
+        SyncBase would never get its turn; PR #344/#345 hit this with
+        5 bot reviewers).
+    2.  Unresolved comments (inline + review) → AddressComments.
         The batch only contains threads/comments we HAVEN'T already
         addressed (``state.threads_addressed_ids``). If every comment
         is already in that dict we fall through — the runner is
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
-    4.  CI FAILURE → ReportCiFailure.
-    5.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
+    3.  CI FAILURE → ReportCiFailure.
+    4.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
-    6.  Legacy ``mergeable == CONFLICTING`` (without richer
-        mergeStateStatus) → SyncBase, same treatment as DIRTY.
-    7.  ``merge_state_status`` BLOCKED / HAS_HOOKS (branch protection or
-        required-review) → NotifyHuman regardless of auto_merge.
-    7.5. Deferred HUMAN feedback still unresolved on GitHub →
-        NotifyHuman. Deferred BOT feedback does not block.
+    5.  Legacy ``mergeable == CONFLICTING`` (without the richer
+        mergeStateStatus / BEHIND / DIRTY signal) → SyncBase. The
+        coding CLI gets a chance to resolve via the
+        `git merge origin/<base>` + fix cycle; runs AFTER comments so
+        a mergeable-CONFLICTING PR's conflict + comments can be fixed
+        in one CLI pass.
+    6.  ``merge_state_status`` BLOCKED / HAS_HOOKS (branch protection
+        or required-review) → NotifyHuman regardless of auto_merge.
+    7.  Deferred HUMAN feedback still unresolved on GitHub →
+        NotifyHuman. Deferred BOT feedback does not block — bots
+        can't themselves mark threads resolved, so their deferred
+        nits would linger forever.
     8.  All green → Merge (or NotifyHuman if auto_merge=False).
+
+    There is NO iteration or wall-clock budget gate — volume is not a
+    terminal condition. A PR that attracts 500 comment cycles is fine
+    as long as the monitor keeps making progress; the only way to exit
+    is Merge, ShortCircuitCompleted, Abort(pr_closed_externally), or
+    NotifyHuman.
     """
 
     # 0. Terminal upstream states short-circuit everything.
@@ -326,28 +347,36 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
 
-    # 1. Budget checks — consume NO iterations beyond this point, so it's
-    # safe to fire every loop.
-    if state.iter_count >= config.iter_cap:
-        return Abort(reason=AbortReason.iter_cap_reached)
-    if time.monotonic() - state.started_at >= config.wall_clock_cap_seconds:
-        return Abort(reason=AbortReason.wall_clock_cap_reached)
-
-    # 2. Base-behind check runs BEFORE comments. Rationale: on a PR with
-    # an active bot-review fleet (Greptile/CodeRabbit/Bugbot/Codex/etc.)
-    # every push triggers a new wave of comments — AddressComments would
-    # fire every single iteration and we'd never integrate base updates,
-    # leaving the PR stuck on BEHIND until iter_cap aborts the monitor.
-    # SyncBase only adds a merge commit; the feature work is unchanged,
-    # and any freshly-arrived review comments are still there for the
-    # next iteration's AddressComments gate.
+    # 1. Base-behind / DIRTY check runs BEFORE comments. Rationale: on a
+    # PR with an active bot-review fleet (Greptile/CodeRabbit/Bugbot/
+    # Codex/etc.) every push triggers a new wave of comments —
+    # AddressComments would fire every single iteration and we'd never
+    # integrate base updates, leaving the PR stuck on BEHIND
+    # indefinitely. SyncBase only adds a merge commit; the feature work
+    # is unchanged, and any freshly-arrived review comments are still
+    # there for the next iteration's AddressComments gate. PR #344/#345
+    # hit this with 5 bot reviewers.
+    #
+    # Three signals route here:
+    #   * local rev-list says base has advanced (base_behind_count > 0)
+    #   * GitHub's mergeStateStatus == BEHIND
+    #   * GitHub's mergeStateStatus == DIRTY (conflict already detected
+    #     server-side; SyncBase's ``git merge`` path reproduces it
+    #     locally and invokes the coding CLI with a conflict-resolve
+    #     prompt — the CLI's fix commit + push lands a CLEAN state on
+    #     the next poll). If the CLI can't resolve after repeated
+    #     attempts, the monitor keeps re-trying indefinitely — the
+    #     operator must close / rebase the PR to break the loop.
+    #
+    # The PR #335/#336 stale-rev-list bug was fixed by adding the
+    # merge_state_status fallback — either signal alone triggers sync.
     if status.base_behind_count > 0 or status.merge_state_status in (
         MergeStateStatus.BEHIND,
         MergeStateStatus.DIRTY,
     ):
         return SyncBase()
 
-    # 3. Unresolved comments, filtered to those we haven't handled yet.
+    # 2. Unresolved comments, filtered to those we haven't handled yet.
     new_threads = tuple(
         t
         for t in status.unresolved_inline_threads
@@ -380,22 +409,26 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return WaitForCI(reason="unknown_mergeable_state")
 
-    # (Gate for BEHIND/DIRTY runs earlier — see step 2.)
+    # (Gate for BEHIND/DIRTY runs earlier — see step 1.)
     #
-    # Historical note: this gate used to live AFTER AddressComments,
-    # which created an infinite loop on PRs with active bot reviewers —
-    # every push triggered a new comment wave, AddressComments fired
-    # every iteration, SyncBase never got its turn, iter_cap eventually
-    # aborted. The PR #335/#336 stale-rev-list bug lived here too —
-    # that fix (base_behind_count fallback) is preserved above.
+    # Historical note: this gate used to live AFTER AddressComments
+    # alongside the BEHIND-case logic, which created an infinite loop
+    # on PRs with active bot reviewers — every push triggered a new
+    # comment wave, AddressComments fired every iteration, SyncBase
+    # never got its turn. The PR #335/#336 stale-rev-list bug lived
+    # here too; that fix (base_behind_count fallback) is preserved at
+    # step 1 above.
 
-    # 6. Legacy ``mergeable == CONFLICTING`` without the richer
+    # 5. Legacy ``mergeable == CONFLICTING`` without the richer
     # mergeStateStatus signal — same treatment as DIRTY: let SyncBase
-    # attempt to reproduce + resolve.
+    # attempt to reproduce + resolve. Runs AFTER comments because a
+    # mergeable CONFLICTING PR is often resolvable in the same pass as
+    # comment fixes; contrast with BEHIND/DIRTY (step 1) which must run
+    # first to break the push→comment→push loop.
     if status.mergeable == MergeableState.CONFLICTING:
         return SyncBase()
 
-    # 7. Branch protection / required-review blocker → hand off to human
+    # 6. Branch protection / required-review blocker → hand off to human
     # regardless of auto_merge setting. Monitor can't bypass branch
     # protection; the only useful action is to tell the maintainer the
     # PR is otherwise ready.
@@ -405,7 +438,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return NotifyHuman()
 
-    # 7.5. Deferred HUMAN feedback still unresolved on GitHub → block
+    # 7. Deferred HUMAN feedback still unresolved on GitHub → block
     # auto-merge. Deferred BOT feedback does not block.
     #
     # "Defer" means the coding CLI decided a reviewer comment needs

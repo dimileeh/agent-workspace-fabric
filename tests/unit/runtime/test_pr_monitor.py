@@ -92,42 +92,36 @@ class TestTerminalStates:
         assert action.reason == AbortReason.pr_closed_externally
 
 
-# ── Budget ────────────────────────────────────────────────────────────────
+# ── No budget caps (iter_count / wall_clock are log-only) ─────────────────
 
 
-class TestBudget:
-    @pytest.mark.unit
-    def test_iter_cap_reached_aborts(self) -> None:
-        state = MonitorState(iter_count=10)
-        action = decide(_status(), state, MonitorConfig(iter_cap=10))
-        assert isinstance(action, Abort)
-        assert action.reason == AbortReason.iter_cap_reached
-
-    @pytest.mark.unit
-    def test_iter_cap_boundary_inclusive(self) -> None:
-        """At iter_count == cap the monitor stops; one-less still runs."""
-        cfg = MonitorConfig(iter_cap=5)
-        at_cap = decide(_status(), MonitorState(iter_count=5), cfg)
-        assert isinstance(at_cap, Abort)
-        under_cap = decide(_status(), MonitorState(iter_count=4), cfg)
-        assert isinstance(under_cap, Merge)  # all gates green, no budget hit
+class TestNoBudgetCaps:
+    """Volume is not a terminal condition. A PR that attracts 100 review
+    cycles or takes 3 days to land is fine as long as the monitor keeps
+    making progress. The dedicated no-cap tests live in
+    ``test_pr_monitor_no_caps.py``; these ones cover the specific
+    interactions that earlier Budget tests locked in — kept to prevent
+    a regression that re-adds a sneaky budget gate."""
 
     @pytest.mark.unit
-    def test_wall_clock_cap_reached_aborts(self) -> None:
-        state = MonitorState(started_at=time.monotonic() - 7200)  # 2h ago
-        cfg = MonitorConfig(wall_clock_cap_seconds=3600)  # 1h cap
-        action = decide(_status(), state, cfg)
-        assert isinstance(action, Abort)
-        assert action.reason == AbortReason.wall_clock_cap_reached
+    def test_high_iter_count_with_all_green_still_merges(self) -> None:
+        state = MonitorState(iter_count=1000)
+        assert isinstance(decide(_status(), state, MonitorConfig()), Merge)
 
     @pytest.mark.unit
-    def test_iter_cap_wins_over_unresolved_comments(self) -> None:
-        """Budget is a harder gate than unresolved comments — otherwise an
-        endlessly-review-bombed PR never aborts."""
-        state = MonitorState(iter_count=10)
+    def test_unresolved_comments_always_win_over_volume(self) -> None:
+        """What the old ``iter_cap_wins_over_unresolved_comments`` locked
+        in (Abort on cap) is explicitly reversed here: even at
+        iter_count=10k the monitor keeps addressing new comments."""
+        state = MonitorState(iter_count=10_000)
         status = _status(inline=(_thread(),))
-        action = decide(status, state, MonitorConfig(iter_cap=10))
-        assert isinstance(action, Abort)
+        action = decide(status, state, MonitorConfig())
+        assert isinstance(action, AddressComments)
+
+    @pytest.mark.unit
+    def test_long_wall_clock_does_not_abort(self) -> None:
+        state = MonitorState(started_at=time.monotonic() - 48 * 3600)
+        assert isinstance(decide(_status(), state, MonitorConfig()), Merge)
 
 
 # ── Unresolved comments ────────────────────────────────────────────────────
@@ -331,8 +325,9 @@ class TestMergeStateStatus:
         trigger SyncBase, which runs ``git merge origin/<base>`` locally
         to reproduce the conflict, then invokes the coding CLI with a
         conflict-resolve prompt. If the CLI's fix commit succeeds, the
-        next poll sees CLEAN. If it doesn't, iter_cap eventually aborts
-        via the budget path — no separate DIRTY-abort path."""
+        next poll sees CLEAN. If it doesn't, the monitor keeps
+        retrying indefinitely — operator intervention (close/rebase
+        the PR) is how a genuinely-stuck conflict gets unstuck."""
         action = decide(
             _status(merge_state_status=MergeStateStatus.DIRTY),
             MonitorState(),
@@ -354,17 +349,17 @@ class TestMergeStateStatus:
         assert isinstance(action, SyncBase)
 
     @pytest.mark.unit
-    def test_dirty_hits_iter_cap_after_repeated_sync_attempts(self) -> None:
-        """If the CLI can't resolve conflicts, iter_count grows with each
-        SyncBase attempt. At the cap we abort via the budget path, NOT
-        via a dedicated DIRTY abort."""
+    def test_dirty_keeps_syncing_even_after_many_attempts(self) -> None:
+        """Volume isn't a terminal condition: even at iter_count=1000 with
+        DIRTY the monitor keeps issuing SyncBase. Operator intervention
+        (closing / rebasing the PR) is how a genuinely-stuck conflict
+        gets resolved; the monitor itself never gives up."""
         action = decide(
             _status(merge_state_status=MergeStateStatus.DIRTY),
-            MonitorState(iter_count=10),
-            MonitorConfig(iter_cap=10),
+            MonitorState(iter_count=1000),
+            MonitorConfig(),
         )
-        assert isinstance(action, Abort)
-        assert action.reason == AbortReason.iter_cap_reached
+        assert isinstance(action, SyncBase)
 
     @pytest.mark.unit
     def test_blocked_notifies_human_even_with_auto_merge(self) -> None:

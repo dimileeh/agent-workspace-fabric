@@ -43,10 +43,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
+import fcntl
 import json
 import subprocess
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -122,6 +124,39 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+@contextlib.contextmanager
+def _per_pr_lock(work_dir: Path, pr_number: int) -> Iterator[bool]:
+    """Serialize the spec-write + spawn on a per-PR lock file so
+    concurrent watchdog invocations can't double-spawn.
+
+    Yields ``True`` if the caller acquired the lock and should do the
+    full attach flow; yields ``False`` if another process already holds
+    it (treat as idempotent no-op, exit 0).
+
+    The lock file persists on disk; only the ``flock`` is released on
+    context exit. Leaving the file in place is fine — the next attach
+    invocation will reuse it. No cleanup race because flock is
+    fd-scoped, not path-scoped.
+    """
+    work_dir.mkdir(parents=True, exist_ok=True)
+    lock_path = work_dir / f"feature-pr-monitor-{pr_number}.lock"
+    fd = lock_path.open("w")
+    try:
+        try:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            # Another attach invocation owns the lock — let it handle
+            # the spawn, we exit cleanly.
+            yield False
+            return
+        try:
+            yield True
+        finally:
+            fcntl.flock(fd.fileno(), fcntl.LOCK_UN)
+    finally:
+        fd.close()
+
+
 async def orchestrate_attach(
     *,
     repo_url: str,
@@ -167,48 +202,63 @@ async def orchestrate_attach(
     )
     spec_filename = task_spec_filename(repo_slug=repo.slug(), pr_number=pr_number)
 
-    # Idempotency: if a monitor is already driving this exact spec,
-    # exit 0 without re-spawning. Check BEFORE writing the spec so a
-    # rapid-fire invocation doesn't keep touching the file.
-    if is_feature_pr_monitor_running(spec_filename=spec_filename, process_lister=process_lister):
+    # Serialize: the ps-grep idempotency check races with a concurrent
+    # invocation that's already PAST the check but hasn't called Popen
+    # yet. A per-PR fcntl.flock closes that window. Watchdog polls can
+    # hammer attach without double-spawning.
+    with _per_pr_lock(work_dir, pr_number) as acquired:
+        if not acquired:
+            print(
+                f"attach-feature-pr-monitor: another invocation is already "
+                f"attaching {repo.slug()}#{pr_number}; exiting idempotent.",
+                flush=True,
+            )
+            return 0
+
+        # Re-check ps INSIDE the lock — the losing invocation from a
+        # previous race may have already spawned the monitor between
+        # our ps check and our lock acquisition.
+        if is_feature_pr_monitor_running(
+            spec_filename=spec_filename, process_lister=process_lister
+        ):
+            print(
+                f"attach-feature-pr-monitor: monitor already active for "
+                f"{repo.slug()}#{pr_number}; nothing to do.",
+                flush=True,
+            )
+            return 0
+
+        spec_dir = work_dir / "feature-pr-specs"
+        spec_dir.mkdir(parents=True, exist_ok=True)
+        spec_path = spec_dir / spec_filename
+        # run_awf.py expects a LIST of task specs — wrap ours in one.
+        spec_path.write_text(json.dumps([spec], indent=2))
+
+        # Spawn run_awf.py detached. We pass --keep-state so the shared
+        # SQLite DB in work_dir isn't wiped on startup.
+        log_path = work_dir / f"feature-pr-monitor-{pr_number}.log"
+        python_bin = _ROOT / ".venv" / "bin" / "python"
+        run_awf = _ROOT / "scripts" / "run_awf.py"
+        handle = spawn(
+            [
+                str(python_bin),
+                str(run_awf),
+                "--config",
+                str(spec_path),
+                "--work-dir",
+                str(work_dir),
+                "--keep-state",
+            ],
+            stdout=log_path.open("a"),
+            stderr=subprocess.STDOUT,
+            start_new_session=True,
+        )
         print(
-            f"attach-feature-pr-monitor: monitor already active for "
-            f"{repo.slug()}#{pr_number}; nothing to do.",
+            f"attach-feature-pr-monitor: spawned run_awf pid={getattr(handle, 'pid', '?')} "
+            f"for {repo.slug()}#{pr_number}; log: {log_path}",
             flush=True,
         )
         return 0
-
-    spec_dir = work_dir / "feature-pr-specs"
-    spec_dir.mkdir(parents=True, exist_ok=True)
-    spec_path = spec_dir / spec_filename
-    # run_awf.py expects a LIST of task specs — wrap ours in one.
-    spec_path.write_text(json.dumps([spec], indent=2))
-
-    # Spawn run_awf.py detached. We pass --keep-state so the shared
-    # SQLite DB in work_dir isn't wiped on startup.
-    log_path = work_dir / f"feature-pr-monitor-{pr_number}.log"
-    python_bin = _ROOT / ".venv" / "bin" / "python"
-    run_awf = _ROOT / "scripts" / "run_awf.py"
-    handle = spawn(
-        [
-            str(python_bin),
-            str(run_awf),
-            "--config",
-            str(spec_path),
-            "--work-dir",
-            str(work_dir),
-            "--keep-state",
-        ],
-        stdout=log_path.open("a"),
-        stderr=subprocess.STDOUT,
-        start_new_session=True,
-    )
-    print(
-        f"attach-feature-pr-monitor: spawned run_awf pid={getattr(handle, 'pid', '?')} "
-        f"for {repo.slug()}#{pr_number}; log: {log_path}",
-        flush=True,
-    )
-    return 0
 
 
 def _load_companions(path: Path) -> list[dict[str, Any]]:

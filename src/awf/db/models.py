@@ -100,7 +100,9 @@ class Workspace(Base):
 
     monitor_iter_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     """Counts non-passive monitor iterations (AddressComments / SyncBase /
-    ReportCiFailure). Bumps against ``iter_cap`` to bound runaway cost."""
+    ReportCiFailure). Kept for structured-log context only — no budget
+    gate fires on high counts. The monitor drives the PR to Merge /
+    NotifyHuman regardless of how many iterations that takes."""
 
     monitor_threads_addressed: Mapped[dict[str, str]] = mapped_column(
         JSON, nullable=False, default=dict

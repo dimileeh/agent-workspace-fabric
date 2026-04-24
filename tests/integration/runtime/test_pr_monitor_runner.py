@@ -204,7 +204,7 @@ def _make_runner(
     sleep_fn: RecordedSleep,
     worktrees_root: Path,
     auto_merge: bool = True,
-    iter_cap: int = 10,
+    max_outer_iterations: int = 20,
 ) -> PullRequestMonitorRunner:
     return PullRequestMonitorRunner(
         session_factory=factory,
@@ -212,12 +212,13 @@ def _make_runner(
         adapter=adapter,
         gh=GitHubClient(cmd),
         monitor_config=MonitorConfig(
-            iter_cap=iter_cap,
             auto_merge=auto_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
         ),
-        runner_config=MonitorRunnerConfig(max_outer_iterations=20, max_fix_cycle_passes=3),
+        runner_config=MonitorRunnerConfig(
+            max_outer_iterations=max_outer_iterations, max_fix_cycle_passes=3
+        ),
         sleep=sleep_fn,
         worktrees_root=worktrees_root,
     )
@@ -827,10 +828,10 @@ class TestSyncBase:
 class TestPushRejectRecovery:
     """Push is rejected when local diverged from remote. Without
     recovery, the monitor loops retrying SyncBase while local commits
-    pile up, eventually hitting iter_cap. Recovery: fetch the feature
-    branch + reset local hard to remote (GitHub is truth for pushed
-    state), then next outer-loop iteration works on a fresh aligned
-    worktree."""
+    pile up and the head SHA on GitHub never moves. Recovery: fetch
+    the feature branch + reset local hard to remote (GitHub is truth
+    for pushed state), then the next outer-loop iteration works on a
+    fresh aligned worktree."""
 
     @pytest.mark.unit
     async def test_push_rejection_triggers_fetch_and_reset_hard(
@@ -951,7 +952,7 @@ class TestPushRejectRecovery:
             adapter=adapter,
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
-            iter_cap=1,
+            max_outer_iterations=2,
         )
         await runner.run(
             workspace_id=ws_id,
@@ -1072,46 +1073,6 @@ class TestDirtyConflictResolution:
             if c.args[:2] == ["git", "-C"] and "merge" in c.args and "--abort" in c.args
         ]
         assert len(abort_calls) == 1, "git merge --abort must fire exactly once before sync"
-
-
-class TestAbortOnIterCap:
-    @pytest.mark.unit
-    async def test_iter_cap_terminates_with_failed(
-        self,
-        factory: async_sessionmaker[AsyncSession],
-        cmd: FakeCommandRunner,
-        adapter: FakeAdapter,
-        sleep_fn: RecordedSleep,
-        tmp_path: Path,
-    ) -> None:
-        ws_id = await _seed_monitoring_workspace(factory)
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            ws.monitor_iter_count = 5  # at cap already
-            await s.commit()
-        cmd.queue_result(returncode=0)  # git fetch origin <base>
-        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
-        cmd.queue_result(returncode=0, stdout=_pr_payload())  # no reason to be over cap;
-        #                                                       but we set iter_count pre-run.
-        runner = _make_runner(
-            factory=factory,
-            cmd=cmd,
-            adapter=adapter,
-            sleep_fn=sleep_fn,
-            worktrees_root=tmp_path / "worktrees",
-            iter_cap=5,
-        )
-        await runner.run(
-            workspace_id=ws_id,
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-        )
-        async with factory() as s:
-            ws = await WorkspaceRepository(s).get(ws_id)
-            assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert "iter_cap_reached" in (ws.failure_message or "")
 
 
 class TestWaitForCi:
@@ -1348,17 +1309,18 @@ class TestAgentRunErrorResilience:
         cmd.queue_result(returncode=0, stdout="UU a\n")  # status
         adapter.queue(returncode=2, raise_error=True)  # CLI dies
         cmd.queue_result(returncode=0)  # push (still attempted)
-        # Iter 2: abort on iter_cap with small cap for speed.
+        # Iter 2: PR ends up clean, monitor proceeds to Merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
             adapter=adapter,
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
-            iter_cap=1,
         )
         await runner.run(
             workspace_id=ws_id,
@@ -1390,14 +1352,18 @@ class TestAgentRunErrorResilience:
         cmd.queue_result(returncode=0, stdout="log")  # log fetch
         adapter.queue(returncode=2, raise_error=True)  # CLI dies mid-ci-fix
         cmd.queue_result(returncode=0)  # push
-        # Iter 2: iter_cap reached.
+        # Iter 2: PR clean, merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="M\n")
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
             adapter=adapter,
             sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
-            iter_cap=1,
         )
         await runner.run(
             workspace_id=ws_id,
@@ -1794,24 +1760,17 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         tmp_path: Path,
     ) -> None:
         """Failed workspaces stay up so the operator can inspect the
-        stack (read logs, exec into containers, etc.)."""
+        stack (read logs, exec into containers, etc.). Exercise via a
+        PR closed externally → Abort(pr_closed_externally) → failed."""
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)
-        cmd.queue_result(returncode=0, stdout="5\n")  # base-behind
-        cmd.queue_result(returncode=0, stdout=_pr_payload())
-        runner = PullRequestMonitorRunner(
-            session_factory=factory,
-            runner=cmd,
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(closed=True))
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
             adapter=adapter,
-            gh=GitHubClient(cmd),
-            monitor_config=MonitorConfig(
-                iter_cap=0,
-                auto_merge=True,
-                poll_interval_seconds=60,
-                settle_interval_seconds=30,
-            ),
-            runner_config=MonitorRunnerConfig(max_outer_iterations=5, max_fix_cycle_passes=3),
-            sleep=sleep_fn,
+            sleep_fn=sleep_fn,
             worktrees_root=tmp_path / "worktrees",
         )
         await runner.run(
@@ -2064,7 +2023,6 @@ class TestMaxOuterIterationsSafetyNet:
             adapter=adapter,
             gh=GitHubClient(cmd),
             monitor_config=MonitorConfig(
-                iter_cap=10,
                 auto_merge=True,
                 poll_interval_seconds=60,
                 settle_interval_seconds=30,
