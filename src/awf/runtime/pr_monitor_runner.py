@@ -852,7 +852,7 @@ class PullRequestMonitorRunner:
             # they must never observe a partially-written JSON payload.
             tmp_path = out_path.with_suffix(f".json.{os.getpid()}.tmp")
             tmp_path.write_text(json.dumps(payload, indent=2))
-            os.replace(tmp_path, out_path)
+            tmp_path.replace(out_path)
         except Exception as exc:
             _log.warning(
                 "monitor.defer_signal_write_failed",
