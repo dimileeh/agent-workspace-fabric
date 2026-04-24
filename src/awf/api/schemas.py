@@ -145,6 +145,33 @@ class WorkspaceAcceptedResponse(BaseModel):
     accepted_at: datetime
 
 
+class WorkspaceEventResponse(BaseModel):
+    """Representation of one workspace audit event in API responses."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    event_type: str
+    old_state: WorkspaceStatus | None
+    new_state: WorkspaceStatus | None
+    reason_code: str | None
+    payload: dict[str, Any] | None
+    occurred_at: datetime
+
+
+class WorkspaceEventListResponse(BaseModel):
+    """Cursor-compatible event list envelope.
+
+    Cursor pagination is intentionally deferred; keep the envelope stable so
+    callers do not need a breaking response-shape change when it is added.
+    """
+
+    items: list[WorkspaceEventResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
 class ErrorResponse(BaseModel):
     """Uniform error envelope.
 

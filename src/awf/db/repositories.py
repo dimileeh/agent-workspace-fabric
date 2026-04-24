@@ -10,6 +10,7 @@ SQLAlchemy calls everywhere. Rules:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any
 
 from sqlalchemy import select
@@ -96,6 +97,17 @@ class WorkspaceRepository:
 
     async def list(self, *, limit: int = 50) -> list[Workspace]:
         stmt = select(Workspace).order_by(Workspace.created_at.desc()).limit(limit)
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def list_events(
+        self, *, workspace_id: str | None = None, limit: int = 50
+    ) -> Sequence[WorkspaceEvent]:
+        stmt = select(WorkspaceEvent).order_by(
+            WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc()
+        )
+        if workspace_id is not None:
+            stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
+        stmt = stmt.limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
     async def transition(
