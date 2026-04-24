@@ -320,13 +320,18 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     3.  CI FAILURE → ReportCiFailure.
     4.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
-    5.  Legacy ``mergeable == CONFLICTING`` (without BEHIND/DIRTY) →
-        SyncBase. The coding CLI gets a chance to resolve via the
+    5.  Legacy ``mergeable == CONFLICTING`` (without the richer
+        mergeStateStatus / BEHIND / DIRTY signal) → SyncBase. The
+        coding CLI gets a chance to resolve via the
         `git merge origin/<base>` + fix cycle; runs AFTER comments so
         a mergeable-CONFLICTING PR's conflict + comments can be fixed
         in one CLI pass.
-    6.  mergeStateStatus BLOCKED / HAS_HOOKS → NotifyHuman.
-    7.  Human-defer on unresolved threads → NotifyHuman.
+    6.  ``merge_state_status`` BLOCKED / HAS_HOOKS (branch protection
+        or required-review) → NotifyHuman regardless of auto_merge.
+    7.  Deferred HUMAN feedback still unresolved on GitHub →
+        NotifyHuman. Deferred BOT feedback does not block — bots
+        can't themselves mark threads resolved, so their deferred
+        nits would linger forever.
     8.  All green → Merge (or NotifyHuman if auto_merge=False).
 
     There is NO iteration or wall-clock budget gate — volume is not a
@@ -385,7 +390,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 
-    # 3. CI failures.
+    # 4. CI failures.
     if status.check_state == CheckState.FAILURE:
         if not status.ci_failures:
             # Failure reported by GraphQL but no per-check log available.
@@ -395,7 +400,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return ReportCiFailure(failures=())
         return ReportCiFailure(failures=status.ci_failures)
 
-    # 4. CI still running, or GitHub is still computing state → passive wait.
+    # 5. CI still running, or GitHub is still computing state → passive wait.
     if status.check_state == CheckState.PENDING:
         return WaitForCI(reason="pending_checks")
     if (
@@ -403,6 +408,16 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         or status.merge_state_status == MergeStateStatus.UNKNOWN
     ):
         return WaitForCI(reason="unknown_mergeable_state")
+
+    # (Gate for BEHIND/DIRTY runs earlier — see step 1.)
+    #
+    # Historical note: this gate used to live AFTER AddressComments
+    # alongside the BEHIND-case logic, which created an infinite loop
+    # on PRs with active bot reviewers — every push triggered a new
+    # comment wave, AddressComments fired every iteration, SyncBase
+    # never got its turn. The PR #335/#336 stale-rev-list bug lived
+    # here too; that fix (base_behind_count fallback) is preserved at
+    # step 1 above.
 
     # 5. Legacy ``mergeable == CONFLICTING`` without the richer
     # mergeStateStatus signal — same treatment as DIRTY: let SyncBase
