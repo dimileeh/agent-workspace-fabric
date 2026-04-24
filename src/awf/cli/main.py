@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import os
-import subprocess
 import sys
 from enum import StrEnum
 from typing import Any
@@ -31,10 +30,8 @@ app = typer.Typer(
 
 workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy).")
 profile_app = typer.Typer(help="Workspace profile inspection.")
-node_app = typer.Typer(help="Local node operator health.")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
-app.add_typer(node_app, name="node")
 
 
 class OutputFormat(StrEnum):
@@ -43,7 +40,6 @@ class OutputFormat(StrEnum):
 
 
 _DEFAULT_BASE_URL = "http://localhost:8000"
-_AGENT_RUNTIME_IMAGE = "awf-agent-runtime:latest"
 
 
 def _base_url(override: str | None) -> str:
@@ -94,57 +90,6 @@ def _handle_response(response: httpx.Response, fmt: OutputFormat) -> None:
     _emit(response.json(), fmt)
 
 
-def _run_local_command(command: list[str]) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603
-        command,
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=10,
-    )
-
-
-def _command_error(result: subprocess.CompletedProcess[str]) -> str | None:
-    message = (result.stderr or result.stdout).strip()
-    if message:
-        return message
-    return f"exited with code {result.returncode}"
-
-
-def _inspect_command(command: list[str]) -> dict[str, object]:
-    try:
-        result = _run_local_command(command)
-    except FileNotFoundError as exc:
-        return {"available": False, "error": str(exc)}
-    except subprocess.TimeoutExpired as exc:
-        return {"available": False, "error": f"timed out after {exc.timeout} seconds"}
-
-    if result.returncode == 0:
-        return {"available": True, "error": None}
-    return {"available": False, "error": _command_error(result)}
-
-
-def _node_status_payload() -> dict[str, object]:
-    docker_cli = _inspect_command(["docker", "--version"])
-    docker_daemon = _inspect_command(["docker", "info"])
-    docker_compose = _inspect_command(["docker", "compose", "version"])
-    runtime_image = _inspect_command(["docker", "image", "inspect", _AGENT_RUNTIME_IMAGE])
-
-    return {
-        "docker_cli": docker_cli,
-        "docker_daemon": {
-            "reachable": docker_daemon["available"],
-            "error": docker_daemon["error"],
-        },
-        "docker_compose_plugin": docker_compose,
-        "agent_runtime_image": {
-            "name": _AGENT_RUNTIME_IMAGE,
-            "exists": runtime_image["available"],
-            "error": runtime_image["error"],
-        },
-    }
-
-
 # ── Commands ─────────────────────────────────────────────────────────────
 
 
@@ -164,14 +109,6 @@ def serve(
         port=port,
         reload=reload,
     )
-
-
-@node_app.command("status")
-def node_status(
-    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
-) -> None:
-    """Inspect local Docker prerequisites for running AWF workspaces."""
-    _emit(_node_status_payload(), fmt)
 
 
 @workspace_app.command("create")
