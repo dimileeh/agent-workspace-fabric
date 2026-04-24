@@ -44,7 +44,7 @@ def _status(
     )
 
 
-def _thread(tid: str, author: str) -> ReviewThread:
+def _thread(tid: str, author: str | None) -> ReviewThread:
     return ReviewThread(
         thread_id=tid,
         path="src/foo.py",
@@ -148,6 +148,6 @@ class TestBotDeferUnblocksMerge:
         slip through on deferred unknown-author feedback. Default to
         human (block the merge)."""
         state = MonitorState(threads_addressed_ids={"T1": "defer"})
-        status = _status(inline=(_thread("T1", ""),))
+        status = _status(inline=(_thread("T1", None),))
         action = decide(status=status, state=state, config=MonitorConfig(auto_merge=True))
         assert isinstance(action, NotifyHuman)
