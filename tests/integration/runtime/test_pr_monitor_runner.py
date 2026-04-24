@@ -1739,6 +1739,133 @@ class TestMonitorDbHelpers:
             assert state.iter_count == 0
 
 
+class TestCompleteWorkspaceTearsDownComposeStack:
+    """2026-04-24 incident: Docker ran out of network subnets because
+    every AWF workspace's compose stack survived its workspace's
+    termination. ``_terminate_completed`` now runs
+    ``docker compose down`` as a best-effort cleanup. Failed
+    workspaces are preserved for operator inspection."""
+
+    @pytest.mark.unit
+    async def test_happy_merge_tears_down_compose(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # clean
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGE-SHA\n")  # gh pr view (sha)
+        cmd.queue_result(returncode=0)  # docker compose down
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="awf_ws_test",
+            compose_file=tmp_path / "compose.yml",
+        )
+        teardown_calls = [
+            c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
+        ]
+        assert len(teardown_calls) == 1
+        args = teardown_calls[0].args
+        assert "--project-name" in args and "awf_ws_test" in args
+        assert "--remove-orphans" in args
+        assert "--volumes" in args
+
+    @pytest.mark.unit
+    async def test_failed_abort_does_not_tear_down_compose(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """Failed workspaces stay up so the operator can inspect the
+        stack (read logs, exec into containers, etc.)."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="5\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        runner = PullRequestMonitorRunner(
+            session_factory=factory,
+            runner=cmd,
+            adapter=adapter,
+            gh=GitHubClient(cmd),
+            monitor_config=MonitorConfig(
+                iter_cap=0,
+                auto_merge=True,
+                poll_interval_seconds=60,
+                settle_interval_seconds=30,
+            ),
+            runner_config=MonitorRunnerConfig(max_outer_iterations=5, max_fix_cycle_passes=3),
+            sleep=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="awf_ws_abort",
+            compose_file=tmp_path / "compose.yml",
+        )
+        teardown_calls = [
+            c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
+        ]
+        assert teardown_calls == [], (
+            "failed workspaces must NOT be torn down automatically — "
+            "operator may need the stack for inspection"
+        )
+
+    @pytest.mark.unit
+    async def test_teardown_failure_does_not_mask_completion(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """``docker compose down`` exiting non-zero (stack already
+        gone, permission issue) must NOT mask completion — the DB
+        transition already landed before the teardown call."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGE-SHA\n")  # gh pr view (sha)
+        cmd.queue_result(returncode=1, stderr="no such compose project")  # teardown fails
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="awf_ws_test",
+            compose_file=tmp_path / "compose.yml",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_merge_sha == "MERGE-SHA"
+
+
 class TestMaxOuterIterationsSafetyNet:
     """If ``max_outer_iterations`` is exhausted without the decision
     core reaching a terminal action, the runner terminates the
