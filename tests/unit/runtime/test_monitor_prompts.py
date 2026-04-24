@@ -161,3 +161,14 @@ class TestReadyToMergeComment:
     def test_states_human_action_required(self) -> None:
         body = ready_to_merge_comment(pr_number=1, head_sha="a" * 40)
         assert "human action required" in body.lower()
+
+    @pytest.mark.unit
+    def test_blocker_reason_avoids_green_gate_claim(self) -> None:
+        body = ready_to_merge_comment(
+            pr_number=1,
+            head_sha="a" * 40,
+            blocker_reason="a review bot reported that review was skipped",
+        )
+        assert "needs human attention" in body
+        assert "review was skipped" in body
+        assert "All 5 AWF gates are green" not in body

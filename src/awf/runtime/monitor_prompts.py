@@ -119,8 +119,23 @@ def fix_ci_prompt(*, pr_number: int, repo_slug: str, failures: tuple[CheckFailur
     )
 
 
-def ready_to_merge_comment(*, pr_number: int, head_sha: str) -> str:
-    """Body used by the release-PR variant to notify the human."""
+def ready_to_merge_comment(
+    *, pr_number: int, head_sha: str, blocker_reason: str | None = None
+) -> str:
+    """Body used when AWF stops for human action.
+
+    Without ``blocker_reason`` this is the ordinary release/manual-merge
+    notification: AWF found a clean PR but is configured not to merge it.
+    With a reason, the PR is *not* ready to merge; avoid claiming all
+    gates are green.
+    """
+    if blocker_reason:
+        return (
+            f"⚠️ PR #{pr_number} needs human attention at commit `{head_sha[:10]}`.\n\n"
+            f"AWF did not auto-merge because {blocker_reason}.\n\n"
+            "After the blocker is cleared or a new commit lands, AWF will re-verify "
+            "the PR before taking any merge action."
+        )
     return (
         f"✅ PR #{pr_number} is ready to merge at commit `{head_sha[:10]}`.\n\n"
         "All 5 AWF gates are green:\n"

@@ -392,6 +392,14 @@ class TestMonitorActionLogging:
         assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
         actions = [e["action"] for e in _action_entries(captured)]
         assert actions == ["Merge", "NotifyHuman"]
+        comment_calls = [
+            call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]
+        ]
+        assert len(comment_calls) == 1
+        body = comment_calls[0][comment_calls[0].index("--body") + 1]
+        assert "needs human attention" in body
+        assert "review was skipped" in body
+        assert "All 5 AWF gates are green" not in body
         assert any(
             r.get("event") == "monitor.pre_merge_recheck_changed_action"
             and r.get("fresh_action") == "NotifyHuman"

@@ -52,6 +52,7 @@ from awf.runtime.pr_monitor import (
     AddressComments,
     CheckFailure,
     Merge,
+    MergeStateStatus,
     MonitorAction,
     MonitorConfig,
     MonitorState,
@@ -408,7 +409,11 @@ class PullRequestMonitorRunner:
                 await self._deps.gh.post_comment(
                     repo=repo,
                     pr_number=pr_number,
-                    body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
+                    body=ready_to_merge_comment(
+                        pr_number=pr_number,
+                        head_sha=status.head_sha,
+                        blocker_reason=_merge_rejection_reason(exc.stderr),
+                    ),
                 )
                 self._write_defer_signal(
                     workspace_id=workspace_id,
@@ -445,7 +450,11 @@ class PullRequestMonitorRunner:
             await self._deps.gh.post_comment(
                 repo=repo,
                 pr_number=pr_number,
-                body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
+                body=ready_to_merge_comment(
+                    pr_number=pr_number,
+                    head_sha=status.head_sha,
+                    blocker_reason=_notify_human_reason(status, state),
+                ),
             )
             self._write_defer_signal(
                 workspace_id=workspace_id,
@@ -1115,6 +1124,30 @@ def _with_ci_failures(status: PRStatus, failures: tuple[CheckFailure, ...]) -> P
     from dataclasses import replace
 
     return replace(status, ci_failures=failures)
+
+
+def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
+    if any(c.blocks_merge for c in status.unresolved_review_comments):
+        return (
+            "a review bot reported that review was skipped or left a trigger-review "
+            "checklist unresolved"
+        )
+    if status.merge_state_status in (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS):
+        return (
+            f"GitHub reports merge state {status.merge_state_status.value}; "
+            "required protection or review hooks need a human"
+        )
+    _, human_deferred = _collect_defer_items(status, state)
+    if human_deferred:
+        return "human review feedback was deferred by the agent and remains unresolved"
+    return None
+
+
+def _merge_rejection_reason(stderr: str) -> str:
+    detail = " ".join(stderr.split())[:240]
+    if detail:
+        return f"GitHub rejected the merge attempt: {detail}"
+    return "GitHub rejected the merge attempt"
 
 
 def _collect_defer_items(

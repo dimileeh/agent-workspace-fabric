@@ -345,7 +345,7 @@ class TestMergeBlockedFallsBackToNotify:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """Branch protection blocks the merge → runner posts ready-to-merge
+        """Branch protection blocks the merge → runner posts human-attention
         and completes (no failure)."""
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
@@ -370,9 +370,11 @@ class TestMergeBlockedFallsBackToNotify:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_merge_sha is None
-        # gh pr comment was invoked with the ready-to-merge body.
+        # gh pr comment was invoked with the human-attention body.
         comment_args = next(c.args for c in cmd.calls if c.args[:3] == ["gh", "pr", "comment"])
-        assert any("Ready" in a or "ready" in a.lower() for a in comment_args)
+        body = comment_args[comment_args.index("--body") + 1]
+        assert "needs human attention" in body
+        assert "branch protection rule blocks merge" in body
 
 
 class TestNotifyHumanVariant:
