@@ -261,11 +261,13 @@ class TestDeferSignalArtifact:
         tmp_path: Path,
     ) -> None:
         """When ``artifacts_root`` is not passed to the runner, it
-        defaults to ``worktrees_root.parent / "artifacts"`` — matches
-        the layout ``run_awf.py`` uses for ``<work_dir>/artifacts``."""
+        defaults to ``worktrees_root.parents[1] / "artifacts"`` — matches
+        the layout ``run_awf.py`` uses where ``worktrees_root`` is
+        ``<work_dir>/git/worktrees`` and artifacts live at
+        ``<work_dir>/artifacts``."""
         ws_id = await seed_monitoring_workspace(factory)
         worktrees_root = tmp_path / "work" / "git" / "worktrees"
-        default_artifacts_root = tmp_path / "work" / "git" / "artifacts"
+        default_artifacts_root = tmp_path / "work" / "artifacts"
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))

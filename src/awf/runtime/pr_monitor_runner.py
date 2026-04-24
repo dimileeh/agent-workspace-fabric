@@ -125,8 +125,9 @@ class PullRequestMonitorRunner:
         self._worktrees_root = worktrees_root
         # Orchestrator-facing JSON drops — one ``<ws_id>.defer-signal.json``
         # per terminal transition. Default layout matches ``run_awf.py``'s
-        # ``<work_dir>/artifacts`` directory.
-        self._artifacts_root = artifacts_root or (worktrees_root.parent / "artifacts")
+        # ``<work_dir>/artifacts`` directory; since ``worktrees_root`` there
+        # is ``<work_dir>/git/worktrees``, go up two levels.
+        self._artifacts_root = artifacts_root or (worktrees_root.parents[1] / "artifacts")
 
     # ── Entry point ────────────────────────────────────────────────────────
 
