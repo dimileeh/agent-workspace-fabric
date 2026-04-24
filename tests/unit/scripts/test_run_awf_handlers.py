@@ -343,6 +343,9 @@ class TestFeatureBranchPrHandler:
         execs = patch_handlers["executors"]
         assert len(execs) == 1
         assert execs[0].calls == [ws_id]
+        compose_spec = patch_handlers["compose_instances"][0].ups[0]
+        assert compose_spec.cpu_limit is None
+        assert compose_spec.memory_limit is None
 
     @pytest.mark.unit
     async def test_companions_get_materialized_before_compose_up(
@@ -418,6 +421,26 @@ class TestFeatureBranchPrHandler:
         assert result["title"] == "handler test"
         assert result["status"] == WorkspaceStatus.completed.value
         assert result["pr_url"] == "https://github.com/dimileeh/aira-web/pull/111"
+
+    @pytest.mark.unit
+    async def test_task_resources_flow_to_feature_branch_compose_limits(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(resources={"cpu": 2, "memory": "6g"}),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="t",
+            git_email="t@e.com",
+        )
+
+        compose_spec = patch_handlers["compose_instances"][0].ups[0]
+        assert compose_spec.cpu_limit == "2"
+        assert compose_spec.memory_limit == "6g"
 
 
 # ── sync_release_pr handler ────────────────────────────────────────────────

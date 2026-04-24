@@ -125,6 +125,13 @@ class TaskConfig:
     agent: str
     test_commands: list[str]
     requires_database: bool = False
+    resources: dict[str, Any] | None = None
+    """Optional local-runner resource limits for feature_branch_pr stacks.
+
+    JSON shape: ``{"cpu": number, "memory": string}``. Values are mapped to
+    ``WorkspaceComposeSpec.cpu_limit`` / ``memory_limit`` when provisioning the
+    normal feature-branch workspace path.
+    """
     profile_ref: str | None = "auto"
     profile: dict[str, Any] | None = None
     companions: list[dict[str, Any]] | None = None
@@ -155,6 +162,36 @@ class TaskConfig:
     Release PRs (development→main) are a separate task kind
     (``sync_release_pr``) and still hardcode ``auto_merge=False`` — the
     dev→main gate is where human approval lives."""
+
+
+def _task_resource_limits(cfg: TaskConfig) -> tuple[str | None, str | None]:
+    """Return compose-ready resource limits from a local runner task config."""
+    resources = cfg.resources
+    if resources is None:
+        return None, None
+    if not isinstance(resources, Mapping):
+        raise ValueError("resources must be an object with optional cpu and memory keys")
+
+    cpu = resources.get("cpu")
+    memory = resources.get("memory")
+
+    if cpu is not None:
+        if isinstance(cpu, bool) or not isinstance(cpu, int | float):
+            raise ValueError("resources.cpu must be a positive number")
+        if cpu <= 0:
+            raise ValueError("resources.cpu must be a positive number")
+        cpu_limit = str(cpu)
+    else:
+        cpu_limit = None
+
+    if memory is not None:
+        if not isinstance(memory, str) or not memory:
+            raise ValueError("resources.memory must be a non-empty string")
+        memory_limit = memory
+    else:
+        memory_limit = None
+
+    return cpu_limit, memory_limit
 
 
 def _resolve_task_profile(
@@ -709,6 +746,7 @@ async def _run_task(
         workspace_id=ws_id,
         work_dir=work_dir,
     )
+    cpu_limit, memory_limit = _task_resource_limits(cfg)
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
@@ -720,6 +758,8 @@ async def _run_task(
         services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
+        cpu_limit=cpu_limit,
+        memory_limit=memory_limit,
         auth_mounts=(mirror_mount, *workspace_auth_mounts),
         git_name=git_name,
         git_email=git_email,
