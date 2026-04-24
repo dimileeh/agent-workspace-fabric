@@ -1,12 +1,18 @@
 """Validation runner — executes test commands inside the workspace container.
 
 Contract:
-    1. If ``requires_database`` is True, run ``alembic upgrade head`` AFTER
-       the first test command (which is the convention for dep-install).
-       This is deliberate: dep install must happen first so Alembic + the
-       app package are importable. If the app doesn't need this pattern,
-       set ``requires_database=False`` and put migration in test_commands
-       yourself.
+    1. If ``requires_database`` is True AND the workspace has an
+       ``alembic.ini`` at its worktree root, run ``alembic upgrade head``
+       AFTER the first test command (which is the convention for
+       dep-install). This is deliberate: dep install must happen first so
+       Alembic + the app package are importable. For Node.js or other
+       non-Python workspaces, set ``requires_database=True`` when the
+       COMPANION stack needs a DB — the Postgres companion will apply its
+       own migrations via its own entrypoint, and AWF will skip the
+       workspace-side alembic step silently (no ``alembic.ini`` ⇒ no
+       Alembic to run). If the app has a custom migration command,
+       leave ``requires_database=False`` and put the migration line in
+       test_commands yourself.
     2. Run each command in ``test_commands`` sequentially via ``docker
        compose exec -T -w /workspace agent sh -lc <command>``.
     3. Capture stdout + stderr for each command to per-workspace artifact
