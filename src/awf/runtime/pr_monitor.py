@@ -296,17 +296,21 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
 
     0.  Terminal states: merged → ShortCircuitCompleted, closed → Abort.
     1.  Budget: iter_cap / wall_clock_cap → Abort.
-    2.  Unresolved comments (inline + review) → AddressComments.
+    2.  Base behind → SyncBase (BEFORE addressing comments so a PR on a
+        fast-moving base doesn't loop forever on new bot-review cycles
+        without ever integrating base updates — if bots keep commenting,
+        AddressComments would fire every iteration and SyncBase would
+        never get its turn; PR #344/#345 hit this with 5 bot reviewers).
+    3.  Unresolved comments (inline + review) → AddressComments.
         The batch only contains threads/comments we HAVEN'T already
         addressed (``state.threads_addressed_ids``). If every comment
         is already in that dict we fall through — the runner is
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
-    3.  CI FAILURE → ReportCiFailure.
-    4.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
+    4.  CI FAILURE → ReportCiFailure.
+    5.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
-    5.  Base behind → SyncBase.
     6.  Mergeable == CONFLICTING after addressing everything → Abort (the
         coding CLI can't fix a structural conflict it doesn't know about).
     7.  All green → Merge (or NotifyHuman if auto_merge=False).
@@ -325,7 +329,21 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if time.monotonic() - state.started_at >= config.wall_clock_cap_seconds:
         return Abort(reason=AbortReason.wall_clock_cap_reached)
 
-    # 2. Unresolved comments, filtered to those we haven't handled yet.
+    # 2. Base-behind check runs BEFORE comments. Rationale: on a PR with
+    # an active bot-review fleet (Greptile/CodeRabbit/Bugbot/Codex/etc.)
+    # every push triggers a new wave of comments — AddressComments would
+    # fire every single iteration and we'd never integrate base updates,
+    # leaving the PR stuck on BEHIND until iter_cap aborts the monitor.
+    # SyncBase only adds a merge commit; the feature work is unchanged,
+    # and any freshly-arrived review comments are still there for the
+    # next iteration's AddressComments gate.
+    if status.base_behind_count > 0 or status.merge_state_status in (
+        MergeStateStatus.BEHIND,
+        MergeStateStatus.DIRTY,
+    ):
+        return SyncBase()
+
+    # 3. Unresolved comments, filtered to those we haven't handled yet.
     new_threads = tuple(
         t
         for t in status.unresolved_inline_threads
@@ -358,29 +376,16 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return WaitForCI(reason="unknown_mergeable_state")
 
-    # 5. Base behind OR hard conflict → integrate base into head. Three
-    # signals route here:
-    #   * local rev-list says base has advanced
-    #   * GitHub's mergeStateStatus == BEHIND
-    #   * GitHub's mergeStateStatus == DIRTY (conflict already detected
-    #     server-side; SyncBase's ``git merge`` path reproduces it
-    #     locally and invokes the coding CLI with a conflict-resolve
-    #     prompt — the CLI's fix commit + push lands a CLEAN state on
-    #     the next poll)
-    # If the CLI can't resolve after repeated attempts, iter_cap aborts
-    # — no dedicated DIRTY abort path.
+    # (Gate for BEHIND/DIRTY runs earlier — see step 2.)
     #
-    # This was the PR #335 / #336 bug: the local count was stale
-    # (worktree hadn't fetched origin/<base> since initial checkout) and
-    # said 0, so SyncBase never fired even though GitHub correctly
-    # reported BEHIND and refused the merge call.
-    if status.base_behind_count > 0 or status.merge_state_status in (
-        MergeStateStatus.BEHIND,
-        MergeStateStatus.DIRTY,
-    ):
-        return SyncBase()
+    # Historical note: this gate used to live AFTER AddressComments,
+    # which created an infinite loop on PRs with active bot reviewers —
+    # every push triggered a new comment wave, AddressComments fired
+    # every iteration, SyncBase never got its turn, iter_cap eventually
+    # aborted. The PR #335/#336 stale-rev-list bug lived here too —
+    # that fix (base_behind_count fallback) is preserved above.
 
-    # 6. Legacy ``mergeable == CONFLICTING`` without the richer
+    # Legacy ``mergeable == CONFLICTING`` without the richer
     # mergeStateStatus signal — same treatment as DIRTY: let SyncBase
     # attempt to reproduce + resolve.
     if status.mergeable == MergeableState.CONFLICTING:

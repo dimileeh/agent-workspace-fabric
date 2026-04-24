@@ -277,13 +277,17 @@ class TestSyncBase:
         assert isinstance(action, Merge)
 
     @pytest.mark.unit
-    def test_comments_addressed_before_base_sync(self) -> None:
-        """Addressing comments updates the head; once pushed, GitHub
-        recomputes base_behind. Syncing base while the head's still
-        diverging from reviewer intent wastes a CI run."""
+    def test_base_sync_runs_before_addressing_comments(self) -> None:
+        """SyncBase runs BEFORE AddressComments. Rationale: on a PR with
+        active bot reviewers (Greptile/CodeRabbit/Bugbot/Codex) every push
+        after AddressComments triggers a fresh comment wave — the monitor
+        would loop AddressComments forever and never SyncBase, leaving the
+        PR stuck on BEHIND until iter_cap aborts. SyncBase only adds a
+        merge commit; the comments are still unresolved for the NEXT
+        outer iteration's AddressComments gate. PR #344/#345 hit this."""
         t = _thread()
         action = decide(_status(base_behind=3, inline=(t,)), MonitorState(), MonitorConfig())
-        assert isinstance(action, AddressComments)
+        assert isinstance(action, SyncBase)
 
 
 # ── Conflicting → Abort ───────────────────────────────────────────────────
@@ -337,17 +341,17 @@ class TestMergeStateStatus:
         assert isinstance(action, SyncBase)
 
     @pytest.mark.unit
-    def test_dirty_with_unresolved_comments_addresses_comments_first(self) -> None:
-        """Same priority as BEHIND — comments first. After the push, the
-        next outer iteration re-evaluates and either moves to SyncBase or
-        clears the state."""
+    def test_dirty_with_unresolved_comments_syncs_base_first(self) -> None:
+        """Same priority as BEHIND — SyncBase runs first even with unresolved
+        comments. The merge commit doesn't change the feature work; the
+        next outer iteration re-evaluates comments on the synced tree."""
         t = _thread()
         action = decide(
             _status(merge_state_status=MergeStateStatus.DIRTY, inline=(t,)),
             MonitorState(),
             MonitorConfig(),
         )
-        assert isinstance(action, AddressComments)
+        assert isinstance(action, SyncBase)
 
     @pytest.mark.unit
     def test_dirty_hits_iter_cap_after_repeated_sync_attempts(self) -> None:
@@ -411,10 +415,13 @@ class TestMergeStateStatus:
         assert isinstance(action, NotifyHuman)
 
     @pytest.mark.unit
-    def test_unresolved_comments_still_take_priority_over_behind(self) -> None:
-        """Even with BEHIND, the comment-fix cycle goes first — the push
-        after addressing comments triggers GitHub to re-compute state
-        and the NEXT outer iteration picks up SyncBase if still needed."""
+    def test_behind_takes_priority_over_unresolved_comments(self) -> None:
+        """Inverted from the pre-PR-#344 policy: with BEHIND AND unresolved
+        comments, SyncBase fires first. Otherwise a PR on a fast-moving
+        base with an active bot-review fleet loops AddressComments every
+        iteration forever, never integrating base updates. The comments
+        are still unresolved after SyncBase; the next outer iteration
+        picks them up via AddressComments on the synced tree."""
         t = _thread()
         action = decide(
             _status(
@@ -424,7 +431,7 @@ class TestMergeStateStatus:
             MonitorState(),
             MonitorConfig(),
         )
-        assert isinstance(action, AddressComments)
+        assert isinstance(action, SyncBase)
 
 
 class TestConflictingAbort:
@@ -454,7 +461,12 @@ class TestConflictingAbort:
         assert isinstance(action, SyncBase)
 
     @pytest.mark.unit
-    def test_conflicting_with_unresolved_comments_addresses_first(self) -> None:
+    def test_conflicting_with_unresolved_comments_still_addresses_comments(self) -> None:
+        """Legacy CONFLICTING (without BEHIND / DIRTY) is the only
+        base-sync signal that runs AFTER comments — because on a mergeable
+        CONFLICTING PR the conflict is often resolvable by the same fix
+        that addresses the comments, so let the CLI take both in one pass.
+        Contrast with BEHIND/DIRTY which run SyncBase first (step 2)."""
         t = _thread()
         action = decide(
             _status(mergeable=MergeableState.CONFLICTING, inline=(t,)),
