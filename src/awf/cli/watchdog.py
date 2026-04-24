@@ -125,11 +125,26 @@ def _default_process_lister() -> str:
         return ""
 
 
+def _project_root() -> Path:
+    """Walk upward from this file until we hit the ``pyproject.toml``
+    that anchors the AWF checkout. Used to locate ``scripts/`` without
+    hard-coding ``parents[N]``, which silently breaks if this module
+    ever gets re-nested under ``src/``."""
+    here = Path(__file__).resolve()
+    for candidate in here.parents:
+        if (candidate / "pyproject.toml").is_file():
+            return candidate
+    raise RuntimeError(
+        f"awf-watchdog: could not locate pyproject.toml above {here}; "
+        "the watchdog must run from within the AWF source checkout"
+    )
+
+
 def _default_spawn_attach(*, repo: str, pr_number: int, work_dir: Path, agent: str) -> int:
     """Real implementation: invoke the attach CLI as a subprocess so the
     watchdog never shares a Python interpreter / asyncio loop / env
     with the monitor it spawns."""
-    attach_script = Path(__file__).resolve().parents[3] / "scripts" / "attach_feature_pr_monitor.py"
+    attach_script = _project_root() / "scripts" / "attach_feature_pr_monitor.py"
     result = subprocess.run(
         [
             sys.executable,
