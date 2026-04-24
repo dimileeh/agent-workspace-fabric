@@ -126,7 +126,7 @@ def test_lint_unresolved_service_dependency() -> None:
     issues = lint_profile(profile)
     unresolved = [i for i in issues if i.code == "unresolved-service-dependency"]
     assert len(unresolved) == 1
-    assert unresolved[0].field_path == "services.0.depends_on"
+    assert unresolved[0].field_path == "services.0.depends_on.1"
     assert "redis" in unresolved[0].message
 
 

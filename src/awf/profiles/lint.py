@@ -81,14 +81,14 @@ def lint_profile(profile: WorkspaceProfile) -> list[LintIssue]:
     # 5. Services with depends_on should depend only on declared services
     service_names = {s.name for s in profile.services}
     for i, service in enumerate(profile.services):
-        for dep in service.depends_on:
+        for j, dep in enumerate(service.depends_on):
             if dep not in service_names:
                 issues.append(
                     LintIssue(
                         code="unresolved-service-dependency",
                         severity=LintSeverity.error,
                         message=f"Service '{service.name}' depends on unknown service '{dep}'",
-                        field_path=f"services.{i}.depends_on",
+                        field_path=f"services.{i}.depends_on.{j}",
                     )
                 )
 
