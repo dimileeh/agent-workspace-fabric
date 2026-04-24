@@ -1,12 +1,18 @@
 """Validation runner — executes test commands inside the workspace container.
 
 Contract:
-    1. If ``requires_database`` is True, run ``alembic upgrade head`` AFTER
-       the first test command (which is the convention for dep-install).
-       This is deliberate: dep install must happen first so Alembic + the
-       app package are importable. If the app doesn't need this pattern,
-       set ``requires_database=False`` and put migration in test_commands
-       yourself.
+    1. If ``requires_database`` is True AND the workspace has an
+       ``alembic.ini`` at its worktree root, run ``alembic upgrade head``
+       AFTER the first test command (which is the convention for
+       dep-install). This is deliberate: dep install must happen first so
+       Alembic + the app package are importable. For Node.js or other
+       non-Python workspaces, set ``requires_database=True`` when the
+       COMPANION stack needs a DB — the Postgres companion will apply its
+       own migrations via its own entrypoint, and AWF will skip the
+       workspace-side alembic step silently (no ``alembic.ini`` ⇒ no
+       Alembic to run). If the app has a custom migration command,
+       leave ``requires_database=False`` and put the migration line in
+       test_commands yourself.
     2. Run each command in ``test_commands`` sequentially via ``docker
        compose exec -T -w /workspace agent sh -lc <command>``.
     3. Capture stdout + stderr for each command to per-workspace artifact
@@ -107,6 +113,7 @@ class ValidationRunner:
         compose_file: Path,
         test_commands: list[str],
         requires_database: bool = False,
+        workspace_worktree: Path | None = None,
     ) -> ValidationResult:
         workspace_artifacts = self._artifacts_dir / workspace_id
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
@@ -145,6 +152,28 @@ class ValidationRunner:
             # migration fails, skip remaining test commands: they'd run against
             # a broken schema and the output would be noise.
             if index == 1 and requires_database:
+                # ``requires_database=True`` means "the companion stack needs
+                # Postgres running" — not "run Alembic here." Non-Python
+                # workspaces (aira-web, etc.) have no ``alembic.ini`` at the
+                # worktree root; their companion backend handles its own
+                # migrations via its own entrypoint. Skip the workspace-side
+                # step for them rather than burn fix-passes on a shell error.
+                # When ``workspace_worktree`` is not provided (e.g. legacy
+                # unit tests that assert the historical migration behavior)
+                # we fall back to the old "just run it" path.
+                if (
+                    workspace_worktree is not None
+                    and not (workspace_worktree / "alembic.ini").is_file()
+                ):
+                    _log.info(
+                        "validation.migration_skipped_no_alembic_ini",
+                        workspace_id=workspace_id,
+                        reason=(
+                            "requires_database=True but workspace has no "
+                            "alembic.ini — skipping migration step"
+                        ),
+                    )
+                    continue
                 migration = await self._exec(
                     compose_project=compose_project,
                     compose_file=compose_file,
