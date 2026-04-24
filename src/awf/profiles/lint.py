@@ -39,7 +39,7 @@ def lint_profile(profile: WorkspaceProfile) -> list[LintIssue]:
     # 2. Service names must not include reserved names agent or docker
     reserved_names = {"agent", "docker"}
     for i, service in enumerate(profile.services):
-        if service.name in reserved_names:
+        if service.name.casefold() in reserved_names:
             issues.append(
                 LintIssue(
                     code="reserved-service-name",

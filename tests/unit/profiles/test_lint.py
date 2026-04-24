@@ -46,14 +46,18 @@ def test_lint_reserved_service_names() -> None:
         services=[
             ProfileService(name="agent", image="busybox"),
             ProfileService(name="docker", image="busybox"),
+            ProfileService(name="Agent", image="busybox"),
+            ProfileService(name="DOCKER", image="busybox"),
             ProfileService(name="valid", image="busybox"),
         ],
     )
     issues = lint_profile(profile)
     reserved_issues = [i for i in issues if i.code == "reserved-service-name"]
-    assert len(reserved_issues) == 2
+    assert len(reserved_issues) == 4
     assert any(i.field_path == "services.0.name" for i in reserved_issues)
     assert any(i.field_path == "services.1.name" for i in reserved_issues)
+    assert any(i.field_path == "services.2.name" for i in reserved_issues)
+    assert any(i.field_path == "services.3.name" for i in reserved_issues)
 
 
 @pytest.mark.unit
