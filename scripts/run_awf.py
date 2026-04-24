@@ -35,7 +35,7 @@ import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import IO, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -561,6 +561,7 @@ async def _run_task(
             adapter=adapter,
             gh=gh,
             worktrees_root=work_dir / "git" / "worktrees",
+            artifacts_root=work_dir / "artifacts",
         )
 
     executor = WorkspaceExecutor(
@@ -766,6 +767,7 @@ async def _run_sync_release_pr(
         adapter=adapter,
         gh=gh,
         worktrees_root=work_dir / "git" / "worktrees",
+        artifacts_root=work_dir / "artifacts",
     )
     print(
         f"[{cfg.task_title[:40]}] release-monitor running for PR #{cfg.pr_number} ...",
@@ -976,6 +978,7 @@ async def _run_sync_feature_pr(
         adapter=adapter,
         gh=gh,
         worktrees_root=work_dir / "git" / "worktrees",
+        artifacts_root=work_dir / "artifacts",
     )
     print(
         f"[{cfg.task_title[:40]}] feature-pr-monitor running for PR "
@@ -1003,6 +1006,41 @@ async def _run_sync_feature_pr(
             "branch": persisted.branch_name,
             "base_commit": persisted.base_commit,
         }
+
+
+def print_defer_summary(*, artifacts_root: Path, out: IO[str]) -> None:
+    """Emit the orchestrator's bot-defer cue if any artifact has one.
+
+    Reads every ``<ws_id>.defer-signal.json`` under ``artifacts_root``
+    (written by ``PullRequestMonitorRunner`` on terminal transitions)
+    and prints a ``DEFERRED BOT FEEDBACK`` section listing every bot
+    defer. Silent when no artifacts contain bot defers — orchestrators
+    grep for the header and skip run_awf output otherwise. Missing
+    directory is a no-op (operators may run with artifacts disabled).
+    """
+    if not artifacts_root.is_dir():
+        return
+    rows: list[tuple[str, list[dict[str, Any]]]] = []
+    for path in sorted(artifacts_root.glob("*.defer-signal.json")):
+        try:
+            data = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        items = data.get("deferred_bot_items") or []
+        if items:
+            rows.append((data.get("workspace_id", path.stem), items))
+    if not rows:
+        return
+    out.write("\nDEFERRED BOT FEEDBACK (orchestrator should spec follow-ups):\n")
+    for ws_id, items in rows:
+        sample = items[0]
+        author = sample.get("author") or "?"
+        path_str = sample.get("path") or "-"
+        line = sample.get("line")
+        locator = f"{path_str}:{line}" if line is not None else path_str
+        count = len(items)
+        noun = "item" if count == 1 else "items"
+        out.write(f"  {ws_id}: {count} {noun} — {author} on {locator}\n")
 
 
 _ADDITIVE_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
@@ -1107,6 +1145,9 @@ async def _main(config_path: Path, work_dir: Path, keep_state: bool) -> int:
             all_ok = False
         elif result["status"] != "completed":
             all_ok = False
+
+    # Bot-defer callout — orchestrators grep for this.
+    print_defer_summary(artifacts_root=work_dir / "artifacts", out=sys.stdout)
 
     return 0 if all_ok else 1
 

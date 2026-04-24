@@ -26,16 +26,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.db.base import Base
-from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
     pr_payload,
-    review_node,
     seed_monitoring_workspace,
     thread_node,
 )

@@ -182,21 +182,21 @@ def make_runner(
     iter_cap: int = 10,
     artifacts_root: Path | None = None,
 ) -> PullRequestMonitorRunner:
-    kwargs: dict = dict(
-        session_factory=factory,
-        runner=cmd,
-        adapter=adapter,
-        gh=GitHubClient(cmd),
-        monitor_config=MonitorConfig(
+    kwargs: dict = {
+        "session_factory": factory,
+        "runner": cmd,
+        "adapter": adapter,
+        "gh": GitHubClient(cmd),
+        "monitor_config": MonitorConfig(
             iter_cap=iter_cap,
             auto_merge=auto_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
         ),
-        runner_config=MonitorRunnerConfig(max_outer_iterations=20, max_fix_cycle_passes=3),
-        sleep=sleep_fn,
-        worktrees_root=worktrees_root,
-    )
+        "runner_config": MonitorRunnerConfig(max_outer_iterations=20, max_fix_cycle_passes=3),
+        "sleep": sleep_fn,
+        "worktrees_root": worktrees_root,
+    }
     if artifacts_root is not None:
         kwargs["artifacts_root"] = artifacts_root
     return PullRequestMonitorRunner(**kwargs)

@@ -24,9 +24,7 @@ def _write_artifact(path: Path, payload: dict) -> None:
 
 class TestDeferSummary:
     @pytest.mark.unit
-    def test_summary_includes_defer_section_when_bot_items_present(
-        self, tmp_path: Path
-    ) -> None:
+    def test_summary_includes_defer_section_when_bot_items_present(self, tmp_path: Path) -> None:
         artifacts_root = tmp_path / "artifacts"
         _write_artifact(
             artifacts_root / "ws_1.defer-signal.json",
@@ -80,9 +78,7 @@ class TestDeferSummary:
         """An orchestrator may run with artifacts disabled / the directory
         never created. Don't crash."""
         buf = io.StringIO()
-        run_awf.print_defer_summary(
-            artifacts_root=tmp_path / "does-not-exist", out=buf
-        )
+        run_awf.print_defer_summary(artifacts_root=tmp_path / "does-not-exist", out=buf)
         assert buf.getvalue() == ""
 
     @pytest.mark.unit

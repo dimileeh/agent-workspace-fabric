@@ -22,6 +22,7 @@ The loop:
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -61,6 +62,7 @@ from awf.runtime.pr_monitor import (
     ShortCircuitCompleted,
     SyncBase,
     WaitForCI,
+    _is_bot_author,
     decide,
 )
 
@@ -109,6 +111,7 @@ class PullRequestMonitorRunner:
         runner_config: MonitorRunnerConfig | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         worktrees_root: Path,
+        artifacts_root: Path | None = None,
     ) -> None:
         self._deps = _RunnerDeps(
             session_factory=session_factory,
@@ -120,6 +123,10 @@ class PullRequestMonitorRunner:
         self._config = monitor_config or MonitorConfig()
         self._runner_config = runner_config or MonitorRunnerConfig()
         self._worktrees_root = worktrees_root
+        # Orchestrator-facing JSON drops — one ``<ws_id>.defer-signal.json``
+        # per terminal transition. Default layout matches ``run_awf.py``'s
+        # ``<work_dir>/artifacts`` directory.
+        self._artifacts_root = artifacts_root or (worktrees_root.parent / "artifacts")
 
     # ── Entry point ────────────────────────────────────────────────────────
 
@@ -276,14 +283,20 @@ class PullRequestMonitorRunner:
             action=type(action).__name__,
             head_sha=status.head_sha[:10],
             base_behind=status.base_behind_count,
-            merge_state=(
-                status.merge_state_status.value if status.merge_state_status else None
-            ),
+            merge_state=(status.merge_state_status.value if status.merge_state_status else None),
             unresolved_threads=len(status.unresolved_inline_threads),
             unresolved_reviews=len(status.unresolved_review_comments),
         )
 
         if isinstance(action, ShortCircuitCompleted):
+            self._write_defer_signal(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                terminal_action="ShortCircuitCompleted",
+                merged=True,
+                status=status,
+                state=state,
+            )
             await self._terminate_completed(
                 workspace_id,
                 pr_merge_sha=None,
@@ -293,6 +306,14 @@ class PullRequestMonitorRunner:
             return True
 
         if isinstance(action, Abort):
+            self._write_defer_signal(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                terminal_action="Abort",
+                merged=False,
+                status=status,
+                state=state,
+            )
             await self._terminate_failed(
                 workspace_id,
                 message=f"monitor: abort ({action.reason.value})",
@@ -361,6 +382,14 @@ class PullRequestMonitorRunner:
                     pr_number=pr_number,
                     body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
                 )
+                self._write_defer_signal(
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    terminal_action="Merge",
+                    merged=False,
+                    status=status,
+                    state=state,
+                )
                 await self._terminate_completed(
                     workspace_id,
                     pr_merge_sha=None,
@@ -368,6 +397,14 @@ class PullRequestMonitorRunner:
                     compose_file=compose_file,
                 )
                 return True
+            self._write_defer_signal(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                terminal_action="Merge",
+                merged=True,
+                status=status,
+                state=state,
+            )
             await self._terminate_completed(
                 workspace_id,
                 pr_merge_sha=merge_sha,
@@ -381,6 +418,14 @@ class PullRequestMonitorRunner:
                 repo=repo,
                 pr_number=pr_number,
                 body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
+            )
+            self._write_defer_signal(
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                terminal_action="NotifyHuman",
+                merged=False,
+                status=status,
+                state=state,
             )
             await self._terminate_completed(
                 workspace_id,
@@ -764,6 +809,49 @@ class PullRequestMonitorRunner:
         )
         return False
 
+    # ── Defer-signal artifact ─────────────────────────────────────────────
+
+    def _write_defer_signal(
+        self,
+        *,
+        workspace_id: str,
+        pr_number: int,
+        terminal_action: str,
+        merged: bool,
+        status: PRStatus,
+        state: MonitorState,
+    ) -> None:
+        """Persist a machine-readable drop of the workspace's terminal
+        state for an orchestrator to consume.
+
+        The file always exists when the runner reaches a terminal
+        action — empty ``deferred_*_items`` lists when nothing was
+        deferred. Downstream tooling can therefore poll for the file's
+        presence as the authoritative "monitor is done" signal without
+        also having to handle a missing-file case.
+
+        Called with a best-effort contract: a failure to write MUST NOT
+        stop the state-machine transition (the DB write has priority).
+        """
+        try:
+            self._artifacts_root.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "workspace_id": workspace_id,
+                "pr_number": pr_number,
+                "terminal_action": terminal_action,
+                "merged": merged,
+                "deferred_bot_items": _collect_defer_items(status, state, bot=True),
+                "deferred_human_items": _collect_defer_items(status, state, bot=False),
+            }
+            out_path = self._artifacts_root / f"{workspace_id}.defer-signal.json"
+            out_path.write_text(json.dumps(payload, indent=2))
+        except Exception as exc:
+            _log.warning(
+                "monitor.defer_signal_write_failed",
+                workspace_id=workspace_id,
+                error=repr(exc)[:400],
+            )
+
     # ── DB state management ───────────────────────────────────────────────
 
     async def _load_workspace(self, workspace_id: str) -> Workspace:
@@ -954,3 +1042,51 @@ def _with_ci_failures(status: PRStatus, failures: tuple[CheckFailure, ...]) -> P
     from dataclasses import replace
 
     return replace(status, ci_failures=failures)
+
+
+def _collect_defer_items(
+    status: PRStatus, state: MonitorState, *, bot: bool
+) -> list[dict[str, object]]:
+    """Collect deferred threads/comments whose author matches the
+    requested kind (bot vs. human) for the defer-signal artifact.
+
+    ``bot=True`` selects items whose author classifies as a bot per
+    ``pr_monitor._is_bot_author``; ``bot=False`` selects the complement
+    (including unknown-author items, which the merge gate treats as
+    human for safety — the artifact mirrors that classification so
+    orchestrators see the same picture).
+    """
+    items: list[dict[str, object]] = []
+    for t in status.unresolved_inline_threads:
+        if state.threads_addressed_ids.get(t.thread_id) != "defer":
+            continue
+        if _is_bot_author(t.author) is not bot:
+            continue
+        items.append(
+            {
+                "kind": "thread",
+                "id": t.thread_id,
+                "author": t.author,
+                "path": t.path,
+                "line": t.line,
+                "body": t.body_excerpt,
+                "agent_verdict_reason": None,
+            }
+        )
+    for c in status.unresolved_review_comments:
+        if state.threads_addressed_ids.get(c.comment_id) != "defer":
+            continue
+        if _is_bot_author(c.author) is not bot:
+            continue
+        items.append(
+            {
+                "kind": "review",
+                "id": c.comment_id,
+                "author": c.author,
+                "path": None,
+                "line": None,
+                "body": c.body_excerpt,
+                "agent_verdict_reason": None,
+            }
+        )
+    return items

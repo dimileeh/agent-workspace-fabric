@@ -19,16 +19,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.db.base import Base
-from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
     pr_payload,
-    review_node,
     seed_monitoring_workspace,
     thread_node,
 )
@@ -328,9 +324,7 @@ class TestMonitorActionLogging:
                 compose_file=tmp_path / "compose.yml",
             )
 
-        action_events = [
-            i for i, r in enumerate(captured) if r.get("event") == "monitor.action"
-        ]
+        action_events = [i for i, r in enumerate(captured) if r.get("event") == "monitor.action"]
         assert action_events, "expected a monitor.action log"
         # The Merge action log should appear somewhere BEFORE the
         # ``gh pr merge`` command is invoked. capture_logs records in
@@ -339,7 +333,8 @@ class TestMonitorActionLogging:
         # sufficient: the very next thing we did after logging was to
         # invoke the gh merge call, and capture_logs records the log
         # synchronously at the moment it is made.
-        merge_actions = [r for r in captured if r.get("event") == "monitor.action"
-                         and r.get("action") == "Merge"]
+        merge_actions = [
+            r for r in captured if r.get("event") == "monitor.action" and r.get("action") == "Merge"
+        ]
         assert merge_actions, "expected a Merge action log"
         assert merge_cmd_index, "expected gh pr merge to have been called"

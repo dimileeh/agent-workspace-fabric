@@ -13,7 +13,10 @@ from __future__ import annotations
 import pytest
 
 from awf.runtime.pr_monitor import (
+    CheckState,
     Merge,
+    MergeableState,
+    MergeStateStatus,
     MonitorConfig,
     MonitorState,
     NotifyHuman,
@@ -21,11 +24,6 @@ from awf.runtime.pr_monitor import (
     ReviewComment,
     ReviewThread,
     decide,
-)
-from awf.runtime.pr_monitor import (
-    MergeableState,
-    MergeStateStatus,
-    CheckState,
 )
 
 
@@ -81,9 +79,7 @@ class TestBotDeferUnblocksMerge:
 
     @pytest.mark.unit
     def test_mixed_defers_block_if_any_human(self) -> None:
-        state = MonitorState(
-            threads_addressed_ids={"T_bot": "defer", "T_human": "defer"}
-        )
+        state = MonitorState(threads_addressed_ids={"T_bot": "defer", "T_human": "defer"})
         status = _status(
             inline=(
                 _thread("T_bot", "greptile-apps"),
