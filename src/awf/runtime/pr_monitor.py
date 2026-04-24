@@ -411,18 +411,16 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # opens a thread expects their question answered before the merge
     # fires. Review feedback on PR #2 (CodeRabbit, Major): "Deferred
     # feedback still disappears from the merge gate".
-    deferred_blocking: list[tuple[str, str, str | None]] = []
-    for t in status.unresolved_inline_threads:
-        if state.threads_addressed_ids.get(t.thread_id) != "defer":
-            continue
-        if not _is_bot_author(t.author):
-            deferred_blocking.append(("thread", t.thread_id, t.author))
-    for c in status.unresolved_review_comments:
-        if state.threads_addressed_ids.get(c.comment_id) != "defer":
-            continue
-        if not _is_bot_author(c.author):
-            deferred_blocking.append(("review", c.comment_id, c.author))
-    if deferred_blocking:
+    has_human_defer = any(
+        state.threads_addressed_ids.get(t.thread_id) == "defer"
+        and not _is_bot_author(t.author)
+        for t in status.unresolved_inline_threads
+    ) or any(
+        state.threads_addressed_ids.get(c.comment_id) == "defer"
+        and not _is_bot_author(c.author)
+        for c in status.unresolved_review_comments
+    )
+    if has_human_defer:
         return NotifyHuman()
 
     # 8. All green — terminal success action.
