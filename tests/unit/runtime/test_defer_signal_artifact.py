@@ -131,6 +131,69 @@ class TestDeferSignalArtifact:
         assert data["deferred_human_items"] == []
 
     @pytest.mark.unit
+    async def test_artifact_written_on_merge_blocked_downgrade(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """``gh pr merge`` can be rejected by branch protection. The
+        runner falls back to posting a "ready to merge" comment and
+        still writes the artifact, but with ``merged=False`` so the
+        orchestrator knows no squash actually landed."""
+        ws_id = await seed_monitoring_workspace(factory)
+        artifacts_root = tmp_path / "artifacts"
+        bot_thread = thread_node(
+            tid="T_bot",
+            author="greptile-apps",
+            path="src/foo.py",
+            line=42,
+            body="consider renaming",
+        )
+        # Outer iter 1: AddressComments fires; adapter defers.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        adapter.queue(stdout="DEFER: advisory nit, skipping")
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))  # settle
+        cmd.queue_result(returncode=0, stderr="Everything up-to-date")  # push
+        # Outer iter 2: bot-defer → gate passes → Merge dispatched, but
+        # gh pr merge is blocked by branch protection → downgrade path.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[bot_thread]))
+        cmd.queue_result(
+            returncode=1,
+            stderr="pull request not mergeable: required status checks pending",
+        )  # gh pr merge — blocked
+        cmd.queue_result(returncode=0)  # gh pr comment (ready-to-merge fallback)
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            artifacts_root=artifacts_root,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        data = _artifact_for(artifacts_root, ws_id)
+        assert data["terminal_action"] == "Merge"
+        assert data["merged"] is False
+        assert len(data["deferred_bot_items"]) == 1
+        item = data["deferred_bot_items"][0]
+        assert item["id"] == "T_bot"
+        assert item["author"] == "greptile-apps"
+        assert item["path"] == "src/foo.py"
+        assert item["line"] == 42
+        assert data["deferred_human_items"] == []
+
+    @pytest.mark.unit
     async def test_artifact_written_on_notify_human_with_human_defers(
         self,
         factory: async_sessionmaker[AsyncSession],
