@@ -126,11 +126,11 @@ class TaskConfig:
     test_commands: list[str]
     requires_database: bool = False
     resources: dict[str, Any] | None = None
-    """Optional local-runner resource limits for feature_branch_pr stacks.
+    """Optional local-runner resource limits for AWF workspace stacks.
 
     JSON shape: ``{"cpu": number, "memory": string}``. Values are mapped to
     ``WorkspaceComposeSpec.cpu_limit`` / ``memory_limit`` when provisioning the
-    normal feature-branch workspace path.
+    workspace for any task kind.
     """
     profile_ref: str | None = "auto"
     profile: dict[str, Any] | None = None
@@ -962,6 +962,7 @@ async def _run_sync_release_pr(
         workspace_id=ws_id,
         work_dir=work_dir,
     )
+    cpu_limit, memory_limit = _task_resource_limits(cfg)
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
@@ -970,6 +971,8 @@ async def _run_sync_release_pr(
         services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
+        cpu_limit=cpu_limit,
+        memory_limit=memory_limit,
         auth_mounts=(mirror_mount, *workspace_auth_mounts),
         git_name=git_name,
         git_email=git_email,
@@ -1188,6 +1191,7 @@ async def _run_sync_feature_pr(
         workspace_id=ws_id,
         work_dir=work_dir,
     )
+    cpu_limit, memory_limit = _task_resource_limits(cfg)
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
@@ -1196,6 +1200,8 @@ async def _run_sync_feature_pr(
         services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
+        cpu_limit=cpu_limit,
+        memory_limit=memory_limit,
         auth_mounts=(mirror_mount, *workspace_auth_mounts),
         git_name=git_name,
         git_email=git_email,

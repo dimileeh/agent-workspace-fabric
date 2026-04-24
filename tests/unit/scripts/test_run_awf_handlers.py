@@ -563,6 +563,32 @@ class TestSyncReleasePrHandler:
         # Companion's worktree scope includes the owning workspace id.
         assert ws_id in adds[1]["new_branch"]
 
+    @pytest.mark.unit
+    async def test_task_resources_flow_to_sync_release_compose_limits(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(
+                task_kind="sync_release_pr",
+                branch_base="main",
+                source_branch="development",
+                pr_number=300,
+                resources={"cpu": 2, "memory": "6g"},
+            ),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="t",
+            git_email="t@e.com",
+        )
+
+        compose_spec = patch_handlers["compose_instances"][0].ups[0]
+        assert compose_spec.cpu_limit == "2"
+        assert compose_spec.memory_limit == "6g"
+
 
 # ── sync_feature_pr handler ────────────────────────────────────────────────
 
@@ -816,6 +842,32 @@ class TestSyncFeaturePrHandler:
         adds = instances[0].added
         assert len(adds) == 2
         assert ws_id in adds[1]["new_branch"]
+
+    @pytest.mark.unit
+    async def test_task_resources_flow_to_sync_feature_compose_limits(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(
+                task_kind="sync_feature_pr",
+                branch_base="development",
+                source_branch="fix/some-pr-head",
+                pr_number=123,
+                resources={"cpu": 2, "memory": "6g"},
+            ),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="t",
+            git_email="t@e.com",
+        )
+
+        compose_spec = patch_handlers["compose_instances"][0].ups[0]
+        assert compose_spec.cpu_limit == "2"
+        assert compose_spec.memory_limit == "6g"
 
 
 # ── _build_auth_mounts ─────────────────────────────────────────────────────
