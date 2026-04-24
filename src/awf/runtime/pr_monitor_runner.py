@@ -836,13 +836,14 @@ class PullRequestMonitorRunner:
         """
         try:
             self._artifacts_root.mkdir(parents=True, exist_ok=True)
+            bot_items, human_items = _collect_defer_items(status, state)
             payload = {
                 "workspace_id": workspace_id,
                 "pr_number": pr_number,
                 "terminal_action": terminal_action,
                 "merged": merged,
-                "deferred_bot_items": _collect_defer_items(status, state, bot=True),
-                "deferred_human_items": _collect_defer_items(status, state, bot=False),
+                "deferred_bot_items": bot_items,
+                "deferred_human_items": human_items,
             }
             out_path = self._artifacts_root / f"{workspace_id}.defer-signal.json"
             out_path.write_text(json.dumps(payload, indent=2))
@@ -1046,24 +1047,23 @@ def _with_ci_failures(status: PRStatus, failures: tuple[CheckFailure, ...]) -> P
 
 
 def _collect_defer_items(
-    status: PRStatus, state: MonitorState, *, bot: bool
-) -> list[dict[str, object]]:
-    """Collect deferred threads/comments whose author matches the
-    requested kind (bot vs. human) for the defer-signal artifact.
+    status: PRStatus, state: MonitorState
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Collect deferred threads/comments, partitioned by author kind.
 
-    ``bot=True`` selects items whose author classifies as a bot per
-    ``pr_monitor._is_bot_author``; ``bot=False`` selects the complement
-    (including unknown-author items, which the merge gate treats as
-    human for safety — the artifact mirrors that classification so
-    orchestrators see the same picture).
+    Returns ``(bot_items, human_items)``. Items whose author classifies
+    as a bot per ``pr_monitor._is_bot_author`` go into the first list;
+    the rest (including unknown-author items, which the merge gate
+    treats as human for safety) go into the second — the artifact
+    mirrors that classification so orchestrators see the same picture.
     """
-    items: list[dict[str, object]] = []
+    bot_items: list[dict[str, object]] = []
+    human_items: list[dict[str, object]] = []
     for t in status.unresolved_inline_threads:
         if state.threads_addressed_ids.get(t.thread_id) != "defer":
             continue
-        if _is_bot_author(t.author) is not bot:
-            continue
-        items.append(
+        bucket = bot_items if _is_bot_author(t.author) else human_items
+        bucket.append(
             {
                 "kind": "thread",
                 "id": t.thread_id,
@@ -1077,9 +1077,8 @@ def _collect_defer_items(
     for c in status.unresolved_review_comments:
         if state.threads_addressed_ids.get(c.comment_id) != "defer":
             continue
-        if _is_bot_author(c.author) is not bot:
-            continue
-        items.append(
+        bucket = bot_items if _is_bot_author(c.author) else human_items
+        bucket.append(
             {
                 "kind": "review",
                 "id": c.comment_id,
@@ -1090,4 +1089,4 @@ def _collect_defer_items(
                 "agent_verdict_reason": None,
             }
         )
-    return items
+    return bot_items, human_items
