@@ -262,6 +262,27 @@ class PullRequestMonitorRunner:
         """Execute one action. Returns True iff the monitor has reached a
         terminal state (merged / notified / aborted / short-circuited)."""
 
+        # One structured log line per iteration, BEFORE any side effect —
+        # operators grepping logs need to see which arm the decision
+        # core chose without having to correlate gh / git calls
+        # downstream. Regression guard for PR 342: the monitor ran 200+
+        # iterations silently because only handoff_to_pr_monitor and
+        # compose_teardown_ok fired.
+        _log.info(
+            "monitor.action",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            iter=state.iter_count,
+            action=type(action).__name__,
+            head_sha=status.head_sha[:10],
+            base_behind=status.base_behind_count,
+            merge_state=(
+                status.merge_state_status.value if status.merge_state_status else None
+            ),
+            unresolved_threads=len(status.unresolved_inline_threads),
+            unresolved_reviews=len(status.unresolved_review_comments),
+        )
+
         if isinstance(action, ShortCircuitCompleted):
             await self._terminate_completed(
                 workspace_id,
