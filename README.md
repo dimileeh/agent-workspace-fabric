@@ -59,6 +59,13 @@ Preview profile resolution for a local checkout:
 awf profile preview ~/Projects/example-repo --profile auto
 ```
 
+Check local node readiness for workspace execution:
+
+```bash
+awf node status
+awf node status --format pretty
+```
+
 Create a v2 workspace:
 
 ```bash

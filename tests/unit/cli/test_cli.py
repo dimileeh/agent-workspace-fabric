@@ -8,6 +8,7 @@ End-to-end testing against a real server lives in tests/e2e/ (future).
 from __future__ import annotations
 
 import json
+import subprocess
 from unittest.mock import MagicMock, patch
 
 import httpx
@@ -205,3 +206,81 @@ class TestConnectionErrors:
 
         assert result.exit_code == 2
         assert "could not reach" in result.stderr
+
+
+class TestNodeStatus:
+    @pytest.mark.unit
+    def test_emits_json_status_for_available_node(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["docker"],
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+        with patch("awf.cli.main._run_local_command", return_value=completed) as mock:
+            result = _runner.invoke(app, ["node", "status"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload == {
+            "docker_cli": {"available": True, "error": None},
+            "docker_daemon": {"reachable": True, "error": None},
+            "docker_compose_plugin": {"available": True, "error": None},
+            "agent_runtime_image": {
+                "name": "awf-agent-runtime:latest",
+                "exists": True,
+                "error": None,
+            },
+        }
+        assert [call.args[0] for call in mock.call_args_list] == [
+            ["docker", "--version"],
+            ["docker", "info"],
+            ["docker", "compose", "version"],
+            ["docker", "image", "inspect", "awf-agent-runtime:latest"],
+        ]
+
+    @pytest.mark.unit
+    def test_reports_docker_errors_without_crashing(self) -> None:
+        def fake_run(command: list[str]) -> subprocess.CompletedProcess[str]:
+            if command == ["docker", "--version"]:
+                raise FileNotFoundError("docker")
+            return subprocess.CompletedProcess(
+                args=command,
+                returncode=1,
+                stdout="",
+                stderr="cannot connect to docker daemon",
+            )
+
+        with patch("awf.cli.main._run_local_command", side_effect=fake_run):
+            result = _runner.invoke(app, ["node", "status"])
+
+        assert result.exit_code == 0
+        payload = json.loads(result.stdout)
+        assert payload["docker_cli"] == {"available": False, "error": "docker"}
+        assert payload["docker_daemon"] == {
+            "reachable": False,
+            "error": "cannot connect to docker daemon",
+        }
+        assert payload["docker_compose_plugin"] == {
+            "available": False,
+            "error": "cannot connect to docker daemon",
+        }
+        assert payload["agent_runtime_image"]["exists"] is False
+        assert payload["agent_runtime_image"]["error"] == "cannot connect to docker daemon"
+
+    @pytest.mark.unit
+    def test_pretty_format_uses_existing_pretty_output(self) -> None:
+        completed = subprocess.CompletedProcess(
+            args=["docker"],
+            returncode=0,
+            stdout="ok",
+            stderr="",
+        )
+
+        with patch("awf.cli.main._run_local_command", return_value=completed):
+            result = _runner.invoke(app, ["node", "status", "--format", "pretty"])
+
+        assert result.exit_code == 0
+        assert "agent_runtime_image:" in result.stdout
+        assert "docker_cli:" in result.stdout
