@@ -460,21 +460,35 @@ class TestRunLoop:
     async def test_signal_handler_sets_stop_event(
         self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
-        """Covers the signal-handler body (lines 185-186). We capture
-        the handler that ``_run`` registers via ``signal.signal``, then
-        invoke it with a fake signum and assert it sets the stop event.
+        """Covers the signal-handler body. We capture the handler that
+        ``_run`` registers via ``loop.add_signal_handler`` (the
+        asyncio-native path — the earlier ``signal.signal`` call chain
+        was racy against the event loop per the asyncio docs), then
+        invoke it and assert it sets the stop event.
         """
         import signal
 
-        captured: dict[str, Any] = {}
-        real_signal = signal.signal
+        captured: dict[signal.Signals, tuple[Any, tuple[Any, ...]]] = {}
 
-        def _capture(signum: int, handler: Any) -> Any:
-            if signum in (signal.SIGTERM, signal.SIGINT):
-                captured[signum] = handler
-            return real_signal(signum, handler)
+        # Patch on the concrete loop class that pytest-asyncio actually
+        # constructs — ``BaseEventLoop`` has a stub that the Unix loop
+        # overrides, so patching the base class is invisible.
+        loop = asyncio.get_running_loop()
 
-        monkeypatch.setattr(signal, "signal", _capture)
+        def _capture_add(
+            self_loop: asyncio.AbstractEventLoop,
+            sig: signal.Signals,
+            callback: Any,
+            *args: Any,
+        ) -> None:
+            if sig in (signal.SIGTERM, signal.SIGINT):
+                captured[sig] = (callback, args)
+
+        monkeypatch.setattr(
+            type(loop),
+            "add_signal_handler",
+            _capture_add,
+        )
 
         stop_from_outside: asyncio.Event | None = None
         orig_event = asyncio.Event
@@ -486,12 +500,13 @@ class TestRunLoop:
             return e
 
         async def _tick_once_then_verify_and_stop(**kwargs: Any) -> None:
-            # By now the handler has been registered. Call it with a
-            # fake signum — the handler should set stop.
+            # By now the handler has been registered on the loop. Invoke
+            # it directly (bypassing the real signal delivery) — it
+            # should set stop.
             assert stop_from_outside is not None
             assert not stop_from_outside.is_set()
-            handler = captured[signal.SIGTERM]
-            handler(signal.SIGTERM, None)
+            callback, args = captured[signal.SIGTERM]
+            callback(*args)
             assert stop_from_outside.is_set()
 
         monkeypatch.setattr(release_pr_watcher.asyncio, "Event", _capture_event)

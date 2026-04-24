@@ -949,16 +949,21 @@ class PullRequestMonitorRunner:
         compose_file: Path,
     ) -> None:
         """Run ``docker compose down --remove-orphans --volumes`` for a
-        terminated workspace. Truly never raises.
+        terminated workspace. Never raises a regular ``Exception``.
 
-        The entire call is wrapped in a blanket ``except Exception``
-        because the failure modes here include ``FileNotFoundError``
-        (no ``docker`` on PATH — happens on dev laptops without the
-        daemon), ``asyncio.CancelledError`` during shutdown, and
-        transient I/O errors from the subprocess runner itself. None
-        of those are reasons to fail a workspace that already merged
-        its PR — the completion signal has already landed in the DB
-        before this method runs."""
+        The call is wrapped in ``except Exception`` so the failure modes
+        that routinely bubble up — ``FileNotFoundError`` (no ``docker``
+        on PATH, common on dev laptops without the daemon), transient
+        I/O errors from the subprocess runner, compose returning junk
+        stderr — don't fail a workspace that already merged its PR. The
+        DB completion transition has already landed before this method
+        runs.
+
+        ``asyncio.CancelledError`` is intentionally NOT caught here
+        (since Python 3.8 it inherits from ``BaseException``, so the
+        ``except Exception`` clause does not match it). Cancellation
+        must propagate cleanly — swallowing it would defeat the loop
+        runner's shutdown path."""
         try:
             r = await self._deps.runner.run(
                 [
@@ -974,10 +979,11 @@ class PullRequestMonitorRunner:
                 ]
             )
         except Exception as exc:
-            # docker binary missing, transient I/O, cancellation — any of
-            # these would otherwise propagate and crash the monitor
-            # runner. Log and swallow; the DB transition already
-            # completed.
+            # docker binary missing, transient I/O, subprocess-runner
+            # hiccup — any of these would otherwise propagate and crash
+            # the monitor runner. Log and swallow; the DB transition
+            # already completed. Cancellation (BaseException) is not in
+            # this branch by design — it flows through.
             _log.warning(
                 "monitor.compose_teardown_raised",
                 workspace_id=workspace_id,
