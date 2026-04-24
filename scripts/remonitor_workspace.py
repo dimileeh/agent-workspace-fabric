@@ -110,6 +110,7 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
         adapter=adapter,
         gh=gh,
         worktrees_root=worktrees_root,
+        artifacts_root=work_dir / "artifacts",
     )
 
     print("[remonitor] entering monitor loop ...", flush=True)

@@ -261,6 +261,31 @@ MonitorAction = (
 )
 
 
+# Known bot reviewer logins whose "defer" verdicts should not block the
+# merge — they only post advisory feedback and cannot themselves mark
+# threads resolved. Any GitHub App handle ending in "[bot]" (e.g.
+# dependabot[bot], renovate[bot]) is also treated as a bot. A
+# non-member in this set whose login we don't recognise is treated as
+# human — safer default: block the merge, let the operator triage.
+BOT_REVIEWER_LOGINS = frozenset(
+    {
+        "greptile-apps",
+        "coderabbitai",
+        "gemini-code-assist",
+        "chatgpt-codex-connector",
+        "cursor",
+        "codex",
+        "github-actions",
+    }
+)
+
+
+def _is_bot_author(login: str | None) -> bool:
+    if not login:
+        return False
+    return login in BOT_REVIEWER_LOGINS or login.endswith("[bot]")
+
+
 # ── The decision function ──────────────────────────────────────────────────
 
 
@@ -371,27 +396,29 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return NotifyHuman()
 
-    # 7.5. Deferred feedback still unresolved on GitHub → block auto-merge.
+    # 7.5. Deferred HUMAN feedback still unresolved on GitHub → block
+    # auto-merge. Deferred BOT feedback does not block.
     #
-    # "Defer" means the coding CLI decided a reviewer comment needs human
-    # follow-up (design question, out-of-scope, etc.) — NOT that the
-    # thread has been addressed. The previous code filtered such threads
-    # out of ``new_threads`` (step 2) AND let merge proceed at step 8,
-    # silently merging past feedback the maintainer never saw. Now we
-    # explicitly check: if any thread we marked ``defer`` is still
-    # unresolved on GitHub (i.e. the human hasn't resolved it either),
-    # hand off to NotifyHuman regardless of ``auto_merge`` so the
-    # deferred question can't slip through. Review feedback on PR #2
-    # (CodeRabbit, Major): "Deferred feedback still disappears from the
-    # merge gate".
-    deferred_still_open = any(
-        state.threads_addressed_ids.get(t.thread_id) == "defer"
+    # "Defer" means the coding CLI decided a reviewer comment needs
+    # human follow-up (design question, out-of-scope, etc.) — NOT that
+    # the thread has been addressed. Originally this gate blocked the
+    # merge on ANY defer regardless of author, and PR 342 sat for 4
+    # hours because Greptile's P1 nit kept returning "defer" on every
+    # iteration. Bot reviewers (Greptile, CodeRabbit, Gemini, Cursor
+    # Bugbot, Codex-connector, etc.) post advisory feedback only —
+    # they cannot themselves mark threads resolved, so their deferred
+    # nits would linger forever. Humans still block: a maintainer who
+    # opens a thread expects their question answered before the merge
+    # fires. Review feedback on PR #2 (CodeRabbit, Major): "Deferred
+    # feedback still disappears from the merge gate".
+    has_human_defer = any(
+        state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_author(t.author)
         for t in status.unresolved_inline_threads
     ) or any(
-        state.threads_addressed_ids.get(c.comment_id) == "defer"
+        state.threads_addressed_ids.get(c.comment_id) == "defer" and not _is_bot_author(c.author)
         for c in status.unresolved_review_comments
     )
-    if deferred_still_open:
+    if has_human_defer:
         return NotifyHuman()
 
     # 8. All green — terminal success action.

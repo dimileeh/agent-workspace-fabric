@@ -41,6 +41,7 @@ def build_release_pr_monitor(
     adapter: AgentAdapter,
     gh: GitHubClient,
     worktrees_root: Path,
+    artifacts_root: Path | None = None,
     iter_cap: int = 10,
     wall_clock_cap_seconds: float = 6 * 3600,
     poll_interval_seconds: float = 60.0,
@@ -68,6 +69,7 @@ def build_release_pr_monitor(
             max_fix_cycle_passes=max_fix_cycle_passes,
         ),
         worktrees_root=worktrees_root,
+        artifacts_root=artifacts_root,
     )
 
 
@@ -78,6 +80,7 @@ def build_feature_pr_monitor(
     adapter: AgentAdapter,
     gh: GitHubClient,
     worktrees_root: Path,
+    artifacts_root: Path | None = None,
     iter_cap: int = 10,
     wall_clock_cap_seconds: float = 6 * 3600,
     poll_interval_seconds: float = 60.0,
@@ -105,4 +108,5 @@ def build_feature_pr_monitor(
             max_fix_cycle_passes=max_fix_cycle_passes,
         ),
         worktrees_root=worktrees_root,
+        artifacts_root=artifacts_root,
     )
