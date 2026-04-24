@@ -21,6 +21,31 @@ from awf.db.enums import AgentRuntime
 _log = get_logger(__name__)
 
 
+# Prepended to every agent prompt. Encodes contract invariants the
+# agent must honour inside an AWF workspace. Kept short — most agent
+# CLIs accept prompts as command-line args and some have length caps.
+_AWF_PROMPT_PREAMBLE = """\
+## AWF workspace contract (DO NOT VIOLATE)
+
+You are inside an AWF-managed Docker workspace at /workspace, on a git
+branch that AWF has already created for you. Your contract:
+
+1. **DO NOT switch git branches.** Do not run `git checkout -b <name>`,
+   `git switch -c <name>`, `git branch <name>`, `git checkout <name>`,
+   or any equivalent. Commit ALL work on the current branch. AWF owns
+   branch management. Drifting to a "properly named" feature branch
+   strands your commits and the PR ends up empty.
+2. **DO NOT push, rebase onto origin, or force-push.** AWF handles
+   push + PR creation after you exit.
+3. Commit your work locally as you go (`git add` + `git commit` is
+   fine). AWF's post-agent step will also capture any uncommitted
+   changes, but commits with good messages are preferred.
+
+---
+
+"""
+
+
 @dataclass(frozen=True)
 class AgentRunResult:
     """Structured result of one coding-CLI run."""
@@ -91,8 +116,19 @@ class AgentAdapter(ABC):
         """Invoke the coding CLI inside the workspace's agent container.
 
         Raises ``AgentRunError`` on non-zero exit.
+
+        The user-supplied ``prompt`` is wrapped with an AWF preamble
+        that encodes contract invariants the agent must honour — most
+        notably "do not switch git branches". Agent CLIs (Claude Code,
+        Codex) sometimes run ``git checkout -b <name>`` mid-session as
+        part of their own "good git hygiene" heuristics, but AWF has
+        already created the right branch on entry; drifting strands
+        the agent's commits on an orphan branch and the PR ends up
+        empty. Preamble + post-agent branch-drift recovery in
+        ``control/executor.py`` form a belt-and-braces defence.
         """
-        cli_args = self._cli_args(prompt=prompt, model=model or self._default_model)
+        wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
+        cli_args = self._cli_args(prompt=wrapped_prompt, model=model or self._default_model)
         args = [
             "docker",
             "compose",

@@ -205,7 +205,72 @@ class WorkspaceExecutor:
         async def _git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
             return await self._runner.run(["git", "-C", str(worktree_host), *args])
 
+        expected_branch = ws.branch_name or f"awf/{workspace_id}"
+
         try:
+            # ── Branch-drift recovery ──────────────────────────────────
+            # Agent CLIs (Claude Code, Codex) sometimes run
+            # ``git checkout -b <descriptive-name>`` mid-session as part
+            # of "good git hygiene" — they don't know AWF already
+            # created the right branch for them. If they commit on the
+            # drifted branch, ``pr_creator.push_and_open`` pushes the
+            # original (empty) AWF branch to origin and ``gh pr create``
+            # fails with "No commits between development and awf/ws_...".
+            #
+            # Incident 2026-04-24 (T41 Phase 3, ws_9ca6134a): agent
+            # switched to ``awf/t41-phase3-github-app-install-flow``
+            # and committed there. AWF's push of the empty
+            # ``awf/ws_9ca6134a...`` created a no-op PR. Agent's work
+            # stranded in the worktree.
+            #
+            # Recovery: if HEAD's branch diverged, fast-forward the
+            # expected branch to the agent's tip. Both branches share
+            # the same base commit (the worktree was created fresh
+            # from origin/<base>), so this is a safe pointer update.
+            current_branch_r = await _git_in_worktree(["rev-parse", "--abbrev-ref", "HEAD"])
+            current_branch = (current_branch_r.stdout or "").strip()
+            if current_branch and current_branch != expected_branch:
+                _log.warning(
+                    "executor.branch_drift_detected",
+                    workspace_id=workspace_id,
+                    current_branch=current_branch,
+                    expected_branch=expected_branch,
+                )
+                agent_head_r = await _git_in_worktree(["rev-parse", "HEAD"])
+                agent_head = (agent_head_r.stdout or "").strip()
+                if not agent_head_r.ok or not agent_head:
+                    raise RuntimeError(
+                        f"branch drift detected (current={current_branch} "
+                        f"expected={expected_branch}) but agent HEAD could not "
+                        f"be resolved: {agent_head_r.stderr!r}"
+                    )
+                # Switch to the expected branch. It should exist locally
+                # — AWF created it at worktree-add time. ``switch`` over
+                # ``checkout`` for clearer semantics.
+                switch_r = await _git_in_worktree(["switch", expected_branch])
+                if not switch_r.ok:
+                    raise RuntimeError(
+                        f"branch drift recovery: could not switch back to "
+                        f"{expected_branch}: {switch_r.stderr!r}"
+                    )
+                # Fast-forward to the agent's tip. ``reset --hard`` over
+                # ``merge --ff-only`` because both branches share the
+                # same base and the agent branch was linear work on
+                # top; ff-only would also work but reset is explicit.
+                reset_r = await _git_in_worktree(["reset", "--hard", agent_head])
+                if not reset_r.ok:
+                    raise RuntimeError(
+                        f"branch drift recovery: reset --hard {agent_head[:10]} "
+                        f"failed: {reset_r.stderr!r}"
+                    )
+                _log.info(
+                    "executor.branch_drift_recovered",
+                    workspace_id=workspace_id,
+                    recovered_from=current_branch,
+                    recovered_to=expected_branch,
+                    head_sha=agent_head,
+                )
+
             await _git_in_worktree(["add", "-A"])
             cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
             if cached.stdout.strip():

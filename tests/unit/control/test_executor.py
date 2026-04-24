@@ -200,9 +200,13 @@ class TestFailurePaths:
         # workspace fails with agent_failure before validation runs.
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=2, stderr="codex: auth failed")  # adapter dies
+        # Executor checks branch drift before the commit block
+        # (rev-parse --abbrev-ref HEAD). Return the expected branch
+        # name (awf/<ws_id>) to skip the recovery path.
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # abbrev-ref
         fake.queue_result(returncode=0)  # git add -A (no-op)
-        fake.queue_result(returncode=0, stdout="")  # diff --cached is empty
-        fake.queue_result(returncode=0, stdout="0\n")  # rev-list base..HEAD = 0
+        fake.queue_result(returncode=0, stdout="")  # diff --cached empty
+        fake.queue_result(returncode=0, stdout="0\n")  # rev-list = 0
 
         await executor.execute(ws_id)
 
@@ -211,8 +215,9 @@ class TestFailurePaths:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "agent_failure"
-        # Validation + PR never ran.
-        assert len(fake.calls) == 4
+        # Validation + PR never ran; 5 subprocess calls total (adapter
+        # + drift-check + add + diff + rev-list).
+        assert len(fake.calls) == 5
 
     @pytest.mark.unit
     async def test_agent_killed_with_uncommitted_work_is_salvaged(
