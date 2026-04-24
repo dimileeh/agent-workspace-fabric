@@ -56,7 +56,10 @@ class FakeAdapter(AgentAdapter):
     ) -> AgentRunResult:
         self.calls.append(prompt)
         if not self._queued:
-            return AgentRunResult(returncode=0, stdout="fixed it", stderr="")
+            raise AssertionError(
+                "FakeAdapter.run called with empty queue; queue() a result "
+                "in the test before this dispatch to avoid masking setup bugs"
+            )
         r = self._queued.pop(0)
         if r.returncode != 0:
             raise AgentRunError(
