@@ -301,23 +301,28 @@ class TestMonitorActionLogging:
             worktrees_root=tmp_path / "worktrees",
         )
 
-        # Wrap FakeCommandRunner.run to interleave with log capture order:
-        # each recorded call happens-after the log that narrates the
-        # action. We check this by asserting the "monitor.action" log
-        # with action=Merge appears in captured_logs BEFORE the ``gh pr
-        # merge`` FakeCommandRunner call does any recording via a
-        # counter-based interleaving check.
-        merge_cmd_index: list[int] = []
+        # Wrap FakeCommandRunner.run so that when ``gh pr merge`` is
+        # invoked, we snapshot whether the Merge action log has already
+        # been emitted. capture_logs' list is appended to synchronously
+        # by structlog, so peeking at it inside tracking_run observes
+        # exactly the logs that existed at dispatch time.
+        saw_merge_log_before_call: list[bool] = []
         original_run = cmd.run
 
-        async def tracking_run(args, **kwargs):  # type: ignore[no-untyped-def]
-            if args[:3] == ["gh", "pr", "merge"]:
-                merge_cmd_index.append(len(cmd.calls))
-            return await original_run(args, **kwargs)
-
-        cmd.run = tracking_run  # type: ignore[method-assign]
-
         with structlog.testing.capture_logs() as captured:
+
+            async def tracking_run(args, **kwargs):  # type: ignore[no-untyped-def]
+                if args[:3] == ["gh", "pr", "merge"]:
+                    saw_merge_log_before_call.append(
+                        any(
+                            r.get("event") == "monitor.action" and r.get("action") == "Merge"
+                            for r in captured
+                        )
+                    )
+                return await original_run(args, **kwargs)
+
+            cmd.run = tracking_run  # type: ignore[method-assign]
+
             await runner.run(
                 workspace_id=ws_id,
                 compose_project="proj",
@@ -326,15 +331,14 @@ class TestMonitorActionLogging:
 
         action_events = [i for i, r in enumerate(captured) if r.get("event") == "monitor.action"]
         assert action_events, "expected a monitor.action log"
-        # The Merge action log should appear somewhere BEFORE the
-        # ``gh pr merge`` command is invoked. capture_logs records in
-        # order, and FakeCommandRunner records in order, so asserting
-        # the log entry index predates the recorded-call index is
-        # sufficient: the very next thing we did after logging was to
-        # invoke the gh merge call, and capture_logs records the log
-        # synchronously at the moment it is made.
         merge_actions = [
             r for r in captured if r.get("event") == "monitor.action" and r.get("action") == "Merge"
         ]
         assert merge_actions, "expected a Merge action log"
-        assert merge_cmd_index, "expected gh pr merge to have been called"
+        # If monitor.action moved below the dispatch, this would be
+        # [False] and the test would fail — which is the regression we
+        # guard against.
+        assert saw_merge_log_before_call == [True], (
+            "expected the Merge monitor.action log to be emitted before "
+            "`gh pr merge` was invoked"
+        )
