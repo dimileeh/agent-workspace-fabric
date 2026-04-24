@@ -980,7 +980,7 @@ class TestBuildAuthMounts:
         # .gemini and .ssh are missing on purpose
         mounts = run_awf._build_auth_mounts(tmp_path)
         targets = [m.target for m in mounts]
-        assert "/home/agent/.codex" in targets
+        assert "/home/agent/.codex" not in targets
         assert "/home/agent/.claude" in targets
         assert "/home/agent/.claude.json" in targets
         assert "/home/agent/.config/gh" in targets
@@ -991,7 +991,7 @@ class TestBuildAuthMounts:
 
     @pytest.mark.unit
     def test_rw_vs_ro_mount_modes(self, tmp_path: Path) -> None:
-        """Credentials that need in-session writes (codex/claude/gemini
+        """Credentials that need in-session writes (claude/gemini
         caches) must be rw; stable creds (gh, gitconfig, ssh) must be
         ro. The handler's first principle is not letting task runs
         pollute the operator's home — so the ro list is the important
@@ -1006,7 +1006,7 @@ class TestBuildAuthMounts:
 
         mounts = run_awf._build_auth_mounts(tmp_path)
         by_target = {m.target: m for m in mounts}
-        assert by_target["/home/agent/.codex"].mode == "rw"
+        assert "/home/agent/.codex" not in by_target
         assert by_target["/home/agent/.claude"].mode == "rw"
         assert by_target["/home/agent/.gemini"].mode == "rw"
         assert by_target["/home/agent/.config/gh"].mode == "ro"
@@ -1035,6 +1035,63 @@ class TestBuildAuthMounts:
         empty.mkdir()
         mounts = run_awf._build_auth_mounts(empty)
         assert mounts == []
+
+    @pytest.mark.unit
+    def test_workspace_auth_mounts_seed_isolated_codex_home(self, tmp_path: Path) -> None:
+        host_home = tmp_path / "host"
+        host_codex = host_home / ".codex"
+        host_codex.mkdir(parents=True)
+        (host_codex / "auth.json").write_text('{"token": "redacted"}')
+        (host_codex / "config.toml").write_text("model = 'gpt-5.5'\n")
+        (host_codex / "installation_id").write_text("install-123")
+        (host_codex / "logs_2.sqlite").write_text("do not copy")
+        (host_codex / "sessions").mkdir()
+        (host_codex / "rules").mkdir()
+        (host_codex / "rules" / "default.rules").write_text("rule")
+        base_mount = run_awf.AuthMount(
+            source=str(host_home / ".claude"),
+            target="/home/agent/.claude",
+            mode="rw",
+        )
+
+        mounts = run_awf._workspace_auth_mounts(
+            [base_mount],
+            workspace_id="ws_test",
+            work_dir=tmp_path / "work",
+            host_home=host_home,
+        )
+
+        codex_mount = mounts[0]
+        codex_home = Path(codex_mount.source)
+        assert codex_mount.target == "/home/agent/.codex"
+        assert codex_mount.mode == "rw"
+        assert codex_home == tmp_path / "work" / "auth" / "ws_test" / "codex"
+        assert (codex_home / "auth.json").read_text() == '{"token": "redacted"}'
+        assert (codex_home / "config.toml").read_text() == "model = 'gpt-5.5'\n"
+        assert (codex_home / "installation_id").read_text() == "install-123"
+        assert (codex_home / "rules" / "default.rules").read_text() == "rule"
+        assert not (codex_home / "logs_2.sqlite").exists()
+        assert not (codex_home / "sessions").exists()
+        assert mounts[1] == base_mount
+
+    @pytest.mark.unit
+    def test_workspace_auth_mounts_skip_codex_when_missing(self, tmp_path: Path) -> None:
+        host_home = tmp_path / "host"
+        host_home.mkdir()
+        base_mount = run_awf.AuthMount(
+            source=str(host_home / ".claude"),
+            target="/home/agent/.claude",
+            mode="rw",
+        )
+
+        mounts = run_awf._workspace_auth_mounts(
+            [base_mount],
+            workspace_id="ws_test",
+            work_dir=tmp_path / "work",
+            host_home=host_home,
+        )
+
+        assert mounts == (base_mount,)
 
 
 class TestAgentEnvironmentWithHostAuth:

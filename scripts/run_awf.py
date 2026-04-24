@@ -32,6 +32,7 @@ import asyncio
 import json
 import os
 import re
+import shutil
 import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -219,15 +220,18 @@ def _build_auth_mounts(
     matching the host user so bind-mounted files are readable).
 
     Mount mode notes:
-    - ``.codex``, ``.claude``, ``.gemini`` are ``rw`` because each CLI writes
-      its model cache / token-refresh state inside its home directory; a
-      read-only mount breaks session initialization.
+    - Codex is intentionally absent here. A live host ``~/.codex`` contains
+      logs, SQLite state, session files, and locks that collide with Codex
+      Desktop. Each workspace gets an isolated Codex home via
+      ``_workspace_auth_mounts`` instead.
+    - ``.claude`` and ``.gemini`` are ``rw`` because each CLI writes its model
+      cache / token-refresh state inside its home directory; a read-only mount
+      breaks session initialization.
     - ``.config/gh``, ``.gitconfig``, ``.ssh`` are ``ro`` — stable credentials
       with no state to update during a task run.
     """
     container_home = "/home/agent"
     rw_mounts = [
-        (host_home / ".codex", f"{container_home}/.codex", "rw"),
         (host_home / ".claude", f"{container_home}/.claude", "rw"),
         # Claude Code keeps its top-level config as a single file at
         # ``~/.claude.json`` (separate from the ``~/.claude/`` dir). When
@@ -264,6 +268,53 @@ def _build_auth_mounts(
                 )
             )
     return mounts
+
+
+def _workspace_auth_mounts(
+    base_mounts: list[AuthMount],
+    *,
+    workspace_id: str,
+    work_dir: Path,
+    host_home: Path | None = None,
+) -> tuple[AuthMount, ...]:
+    mounts = list(base_mounts)
+    codex_home = _prepare_isolated_codex_home(
+        host_home=(host_home or Path(os.environ["HOME"])),
+        target_root=work_dir / "auth" / workspace_id / "codex",
+    )
+    if codex_home is not None:
+        mounts.insert(
+            0,
+            AuthMount(
+                source=str(codex_home),
+                target="/home/agent/.codex",
+                mode="rw",
+            ),
+        )
+    return tuple(mounts)
+
+
+def _prepare_isolated_codex_home(*, host_home: Path, target_root: Path) -> Path | None:
+    """Seed a per-workspace Codex home without sharing live runtime state."""
+    source = host_home / ".codex"
+    if not source.exists():
+        return None
+
+    if target_root.exists():
+        shutil.rmtree(target_root)
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    for filename in ("auth.json", "config.toml", "installation_id"):
+        src = source / filename
+        if src.is_file():
+            shutil.copy2(src, target_root / filename)
+
+    for dirname in ("rules",):
+        src_dir = source / dirname
+        if src_dir.is_dir():
+            shutil.copytree(src_dir, target_root / dirname)
+
+    return target_root
 
 
 def _agent_environment_with_host_auth(
@@ -653,6 +704,11 @@ async def _run_task(
         target=str(layout.mirror_path),
         mode="rw",
     )
+    workspace_auth_mounts = _workspace_auth_mounts(
+        auth_mounts,
+        workspace_id=ws_id,
+        work_dir=work_dir,
+    )
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
@@ -664,7 +720,7 @@ async def _run_task(
         services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
-        auth_mounts=(mirror_mount, *auth_mounts),
+        auth_mounts=(mirror_mount, *workspace_auth_mounts),
         git_name=git_name,
         git_email=git_email,
         companions=tuple(companion_services),
@@ -861,6 +917,11 @@ async def _run_sync_release_pr(
         target=str(layout.mirror_path),
         mode="rw",
     )
+    workspace_auth_mounts = _workspace_auth_mounts(
+        auth_mounts,
+        workspace_id=ws_id,
+        work_dir=work_dir,
+    )
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
@@ -869,7 +930,7 @@ async def _run_sync_release_pr(
         services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
-        auth_mounts=(mirror_mount, *auth_mounts),
+        auth_mounts=(mirror_mount, *workspace_auth_mounts),
         git_name=git_name,
         git_email=git_email,
         companions=tuple(companion_services),
@@ -1082,6 +1143,11 @@ async def _run_sync_feature_pr(
         target=str(layout.mirror_path),
         mode="rw",
     )
+    workspace_auth_mounts = _workspace_auth_mounts(
+        auth_mounts,
+        workspace_id=ws_id,
+        work_dir=work_dir,
+    )
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
@@ -1090,7 +1156,7 @@ async def _run_sync_feature_pr(
         services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
         postgres_password=postgres_password,
-        auth_mounts=(mirror_mount, *auth_mounts),
+        auth_mounts=(mirror_mount, *workspace_auth_mounts),
         git_name=git_name,
         git_email=git_email,
         companions=tuple(companion_services),
