@@ -42,8 +42,6 @@ def build_release_pr_monitor(
     gh: GitHubClient,
     worktrees_root: Path,
     artifacts_root: Path | None = None,
-    iter_cap: int = 10,
-    wall_clock_cap_seconds: float = 6 * 3600,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
     max_outer_iterations: int = 10_000,
@@ -58,8 +56,6 @@ def build_release_pr_monitor(
         adapter=adapter,
         gh=gh,
         monitor_config=MonitorConfig(
-            iter_cap=iter_cap,
-            wall_clock_cap_seconds=wall_clock_cap_seconds,
             auto_merge=False,  # the point of this whole module
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,
@@ -81,8 +77,6 @@ def build_feature_pr_monitor(
     gh: GitHubClient,
     worktrees_root: Path,
     artifacts_root: Path | None = None,
-    iter_cap: int = 10,
-    wall_clock_cap_seconds: float = 6 * 3600,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
     max_outer_iterations: int = 10_000,
@@ -97,8 +91,6 @@ def build_feature_pr_monitor(
         adapter=adapter,
         gh=gh,
         monitor_config=MonitorConfig(
-            iter_cap=iter_cap,
-            wall_clock_cap_seconds=wall_clock_cap_seconds,
             auto_merge=True,
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,

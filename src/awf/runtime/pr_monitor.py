@@ -15,8 +15,9 @@ Design notes:
   things to do. The runner calls it once, acts, then calls it again. This
   keeps the loop simple and the decision table testable.
 * **Iteration accounting is the runner's problem, not ours**. ``decide``
-  just inspects ``state.iter_count`` against ``config.iter_cap``; bumping
-  the counter happens in the runner after an action executes.
+  ignores ``state.iter_count`` entirely — the counter exists for
+  structured-log context, not as a terminal gate. Bumping happens in
+  the runner after an action executes.
 * **Thread dedup is the caller's problem**. ``decide`` returns a
   ``batch`` of threads on ``AddressComments`` consisting *only* of threads
   whose IDs are absent from ``state.threads_addressed_ids``. If every
@@ -168,10 +169,16 @@ class MonitorState:
 
 @dataclass(frozen=True)
 class MonitorConfig:
-    """Caps + intervals — knobs exposed for policy without changing the logic."""
+    """Intervals + policy knobs — no iteration or wall-clock budget caps.
 
-    iter_cap: int = 10
-    wall_clock_cap_seconds: float = 6 * 3600  # 6 hours
+    Earlier versions carried ``iter_cap=10`` and
+    ``wall_clock_cap_seconds=6*3600``; both were terminal abort
+    conditions. In practice the cap fired on legitimate PRs with heavy
+    bot review (5 reviewers × N cycles each > 10 iterations), stranding
+    green-CI PRs behind an Abort. Policy now: the monitor drives every
+    PR to ``Merge`` / ``NotifyHuman`` no matter the volume; the only
+    terminal NotifyHuman paths are branch-protection and human-defer."""
+
     auto_merge: bool = True  # False = release-PR variant
     # Only used by the RUNNER, not decide(); listed here so the full config
     # travels in one object.
@@ -184,10 +191,12 @@ class MonitorConfig:
 
 class AbortReason(StrEnum):
     """Reason codes for why the monitor gave up. Propagate into
-    ``Workspace.failure_reason``-style fields so operators can triage."""
+    ``Workspace.failure_reason``-style fields so operators can triage.
 
-    iter_cap_reached = "iter_cap_reached"
-    wall_clock_cap_reached = "wall_clock_cap_reached"
+    No ``iter_cap_reached`` / ``wall_clock_cap_reached`` — volume is
+    not a terminal condition; bots can leave thousands of review
+    cycles and the monitor must keep servicing the PR."""
+
     pr_closed_externally = "pr_closed_externally"
     no_progress_on_comments = "no_progress_on_comments"
     merge_conflict_unresolvable = "merge_conflict_unresolvable"
@@ -295,21 +304,26 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     Gate order matters:
 
     0.  Terminal states: merged → ShortCircuitCompleted, closed → Abort.
-    1.  Budget: iter_cap / wall_clock_cap → Abort.
-    2.  Unresolved comments (inline + review) → AddressComments.
+    1.  Unresolved comments (inline + review) → AddressComments.
         The batch only contains threads/comments we HAVEN'T already
         addressed (``state.threads_addressed_ids``). If every comment
         is already in that dict we fall through — the runner is
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
-    3.  CI FAILURE → ReportCiFailure.
-    4.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
+    2.  CI FAILURE → ReportCiFailure.
+    3.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
-    5.  Base behind → SyncBase.
-    6.  Mergeable == CONFLICTING after addressing everything → Abort (the
-        coding CLI can't fix a structural conflict it doesn't know about).
+    4.  Base behind → SyncBase.
+    5.  mergeStateStatus BLOCKED / HAS_HOOKS → NotifyHuman.
+    6.  Human-defer on unresolved threads → NotifyHuman.
     7.  All green → Merge (or NotifyHuman if auto_merge=False).
+
+    There is NO iteration or wall-clock budget gate — volume is not a
+    terminal condition. A PR that attracts 500 comment cycles is fine
+    as long as the monitor keeps making progress; the only way to exit
+    is Merge, ShortCircuitCompleted, Abort(pr_closed_externally), or
+    NotifyHuman.
     """
 
     # 0. Terminal upstream states short-circuit everything.
@@ -318,14 +332,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if status.closed:
         return Abort(reason=AbortReason.pr_closed_externally)
 
-    # 1. Budget checks — consume NO iterations beyond this point, so it's
-    # safe to fire every loop.
-    if state.iter_count >= config.iter_cap:
-        return Abort(reason=AbortReason.iter_cap_reached)
-    if time.monotonic() - state.started_at >= config.wall_clock_cap_seconds:
-        return Abort(reason=AbortReason.wall_clock_cap_reached)
-
-    # 2. Unresolved comments, filtered to those we haven't handled yet.
+    # 1. Unresolved comments, filtered to those we haven't handled yet.
     new_threads = tuple(
         t
         for t in status.unresolved_inline_threads
@@ -339,7 +346,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
 
-    # 3. CI failures.
+    # 2. CI failures.
     if status.check_state == CheckState.FAILURE:
         if not status.ci_failures:
             # Failure reported by GraphQL but no per-check log available.
@@ -349,7 +356,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
             return ReportCiFailure(failures=())
         return ReportCiFailure(failures=status.ci_failures)
 
-    # 4. CI still running, or GitHub is still computing state → passive wait.
+    # 3. CI still running, or GitHub is still computing state → passive wait.
     if status.check_state == CheckState.PENDING:
         return WaitForCI(reason="pending_checks")
     if (
@@ -358,7 +365,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return WaitForCI(reason="unknown_mergeable_state")
 
-    # 5. Base behind OR hard conflict → integrate base into head. Three
+    # 4. Base behind OR hard conflict → integrate base into head. Three
     # signals route here:
     #   * local rev-list says base has advanced
     #   * GitHub's mergeStateStatus == BEHIND
@@ -366,9 +373,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     #     server-side; SyncBase's ``git merge`` path reproduces it
     #     locally and invokes the coding CLI with a conflict-resolve
     #     prompt — the CLI's fix commit + push lands a CLEAN state on
-    #     the next poll)
-    # If the CLI can't resolve after repeated attempts, iter_cap aborts
-    # — no dedicated DIRTY abort path.
+    #     the next poll). If the CLI can't resolve after repeated
+    #     attempts, the monitor keeps re-trying indefinitely — the
+    #     operator must close / rebase the PR to break the loop.
     #
     # This was the PR #335 / #336 bug: the local count was stale
     # (worktree hadn't fetched origin/<base> since initial checkout) and
@@ -380,13 +387,13 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return SyncBase()
 
-    # 6. Legacy ``mergeable == CONFLICTING`` without the richer
+    # Legacy ``mergeable == CONFLICTING`` without the richer
     # mergeStateStatus signal — same treatment as DIRTY: let SyncBase
     # attempt to reproduce + resolve.
     if status.mergeable == MergeableState.CONFLICTING:
         return SyncBase()
 
-    # 7. Branch protection / required-review blocker → hand off to human
+    # 5. Branch protection / required-review blocker → hand off to human
     # regardless of auto_merge setting. Monitor can't bypass branch
     # protection; the only useful action is to tell the maintainer the
     # PR is otherwise ready.
@@ -396,7 +403,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return NotifyHuman()
 
-    # 7.5. Deferred HUMAN feedback still unresolved on GitHub → block
+    # 6. Deferred HUMAN feedback still unresolved on GitHub → block
     # auto-merge. Deferred BOT feedback does not block.
     #
     # "Defer" means the coding CLI decided a reviewer comment needs
@@ -421,7 +428,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if has_human_defer:
         return NotifyHuman()
 
-    # 8. All green — terminal success action.
+    # 7. All green — terminal success action.
     if config.auto_merge:
         return Merge()
     return NotifyHuman()

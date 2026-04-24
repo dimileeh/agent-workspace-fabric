@@ -182,7 +182,6 @@ def make_runner(
     sleep_fn: RecordedSleep,
     worktrees_root: Path,
     auto_merge: bool = True,
-    iter_cap: int = 10,
     artifacts_root: Path | None = None,
 ) -> PullRequestMonitorRunner:
     kwargs: dict = {
@@ -191,7 +190,6 @@ def make_runner(
         "adapter": adapter,
         "gh": GitHubClient(cmd),
         "monitor_config": MonitorConfig(
-            iter_cap=iter_cap,
             auto_merge=auto_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
