@@ -339,6 +339,5 @@ class TestMonitorActionLogging:
         # [False] and the test would fail — which is the regression we
         # guard against.
         assert saw_merge_log_before_call == [True], (
-            "expected the Merge monitor.action log to be emitted before "
-            "`gh pr merge` was invoked"
+            "expected the Merge monitor.action log to be emitted before `gh pr merge` was invoked"
         )

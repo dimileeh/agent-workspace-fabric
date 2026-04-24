@@ -412,12 +412,10 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # fires. Review feedback on PR #2 (CodeRabbit, Major): "Deferred
     # feedback still disappears from the merge gate".
     has_human_defer = any(
-        state.threads_addressed_ids.get(t.thread_id) == "defer"
-        and not _is_bot_author(t.author)
+        state.threads_addressed_ids.get(t.thread_id) == "defer" and not _is_bot_author(t.author)
         for t in status.unresolved_inline_threads
     ) or any(
-        state.threads_addressed_ids.get(c.comment_id) == "defer"
-        and not _is_bot_author(c.author)
+        state.threads_addressed_ids.get(c.comment_id) == "defer" and not _is_bot_author(c.author)
         for c in status.unresolved_review_comments
     )
     if has_human_defer:
