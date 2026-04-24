@@ -28,6 +28,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from functools import partial
 from pathlib import Path
 
 import typer
@@ -61,21 +62,32 @@ class WatchdogConfig:
 
     ``poll_seconds`` controls how often the loop wakes up. 300s is a
     reasonable default — long enough that we don't burn gh API quota,
-    short enough that a dead monitor gets re-attached within minutes."""
+    short enough that a dead monitor gets re-attached within minutes.
+
+    ``gh_pr_limit`` caps the ``gh pr list`` page size per repo. 200 is
+    comfortably above any realistic open-PR count for the three
+    AWF-managed repos, but raise it if a repo ever holds more open
+    ``awf/`` PRs than this — otherwise stranded PRs past the cap are
+    silently skipped."""
 
     work_dir: Path
     repos: list[str] = field(default_factory=lambda: list(_DEFAULT_REPOS))
     agent: str = "claude_code"
     poll_seconds: int = 300
+    gh_pr_limit: int = 200
 
 
 # ── Scan primitives — pure functions taking injectable seams ───────────────
 
 
-def _default_gh_lister(repo: str) -> str:
+def _default_gh_lister(repo: str, *, limit: int = 200) -> str:
     """Real implementation: shell out to ``gh pr list``. Returns the
     raw JSON string from gh's stdout. Raises ``subprocess.CalledProcessError``
-    on non-zero exit (callers catch + continue)."""
+    on non-zero exit (callers catch + continue).
+
+    ``limit`` maps directly to ``gh pr list --limit``. The watchdog
+    binds this via ``functools.partial`` from ``WatchdogConfig.gh_pr_limit``
+    so operators can raise it if a repo ever exceeds the default."""
     result = subprocess.run(
         [
             "gh",
@@ -90,7 +102,7 @@ def _default_gh_lister(repo: str) -> str:
             "--json",
             "number,headRefName,baseRefName",
             "--limit",
-            "200",
+            str(limit),
         ],
         capture_output=True,
         text=True,
@@ -319,6 +331,11 @@ def start(
         "--agent",
         help="Coding CLI the attach script passes to run_awf.py.",
     ),
+    gh_pr_limit: int = typer.Option(
+        200,
+        "--gh-pr-limit",
+        help="Max PRs fetched per repo via 'gh pr list --limit'. Raise if any repo has >200 open awf/ PRs.",
+    ),
 ) -> None:
     """Run the watchdog loop (blocks forever until SIGTERM/SIGINT)."""
     config = WatchdogConfig(
@@ -326,10 +343,11 @@ def start(
         repos=list(repo) if repo else list(_DEFAULT_REPOS),
         agent=agent,
         poll_seconds=poll_seconds,
+        gh_pr_limit=gh_pr_limit,
     )
     _run_loop(
         config=config,
-        gh_lister=_default_gh_lister,
+        gh_lister=partial(_default_gh_lister, limit=config.gh_pr_limit),
         process_lister=_default_process_lister,
         spawn_attach=_default_spawn_attach,
     )
