@@ -23,5 +23,7 @@ class ClaudeCodeAdapter(AgentAdapter):
         args = ["claude", "--dangerously-skip-permissions"]
         if model:
             args += ["--model", model]
+        if self._default_effort:
+            args += ["--effort", self._default_effort]
         args += ["-p", prompt]
         return args

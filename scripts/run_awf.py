@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 # Adapter registry side-effect import (populates get_adapter).
 import awf.adapters.registry  # noqa: F401
 from awf.adapters.base import AgentAdapter
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
@@ -67,10 +68,8 @@ from awf.runtime.validation import ValidationRunner
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TEMPLATE = _REPO_ROOT / "docker" / "compose" / "workspace.base.yml.j2"
 
-# Empty defaults → let each CLI read its own ~/.<cli>/config for model choice.
-# This avoids shipping a model name that's wrong for one account type (e.g. gpt-5.1
-# is not available on ChatGPT-account Codex, which uses gpt-5.4).
-_DEFAULT_MODELS: dict[AgentRuntime, str] = {}
+# Central defaults used for every AWF-spawned agent CLI.
+_DEFAULT_AGENT_DEFAULTS = DEFAULT_AGENT_DEFAULTS
 
 
 @dataclass(frozen=True)
@@ -639,7 +638,7 @@ async def _run_task(
         config=ExecutorConfig(
             worktrees_root=work_dir / "git" / "worktrees",
             compose_projects_root=work_dir / "compose" / "compose",
-            default_models=_DEFAULT_MODELS,
+            agent_defaults=_DEFAULT_AGENT_DEFAULTS,
         ),
         pr_monitor_factory=_monitor_factory,
     )
@@ -832,7 +831,11 @@ async def _run_sync_release_pr(
     from awf.adapters.base import get_adapter
 
     agent_runtime = AgentRuntime(cfg.agent)
-    adapter = get_adapter(agent_runtime, runner=runner, default_model=None)
+    adapter = get_adapter(
+        agent_runtime,
+        runner=runner,
+        defaults=_DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+    )
     gh = GitHubClient(runner)
     monitor = build_release_pr_monitor(
         session_factory=session_factory,
@@ -1049,7 +1052,11 @@ async def _run_sync_feature_pr(
     from awf.adapters.base import get_adapter
 
     agent_runtime = AgentRuntime(cfg.agent)
-    adapter = get_adapter(agent_runtime, runner=runner, default_model=None)
+    adapter = get_adapter(
+        agent_runtime,
+        runner=runner,
+        defaults=_DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+    )
     gh = GitHubClient(runner)
     factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
     monitor = factory(

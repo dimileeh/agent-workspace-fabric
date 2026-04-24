@@ -82,6 +82,14 @@ class AgentRunError(Exception):
         )
 
 
+@dataclass(frozen=True)
+class AgentDefaults:
+    """Default model and reasoning/thinking policy for one agent CLI."""
+
+    model: str
+    effort: str | None = None
+
+
 class AgentAdapter(ABC):
     """Shared scaffolding for coding-CLI adapters."""
 
@@ -90,9 +98,11 @@ class AgentAdapter(ABC):
         *,
         runner: AsyncCommandRunner,
         default_model: str | None = None,
+        default_effort: str | None = None,
     ) -> None:
         self._runner = runner
         self._default_model = default_model
+        self._default_effort = default_effort
 
     @property
     @abstractmethod
@@ -148,6 +158,7 @@ class AgentAdapter(ABC):
             agent=self.name.value,
             compose_project=compose_project,
             model=model or self._default_model,
+            effort=self._default_effort,
         )
         # Close stdin explicitly. Some CLIs (Codex in particular) read
         # "additional input" from stdin after argv parsing; if AWF is
@@ -196,6 +207,8 @@ def get_adapter(
     *,
     runner: AsyncCommandRunner,
     default_model: str | None = None,
+    default_effort: str | None = None,
+    defaults: AgentDefaults | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime.
 
@@ -203,4 +216,11 @@ def get_adapter(
     subclass forgot to import. Tests verify the registry is populated.
     """
     cls = _REGISTRY[runtime]
-    return cls(runner=runner, default_model=default_model)
+    if defaults is not None:
+        default_model = defaults.model
+        default_effort = defaults.effort
+    return cls(
+        runner=runner,
+        default_model=default_model,
+        default_effort=default_effort,
+    )

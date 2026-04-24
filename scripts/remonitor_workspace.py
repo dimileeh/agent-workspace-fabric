@@ -35,6 +35,7 @@ import awf.adapters.claude_code  # noqa: E402, F401
 import awf.adapters.codex  # noqa: E402, F401
 import awf.adapters.gemini  # noqa: E402, F401
 from awf.adapters.base import get_adapter  # noqa: E402
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS  # noqa: E402
 from awf.common.commands import AsyncioSubprocessRunner  # noqa: E402
 from awf.common.github_client import GitHubClient  # noqa: E402
 from awf.common.ids import new_event_id  # noqa: E402
@@ -120,7 +121,11 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
         return 2
 
     runner = AsyncioSubprocessRunner()
-    adapter = get_adapter(agent_runtime, runner=runner, default_model=None)
+    adapter = get_adapter(
+        agent_runtime,
+        runner=runner,
+        defaults=DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+    )
     gh = GitHubClient(runner)
     monitor = build_feature_pr_monitor(
         session_factory=factory,

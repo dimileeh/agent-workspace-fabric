@@ -16,14 +16,15 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.base import AgentAdapter, AgentRunError, get_adapter
+from awf.adapters.base import AgentAdapter, AgentDefaults, AgentRunError, get_adapter
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
 from awf.common.commands import AsyncCommandRunner
 from awf.common.logging import get_logger
 from awf.control.validation_fix_cycle import (
@@ -65,8 +66,11 @@ class ExecutorConfig:
     compose_projects_root: Path
     """Where per-workspace compose.yml was rendered by the Provisioner."""
 
-    default_models: dict[AgentRuntime, str]
-    """Default LLM model to pass each adapter when the request doesn't set one."""
+    default_models: Mapping[AgentRuntime, str] | None = None
+    """Legacy model-only overrides. Prefer ``agent_defaults`` for new code."""
+
+    agent_defaults: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS
+    """Default model and effort policy for each agent runtime."""
 
     max_validation_fix_passes: int = 5
     """Maximum fix attempts on validation failure. After the initial agent
@@ -134,8 +138,9 @@ class WorkspaceExecutor:
         # ── Step 1: agent CLI runs the task inside the container ────────────
         try:
             agent = AgentRuntime(ws.agent)
-            default_model = self._config.default_models.get(agent)
-            adapter = get_adapter(agent, runner=self._runner, default_model=default_model)
+            defaults = self._defaults_for(agent)
+            default_model = defaults.model if defaults else None
+            adapter = get_adapter(agent, runner=self._runner, defaults=defaults)
             profile = _profile_for_workspace(ws, worktree_path=worktree_path)
             setup_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
@@ -705,6 +710,13 @@ class WorkspaceExecutor:
         )
 
     # ── Internals ──────────────────────────────────────────────────────────
+
+    def _defaults_for(self, agent: AgentRuntime) -> AgentDefaults | None:
+        defaults = defaults_with_model_overrides(
+            self._config.default_models,
+            base=self._config.agent_defaults,
+        )
+        return defaults.get(agent)
 
     async def _claim_ready(self, workspace_id: str) -> Workspace | None:
         async with self._session_factory() as session:
