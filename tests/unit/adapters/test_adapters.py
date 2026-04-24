@@ -103,6 +103,19 @@ class TestCodexAdapter:
         assert exc.value.result.returncode == 2
         assert "codex: auth required" in exc.value.result.stderr
 
+    @pytest.mark.unit
+    async def test_closes_stdin_for_noninteractive_exec(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        assert runner.calls[0].input_bytes == b""
+
 
 class TestClaudeCodeAdapter:
     @pytest.mark.unit

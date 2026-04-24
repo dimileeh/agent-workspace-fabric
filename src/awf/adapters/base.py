@@ -149,7 +149,11 @@ class AgentAdapter(ABC):
             compose_project=compose_project,
             model=model or self._default_model,
         )
-        result = await self._runner.run(args)
+        # Close stdin explicitly. Some CLIs (Codex in particular) read
+        # "additional input" from stdin after argv parsing; if AWF is
+        # launched from an interactive terminal, inheriting that open
+        # stream makes the agent wait forever for EOF.
+        result = await self._runner.run(args, input_bytes=b"")
 
         if not result.ok:
             raise AgentRunError(agent=self.name, result=result)
