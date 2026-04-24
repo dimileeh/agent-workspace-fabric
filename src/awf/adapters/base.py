@@ -21,6 +21,22 @@ from awf.db.enums import AgentRuntime
 _log = get_logger(__name__)
 
 
+_AUTH_FAILURE_MARKERS = (
+    "not logged in",
+    "please run /login",
+    "please set an auth method",
+    "manual authorization is required",
+    "could not authenticate",
+    "error authenticating",
+    "invalid_grant",
+    "anthropic_api_key",
+    "gemini_api_key",
+    "google_api_key",
+    "google_genai_use_vertexai",
+    "google_genai_use_gca",
+)
+
+
 # Prepended to every agent prompt. Encodes contract invariants the
 # agent must honour inside an AWF workspace. Kept short — most agent
 # CLIs accept prompts as command-line args and some have length caps.
@@ -167,7 +183,11 @@ class AgentAdapter(ABC):
         result = await self._runner.run(args, input_bytes=b"")
 
         if not result.ok:
-            raise AgentRunError(agent=self.name, result=result)
+            raise AgentRunError(
+                agent=self.name,
+                result=result,
+                reason_code=_failure_reason_for_result(result),
+            )
 
         _log.info(
             "agent.run.ok",
@@ -224,3 +244,10 @@ def get_adapter(
         default_model=default_model,
         default_effort=default_effort,
     )
+
+
+def _failure_reason_for_result(result: CommandResult) -> str:
+    output = f"{result.stderr}\n{result.stdout}".lower()
+    if any(marker in output for marker in _AUTH_FAILURE_MARKERS):
+        return "AGENT_AUTH_FAILED"
+    return "AGENT_CLI_FAILED"

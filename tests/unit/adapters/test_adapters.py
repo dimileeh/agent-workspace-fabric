@@ -150,7 +150,22 @@ class TestClaudeCodeAdapter:
         assert args[-1].endswith(_PROMPT)
         assert "AWF workspace contract" in args[-1]
         assert "--model" in args and "sonnet" in args
-        assert "--effort" in args and "xhigh" in args
+        assert "--effort" in args and "max" in args
+
+    @pytest.mark.unit
+    async def test_auth_failure_gets_structured_reason_code(self) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="Not logged in · Please run /login")
+        adapter = ClaudeCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+            )
+
+        assert exc.value.reason_code == "AGENT_AUTH_FAILED"
 
 
 class TestGeminiAdapter:
@@ -168,7 +183,11 @@ class TestGeminiAdapter:
         _assert_docker_exec_prefix(args)
 
         gemini_start = args.index("gemini")
-        assert args[gemini_start : gemini_start + 2] == ["gemini", "--yolo"]
+        assert args[gemini_start : gemini_start + 3] == [
+            "gemini",
+            "--skip-trust",
+            "--yolo",
+        ]
         assert args[-2] == "-p"
         # AWF prepends a contract preamble ("do not switch branches")
         # before the user-supplied prompt; the last argv element is
@@ -198,6 +217,7 @@ class TestGeminiAdapter:
         script = args[sh_start + 2]
         assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in script
         assert '"thinkingLevel":"HIGH"' in script
+        assert "GEMINI_CLI_TRUST_WORKSPACE" in script
         assert "exec gemini" in script
         assert "-m" in args and "gemini-3.1-pro" in args
         assert args[-1].endswith(_PROMPT)

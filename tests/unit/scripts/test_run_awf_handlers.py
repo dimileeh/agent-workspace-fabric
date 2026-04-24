@@ -975,6 +975,7 @@ class TestBuildAuthMounts:
         # .claude.json exists as a file
         (tmp_path / ".claude.json").write_text("{}")
         (tmp_path / ".config" / "gh").mkdir(parents=True)
+        (tmp_path / ".config" / "gcloud").mkdir(parents=True)
         (tmp_path / ".gitconfig").write_text("")
         # .gemini and .ssh are missing on purpose
         mounts = run_awf._build_auth_mounts(tmp_path)
@@ -983,6 +984,7 @@ class TestBuildAuthMounts:
         assert "/home/agent/.claude" in targets
         assert "/home/agent/.claude.json" in targets
         assert "/home/agent/.config/gh" in targets
+        assert "/home/agent/.config/gcloud" in targets
         assert "/home/agent/.gitconfig" in targets
         assert "/home/agent/.gemini" not in targets
         assert "/home/agent/.ssh" not in targets
@@ -998,6 +1000,7 @@ class TestBuildAuthMounts:
             (tmp_path / d).mkdir()
         (tmp_path / ".claude.json").write_text("{}")
         (tmp_path / ".config" / "gh").mkdir(parents=True)
+        (tmp_path / ".config" / "gcloud").mkdir(parents=True)
         (tmp_path / ".gitconfig").write_text("")
         (tmp_path / ".ssh").mkdir()
 
@@ -1007,8 +1010,23 @@ class TestBuildAuthMounts:
         assert by_target["/home/agent/.claude"].mode == "rw"
         assert by_target["/home/agent/.gemini"].mode == "rw"
         assert by_target["/home/agent/.config/gh"].mode == "ro"
+        assert by_target["/home/agent/.config/gcloud"].mode == "ro"
         assert by_target["/home/agent/.gitconfig"].mode == "ro"
         assert by_target["/home/agent/.ssh"].mode == "ro"
+
+    @pytest.mark.unit
+    def test_google_application_credentials_file_is_mounted(self, tmp_path: Path) -> None:
+        credentials = tmp_path / "svc.json"
+        credentials.write_text("{}")
+
+        mounts = run_awf._build_auth_mounts(
+            tmp_path,
+            host_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials)},
+        )
+
+        by_target = {m.target: m for m in mounts}
+        assert by_target[str(credentials)].source == str(credentials)
+        assert by_target[str(credentials)].mode == "ro"
 
     @pytest.mark.unit
     def test_missing_home_returns_empty(self, tmp_path: Path) -> None:
@@ -1017,3 +1035,29 @@ class TestBuildAuthMounts:
         empty.mkdir()
         mounts = run_awf._build_auth_mounts(empty)
         assert mounts == []
+
+
+class TestAgentEnvironmentWithHostAuth:
+    @pytest.mark.unit
+    def test_passes_known_provider_env_as_compose_placeholders(self) -> None:
+        env = run_awf._agent_environment_with_host_auth(
+            (("PYTHONUNBUFFERED", "1"),),
+            host_env={
+                "ANTHROPIC_API_KEY": "secret-anthropic",
+                "GEMINI_API_KEY": "secret-gemini",
+            },
+        )
+
+        assert ("PYTHONUNBUFFERED", "1") in env
+        assert ("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}") in env
+        assert ("GEMINI_API_KEY", "${GEMINI_API_KEY}") in env
+        assert ("ANTHROPIC_API_KEY", "secret-anthropic") not in env
+
+    @pytest.mark.unit
+    def test_profile_env_wins_over_host_passthrough(self) -> None:
+        env = run_awf._agent_environment_with_host_auth(
+            (("GEMINI_API_KEY", "profile-value"),),
+            host_env={"GEMINI_API_KEY": "host-secret"},
+        )
+
+        assert env == (("GEMINI_API_KEY", "profile-value"),)

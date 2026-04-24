@@ -20,7 +20,7 @@ class GeminiAdapter(AgentAdapter):
         return AgentRuntime.gemini
 
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
-        args = ["--yolo"]
+        args = ["--skip-trust", "--yolo"]
         if model:
             args += ["-m", model]
         args += ["-p", prompt]
@@ -35,6 +35,7 @@ class GeminiAdapter(AgentAdapter):
             f"{json.dumps(settings, separators=(',', ':'))}\n"
             "AWF_GEMINI_SETTINGS\n"
             'export GEMINI_CLI_SYSTEM_SETTINGS_PATH="$settings_path"\n'
+            'export GEMINI_CLI_TRUST_WORKSPACE="${GEMINI_CLI_TRUST_WORKSPACE:-true}"\n'
             'exec gemini "$@"\n'
         )
         return ["sh", "-lc", script, "awf-gemini", *args]

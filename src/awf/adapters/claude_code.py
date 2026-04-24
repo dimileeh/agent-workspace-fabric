@@ -24,6 +24,19 @@ class ClaudeCodeAdapter(AgentAdapter):
         if model:
             args += ["--model", model]
         if self._default_effort:
-            args += ["--effort", self._default_effort]
+            args += ["--effort", _claude_effort_for_awf_effort(self._default_effort)]
         args += ["-p", prompt]
         return args
+
+
+def _claude_effort_for_awf_effort(effort: str) -> str:
+    """Map AWF's abstract effort policy to Claude Code's concrete flag.
+
+    Recent Claude Code builds accept ``xhigh`` and ``max``; older builds only
+    accept ``max`` as their top effort. Use ``max`` for AWF's ``xhigh`` so
+    dogfood workspaces keep running across both CLI generations.
+    """
+    normalized = effort.lower()
+    if normalized in {"xhigh", "max"}:
+        return "max"
+    return normalized

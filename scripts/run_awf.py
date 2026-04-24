@@ -33,6 +33,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -67,6 +68,28 @@ from awf.runtime.validation import ValidationRunner
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TEMPLATE = _REPO_ROOT / "docker" / "compose" / "workspace.base.yml.j2"
+
+_AGENT_AUTH_ENV_VARS = (
+    # Claude Code portable/API-key auth. Host claude.ai OAuth can live in
+    # macOS Keychain, which is not available inside a Linux container.
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    # Gemini CLI headless auth.
+    "GEMINI_API_KEY",
+    "GEMINI_API_KEY_AUTH_MECHANISM",
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GOOGLE_GENAI_USE_GCA",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
+)
 
 # Central defaults used for every AWF-spawned agent CLI.
 _DEFAULT_AGENT_DEFAULTS = DEFAULT_AGENT_DEFAULTS
@@ -186,7 +209,10 @@ def _with_legacy_aira_postgres_if_needed(
     )
 
 
-def _build_auth_mounts(host_home: Path) -> list[AuthMount]:
+def _build_auth_mounts(
+    host_home: Path,
+    host_env: Mapping[str, str] | None = None,
+) -> list[AuthMount]:
     """Map host CLI credential directories to the agent user's home.
 
     The container user is ``agent`` with home ``/home/agent`` (UID 1000,
@@ -214,14 +240,55 @@ def _build_auth_mounts(host_home: Path) -> list[AuthMount]:
     ]
     ro_mounts = [
         (host_home / ".config" / "gh", f"{container_home}/.config/gh", "ro"),
+        # Gemini Vertex / ADC flows need gcloud state. This is read-only so
+        # workspaces cannot mutate the operator's local gcloud credentials.
+        (host_home / ".config" / "gcloud", f"{container_home}/.config/gcloud", "ro"),
         (host_home / ".gitconfig", f"{container_home}/.gitconfig", "ro"),
         (host_home / ".ssh", f"{container_home}/.ssh", "ro"),
     ]
-    return [
+    mounts = [
         AuthMount(source=str(src), target=tgt, mode=mode)
         for src, tgt, mode in [*rw_mounts, *ro_mounts]
         if src.exists()
     ]
+    source_env = os.environ if host_env is None else host_env
+    google_credentials = source_env.get("GOOGLE_APPLICATION_CREDENTIALS")
+    if google_credentials:
+        credentials_path = Path(google_credentials).expanduser()
+        if credentials_path.exists():
+            mounts.append(
+                AuthMount(
+                    source=str(credentials_path),
+                    target=str(credentials_path),
+                    mode="ro",
+                )
+            )
+    return mounts
+
+
+def _agent_environment_with_host_auth(
+    base_environment: tuple[tuple[str, str], ...],
+    host_env: Mapping[str, str] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Append provider auth env pass-through without writing secrets to disk.
+
+    Values are rendered as Compose interpolation placeholders like
+    ``${GEMINI_API_KEY}``, so the generated compose.yml records only the
+    variable names. Docker Compose substitutes the real values from the
+    ``run_awf.py`` process environment at ``compose up`` time.
+    """
+    source_env = os.environ if host_env is None else host_env
+    merged: list[tuple[str, str]] = list(base_environment)
+    existing = {key for key, _ in merged}
+    for name in _AGENT_AUTH_ENV_VARS:
+        if name not in existing and source_env.get(name):
+            merged.append((name, f"${{{name}}}"))
+            existing.add(name)
+    return tuple(merged)
+
+
+def _profile_agent_environment(profile: WorkspaceProfile) -> tuple[tuple[str, str], ...]:
+    return _agent_environment_with_host_auth(profile_agent_environment(profile))
 
 
 async def _materialize_companion(
@@ -592,7 +659,7 @@ async def _run_task(
         # aira-backend requires the ``vector`` Postgres extension for embeddings;
         # plain postgres:16-alpine doesn't include it. Use the pgvector image
         # everywhere — harmless extra KB for tasks that don't need the extension.
-        agent_environment=profile_agent_environment(profile),
+        agent_environment=_profile_agent_environment(profile),
         docker_mode=profile.docker.mode.value,
         services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
@@ -619,7 +686,7 @@ async def _run_task(
     # the ``monitoring_pr`` stage (comments, CI, base sync, merge).
     gh = GitHubClient(runner)
 
-    def _monitor_factory(adapter: AgentAdapter):
+    def _monitor_factory(adapter: AgentAdapter) -> Any:
         return build_feature_pr_monitor(
             session_factory=session_factory,
             runner=runner,
@@ -797,7 +864,7 @@ async def _run_sync_release_pr(
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
-        agent_environment=profile_agent_environment(profile),
+        agent_environment=_profile_agent_environment(profile),
         docker_mode=profile.docker.mode.value,
         services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
@@ -1018,7 +1085,7 @@ async def _run_sync_feature_pr(
     spec = WorkspaceComposeSpec(
         workspace_id=ws_id,
         worktree_host_path=layout.worktree_path,
-        agent_environment=profile_agent_environment(profile),
+        agent_environment=_profile_agent_environment(profile),
         docker_mode=profile.docker.mode.value,
         services=profile_services(profile),
         postgres_image="pgvector/pgvector:pg18",
