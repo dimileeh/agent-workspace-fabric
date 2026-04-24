@@ -222,11 +222,11 @@ A new task shape `task_kind: "monitor_release_pr"` that:
 The auto-merge flag is the only functional divergence; the rest of the
 code is shared.
 
-### 6. Iteration + time budgets
+### 6. Iteration + time accounting (no caps)
 
 - `iter` increments on `AddressComments`, `SyncBase`, `ReportCiFailure`. `WaitForCI` does NOT increment (it's passive).
-- `iter_cap` (default 10) — bounds runaway cost for contested PRs.
-- `wall_clock_cap` (default 6 h) — bounds abandoned PRs. A 5-hour CI queue shouldn't kill the monitor; a genuinely abandoned PR eventually should.
+- There is NO `iter_cap` or `wall_clock_cap`. The monitor drives each PR to `Merge` / `NotifyHuman` regardless of how many review cycles or how much wall-clock time it takes. `iter_count` stays in state for log context only.
+- If the monitor PROCESS dies, `awf-watchdog` re-attaches a new monitor to the PR — volume-driven death is handled externally.
 - `poll_interval` (default 60 s during CI waits, 30 s during the comment-settle window).
 
 ### 7. Auth
@@ -276,14 +276,14 @@ would land in "ready but not merged" terminal state.
    - CI `FAILURE` → `AddressComments(batch=[ci_failure_pseudo_thread])` or a dedicated `ReportCiFailure` action (TBD during implementation — depends on how cleanly CI-fix reuses the comment-fix code path)
    - PR `closed: true` → `Abort(pr_closed_externally)`
    - PR `merged: true` → short-circuit to `completed`, no further action
-   - `iter_count >= cap` → `Abort(iter_cap_reached)`
+   - High `iter_count` (e.g. 1000) still routes by the normal gates — NO abort on volume
    - Edge: `mergeable: UNKNOWN` + PENDING → `WaitForCI`
    - Release-PR variant: all gates green → `NotifyHuman` (never `Merge`)
 
-2. **Iteration + time accounting tests**:
+2. **Iteration accounting tests**:
    - `AddressComments`, `SyncBase` bump `iter`; `WaitForCI` does not.
-   - Hitting `iter_cap` yields `Abort(iter_cap_reached)`.
-   - Hitting `wall_clock_cap` yields `Abort(wall_clock_cap_reached)`.
+   - A high `iter_count` does NOT abort — volume isn't a terminal condition.
+   - A long wall-clock elapsed time does NOT abort either.
 
 3. **Thread-dedup tests** — `AddressComments` never re-queues a thread whose ID is in `threads_addressed_ids`.
 
@@ -305,7 +305,7 @@ would land in "ready but not merged" terminal state.
    - Crash-safe resume: start runner with `threads_addressed_ids = {t1: fix_committed}`; fake GH still shows t1 unresolved; runner does NOT re-invoke CLI for t1 (it'll just push + resolve).
    - CI failure → CLI fix → push → checks green → merge.
    - Base behind → `SyncBase` → push → merge.
-   - Iter cap reached → `Abort(iter_cap_reached)` with workspace state `failed`.
+   - High iter_count with green gates still merges (no budget abort).
    - PR closed externally → `Abort(pr_closed_externally)`.
 
 7. **Executor integration in `tests/integration/control/test_executor_monitor.py`**:
@@ -330,7 +330,7 @@ would land in "ready but not merged" terminal state.
 |---|---|
 | CLI makes cosmetic changes that don't actually address feedback → thread re-opens on next review | Iter cap + require a new HEAD SHA between `AddressComments` invocations; if the SHA didn't advance despite a "fix_committed" verdict, force an abort. |
 | GH token can't merge due to branch protection | Merge call fails → fall back to `NotifyHuman` behavior (post "ready to merge" comment, exit `completed`). Operator sees the PR flagged as ready and does the final click. Documented in README. |
-| Cost explosion from repeated CLI invocations | `iter_cap` + `wall_clock_cap` + existing per-workspace cost ceiling. |
+| Cost explosion from repeated CLI invocations | Covered at the coding-CLI / workspace layer (per-workspace cost ceiling, reviewer-bot rate limits). Monitor-level budget caps were removed after stranding PRs that attracted 5 bot reviewers; operator intervention (close PR) is the correct escape for a genuine runaway. |
 | CodeRabbit posts comments AFTER initial push during the settle window | `settle_interval` (30 s) in `fix_cycle` specifically to catch this. Worst case the burst arrives just after our push; next outer-loop iteration catches it. |
 | Thread-resolve mutation fails (transient) | Retry with exponential backoff; if the thread stays unresolved, next poll re-queues it under `AddressComments` — the CLI sees its own previous fix commit + the already-posted reply and just needs to retry the resolve. |
 | Two tasks' PRs against overlapping files conflict at merge time | Out of scope for this iteration (merge queue is Phase 2). For MVP, the second task's monitor hits `SyncBase` → `CONFLICTING`, escalates via `NotifyHuman`-style fallback. |
