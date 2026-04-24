@@ -1,14 +1,10 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING
 
 from pydantic import BaseModel
 
-from .models import DockerMode
-
-if TYPE_CHECKING:
-    from .models import WorkspaceProfile
+from .models import DockerMode, WorkspaceProfile
 
 
 class LintSeverity(StrEnum):
