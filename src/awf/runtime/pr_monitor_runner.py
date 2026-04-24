@@ -830,20 +830,43 @@ class PullRequestMonitorRunner:
         compose_file: Path,
     ) -> None:
         """Run ``docker compose down --remove-orphans --volumes`` for a
-        terminated workspace. Never raises."""
-        r = await self._deps.runner.run(
-            [
-                "docker",
-                "compose",
-                "--project-name",
-                compose_project,
-                "--file",
-                str(compose_file),
-                "down",
-                "--remove-orphans",
-                "--volumes",
-            ]
-        )
+        terminated workspace. Truly never raises.
+
+        The entire call is wrapped in a blanket ``except Exception``
+        because the failure modes here include ``FileNotFoundError``
+        (no ``docker`` on PATH — happens on dev laptops without the
+        daemon), ``asyncio.CancelledError`` during shutdown, and
+        transient I/O errors from the subprocess runner itself. None
+        of those are reasons to fail a workspace that already merged
+        its PR — the completion signal has already landed in the DB
+        before this method runs."""
+        try:
+            r = await self._deps.runner.run(
+                [
+                    "docker",
+                    "compose",
+                    "--project-name",
+                    compose_project,
+                    "--file",
+                    str(compose_file),
+                    "down",
+                    "--remove-orphans",
+                    "--volumes",
+                ]
+            )
+        except Exception as exc:
+            # docker binary missing, transient I/O, cancellation — any of
+            # these would otherwise propagate and crash the monitor
+            # runner. Log and swallow; the DB transition already
+            # completed.
+            _log.warning(
+                "monitor.compose_teardown_raised",
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                error=repr(exc)[:400],
+            )
+            return
+
         if r.ok:
             _log.info(
                 "monitor.compose_teardown_ok",
@@ -852,8 +875,7 @@ class PullRequestMonitorRunner:
             )
         else:
             # Compose may already be gone (operator tore it down
-            # manually, or an earlier teardown in a retry loop). Log
-            # but don't re-raise — the workspace IS completed.
+            # manually, or an earlier teardown in a retry loop).
             _log.warning(
                 "monitor.compose_teardown_failed",
                 workspace_id=workspace_id,

@@ -1828,6 +1828,169 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         )
 
     @pytest.mark.unit
+    async def test_short_circuit_completed_tears_down_compose(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """PR was merged elsewhere before the monitor started. The
+        ``ShortCircuitCompleted`` path completes the workspace — must
+        tear down too."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # fetch base
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="awf_ws_short",
+            compose_file=tmp_path / "compose.yml",
+        )
+        teardown_calls = [
+            c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
+        ]
+        assert len(teardown_calls) == 1
+        assert "awf_ws_short" in teardown_calls[0].args
+
+    @pytest.mark.unit
+    async def test_merge_blocked_notify_human_tears_down_compose(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """``Merge`` blocked by branch protection → fallback to
+        NotifyHuman → completes the workspace. Must tear down."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(
+            returncode=1, stderr="Pull request protected: approvals required"
+        )  # gh pr merge blocked
+        cmd.queue_result(returncode=0)  # post_comment (ready-to-merge)
+        cmd.queue_result(returncode=0)  # docker compose down
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="awf_ws_blocked",
+            compose_file=tmp_path / "compose.yml",
+        )
+        teardown_calls = [
+            c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
+        ]
+        assert len(teardown_calls) == 1
+        assert "awf_ws_blocked" in teardown_calls[0].args
+
+    @pytest.mark.unit
+    async def test_plain_notify_human_tears_down_compose(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """Release-PR-style monitor (``auto_merge=False``) posts a
+        ready-to-merge comment when gates green and completes — must
+        tear down too."""
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload())
+        cmd.queue_result(returncode=0)  # post_comment
+        cmd.queue_result(returncode=0)  # docker compose down
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            auto_merge=False,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="awf_ws_notify",
+            compose_file=tmp_path / "compose.yml",
+        )
+        teardown_calls = [
+            c for c in cmd.calls if c.args[:2] == ["docker", "compose"] and "down" in c.args
+        ]
+        assert len(teardown_calls) == 1
+        assert "awf_ws_notify" in teardown_calls[0].args
+
+    @pytest.mark.unit
+    async def test_teardown_raised_exception_swallowed(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """``docker compose down`` subprocess RAISING (not exiting
+        non-zero — raising) must not kill the monitor. Simulates
+        FileNotFoundError when docker isn't on PATH."""
+
+        class _RaisingRunner(FakeCommandRunner):
+            def __init__(self) -> None:
+                super().__init__()
+                self.teardown_seen = False
+
+            async def run(self, args, *, input_bytes=None, cwd=None):  # type: ignore[override]
+                if args[:2] == ["docker", "compose"] and "down" in args:
+                    self.teardown_seen = True
+                    raise FileNotFoundError("docker: command not found")
+                return await super().run(args, input_bytes=input_bytes, cwd=cwd)
+
+        cmd_raising = _RaisingRunner()
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd_raising.queue_result(returncode=0)
+        cmd_raising.queue_result(returncode=0, stdout="0\n")
+        cmd_raising.queue_result(returncode=0, stdout=_pr_payload())
+        cmd_raising.queue_result(returncode=0)  # gh pr merge
+        cmd_raising.queue_result(returncode=0, stdout="M\n")  # gh pr view
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd_raising,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        # Must NOT raise despite the teardown raising internally.
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="awf_ws_missing_docker",
+            compose_file=tmp_path / "compose.yml",
+        )
+        assert cmd_raising.teardown_seen
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+    @pytest.mark.unit
     async def test_teardown_failure_does_not_mask_completion(
         self,
         factory: async_sessionmaker[AsyncSession],
