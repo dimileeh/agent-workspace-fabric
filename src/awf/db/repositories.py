@@ -94,6 +94,26 @@ class WorkspaceRepository:
         stmt = select(Workspace).where(Workspace.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def list_events(
+        self,
+        *,
+        workspace_id: str | None = None,
+        limit: int = 50,
+    ) -> list[WorkspaceEvent]:
+        """Return events newest-first, optionally filtered by ``workspace_id``.
+
+        ``occurred_at`` is the canonical ordering key; ``id`` is the tiebreaker
+        so events recorded in the same transaction (identical server-side
+        default timestamp on SQLite) have a stable, deterministic order.
+        """
+        stmt = select(WorkspaceEvent)
+        if workspace_id is not None:
+            stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
+        stmt = stmt.order_by(WorkspaceEvent.occurred_at.desc(), WorkspaceEvent.id.desc()).limit(
+            limit
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
     async def list(self, *, limit: int = 50) -> list[Workspace]:
         stmt = select(Workspace).order_by(Workspace.created_at.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())

@@ -130,6 +130,40 @@ class WorkspaceResponse(BaseModel):
     updated_at: datetime
 
 
+class WorkspaceEventResponse(BaseModel):
+    """Single append-only audit event.
+
+    See docs/awf_prd_v2.2.md §14.1 — the shape matches the ``workspace_event``
+    entity: event id, workspace id, typed event + optional state transition,
+    structured reason code, free-form payload, occurrence timestamp.
+    """
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    event_type: str
+    old_state: str | None
+    new_state: str | None
+    reason_code: str | None
+    payload: dict[str, Any] | None
+    occurred_at: datetime
+
+
+class WorkspaceEventListResponse(BaseModel):
+    """Paginated envelope for ``GET /v1/events``.
+
+    The envelope follows the PRD-mandated ``items`` / ``next_cursor`` /
+    ``has_more`` shape (docs/awf_prd_v2.2.md §14.1 Pagination). Cursor
+    pagination isn't wired yet — this slice always returns
+    ``next_cursor=None`` and ``has_more=False``.
+    """
+
+    items: list[WorkspaceEventResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
 class WorkspaceAcceptedResponse(BaseModel):
     """202 Accepted payload for workspace creation.
 
