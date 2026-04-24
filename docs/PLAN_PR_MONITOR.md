@@ -109,6 +109,8 @@ while True:
         continue
 
     # All 5 gates green — merge.
+    # First, recheck a final quiet window. Do not auto-merge if a review bot
+    # says review was skipped or leaves a trigger-review checklist unresolved.
     gh_pr_merge(--squash --delete-branch)
     transition_workspace(completed)
     return
