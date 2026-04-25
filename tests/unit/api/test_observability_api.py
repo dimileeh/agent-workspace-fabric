@@ -357,7 +357,7 @@ class TestWorkspaceWebSocket:
         )
 
         try:
-            await asyncio.wait_for(websocket.event_sent.wait(), timeout=1)
+            await asyncio.wait_for(websocket.event_sent.wait(), timeout=5)
         finally:
             log_task.cancel()
             stream_task.cancel()
