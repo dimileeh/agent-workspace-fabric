@@ -91,11 +91,18 @@ class _ProcessResult:
 
 
 async def _run(args: list[str]) -> _ProcessResult:
-    proc = await asyncio.create_subprocess_exec(
-        *args,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        return _ProcessResult(
+            returncode=127,
+            stdout="",
+            stderr=f"{args[0]} executable is not available: {exc}",
+        )
     stdout, stderr = await proc.communicate()
     assert proc.returncode is not None
     return _ProcessResult(

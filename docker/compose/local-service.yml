@@ -1,7 +1,10 @@
 name: awf-local-service
 
 x-awf-service: &awf-service
-  image: ghcr.io/astral-sh/uv:python3.12-bookworm
+  build:
+    context: ../..
+    dockerfile: docker/control-plane.Dockerfile
+  image: awf-control-plane:local
   working_dir: /app
   volumes:
     - ../..:/app
@@ -14,12 +17,15 @@ x-awf-service: &awf-service
     AWF_API_HOST: 0.0.0.0
     AWF_API_PORT: "8000"
     AWF_API_BASE_URL: http://api:8000
+    AWF_API_TOKEN: ${AWF_API_TOKEN:-local-dev-token}
     AWF_DATABASE_URL: postgresql+asyncpg://awf:awf_dev@postgres:5432/awf
     AWF_DOCKER_HOST: unix:///var/run/docker.sock
     AWF_AGENT_RUNTIME_IMAGE: awf-agent-runtime:latest
     AWF_WORK_DIR: /awf-work
     AWF_WORKER_POLL_INTERVAL_SECONDS: "1.0"
     AWF_WORKER_MAX_CONCURRENT_PROVISIONS: "3"
+    UV_PROJECT_ENVIRONMENT: /tmp/awf-venv
+    UV_LINK_MODE: copy
 
 services:
   postgres:

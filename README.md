@@ -507,8 +507,11 @@ plane. The stack runs:
 - The AWF API service.
 - The AWF worker service.
 
-Both the API and worker containers mount `/var/run/docker.sock` so AWF can
-create and manage per-workspace Compose stacks on the host Docker daemon.
+The API, worker, and migration services use the local `awf-control-plane:local`
+image built from `docker/control-plane.Dockerfile`. It includes Python, `uv`,
+git/SSH tooling, the Docker CLI, and the Docker Compose plugin. Both the API and
+worker containers mount `/var/run/docker.sock` so AWF can create, inspect, and
+manage per-workspace Compose stacks on the host Docker daemon.
 
 Start from a clean checkout:
 
@@ -528,6 +531,10 @@ The service-mode default database URL is local Postgres
 (`postgresql+asyncpg://awf:...@localhost:5433/awf`). SQLite remains supported
 for tests and throwaway script runs, but the always-on service should run
 against Postgres.
+
+The local Compose stack defaults `AWF_API_TOKEN` to `local-dev-token`. Use the
+same value in the console `.env.local` file, or override it consistently in the
+shell before starting the stack.
 
 The AWF Postgres database is only the control-plane database. Project and
 workspace databases remain separate and profile-isolated; if a workspace
@@ -697,6 +704,7 @@ Key local service values:
 
 ```text
 AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf
+AWF_API_TOKEN=local-dev-token
 AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
 AWF_WORK_DIR=.awf
 AWF_GITHUB_TOKEN=
@@ -847,7 +855,15 @@ AWF includes a local Next.js console under `apps/console`. It talks to AWF
 through Next.js BFF routes, so `AWF_API_TOKEN` stays server-side and is never
 sent to browser JavaScript.
 
-Start the AWF API with a local token:
+Start the full local service stack, which sets `AWF_API_TOKEN=local-dev-token`
+by default:
+
+```bash
+docker compose -f docker/compose/local-service.yml up --build
+```
+
+For API-only throwaway development, start the AWF API with a matching local
+token:
 
 ```bash
 AWF_API_TOKEN=local-dev-token uv run --python 3.12 --extra dev awf serve --reload
@@ -858,7 +874,6 @@ Then start the console:
 ```bash
 cd apps/console
 cp .env.example .env.local
-# set AWF_API_TOKEN=local-dev-token in .env.local
 npm install
 npm run dev
 ```

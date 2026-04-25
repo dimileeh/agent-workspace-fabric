@@ -1737,7 +1737,7 @@ async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
   try {
     const response = await fetch(path, { cache: "no-store" });
     const text = await response.text();
-    const body = text ? (JSON.parse(text) as unknown) : null;
+    const body = parseJsonOrNull(text);
     if (!response.ok) {
       const errorBody = body as
         | { detail?: { error_code?: string; message?: string }; message?: string; error_code?: string }
@@ -1748,9 +1748,18 @@ async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
         message:
           errorBody?.detail?.message ||
           errorBody?.message ||
+          text ||
           `Request failed with HTTP ${response.status}.`,
         errorCode: errorBody?.detail?.error_code || errorBody?.error_code,
-        detail: body,
+        detail: body ?? text,
+      };
+    }
+    if (body === null && text) {
+      return {
+        ok: false,
+        status: response.status,
+        message: text,
+        detail: text,
       };
     }
     return { ok: true, data: body as T };
@@ -1760,6 +1769,17 @@ async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
       status: 0,
       message: error instanceof Error ? error.message : String(error),
     };
+  }
+}
+
+function parseJsonOrNull(text: string): unknown | null {
+  if (!text) {
+    return null;
+  }
+  try {
+    return JSON.parse(text) as unknown;
+  } catch {
+    return null;
   }
 }
 
