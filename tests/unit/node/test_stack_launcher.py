@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
+from awf.node import stack_launcher as stack_launcher_mod
 from awf.node.compose_manager import AuthMount, ComposeProjectPaths, WorkspaceComposeSpec
 from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
@@ -138,3 +140,47 @@ async def test_compose_stack_launcher_appends_service_auth_mounts() -> None:
             mode="rw",
         ),
     )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Callable[..., object], tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_to_thread(
+        func: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(stack_launcher_mod.asyncio, "to_thread", fake_to_thread)
+    compose = _RecordingCompose()
+    auth_mount_resolver = _RecordingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        auth_mount_resolver=auth_mount_resolver,
+    )
+    layout = WorktreeLayout(
+        mirror_path=Path("/host/awf/git/mirrors/repo.git"),
+        worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
+        branch_name="awf/ws_launcher",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=WorkspaceProfile(name="generic"),
+        )
+    )
+
+    assert len(calls) == 1
+    func, args, kwargs = calls[0]
+    assert func == auth_mount_resolver.resolve
+    assert args == ()
+    assert kwargs == {"workspace_id": "ws_launcher"}

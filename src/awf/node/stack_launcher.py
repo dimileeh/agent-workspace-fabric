@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
@@ -55,7 +56,12 @@ class ComposeStackLauncher:
         )
         auth_mounts = [mirror_mount]
         if self._auth_mount_resolver is not None:
-            auth_mounts.extend(self._auth_mount_resolver.resolve(workspace_id=request.workspace_id))
+            auth_mounts.extend(
+                await asyncio.to_thread(
+                    self._auth_mount_resolver.resolve,
+                    workspace_id=request.workspace_id,
+                )
+            )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,
