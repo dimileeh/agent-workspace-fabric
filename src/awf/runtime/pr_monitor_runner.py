@@ -1356,6 +1356,8 @@ def _initial_review_grace_wall_started_value_from_datetime(started_at: datetime)
 
 
 def _initial_review_grace_wall_seconds(raw: object) -> float | None:
+    if not isinstance(raw, (str, bytes, bytearray, int, float)):
+        return None
     try:
         value = float(raw)
     except (TypeError, ValueError):

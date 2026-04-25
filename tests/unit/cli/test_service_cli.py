@@ -31,6 +31,7 @@ def test_service_config_uses_postgres_default_and_redacts_secrets() -> None:
         api_token="api-secret",
         github_token="ghp_secret",
         database_url="sqlite+aiosqlite:///./awf.db",
+        worker_max_concurrent_executions=5,
     )
 
     settings = resolve_service_settings(base, environ={})
@@ -38,6 +39,7 @@ def test_service_config_uses_postgres_default_and_redacts_secrets() -> None:
     rendered = json.dumps(payload)
 
     assert settings.database_url == DEFAULT_LOCAL_SERVICE_DATABASE_URL
+    assert settings.worker_max_concurrent_executions == 5
     assert payload["database_url"].startswith("postgresql+asyncpg://awf:")
     assert "awf_dev" not in payload["database_url"]
     assert payload["api_token"] == "<redacted>"
@@ -361,14 +363,25 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             created["provisioner_config"] = config
 
     class _ControlWorker:
-        def __init__(self, *, session_factory: object, provisioner: object, config: object) -> None:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            provisioner: object,
+            executor: object,
+            config: object,
+        ) -> None:
             created["worker_session_factory"] = session_factory
             created["worker_provisioner"] = provisioner
+            created["worker_executor"] = executor
             created["worker_config"] = config
 
         async def run_once(self) -> int:
             created["run_once"] = True
             return 0
+
+        async def wait_for_execution_tasks(self) -> None:
+            created["wait_for_execution_tasks"] = True
 
     engine = _Engine()
     session_factory = object()
@@ -407,6 +420,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         github_token=None,
         worker_poll_interval_seconds=0.25,
         worker_max_concurrent_provisions=2,
+        worker_max_concurrent_executions=4,
         node_id="node-1",
     )
 
@@ -425,8 +439,11 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["provisioner_session_factory"] is session_factory
     assert created["worker_session_factory"] is session_factory
     assert created["provisioner_stack_launcher"].__class__ is _ComposeStackLauncher
+    assert created["worker_executor"] is not None
     assert created["provisioner_config"].node_id == "node-1"
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2
+    assert created["worker_config"].max_concurrent_executions == 4
     assert created["run_once"] is True
+    assert created["wait_for_execution_tasks"] is True
     assert created["disposed"] is True

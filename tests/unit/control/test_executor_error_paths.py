@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor import ExecutorConfig, WorkspaceExecutor, _call_pr_monitor_factory
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -459,6 +459,24 @@ class TestCommitStepRuntimeError:
 
 
 class TestPrMonitorFactoryPath:
+    @pytest.mark.unit
+    def test_adapter_only_factory_preserves_internal_type_error(self) -> None:
+        """Adapter-only factory body TypeErrors should not be masked."""
+        adapter = object()
+        profile = object()
+        factory_error = TypeError("factory body broke")
+        factory_calls: list[object] = []
+
+        def _monitor_factory(adapter: object) -> object:
+            factory_calls.append(adapter)
+            raise factory_error
+
+        with pytest.raises(TypeError, match="factory body broke") as exc_info:
+            _call_pr_monitor_factory(_monitor_factory, adapter=adapter, profile=profile)
+
+        assert exc_info.value is factory_error
+        assert factory_calls == [adapter]
+
     @pytest.mark.unit
     async def test_factory_builds_monitor_once_and_it_runs(
         self,

@@ -8,6 +8,7 @@ concurrency, so end-to-end is the most useful test.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -84,6 +85,57 @@ async def _create_requested(
         return ws.id
 
 
+async def _create_ready(
+    session_factory: async_sessionmaker[AsyncSession], origin: Path, title: str
+) -> str:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await s.commit()
+        return ws.id
+
+
+class _TransitioningProvisioner:
+    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
+        self._session_factory = session_factory
+        self.calls: list[str] = []
+
+    async def provision(self, workspace_id: str) -> None:
+        self.calls.append(workspace_id)
+        async with self._session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            ws.branch_name = f"awf/{workspace_id}"
+            ws.base_commit = "b" * 40
+            ws.compose_project_name = f"awf_{workspace_id}"
+            ws.compose_file_path = f"/tmp/awf/{workspace_id}/compose.yml"
+            await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="TEST_READY")
+            await s.commit()
+
+
+class _RecordingExecutor:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    async def execute(self, workspace_id: str) -> None:
+        self.calls.append(workspace_id)
+
+
 class TestRunOnce:
     @pytest.mark.unit
     async def test_returns_zero_when_no_pending(self, worker: ControlWorker) -> None:
@@ -137,3 +189,204 @@ class TestRunOnce:
                 )
             )
             assert count == 5
+
+
+class TestRunOnceExecution:
+    @pytest.mark.unit
+    async def test_dispatches_requested_provisioning_then_ready_execution_work(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(session_factory, origin_repo, "already-ready")
+        requested_id = await _create_requested(session_factory, origin_repo, "new-request")
+        provisioner = _TransitioningProvisioner(session_factory)
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+        )
+
+        dispatched = await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        assert dispatched == 2
+        assert provisioner.calls == [requested_id]
+        assert set(executor.calls) == {ready_id, requested_id}
+
+    @pytest.mark.unit
+    async def test_freshly_provisioned_workspace_is_not_counted_twice(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(session_factory, origin_repo, "new-request")
+        provisioner = _TransitioningProvisioner(session_factory)
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+        )
+
+        dispatched = await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        assert dispatched == 1
+        assert provisioner.calls == [requested_id]
+        assert executor.calls == [requested_id]
+
+    @pytest.mark.unit
+    async def test_ready_execution_does_not_block_future_poll_batches(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(session_factory, origin_repo, "already-ready")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        provisioner = _TransitioningProvisioner(session_factory)
+
+        class _BlockingExecutor:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def execute(self, workspace_id: str) -> None:
+                self.calls.append(workspace_id)
+                started.set()
+                await release.wait()
+
+        executor = _BlockingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await asyncio.wait_for(worker.run_once(), timeout=0.2) == 1
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+
+        requested_id = await _create_requested(session_factory, origin_repo, "new-request")
+        assert await asyncio.wait_for(worker.run_once(), timeout=0.2) == 1
+        assert provisioner.calls == [requested_id]
+        assert executor.calls == [ready_id]
+
+        release.set()
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=0.2)
+
+    @pytest.mark.unit
+    async def test_execution_limit_is_independent_from_provisioning_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_ids = [
+            await _create_ready(session_factory, origin_repo, f"ready-{i}") for i in range(4)
+        ]
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=3,
+            ),
+        )
+
+        assert await worker.run_once() == 3
+        await worker.wait_for_execution_tasks()
+
+        assert set(executor.calls) == set(ready_ids[:3])
+
+    @pytest.mark.unit
+    async def test_ready_workspace_is_noop_when_no_executor_is_wired(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(session_factory, origin_repo, "already-ready")
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(ready_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    async def test_ready_execution_race_skip_does_not_mark_workspace_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(session_factory, origin_repo, "race")
+
+        class _CancellingExecutor:
+            async def execute(self, workspace_id: str) -> None:
+                async with session_factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="RACE")
+                    await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_CancellingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(ready_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.failure_reason is None
+
+    @pytest.mark.unit
+    async def test_bad_ready_execution_does_not_abort_other_ready_workspaces(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        first_id = await _create_ready(session_factory, origin_repo, "bad")
+        second_id = await _create_ready(session_factory, origin_repo, "good")
+
+        class _FlakyExecutor:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def execute(self, workspace_id: str) -> None:
+                self.calls.append(workspace_id)
+                if workspace_id == first_id:
+                    raise RuntimeError("boom")
+
+        executor = _FlakyExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+        )
+
+        assert await worker.run_once() == 2
+        await worker.wait_for_execution_tasks()
+        assert set(executor.calls) == {first_id, second_id}
