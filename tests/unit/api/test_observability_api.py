@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -13,6 +15,7 @@ from starlette.websockets import WebSocketDisconnect
 
 import awf.api.routes.controls as controls_route
 import awf.api.routes.runtime as runtime_route
+import awf.api.routes.ws as ws_route
 from awf.api.app import configure_database, create_app
 from awf.common.config import get_settings
 from awf.db.base import Base
@@ -23,7 +26,9 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
+from awf.runtime.events import WorkspaceEventFrame
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.runtime.logs import LOG_BROADCASTER
 
 _BODY = {
     "repo_url": "git@github.com:example/console.git",
@@ -284,6 +289,62 @@ class TestWorkspaceWebSocket:
         assert tail["stream_id"] == "agent.stdout"
         assert tail["data"] == "hello websocket\n"
 
+    @pytest.mark.unit
+    async def test_live_events_are_not_starved_by_steady_logs(self) -> None:
+        workspace_id = "ws_live_events"
+        event_queue: asyncio.Queue[WorkspaceEventFrame] = asyncio.Queue()
+        websocket = _RecordingWebSocket()
+        stream_task = asyncio.create_task(
+            ws_route._stream_live_frames(
+                websocket,
+                workspace_id=workspace_id,
+                selected={"events", "agent"},
+                seen_event_ids=set(),
+                event_queue=event_queue,
+                heartbeat_interval=60,
+            )
+        )
+
+        async def publish_logs_until_event() -> None:
+            seq = 0
+            while not websocket.event_sent.is_set():
+                seq += 1
+                await LOG_BROADCASTER.publish(
+                    workspace_id=workspace_id,
+                    stream_id="agent.stdout",
+                    source="agent",
+                    fd="stdout",
+                    offset=seq,
+                    data=f"log {seq}\n",
+                )
+                await asyncio.sleep(0)
+
+        log_task = asyncio.create_task(publish_logs_until_event())
+        await event_queue.put(
+            WorkspaceEventFrame(
+                id="evt_live",
+                workspace_id=workspace_id,
+                event_type="workspace.state_changed",
+                old_state="requested",
+                new_state="running",
+                reason_code="TEST",
+                payload=None,
+                occurred_at=datetime.now(UTC),
+            )
+        )
+
+        try:
+            await asyncio.wait_for(websocket.event_sent.wait(), timeout=1)
+        finally:
+            log_task.cancel()
+            stream_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await log_task
+            with suppress(asyncio.CancelledError):
+                await stream_task
+
+        assert websocket.events == ["workspace.state_changed"]
+
 
 class TestOperationsAndControls:
     @pytest.mark.unit
@@ -430,3 +491,19 @@ def _make_sync_test_client(
     app = create_app(use_lifespan=False)
     configure_database(app, factory)
     return workspace_id, TestClient(app), engine
+
+
+class _RecordingWebSocket:
+    def __init__(self) -> None:
+        self.event_sent = asyncio.Event()
+        self.events: list[str] = []
+
+    async def send_json(self, payload: dict[str, object]) -> None:
+        if payload.get("type") != "event":
+            return
+        event = payload["event"]
+        assert isinstance(event, dict)
+        event_type = event["event_type"]
+        assert isinstance(event_type, str)
+        self.events.append(event_type)
+        self.event_sent.set()

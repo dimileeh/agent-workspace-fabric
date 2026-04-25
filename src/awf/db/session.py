@@ -17,6 +17,8 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from awf.runtime.events import ensure_workspace_event_broadcasting
+
 
 def make_engine(url: str, *, echo: bool = False) -> AsyncEngine:
     """Create a new async engine for the given URL.
@@ -33,6 +35,7 @@ def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession
     ``expire_on_commit=False`` so attributes remain readable after commit —
     important for API handlers that return ORM objects after a write.
     """
+    ensure_workspace_event_broadcasting()
     return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
 
 

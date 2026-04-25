@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import suppress
 from pathlib import Path
+from typing import Any, cast
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -15,7 +17,8 @@ from awf.db.repositories import (
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
-from awf.runtime.logs import LOG_BROADCASTER, LogStore
+from awf.runtime.events import WORKSPACE_EVENT_BROADCASTER, WorkspaceEventFrame
+from awf.runtime.logs import LOG_BROADCASTER, LogFrame, LogStore
 
 router = APIRouter(tags=["workspace-streams"])
 
@@ -47,6 +50,54 @@ async def workspace_socket(
     selected = {c.strip() for c in channels.split(",") if c.strip()}
     seen_event_ids: set[str] = set()
 
+    try:
+        if "events" in selected:
+            async with WORKSPACE_EVENT_BROADCASTER.subscribe(workspace_id) as event_queue:
+                if not await _send_initial_state(
+                    websocket,
+                    factory,
+                    workspace_id,
+                    selected,
+                    seen_event_ids,
+                    tail_bytes,
+                ):
+                    return
+                await _stream_live_frames(
+                    websocket,
+                    workspace_id=workspace_id,
+                    selected=selected,
+                    seen_event_ids=seen_event_ids,
+                    event_queue=event_queue,
+                )
+        else:
+            if not await _send_initial_state(
+                websocket,
+                factory,
+                workspace_id,
+                selected,
+                seen_event_ids,
+                tail_bytes,
+            ):
+                return
+            await _stream_live_frames(
+                websocket,
+                workspace_id=workspace_id,
+                selected=selected,
+                seen_event_ids=seen_event_ids,
+                event_queue=None,
+            )
+    except WebSocketDisconnect:
+        return
+
+
+async def _send_initial_state(
+    websocket: WebSocket,
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    selected: set[str],
+    seen_event_ids: set[str],
+    tail_bytes: int,
+) -> bool:
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         if workspace is None:
@@ -54,7 +105,7 @@ async def workspace_socket(
                 {"type": "error", "error_code": "NOT_FOUND", "message": "workspace not found"}
             )
             await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-            return
+            return False
         await websocket.send_json(
             {
                 "type": "snapshot",
@@ -104,40 +155,50 @@ async def workspace_socket(
                             "data": data,
                         }
                     )
+    return True
 
-    try:
-        async with LOG_BROADCASTER.subscribe(workspace_id) as queue:
-            while True:
-                try:
-                    frame = await asyncio.wait_for(queue.get(), timeout=5.0)
-                except TimeoutError:
-                    await _send_new_events(websocket, factory, workspace_id, seen_event_ids)
+
+async def _stream_live_frames(
+    websocket: WebSocket,
+    *,
+    workspace_id: str,
+    selected: set[str],
+    seen_event_ids: set[str],
+    event_queue: asyncio.Queue[WorkspaceEventFrame] | None,
+    heartbeat_interval: float = 5.0,
+) -> None:
+    async with LOG_BROADCASTER.subscribe(workspace_id) as log_queue:
+        while True:
+            waiters: dict[asyncio.Task[Any], str] = {
+                asyncio.create_task(log_queue.get()): "log",
+                asyncio.create_task(asyncio.sleep(heartbeat_interval)): "heartbeat",
+            }
+            if event_queue is not None:
+                waiters[asyncio.create_task(event_queue.get())] = "event"
+
+            done, pending = await asyncio.wait(waiters, return_when=asyncio.FIRST_COMPLETED)
+            for task in pending:
+                task.cancel()
+            for task in pending:
+                with suppress(asyncio.CancelledError):
+                    await task
+
+            for task in done:
+                kind = waiters[task]
+                if kind == "heartbeat":
                     await websocket.send_json({"type": "heartbeat", "workspace_id": workspace_id})
                     continue
+                if kind == "event":
+                    event = cast(WorkspaceEventFrame, task.result())
+                    if event.id in seen_event_ids:
+                        continue
+                    seen_event_ids.add(event.id)
+                    await websocket.send_json({"type": "event", "event": event.model_dump()})
+                    continue
+
+                frame = cast(LogFrame, task.result())
                 if _stream_selected(frame.source, selected):
                     await websocket.send_json(frame.model_dump())
-    except WebSocketDisconnect:
-        return
-
-
-async def _send_new_events(
-    websocket: WebSocket,
-    factory: async_sessionmaker[AsyncSession],
-    workspace_id: str,
-    seen_event_ids: set[str],
-) -> None:
-    async with factory() as session:
-        events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id, limit=50)
-        for event in reversed(events):
-            if event.id in seen_event_ids:
-                continue
-            seen_event_ids.add(event.id)
-            await websocket.send_json(
-                {
-                    "type": "event",
-                    "event": WorkspaceEventResponse.model_validate(event).model_dump(mode="json"),
-                }
-            )
 
 
 def _stream_selected(source: str, selected: set[str]) -> bool:
