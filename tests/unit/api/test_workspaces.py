@@ -58,6 +58,7 @@ class TestCreateWorkspace:
         assert body["status"] == "requested"
         assert body["version"] == 1
         assert body["status_url"] == f"/v1/workspaces/{body['workspace_id']}"
+        assert body["events_url"] == f"/v1/workspaces/{body['workspace_id']}/events"
         assert "accepted_at" in body
 
     @pytest.mark.unit

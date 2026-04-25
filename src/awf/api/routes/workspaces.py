@@ -277,7 +277,7 @@ def _accepted(
         status=WorkspaceStatus(status_value),
         version=version,
         status_url=f"/v1/workspaces/{ws_id}",
-        events_url=f"/v1/events?workspace_id={ws_id}",
+        events_url=f"/v1/workspaces/{ws_id}/events",
         accepted_at=created_at,
     )
 
