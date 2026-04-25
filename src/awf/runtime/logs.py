@@ -167,7 +167,30 @@ class LogStore:
         offset: int,
         limit_bytes: int,
     ) -> tuple[str, int, bool]:
-        return await asyncio.to_thread(_read_log_chunk, path, offset, limit_bytes)
+        return await read_log_chunk(
+            path=self._resolve_read_path(path),
+            offset=offset,
+            limit_bytes=limit_bytes,
+        )
+
+    def _resolve_read_path(self, path: Path) -> Path:
+        read_path = path if path.is_absolute() else self._root / path
+        root = self._root.resolve()
+        resolved = read_path.resolve()
+        try:
+            resolved.relative_to(root)
+        except ValueError:
+            raise ValueError("LogStore.read path must be within root") from None
+        return resolved
+
+
+async def read_log_chunk(
+    *,
+    path: Path,
+    offset: int,
+    limit_bytes: int,
+) -> tuple[str, int, bool]:
+    return await asyncio.to_thread(_read_log_chunk, path, offset, limit_bytes)
 
 
 def _read_log_chunk(path: Path, offset: int, limit_bytes: int) -> tuple[str, int, bool]:

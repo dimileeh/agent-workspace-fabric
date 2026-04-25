@@ -23,7 +23,7 @@ from awf.db.repositories import (
 )
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
-from awf.runtime.logs import LogStore
+from awf.runtime.logs import read_log_chunk
 
 
 class WorkspaceService:
@@ -36,7 +36,7 @@ class WorkspaceService:
         log_root: Path | str | None = None,
     ) -> None:
         self._factory = session_factory
-        self._log_root = Path(log_root) if log_root is not None else None
+        self._log_root = Path(log_root).resolve() if log_root is not None else None
 
     async def create(self, req: WorkspaceCreateRequest) -> WorkspaceResponse:
         async with self._factory() as s:
@@ -118,9 +118,14 @@ class WorkspaceService:
                 return None
             path = Path(stream.path)
 
+        if (
+            self._log_root is not None
+            and not path.resolve().is_relative_to(self._log_root)
+        ):
+            return None
         if not path.is_file():
             return None
-        data, next_offset, eof = await LogStore(root=self._log_root or path.parent).read(
+        data, next_offset, eof = await read_log_chunk(
             path=path,
             offset=offset,
             limit_bytes=limit_bytes,

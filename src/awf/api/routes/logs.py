@@ -15,7 +15,7 @@ from awf.api.schemas import (
     WorkspaceLogStreamResponse,
 )
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
-from awf.runtime.logs import LogStore
+from awf.runtime.logs import read_log_chunk
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/logs", tags=["logs"])
 
@@ -67,7 +67,7 @@ async def read_workspace_log(
                 "message": f"Log file is missing for stream {stream_id}",
             },
         )
-    data, next_offset, eof = await LogStore(root=path.parent).read(
+    data, next_offset, eof = await read_log_chunk(
         path=path,
         offset=offset,
         limit_bytes=limit_bytes,
