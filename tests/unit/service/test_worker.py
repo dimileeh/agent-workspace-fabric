@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -156,7 +157,12 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         created["feature_monitor_kwargs"] = kwargs
         return object()
 
+    def _build_release_monitor(**kwargs: object) -> object:
+        created["release_monitor_kwargs"] = kwargs
+        return object()
+
     monkeypatch.setattr(worker_mod, "build_feature_pr_monitor", _build_feature_monitor)
+    monkeypatch.setattr(worker_mod, "build_release_pr_monitor", _build_release_monitor)
 
     settings = _settings(tmp_path)
     runtime = worker_mod.build_worker_runtime(settings)
@@ -178,7 +184,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["worker_config"].max_concurrent_provisions == 2
     assert created["worker_config"].max_concurrent_executions == 4
 
-    default_monitor = created["executor_monitor_factory"](object(), WorkspaceProfile(name="default"))
+    default_monitor = created["executor_monitor_factory"](
+        object(),
+        WorkspaceProfile(name="default"),
+        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+    )
     assert default_monitor is not None
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 900
 
@@ -186,9 +196,24 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
         name="custom",
         monitor=ProfileMonitor(initial_review_grace_period_seconds=321),
     )
-    monitor = created["executor_monitor_factory"](object(), profile)
+    monitor = created["executor_monitor_factory"](
+        object(),
+        profile,
+        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+    )
 
     assert monitor is not None
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 321
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
+
+    manual_monitor = created["executor_monitor_factory"](
+        object(),
+        profile,
+        SimpleNamespace(auto_merge=False, initial_review_grace_period_seconds=12.5),
+    )
+
+    assert manual_monitor is not None
+    assert created["release_monitor_kwargs"]["initial_review_grace_period_seconds"] == 12.5
+    assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
+    assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"

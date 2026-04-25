@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -86,6 +87,7 @@ async def _seed_ready(
     *,
     agent: str = "codex",
     base_commit: str | None = "a" * 40,
+    auto_merge: bool | None = None,
 ) -> str:
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -103,6 +105,8 @@ async def _seed_ready(
         ws.remote_push_branch = "awf/x"
         ws.base_commit = base_commit
         ws.compose_project_name = "awf_x"
+        if auto_merge is not None:
+            ws.auto_merge = auto_merge
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
         await s.commit()
         return ws.id
@@ -460,10 +464,49 @@ class TestCommitStepRuntimeError:
 
 class TestPrMonitorFactoryPath:
     @pytest.mark.unit
+    def test_monitor_factory_supports_one_two_and_three_argument_forms(self) -> None:
+        adapter = object()
+        profile = object()
+        workspace = SimpleNamespace(id="ws_policy", auto_merge=True)
+
+        def _one_arg(adapter: object) -> tuple[str, object]:
+            return ("one", adapter)
+
+        def _two_arg(adapter: object, profile: object) -> tuple[str, object, object]:
+            return ("two", adapter, profile)
+
+        def _three_arg(
+            adapter: object,
+            profile: object,
+            workspace: object,
+        ) -> tuple[str, object, object, object]:
+            return ("three", adapter, profile, workspace)
+
+        assert _call_pr_monitor_factory(
+            _one_arg,
+            adapter=adapter,
+            profile=profile,
+            workspace=workspace,
+        ) == ("one", adapter)
+        assert _call_pr_monitor_factory(
+            _two_arg,
+            adapter=adapter,
+            profile=profile,
+            workspace=workspace,
+        ) == ("two", adapter, profile)
+        assert _call_pr_monitor_factory(
+            _three_arg,
+            adapter=adapter,
+            profile=profile,
+            workspace=workspace,
+        ) == ("three", adapter, profile, workspace)
+
+    @pytest.mark.unit
     def test_adapter_only_factory_preserves_internal_type_error(self) -> None:
         """Adapter-only factory body TypeErrors should not be masked."""
         adapter = object()
         profile = object()
+        workspace = SimpleNamespace(id="ws_policy")
         factory_error = TypeError("factory body broke")
         factory_calls: list[object] = []
 
@@ -472,10 +515,38 @@ class TestPrMonitorFactoryPath:
             raise factory_error
 
         with pytest.raises(TypeError, match="factory body broke") as exc_info:
-            _call_pr_monitor_factory(_monitor_factory, adapter=adapter, profile=profile)
+            _call_pr_monitor_factory(
+                _monitor_factory,
+                adapter=adapter,
+                profile=profile,
+                workspace=workspace,
+            )
 
         assert exc_info.value is factory_error
         assert factory_calls == [adapter]
+
+    @pytest.mark.unit
+    def test_three_arg_factory_preserves_internal_type_error(self) -> None:
+        adapter = object()
+        profile = object()
+        workspace = SimpleNamespace(id="ws_policy")
+        factory_error = TypeError("factory body broke after accepting workspace")
+        factory_calls: list[object] = []
+
+        def _monitor_factory(adapter: object, profile: object, workspace: object) -> object:
+            factory_calls.extend([adapter, profile, workspace])
+            raise factory_error
+
+        with pytest.raises(TypeError, match="accepting workspace") as exc_info:
+            _call_pr_monitor_factory(
+                _monitor_factory,
+                adapter=adapter,
+                profile=profile,
+                workspace=workspace,
+            )
+
+        assert exc_info.value is factory_error
+        assert factory_calls == [adapter, profile, workspace]
 
     @pytest.mark.unit
     async def test_factory_builds_monitor_once_and_it_runs(
@@ -524,3 +595,43 @@ class TestPrMonitorFactoryPath:
 
         assert len(factory_calls) == 1  # factory called with adapter exactly once
         assert len(monitor_calls) == 1  # monitor.run fired
+
+    @pytest.mark.unit
+    async def test_executor_passes_workspace_row_to_three_arg_factory(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        factory_workspaces: list[Any] = []
+
+        class _FakeMonitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                return None
+
+        def _monitor_factory(adapter: Any, profile: Any, workspace: Any) -> _FakeMonitor:
+            factory_workspaces.append(workspace)
+            return _FakeMonitor()
+
+        ws_id = await _seed_ready(factory, auto_merge=False)
+        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="a\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0)  # validation cmd
+        fake.queue_result(returncode=0, stdout="deadbeef\n")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0, stdout="abc commit\n")
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/42\n")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+        await executor.execute(ws_id)
+
+        assert len(factory_workspaces) == 1
+        assert factory_workspaces[0].id == ws_id
+        assert factory_workspaces[0].auto_merge is False
