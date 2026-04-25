@@ -408,7 +408,11 @@ class PullRequestMonitorRunner:
                         unresolved_threads=len(fresh_status.unresolved_inline_threads),
                         unresolved_reviews=len(fresh_status.unresolved_review_comments),
                         check_state=fresh_status.check_state.value,
-                        merge_state=fresh_status.merge_state_status.value,
+                        merge_state=(
+                            fresh_status.merge_state_status.value
+                            if fresh_status.merge_state_status
+                            else None
+                        ),
                     )
                     return await self._execute(
                         action=fresh_action,
