@@ -256,16 +256,16 @@ class WorkspaceLogSink:
         encoded = data.encode("utf-8")
         async with self._write_lock:
             offset = await asyncio.to_thread(_append_log_bytes, self.path, encoded)
-        if self.session_factory is not None:
-            async with self.session_factory() as session:
-                repo = WorkspaceLogStreamRepository(session)
-                await repo.append_metadata(
-                    workspace_id=self.workspace_id,
-                    stream_id=self.stream_id,
-                    byte_delta=len(encoded),
-                    line_delta=data.count("\n"),
-                )
-                await session.commit()
+            if self.session_factory is not None:
+                async with self.session_factory() as session:
+                    repo = WorkspaceLogStreamRepository(session)
+                    await repo.append_metadata(
+                        workspace_id=self.workspace_id,
+                        stream_id=self.stream_id,
+                        byte_delta=len(encoded),
+                        line_delta=data.count("\n"),
+                    )
+                    await session.commit()
         await self.broadcaster.publish(
             workspace_id=self.workspace_id,
             stream_id=self.stream_id,

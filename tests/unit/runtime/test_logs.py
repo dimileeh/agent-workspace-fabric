@@ -134,6 +134,59 @@ async def test_log_sink_write_uses_threaded_file_append(
 
 
 @pytest.mark.unit
+async def test_log_sink_updates_metadata_under_write_lock(
+    monkeypatch: pytest.MonkeyPatch,
+    engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@example.com:repo/app.git",
+            branch_base="main",
+            task_title="Observe",
+            task_prompt="Add logs",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+    store = LogStore(root=tmp_path, session_factory=factory)
+    sink = await store.open_stream(
+        workspace_id=workspace.id,
+        stream_id="agent.stdout",
+        source="agent",
+        name="Codex agent stdout",
+        kind="stdout",
+    )
+
+    original_append_metadata = WorkspaceLogStreamRepository.append_metadata
+    observed_lock_states: list[bool] = []
+
+    async def append_metadata_spy(
+        self: WorkspaceLogStreamRepository,
+        **kwargs: Any,
+    ) -> object:
+        observed_lock_states.append(sink._write_lock.locked())
+        return await original_append_metadata(self, **kwargs)
+
+    monkeypatch.setattr(WorkspaceLogStreamRepository, "append_metadata", append_metadata_spy)
+
+    await sink.write("hello\n")
+
+    async with factory() as session:
+        stream = await WorkspaceLogStreamRepository(session).get(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+        )
+
+    assert observed_lock_states == [True]
+    assert stream is not None
+    assert stream.byte_count == len("hello\n")
+    assert stream.line_count == 1
+
+
+@pytest.mark.unit
 async def test_log_broadcaster_delivers_workspace_frames() -> None:
     broadcaster = LogBroadcaster()
 
