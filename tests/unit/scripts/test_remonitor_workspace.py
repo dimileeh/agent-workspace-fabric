@@ -11,6 +11,7 @@ on the observable state transitions + the CLI's exit code."""
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,10 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.pr_monitor_runner import (
+    _initial_review_grace_done_key,
+    _initial_review_grace_started_key,
+)
 from scripts import remonitor_workspace
 
 
@@ -32,6 +37,7 @@ async def _seed_workspace(
     pr_number: int | None = 123,
     compose_project_name: str | None = "awf_ws_x",
     monitor_threads_addressed: dict[str, str] | None = None,
+    monitor_started_at: datetime | None = None,
 ) -> str:
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine.begin() as conn:
@@ -65,6 +71,8 @@ async def _seed_workspace(
         ws.pr_url = "https://github.com/dimileeh/aira-web/pull/123"
         ws.monitor_iter_count = 7
         ws.monitor_threads_addressed = monitor_threads_addressed or {}
+        if monitor_started_at is not None:
+            ws.monitor_started_at = monitor_started_at
         if status != "completed":
             # Flip manually (status transitions in AWF don't cleanly go
             # completed → failed / completed → monitoring_pr).
@@ -82,6 +90,7 @@ class _FakeMonitor:
     def __init__(self, *, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._factory = session_factory
         self.calls: list[dict[str, Any]] = []
+        self.observed_states: list[dict[str, Any]] = []
 
     async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
         self.calls.append(
@@ -95,6 +104,13 @@ class _FakeMonitor:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
             assert ws is not None
+            self.observed_states.append(
+                {
+                    "monitor_iter_count": ws.monitor_iter_count,
+                    "monitor_started_at": ws.monitor_started_at,
+                    "monitor_threads_addressed": dict(ws.monitor_threads_addressed or {}),
+                }
+            )
             await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="FAKE_MON")
             await s.commit()
 
@@ -193,6 +209,52 @@ class TestRemonitor:
                 "T2": "false_positive",
             }
         await engine.dispose()
+
+    @pytest.mark.unit
+    async def test_remonitor_preserves_initial_grace_start_while_resetting_budget(
+        self,
+        tmp_path: Path,
+        patch_monitor_builder: list[_FakeMonitor],
+    ) -> None:
+        original_monitor_start = datetime.now(UTC) - timedelta(minutes=10)
+        ws_id = await _seed_workspace(
+            tmp_path / "awf.db",
+            monitor_started_at=original_monitor_start,
+            monitor_threads_addressed={"T1": "fix_committed"},
+        )
+        (tmp_path / "compose" / "compose" / ws_id).mkdir(parents=True)
+        (tmp_path / "compose" / "compose" / ws_id / "compose.yml").write_text("x")
+
+        rc = await remonitor_workspace._main(tmp_path, ws_id)
+
+        assert rc == 0
+        observed = patch_monitor_builder[0].observed_states[0]
+        assert observed["monitor_iter_count"] == 0
+        assert observed["monitor_started_at"] is None
+        assert observed["monitor_threads_addressed"]["T1"] == "fix_committed"
+        assert _initial_review_grace_started_key(123) in observed["monitor_threads_addressed"]
+
+    @pytest.mark.unit
+    async def test_remonitor_preserves_existing_initial_grace_done_key(
+        self,
+        tmp_path: Path,
+        patch_monitor_builder: list[_FakeMonitor],
+    ) -> None:
+        done_key = _initial_review_grace_done_key(123)
+        ws_id = await _seed_workspace(
+            tmp_path / "awf.db",
+            monitor_started_at=datetime.now(UTC) - timedelta(hours=2),
+            monitor_threads_addressed={done_key: "elapsed"},
+        )
+        (tmp_path / "compose" / "compose" / ws_id).mkdir(parents=True)
+        (tmp_path / "compose" / "compose" / ws_id / "compose.yml").write_text("x")
+
+        rc = await remonitor_workspace._main(tmp_path, ws_id)
+
+        assert rc == 0
+        observed = patch_monitor_builder[0].observed_states[0]
+        assert observed["monitor_started_at"] is None
+        assert observed["monitor_threads_addressed"] == {done_key: "elapsed"}
 
     @pytest.mark.unit
     async def test_missing_db_returns_two(self, tmp_path: Path) -> None:
