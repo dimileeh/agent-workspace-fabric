@@ -70,7 +70,10 @@ export function openAwfWorkspaceSocket({
     channels,
     tail_bytes: tailBytes,
   });
-  return new WebSocket(awfWebSocketUrl(`/v1/workspaces/${workspaceId}/ws?${params}`), {
-    headers: awfHeaders(),
-  });
+  return new WebSocket(
+    awfWebSocketUrl(`/v1/workspaces/${encodeURIComponent(workspaceId)}/ws?${params}`),
+    {
+      headers: awfHeaders(),
+    },
+  );
 }
