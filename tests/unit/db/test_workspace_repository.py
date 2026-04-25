@@ -142,6 +142,34 @@ class TestListWorkspaces:
         assert [row.id for row in rows] == [matching.id]
 
     @pytest.mark.unit
+    async def test_accepts_string_status_and_agent_filters(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        matching = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="matching",
+            task_prompt="p",
+            agent=AgentRuntime.gemini.value,
+            test_commands=[],
+        )
+        await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="wrong agent",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+        )
+
+        rows = await repo.list(
+            status=WorkspaceStatus.requested.value,
+            agent=AgentRuntime.gemini.value,
+            limit=10,
+        )
+
+        assert [row.id for row in rows] == [matching.id]
+
+    @pytest.mark.unit
     async def test_applies_filters_before_limit(self, session: AsyncSession) -> None:
         repo = WorkspaceRepository(session)
         matching = await repo.create(
@@ -169,6 +197,29 @@ class TestListWorkspaces:
         rows = await repo.list(status=WorkspaceStatus.ready, limit=1)
 
         assert [row.id for row in rows] == [matching.id]
+
+    @pytest.mark.unit
+    async def test_orders_created_at_ties_by_id_desc(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        rows = [
+            await repo.create(
+                repo_url=f"git@github.com:example/app-{index}.git",
+                branch_base="development",
+                task_title=f"workspace {index}",
+                task_prompt="p",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            for index in range(3)
+        ]
+        tied_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        for row in rows:
+            row.created_at = tied_created_at
+        await session.commit()
+
+        listed = await repo.list(limit=3)
+
+        assert [row.id for row in listed] == sorted((row.id for row in rows), reverse=True)
 
 
 class TestTransition:

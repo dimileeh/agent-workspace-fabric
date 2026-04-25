@@ -98,19 +98,19 @@ class WorkspaceRepository:
     async def list(
         self,
         *,
-        status: WorkspaceStatus | None = None,
-        agent: AgentRuntime | None = None,
+        status: WorkspaceStatus | str | None = None,
+        agent: AgentRuntime | str | None = None,
         repo_url: str | None = None,
         limit: int = 50,
     ) -> list[Workspace]:
         stmt = select(Workspace)
         if status is not None:
-            stmt = stmt.where(Workspace.status == status.value)
+            stmt = stmt.where(Workspace.status == status)
         if agent is not None:
-            stmt = stmt.where(Workspace.agent == agent.value)
+            stmt = stmt.where(Workspace.agent == agent)
         if repo_url is not None:
             stmt = stmt.where(Workspace.repo_url == repo_url)
-        stmt = stmt.order_by(Workspace.created_at.desc()).limit(limit)
+        stmt = stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
     async def transition(
