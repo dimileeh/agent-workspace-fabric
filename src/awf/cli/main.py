@@ -177,6 +177,7 @@ def workspace_create(
         None,
         "--initial-review-grace-period-seconds",
         min=0,
+        max=86400,
         help="Override profile monitor grace; omit to use the profile setting.",
     ),
     idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
