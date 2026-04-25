@@ -31,7 +31,7 @@ class HttpResponse(Protocol):
 
 
 class HttpGet(Protocol):
-    def __call__(self, url: str, *, timeout: float) -> HttpResponse: ...
+    def __call__(self, url: str, *, timeout: float) -> Awaitable[HttpResponse]: ...
 
 
 class CompletedProcessLike(Protocol):
@@ -69,7 +69,7 @@ async def collect_service_status(
     resolved_socket_exists = socket_exists or Path.exists
 
     api_check, db_check, docker_check, image_check = await asyncio.gather(
-        asyncio.to_thread(_check_api, settings, resolved_api_get),
+        _check_api(settings, resolved_api_get),
         resolved_db_probe(settings.database_url),
         asyncio.to_thread(_check_docker, settings, resolved_run, resolved_socket_exists),
         asyncio.to_thread(_check_agent_runtime_image, settings, resolved_run),
@@ -100,10 +100,10 @@ async def check_database(database_url: str) -> CheckPayload:
     return _ok()
 
 
-def _check_api(settings: ServiceSettings, api_get: HttpGet) -> CheckPayload:
+async def _check_api(settings: ServiceSettings, api_get: HttpGet) -> CheckPayload:
     url = f"{settings.api_base_url.rstrip('/')}/healthz"
     try:
-        response = api_get(url, timeout=_CHECK_TIMEOUT_SECONDS)
+        response = await api_get(url, timeout=_CHECK_TIMEOUT_SECONDS)
         response.raise_for_status()
     except Exception as exc:
         return _fail("API_UNREACHABLE", _truncate(f"{type(exc).__name__}: {exc}"))
@@ -160,8 +160,9 @@ def _check_agent_runtime_image(
     )
 
 
-def _http_get(url: str, *, timeout: float) -> HttpResponse:
-    return httpx.get(url, timeout=timeout)
+async def _http_get(url: str, *, timeout: float) -> HttpResponse:
+    async with httpx.AsyncClient() as client:
+        return await client.get(url, timeout=timeout)
 
 
 def _run_subprocess(

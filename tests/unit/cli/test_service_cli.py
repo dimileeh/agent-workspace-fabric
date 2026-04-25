@@ -105,7 +105,7 @@ def test_service_status_uses_mocked_api_db_docker_and_image_checks(tmp_path: Pat
         def raise_for_status(self) -> None:
             return None
 
-    def _api_get(url: str, *, timeout: float) -> _Response:
+    async def _api_get(url: str, *, timeout: float) -> _Response:
         api_calls.append(url)
         return _Response()
 
@@ -188,8 +188,10 @@ def test_service_status_runs_dependency_checks_concurrently(tmp_path: Path) -> N
         if not release.wait(timeout=2):
             raise AssertionError(f"{name} check was not released")
 
-    def _api_get(url: str, *, timeout: float) -> _Response:
-        _wait_for_release("api")
+    async def _api_get(url: str, *, timeout: float) -> _Response:
+        started["api"].set()
+        if not await asyncio.to_thread(release.wait, 2):
+            raise AssertionError("api check was not released")
         return _Response()
 
     async def _db_probe(database_url: str) -> dict[str, Any]:
@@ -248,7 +250,7 @@ def test_service_status_reports_failures_from_mocked_checks(tmp_path: Path) -> N
     from awf.service.config import ServiceSettings
     from awf.service.status import collect_service_status
 
-    def _api_get(url: str, *, timeout: float) -> Any:
+    async def _api_get(url: str, *, timeout: float) -> Any:
         raise httpx.ConnectError("connection refused")
 
     async def _db_probe(database_url: str) -> dict[str, Any]:
