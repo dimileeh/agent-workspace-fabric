@@ -378,6 +378,9 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             created["run_once"] = True
             return 0
 
+        async def wait_for_execution_tasks(self) -> None:
+            created["wait_for_execution_tasks"] = True
+
     engine = _Engine()
     session_factory = object()
 
@@ -438,4 +441,5 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2
     assert created["run_once"] is True
+    assert created["wait_for_execution_tasks"] is True
     assert created["disposed"] is True

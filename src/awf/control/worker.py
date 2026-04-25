@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
+from functools import partial
 from typing import Protocol
 
 from sqlalchemy import select
@@ -54,6 +55,7 @@ class ControlWorker:
         self._executor = executor
         self._config = config
         self._stopped = asyncio.Event()
+        self._execution_tasks: dict[str, asyncio.Task[None]] = {}
 
     def request_stop(self) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -77,15 +79,16 @@ class ControlWorker:
             dispatched += len(requested_ids)
 
         if self._executor is not None:
-            ready_ids = await self._list_ready()
-            if ready_ids:
-                await asyncio.gather(
-                    *(self._safely_execute(ws_id) for ws_id in ready_ids),
-                    return_exceptions=False,
-                )
-                dispatched += len(ready_ids)
+            execution_slots = self._available_execution_slots()
+            ready_ids = await self._list_ready(limit=execution_slots)
+            dispatched += self._dispatch_ready_executions(ready_ids)
 
         return dispatched
+
+    async def wait_for_execution_tasks(self) -> None:
+        """Wait for ready-workspace execution tasks started by this worker."""
+        while self._execution_tasks:
+            await asyncio.gather(*tuple(self._execution_tasks.values()))
 
     async def run_forever(self) -> None:
         while not self._stopped.is_set():
@@ -111,20 +114,47 @@ class ControlWorker:
         """Return up to ``max_concurrent_provisions`` workspace IDs in ``requested``."""
         return await self._list_by_status(WorkspaceStatus.requested)
 
-    async def _list_ready(self) -> list[str]:
+    async def _list_ready(self, *, limit: int | None = None) -> list[str]:
         """Return up to ``max_concurrent_provisions`` workspace IDs in ``ready``."""
-        return await self._list_by_status(WorkspaceStatus.ready)
+        return await self._list_by_status(WorkspaceStatus.ready, limit=limit)
 
-    async def _list_by_status(self, status: WorkspaceStatus) -> list[str]:
+    async def _list_by_status(
+        self, status: WorkspaceStatus, *, limit: int | None = None
+    ) -> list[str]:
+        row_limit = self._config.max_concurrent_provisions if limit is None else limit
+        if row_limit <= 0:
+            return []
+
         async with self._session_factory() as session:
             stmt = (
                 select(Workspace.id)
                 .where(Workspace.status == status.value)
                 .order_by(Workspace.created_at)
-                .limit(self._config.max_concurrent_provisions)
+                .limit(row_limit)
             )
             result = await session.execute(stmt)
             return [row[0] for row in result.all()]
+
+    def _available_execution_slots(self) -> int:
+        return max(0, self._config.max_concurrent_provisions - len(self._execution_tasks))
+
+    def _dispatch_ready_executions(self, workspace_ids: list[str]) -> int:
+        dispatched = 0
+        for workspace_id in workspace_ids:
+            if workspace_id in self._execution_tasks:
+                continue
+
+            task = asyncio.create_task(
+                self._safely_execute(workspace_id),
+                name=f"awf-execute-{workspace_id}",
+            )
+            self._execution_tasks[workspace_id] = task
+            task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+            dispatched += 1
+        return dispatched
+
+    def _forget_execution_task(self, workspace_id: str, _task: asyncio.Task[None]) -> None:
+        self._execution_tasks.pop(workspace_id, None)
 
     async def _safely_provision(self, workspace_id: str) -> None:
         try:

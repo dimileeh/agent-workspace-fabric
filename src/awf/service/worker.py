@@ -128,6 +128,7 @@ async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:
     try:
         if once:
             await runtime.worker.run_once()
+            await runtime.worker.wait_for_execution_tasks()
             return
         await runtime.worker.run_forever()
     finally:

@@ -8,6 +8,7 @@ concurrency, so end-to-end is the most useful test.
 
 from __future__ import annotations
 
+import asyncio
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
@@ -209,10 +210,50 @@ class TestRunOnceExecution:
         )
 
         dispatched = await worker.run_once()
+        await worker.wait_for_execution_tasks()
 
         assert dispatched == 3
         assert provisioner.calls == [requested_id]
         assert set(executor.calls) == {ready_id, requested_id}
+
+    @pytest.mark.unit
+    async def test_ready_execution_does_not_block_future_poll_batches(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(session_factory, origin_repo, "already-ready")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        provisioner = _TransitioningProvisioner(session_factory)
+
+        class _BlockingExecutor:
+            def __init__(self) -> None:
+                self.calls: list[str] = []
+
+            async def execute(self, workspace_id: str) -> None:
+                self.calls.append(workspace_id)
+                started.set()
+                await release.wait()
+
+        executor = _BlockingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        assert await asyncio.wait_for(worker.run_once(), timeout=0.2) == 1
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+
+        requested_id = await _create_requested(session_factory, origin_repo, "new-request")
+        assert await asyncio.wait_for(worker.run_once(), timeout=0.2) == 1
+        assert provisioner.calls == [requested_id]
+        assert executor.calls == [ready_id]
+
+        release.set()
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=0.2)
 
     @pytest.mark.unit
     async def test_ready_workspace_is_noop_when_no_executor_is_wired(
@@ -259,6 +300,7 @@ class TestRunOnceExecution:
         )
 
         assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
 
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(ready_id)
@@ -293,4 +335,5 @@ class TestRunOnceExecution:
         )
 
         assert await worker.run_once() == 2
+        await worker.wait_for_execution_tasks()
         assert set(executor.calls) == {first_id, second_id}
