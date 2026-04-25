@@ -47,6 +47,7 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus  # noqa: E402
 from awf.db.models import WorkspaceEvent  # noqa: E402
 from awf.db.repositories import WorkspaceRepository  # noqa: E402
 from awf.db.session import make_session_factory  # noqa: E402
+from awf.runtime.logs import LogStore  # noqa: E402
 from awf.runtime.release_pr_monitor import (  # noqa: E402
     build_feature_pr_monitor,
     build_release_pr_monitor,
@@ -122,6 +123,12 @@ async def _main(
         agent_runtime = AgentRuntime(ws.agent)
         compose_project = ws.compose_project_name or f"awf_{workspace_id}"
         remote_push_branch = ws.remote_push_branch or ws.branch_name
+        if not remote_push_branch:
+            print(
+                "Workspace has no remote_push_branch or branch_name; nothing safe to push.",
+                file=sys.stderr,
+            )
+            return 2
 
     # Re-use the container + worktree that the original run set up.
     compose_file = work_dir / "compose" / "compose" / workspace_id / "compose.yml"
@@ -135,6 +142,7 @@ async def _main(
         return 2
 
     runner = AsyncioSubprocessRunner()
+    log_store = LogStore(root=work_dir / "logs", session_factory=factory)
     if push_pending:
         await _push_pending_head(
             runner=runner,
@@ -147,6 +155,7 @@ async def _main(
         agent_runtime,
         runner=runner,
         defaults=DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+        log_store=log_store,
     )
     gh = GitHubClient(runner)
     monitor_builder = build_feature_pr_monitor if auto_merge else build_release_pr_monitor
@@ -157,6 +166,7 @@ async def _main(
         gh=gh,
         worktrees_root=worktrees_root,
         artifacts_root=work_dir / "artifacts",
+        log_store=log_store,
     )
 
     print("[remonitor] entering monitor loop ...", flush=True)

@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncCommandRunner
 from awf.common.github_client import GitHubClient
+from awf.runtime.logs import LogStore
 from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
@@ -43,6 +44,7 @@ def build_release_pr_monitor(
     gh: GitHubClient,
     worktrees_root: Path,
     artifacts_root: Path | None = None,
+    log_store: LogStore | None = None,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
     initial_review_grace_period_seconds: float = 900.0,
@@ -71,6 +73,7 @@ def build_release_pr_monitor(
         ),
         worktrees_root=worktrees_root,
         artifacts_root=artifacts_root,
+        log_store=log_store,
     )
 
 
@@ -82,6 +85,7 @@ def build_feature_pr_monitor(
     gh: GitHubClient,
     worktrees_root: Path,
     artifacts_root: Path | None = None,
+    log_store: LogStore | None = None,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
     initial_review_grace_period_seconds: float = 900.0,
@@ -110,4 +114,5 @@ def build_feature_pr_monitor(
         ),
         worktrees_root=worktrees_root,
         artifacts_root=artifacts_root,
+        log_store=log_store,
     )

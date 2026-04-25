@@ -23,6 +23,7 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.logs import LogStore
 from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
@@ -35,11 +36,13 @@ class FakeAdapter(AgentAdapter):
     runtime = AgentRuntime.claude_code
     _queued: list[AgentRunResult] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    workspace_ids: list[str | None] = field(default_factory=list)
 
     def __init__(self) -> None:  # type: ignore[override]
         super().__init__(runner=None)  # type: ignore[arg-type]
         self._queued = []
         self.calls = []
+        self.workspace_ids = []
 
     @property
     def name(self) -> AgentRuntime:  # type: ignore[override]
@@ -52,9 +55,16 @@ class FakeAdapter(AgentAdapter):
         self._queued.append(AgentRunResult(returncode=returncode, stdout=stdout, stderr=""))
 
     async def run(  # type: ignore[override]
-        self, *, compose_project: str, compose_file: Path, prompt: str, model: str | None = None
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        model: str | None = None,
+        workspace_id: str | None = None,
     ) -> AgentRunResult:
         self.calls.append(prompt)
+        self.workspace_ids.append(workspace_id)
         if not self._queued:
             raise AssertionError(
                 "FakeAdapter.run called with empty queue; queue() a result "
@@ -202,6 +212,7 @@ def make_runner(
     pre_merge_settle_seconds: float = 0,
     initial_review_grace_period_seconds: float = 0,
     artifacts_root: Path | None = None,
+    log_store: LogStore | None = None,
 ) -> PullRequestMonitorRunner:
     kwargs: dict = {
         "session_factory": factory,
@@ -218,6 +229,7 @@ def make_runner(
         "runner_config": MonitorRunnerConfig(max_outer_iterations=20, max_fix_cycle_passes=3),
         "sleep": sleep_fn,
         "worktrees_root": worktrees_root,
+        "log_store": log_store,
     }
     if artifacts_root is not None:
         kwargs["artifacts_root"] = artifacts_root

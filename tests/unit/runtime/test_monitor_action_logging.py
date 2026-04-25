@@ -20,8 +20,9 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.runtime.logs import LogStore
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -103,6 +104,47 @@ class TestMonitorActionLogging:
         assert entry["unresolved_threads"] == 0
         assert entry["unresolved_reviews"] == 0
         assert entry["head_sha"].startswith("abc1234567")
+
+    @pytest.mark.unit
+    async def test_monitor_writes_durable_monitor_log_stream(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # PR state
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # sha lookup
+        log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            log_store=log_store,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        async with factory() as s:
+            streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws_id)
+            monitor_stream = next(stream for stream in streams if stream.stream_id == "monitor.log")
+        assert monitor_stream.source == "monitor"
+        assert monitor_stream.kind == "stdout"
+        assert monitor_stream.line_count >= 3
+        log_text = Path(monitor_stream.path).read_text()
+        assert '"event": "monitor.start"' in log_text
+        assert '"event": "monitor.action"' in log_text
+        assert '"action": "Merge"' in log_text
 
     @pytest.mark.unit
     async def test_notify_human_action_emits_log_line(
@@ -195,6 +237,7 @@ class TestMonitorActionLogging:
         assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
         assert len(adapter.calls) == 1
         assert "late actionable review" in adapter.calls[0]
+        assert adapter.workspace_ids == [ws_id]
         assert sleep_fn.calls == [60, 30]
         comment_calls = [
             call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]

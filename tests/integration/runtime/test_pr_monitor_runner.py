@@ -40,11 +40,13 @@ class FakeAdapter(AgentAdapter):
     runtime = AgentRuntime.claude_code
     _queued: list[AgentRunResult] = field(default_factory=list)
     calls: list[str] = field(default_factory=list)
+    workspace_ids: list[str | None] = field(default_factory=list)
 
     def __init__(self) -> None:  # type: ignore[override]
         super().__init__(runner=None)  # type: ignore[arg-type]
         self._queued = []
         self.calls = []
+        self.workspace_ids = []
 
     @property
     def name(self) -> AgentRuntime:  # type: ignore[override]
@@ -59,9 +61,16 @@ class FakeAdapter(AgentAdapter):
             self._queued[-1] = AgentRunResult(returncode=returncode, stdout=stdout, stderr="err")
 
     async def run(  # type: ignore[override]
-        self, *, compose_project: str, compose_file: Path, prompt: str, model: str | None = None
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        model: str | None = None,
+        workspace_id: str | None = None,
     ) -> AgentRunResult:
         self.calls.append(prompt)
+        self.workspace_ids.append(workspace_id)
         if not self._queued:
             return AgentRunResult(returncode=0, stdout="fixed it", stderr="")
         r = self._queued.pop(0)

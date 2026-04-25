@@ -42,6 +42,7 @@ from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.logs import LogStore, WorkspaceLogSink
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
@@ -102,6 +103,7 @@ class _RunnerDeps:
     adapter: AgentAdapter
     gh: GitHubClient
     sleep: Callable[[float], Awaitable[None]]
+    log_store: LogStore | None = None
 
 
 class PullRequestMonitorRunner:
@@ -119,6 +121,7 @@ class PullRequestMonitorRunner:
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         worktrees_root: Path,
         artifacts_root: Path | None = None,
+        log_store: LogStore | None = None,
     ) -> None:
         self._deps = _RunnerDeps(
             session_factory=session_factory,
@@ -126,6 +129,7 @@ class PullRequestMonitorRunner:
             adapter=adapter,
             gh=gh,
             sleep=sleep,
+            log_store=log_store,
         )
         self._config = monitor_config or MonitorConfig()
         self._runner_config = runner_config or MonitorRunnerConfig()
@@ -136,114 +140,188 @@ class PullRequestMonitorRunner:
         # is ``<work_dir>/git/worktrees``, go up two levels.
         self._artifacts_root = artifacts_root or (worktrees_root.parents[1] / "artifacts")
 
+    async def _open_monitor_log(self, workspace_id: str) -> WorkspaceLogSink | None:
+        if self._deps.log_store is None:
+            return None
+        return await self._deps.log_store.open_stream(
+            workspace_id=workspace_id,
+            stream_id="monitor.log",
+            source="monitor",
+            name="PR monitor",
+            kind="stdout",
+        )
+
+    async def _write_monitor_log(
+        self, sink: WorkspaceLogSink | None, payload: dict[str, object]
+    ) -> None:
+        if sink is None:
+            return
+        try:
+            await sink.write(json.dumps(payload, default=str, sort_keys=True) + "\n")
+        except Exception as exc:
+            _log.warning("monitor.log_write_failed", error=str(exc)[:400])
+
     # ── Entry point ────────────────────────────────────────────────────────
 
     async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
         """Drive the monitor phase until a terminal ``MonitorAction`` fires."""
 
-        for _ in range(self._runner_config.max_outer_iterations):
-            ws = await self._load_workspace(workspace_id)
-            if ws.status != WorkspaceStatus.monitoring_pr.value:
-                # Someone else terminated us (cancel, crash recovery, etc.).
-                return
+        monitor_log = await self._open_monitor_log(workspace_id)
+        try:
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.start",
+                    "workspace_id": workspace_id,
+                    "compose_project": compose_project,
+                },
+            )
+            for _ in range(self._runner_config.max_outer_iterations):
+                ws = await self._load_workspace(workspace_id)
+                if ws.status != WorkspaceStatus.monitoring_pr.value:
+                    # Someone else terminated us (cancel, crash recovery, etc.).
+                    return
 
-            state = self._load_state(ws)
-            if ws.monitor_started_at is None:
-                # Legacy/remonitor rows may enter the runner without the
-                # repository transition stamp. Persist before any action can
-                # sleep, otherwise a restart during the initial review grace
-                # window would start that window over.
-                await self._persist_state(workspace_id, state)
-            repo = RepoRef.from_url(ws.repo_url)
-            pr_number = ws.pr_number
-            if pr_number is None:
-                # A workspace in ``monitoring_pr`` without a PR number is
-                # an upstream invariant violation (the executor/sync
-                # handlers set pr_number before transitioning here).
-                # Fail cleanly instead of crashing the background runner
-                # with AssertionError — review feedback on PR #2 (gemini).
-                await self._terminate_failed(
-                    workspace_id,
-                    message=(
-                        "monitor: workspace reached monitoring_pr without a "
-                        "pr_number — upstream provisioning must populate it"
-                    ),
-                )
-                return
+                state = self._load_state(ws)
+                if ws.monitor_started_at is None:
+                    # Legacy/remonitor rows may enter the runner without the
+                    # repository transition stamp. Persist before any action can
+                    # sleep, otherwise a restart during the initial review grace
+                    # window would start that window over.
+                    await self._persist_state(workspace_id, state)
+                repo = RepoRef.from_url(ws.repo_url)
+                pr_number = ws.pr_number
+                if pr_number is None:
+                    # A workspace in ``monitoring_pr`` without a PR number is
+                    # an upstream invariant violation (the executor/sync
+                    # handlers set pr_number before transitioning here).
+                    # Fail cleanly instead of crashing the background runner
+                    # with AssertionError — review feedback on PR #2 (gemini).
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.failed",
+                            "workspace_id": workspace_id,
+                            "reason": "missing_pr_number",
+                        },
+                    )
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=(
+                            "monitor: workspace reached monitoring_pr without a "
+                            "pr_number — upstream provisioning must populate it"
+                        ),
+                    )
+                    return
 
-            try:
-                status = await self._fetch_status_for_decision(
+                try:
+                    status = await self._fetch_status_for_decision(
+                        repo=repo,
+                        pr_number=pr_number,
+                        workspace_id=workspace_id,
+                        base_branch=ws.branch_base,
+                    )
+                except GitHubClientError as exc:
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.failed",
+                            "workspace_id": workspace_id,
+                            "reason": "github_error",
+                            "message": str(exc)[:400],
+                        },
+                    )
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=f"monitor: github error: {exc}"[:2000],
+                    )
+                    return
+
+                # Determine the remote push target for this workspace.
+                # ``remote_push_branch`` is the canonical destination.
+                #
+                # Pre-migration fallback — task-kind-conditional:
+                #   * ``feature_branch_pr``: ``branch_name`` (e.g. ``awf/<id>``)
+                #     equals the remote branch. Safe to fall back.
+                #   * sync kinds: ``branch_name`` is the LOCAL synthetic ref
+                #     (``release-sync/<id>`` / ``feature-sync/<id>``) — NOT
+                #     the remote branch the PR expects. Falling back would
+                #     push to a new remote branch instead of updating the
+                #     PR's head. Refuse and fail fast instead; the row
+                #     predates this migration and must be re-attached
+                #     fresh (which will populate remote_push_branch).
+                remote_branch = ws.remote_push_branch
+                if remote_branch is None and ws.task_kind == "feature_branch_pr":
+                    remote_branch = ws.branch_name
+                if not remote_branch:
+                    # No safe push target — either missing branch entirely
+                    # (upstream invariant violation) or a pre-migration
+                    # sync row where ``branch_name`` is unsafe to reuse.
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.failed",
+                            "workspace_id": workspace_id,
+                            "reason": "missing_remote_push_branch",
+                            "task_kind": ws.task_kind,
+                            "branch_name": ws.branch_name,
+                        },
+                    )
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=(
+                            "monitor: workspace has no remote_push_branch "
+                            f"(task_kind={ws.task_kind}, branch_name="
+                            f"{ws.branch_name!r}). For sync workspaces "
+                            "predating the remote_push_branch migration, "
+                            "re-attach the monitor via "
+                            "attach_feature_pr_monitor.py so a fresh row "
+                            "is provisioned with the column populated."
+                        ),
+                    )
+                    return
+
+                action = decide(status, state, self._config)
+                terminal = await self._execute(
+                    action=action,
+                    workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
-                    workspace_id=workspace_id,
+                    status=status,
+                    state=state,
                     base_branch=ws.branch_base,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
                 )
-            except GitHubClientError as exc:
-                await self._terminate_failed(
-                    workspace_id,
-                    message=f"monitor: github error: {exc}"[:2000],
-                )
-                return
+                await self._persist_state(workspace_id, state)
+                if terminal:
+                    return
 
-            # Determine the remote push target for this workspace.
-            # ``remote_push_branch`` is the canonical destination.
-            #
-            # Pre-migration fallback — task-kind-conditional:
-            #   * ``feature_branch_pr``: ``branch_name`` (e.g. ``awf/<id>``)
-            #     equals the remote branch. Safe to fall back.
-            #   * sync kinds: ``branch_name`` is the LOCAL synthetic ref
-            #     (``release-sync/<id>`` / ``feature-sync/<id>``) — NOT
-            #     the remote branch the PR expects. Falling back would
-            #     push to a new remote branch instead of updating the
-            #     PR's head. Refuse and fail fast instead; the row
-            #     predates this migration and must be re-attached
-            #     fresh (which will populate remote_push_branch).
-            remote_branch = ws.remote_push_branch
-            if remote_branch is None and ws.task_kind == "feature_branch_pr":
-                remote_branch = ws.branch_name
-            if not remote_branch:
-                # No safe push target — either missing branch entirely
-                # (upstream invariant violation) or a pre-migration
-                # sync row where ``branch_name`` is unsafe to reuse.
-                await self._terminate_failed(
-                    workspace_id,
-                    message=(
-                        "monitor: workspace has no remote_push_branch "
-                        f"(task_kind={ws.task_kind}, branch_name="
-                        f"{ws.branch_name!r}). For sync workspaces "
-                        "predating the remote_push_branch migration, "
-                        "re-attach the monitor via "
-                        "attach_feature_pr_monitor.py so a fresh row "
-                        "is provisioned with the column populated."
-                    ),
-                )
-                return
-
-            action = decide(status, state, self._config)
-            terminal = await self._execute(
-                action=action,
-                workspace_id=workspace_id,
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                base_branch=ws.branch_base,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
+            # Safety net — max_outer_iterations hit without a terminal action.
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.failed",
+                    "workspace_id": workspace_id,
+                    "reason": "max_outer_iterations",
+                },
             )
-            await self._persist_state(workspace_id, state)
-            if terminal:
-                return
-
-        # Safety net — max_outer_iterations hit without a terminal action.
-        await self._terminate_failed(
-            workspace_id,
-            message=(
-                "monitor: hit max_outer_iterations without a terminal action "
-                "(likely a decision loop bug)"
-            ),
-        )
+            await self._terminate_failed(
+                workspace_id,
+                message=(
+                    "monitor: hit max_outer_iterations without a terminal action "
+                    "(likely a decision loop bug)"
+                ),
+            )
+        finally:
+            await self._write_monitor_log(
+                monitor_log,
+                {"event": "monitor.closed", "workspace_id": workspace_id},
+            )
+            if monitor_log is not None:
+                await monitor_log.close()
 
     # ── Action dispatch ────────────────────────────────────────────────────
 
@@ -260,6 +338,7 @@ class PullRequestMonitorRunner:
         remote_branch: str,
         compose_project: str,
         compose_file: Path,
+        monitor_log: WorkspaceLogSink | None,
     ) -> bool:
         """Execute one action. Returns True iff the monitor has reached a
         terminal state (merged / notified / aborted / short-circuited)."""
@@ -281,6 +360,23 @@ class PullRequestMonitorRunner:
             merge_state=(status.merge_state_status.value if status.merge_state_status else None),
             unresolved_threads=len(status.unresolved_inline_threads),
             unresolved_reviews=len(status.unresolved_review_comments),
+        )
+        await self._write_monitor_log(
+            monitor_log,
+            {
+                "event": "monitor.action",
+                "workspace_id": workspace_id,
+                "pr_number": pr_number,
+                "iter": state.iter_count,
+                "action": type(action).__name__,
+                "head_sha": status.head_sha,
+                "base_behind": status.base_behind_count,
+                "merge_state": (
+                    status.merge_state_status.value if status.merge_state_status else None
+                ),
+                "unresolved_threads": len(status.unresolved_inline_threads),
+                "unresolved_reviews": len(status.unresolved_review_comments),
+            },
         )
 
         if isinstance(action, ShortCircuitCompleted):
@@ -431,6 +527,7 @@ class PullRequestMonitorRunner:
                         remote_branch=remote_branch,
                         compose_project=compose_project,
                         compose_file=compose_file,
+                        monitor_log=monitor_log,
                     )
                 status = fresh_status
 
@@ -553,6 +650,7 @@ class PullRequestMonitorRunner:
             # 1) Address each item in the current batch.
             for t in threads:
                 verdict = await self._address_thread(
+                    workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
                     thread=t,
@@ -564,6 +662,7 @@ class PullRequestMonitorRunner:
                     threads_to_resolve.append(t.thread_id)
             for c in reviews:
                 verdict = await self._address_review_comment(
+                    workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
                     comment=c,
@@ -634,6 +733,7 @@ class PullRequestMonitorRunner:
     async def _address_thread(
         self,
         *,
+        workspace_id: str,
         repo: RepoRef,
         pr_number: int,
         thread: ReviewThread,
@@ -642,6 +742,7 @@ class PullRequestMonitorRunner:
     ) -> Verdict:
         prompt = address_thread_prompt(pr_number=pr_number, repo_slug=repo.slug(), thread=thread)
         return await self._invoke_cli_for_verdict(
+            workspace_id=workspace_id,
             prompt=prompt,
             compose_project=compose_project,
             compose_file=compose_file,
@@ -650,6 +751,7 @@ class PullRequestMonitorRunner:
     async def _address_review_comment(
         self,
         *,
+        workspace_id: str,
         repo: RepoRef,
         pr_number: int,
         comment: ReviewComment,
@@ -660,19 +762,21 @@ class PullRequestMonitorRunner:
             pr_number=pr_number, repo_slug=repo.slug(), comment=comment
         )
         return await self._invoke_cli_for_verdict(
+            workspace_id=workspace_id,
             prompt=prompt,
             compose_project=compose_project,
             compose_file=compose_file,
         )
 
     async def _invoke_cli_for_verdict(
-        self, *, prompt: str, compose_project: str, compose_file: Path
+        self, *, workspace_id: str, prompt: str, compose_project: str, compose_file: Path
     ) -> Verdict:
         try:
             result = await self._deps.adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 prompt=prompt,
+                workspace_id=workspace_id,
             )
         except AgentRunError as exc:
             _log.warning(
@@ -734,6 +838,7 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                     prompt=prompt,
+                    workspace_id=workspace_id,
                 )
             except AgentRunError as exc:
                 _log.warning(
@@ -764,6 +869,7 @@ class PullRequestMonitorRunner:
                 compose_project=compose_project,
                 compose_file=compose_file,
                 prompt=prompt,
+                workspace_id=workspace_id,
             )
         except AgentRunError as exc:
             _log.warning(

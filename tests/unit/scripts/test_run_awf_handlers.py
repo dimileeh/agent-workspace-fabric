@@ -561,6 +561,8 @@ class TestSyncReleasePrHandler:
             )
             assert ws.pr_number == 278
             assert ws.pr_url == "https://github.com/dimileeh/aira-web/pull/278"
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert isinstance(kwargs["log_store"], run_awf.LogStore)
 
     @pytest.mark.unit
     async def test_missing_pr_number_raises(
@@ -674,6 +676,8 @@ class TestSyncFeaturePrHandler:
                 "sync_feature_pr must push to the PR's head branch"
             )
             assert ws.pr_number == 277
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert isinstance(kwargs["log_store"], run_awf.LogStore)
 
     @pytest.mark.unit
     async def test_missing_source_branch_raises(

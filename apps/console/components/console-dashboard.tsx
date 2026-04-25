@@ -141,7 +141,11 @@ export function ConsoleDashboard() {
     setError(null);
     setOverview(result.data.items);
     setLastRefresh(new Date());
-    setSelectedId((current) => current ?? result.data.items[0]?.workspace_id ?? null);
+    setSelectedId((current) =>
+      current && result.data.items.some((item) => item.workspace_id === current)
+        ? current
+        : result.data.items[0]?.workspace_id ?? null,
+    );
   }, [overviewPath]);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {

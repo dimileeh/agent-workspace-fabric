@@ -808,6 +808,7 @@ async def _run_task(
                 initial_review_grace_period_seconds=_initial_review_grace_period_seconds(
                     cfg, profile
                 ),
+                log_store=log_store,
             )
 
         executor = WorkspaceExecutor(
@@ -881,6 +882,7 @@ async def _run_sync_release_pr(
     runner = AsyncioSubprocessRunner()
     git = GitManager(work_dir / "git")
     compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
+    log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
 
     # Step 1: workspace row. For a release-sync, branch_name is the
     # source branch (not an awf/ws_X feature branch) because the
@@ -1024,6 +1026,7 @@ async def _run_sync_release_pr(
         agent_runtime,
         runner=runner,
         defaults=_DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+        log_store=log_store,
     )
     gh = GitHubClient(runner)
     monitor = build_release_pr_monitor(
@@ -1034,6 +1037,7 @@ async def _run_sync_release_pr(
         worktrees_root=work_dir / "git" / "worktrees",
         artifacts_root=work_dir / "artifacts",
         initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
+        log_store=log_store,
     )
     print(
         f"[{cfg.task_title[:40]}] release-monitor running for PR #{cfg.pr_number} ...",
@@ -1109,6 +1113,7 @@ async def _run_sync_feature_pr(
     runner = AsyncioSubprocessRunner()
     git = GitManager(work_dir / "git")
     compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
+    log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
 
     # Step 1: workspace row.
     async with session_factory() as s:
@@ -1251,6 +1256,7 @@ async def _run_sync_feature_pr(
         agent_runtime,
         runner=runner,
         defaults=_DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+        log_store=log_store,
     )
     gh = GitHubClient(runner)
     factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
@@ -1262,6 +1268,7 @@ async def _run_sync_feature_pr(
         worktrees_root=work_dir / "git" / "worktrees",
         artifacts_root=work_dir / "artifacts",
         initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
+        log_store=log_store,
     )
     print(
         f"[{cfg.task_title[:40]}] feature-pr-monitor running for PR "

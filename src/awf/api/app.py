@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf import __version__
 from awf.api.routes import (
@@ -37,9 +37,23 @@ from awf.db.base import Base
 from awf.db.session import make_engine, make_session_factory
 
 
-def configure_database(app: FastAPI, factory: async_sessionmaker[AsyncSession]) -> None:
+def configure_database(
+    app: FastAPI,
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    engine: AsyncEngine | None = None,
+    database_url: str | None = None,
+) -> None:
     """Attach a session factory to ``app.state`` for dependency injection."""
     app.state.db_session_factory = factory
+    if engine is not None:
+        app.state.db_engine = engine
+    if database_url is not None:
+        app.state.database_url = database_url
+        from awf.api.deps import _sqlite_file_path, _sqlite_identity
+
+        db_path = _sqlite_file_path(database_url)
+        app.state.db_sqlite_identity = _sqlite_identity(db_path) if db_path is not None else None
 
 
 @asynccontextmanager
@@ -59,12 +73,15 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
             await conn.run_sync(Base.metadata.create_all)
 
     factory = make_session_factory(engine)
-    configure_database(app, factory)
+    configure_database(app, factory, engine=engine, database_url=settings.database_url)
 
     try:
         yield
     finally:
-        await engine.dispose()
+        current_engine = getattr(app.state, "db_engine", engine)
+        await current_engine.dispose()
+        if current_engine is not engine:
+            await engine.dispose()
 
 
 def create_app(*, use_lifespan: bool = True) -> FastAPI:

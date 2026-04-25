@@ -30,7 +30,13 @@ class _StubAdapter(AgentAdapter):
         return []
 
     async def run(  # type: ignore[override]
-        self, *, compose_project: str, compose_file: Path, prompt: str, model: str | None = None
+        self,
+        *,
+        compose_project: str,
+        compose_file: Path,
+        prompt: str,
+        model: str | None = None,
+        workspace_id: str | None = None,
     ) -> AgentRunResult:
         return AgentRunResult(returncode=0, stdout="", stderr="")
 
