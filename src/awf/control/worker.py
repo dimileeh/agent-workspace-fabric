@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from dataclasses import dataclass
+from typing import Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -33,18 +34,24 @@ class WorkerConfig:
     max_concurrent_provisions: int = 3
 
 
+class WorkspaceExecutorProtocol(Protocol):
+    async def execute(self, workspace_id: str) -> None: ...
+
+
 class ControlWorker:
-    """Reads pending work from the DB and dispatches it to the provisioner."""
+    """Reads pending work from the DB and dispatches it to runtime handlers."""
 
     def __init__(
         self,
         *,
         session_factory: async_sessionmaker[AsyncSession],
         provisioner: Provisioner,
+        executor: WorkspaceExecutorProtocol | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
         self._provisioner = provisioner
+        self._executor = executor
         self._config = config
         self._stopped = asyncio.Event()
 
@@ -53,21 +60,32 @@ class ControlWorker:
         self._stopped.set()
 
     async def run_once(self) -> int:
-        """Claim + dispatch up to ``max_concurrent_provisions`` requested workspaces.
+        """Claim + dispatch requested provisioning and ready execution workspaces.
 
         Returns the number of workspaces dispatched. A zero return is a signal
         for ``run_forever`` to sleep; non-zero means we may be throughput-bound
         and should immediately loop again.
         """
-        ids = await self._list_pending()
-        if not ids:
-            return 0
+        dispatched = 0
 
-        await asyncio.gather(
-            *(self._safely_provision(ws_id) for ws_id in ids),
-            return_exceptions=False,
-        )
-        return len(ids)
+        requested_ids = await self._list_requested()
+        if requested_ids:
+            await asyncio.gather(
+                *(self._safely_provision(ws_id) for ws_id in requested_ids),
+                return_exceptions=False,
+            )
+            dispatched += len(requested_ids)
+
+        if self._executor is not None:
+            ready_ids = await self._list_ready()
+            if ready_ids:
+                await asyncio.gather(
+                    *(self._safely_execute(ws_id) for ws_id in ready_ids),
+                    return_exceptions=False,
+                )
+                dispatched += len(ready_ids)
+
+        return dispatched
 
     async def run_forever(self) -> None:
         while not self._stopped.is_set():
@@ -86,11 +104,22 @@ class ControlWorker:
                     )
 
     async def _list_pending(self) -> list[str]:
+        """Backward-compatible alias for the original requested query."""
+        return await self._list_requested()
+
+    async def _list_requested(self) -> list[str]:
         """Return up to ``max_concurrent_provisions`` workspace IDs in ``requested``."""
+        return await self._list_by_status(WorkspaceStatus.requested)
+
+    async def _list_ready(self) -> list[str]:
+        """Return up to ``max_concurrent_provisions`` workspace IDs in ``ready``."""
+        return await self._list_by_status(WorkspaceStatus.ready)
+
+    async def _list_by_status(self, status: WorkspaceStatus) -> list[str]:
         async with self._session_factory() as session:
             stmt = (
                 select(Workspace.id)
-                .where(Workspace.status == WorkspaceStatus.requested.value)
+                .where(Workspace.status == status.value)
                 .order_by(Workspace.created_at)
                 .limit(self._config.max_concurrent_provisions)
             )
@@ -104,3 +133,14 @@ class ControlWorker:
             # Provisioner.provision() already logged + transitioned to failed;
             # we swallow here so one bad workspace doesn't abort the batch.
             _log.exception("worker.provision_failed", workspace_id=workspace_id)
+
+    async def _safely_execute(self, workspace_id: str) -> None:
+        if self._executor is None:
+            return
+        try:
+            await self._executor.execute(workspace_id)
+        except Exception:
+            # WorkspaceExecutor.execute() owns state transitions, including
+            # skip-if-no-longer-ready semantics. The worker must keep polling
+            # even if one execution path crashes before it can mark a failure.
+            _log.exception("worker.execute_failed", workspace_id=workspace_id)

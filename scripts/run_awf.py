@@ -797,7 +797,10 @@ async def _run_task(
         # the ``monitoring_pr`` stage (comments, CI, base sync, merge).
         gh = GitHubClient(runner)
 
-        def _monitor_factory(adapter: AgentAdapter) -> Any:
+        def _monitor_factory(
+            adapter: AgentAdapter,
+            monitor_profile: WorkspaceProfile = profile,
+        ) -> Any:
             factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
             return factory(
                 session_factory=session_factory,
@@ -807,7 +810,7 @@ async def _run_task(
                 worktrees_root=work_dir / "git" / "worktrees",
                 artifacts_root=work_dir / "artifacts",
                 initial_review_grace_period_seconds=_initial_review_grace_period_seconds(
-                    cfg, profile
+                    cfg, monitor_profile
                 ),
                 log_store=log_store,
             )

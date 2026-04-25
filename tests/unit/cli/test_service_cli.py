@@ -361,9 +361,17 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             created["provisioner_config"] = config
 
     class _ControlWorker:
-        def __init__(self, *, session_factory: object, provisioner: object, config: object) -> None:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            provisioner: object,
+            executor: object,
+            config: object,
+        ) -> None:
             created["worker_session_factory"] = session_factory
             created["worker_provisioner"] = provisioner
+            created["worker_executor"] = executor
             created["worker_config"] = config
 
         async def run_once(self) -> int:
@@ -425,6 +433,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["provisioner_session_factory"] is session_factory
     assert created["worker_session_factory"] is session_factory
     assert created["provisioner_stack_launcher"].__class__ is _ComposeStackLauncher
+    assert created["worker_executor"] is not None
     assert created["provisioner_config"].node_id == "node-1"
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2

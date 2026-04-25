@@ -397,10 +397,15 @@ curl -X POST http://localhost:8000/v2/workspaces \
   }'
 ```
 
-Current MVP note: the REST API persists workspace requests and exposes state.
-The always-on worker path currently proves provisioning only
-(`requested -> provisioning -> ready`). The full local end-to-end executor is
-still `scripts/run_awf.py` until API-backed full execution lands.
+Current local-service behavior: the REST API persists workspace requests and
+exposes state, and the always-on worker drives feature PR workspaces through the
+full lifecycle: `requested -> provisioning -> ready -> running -> validating ->
+pushing -> monitoring_pr -> completed/failed`. Feature PR workspaces created
+through the service use the resolved profile's monitor grace window
+(`monitor.initial_review_grace_period_seconds`, default `900`) and auto-merge
+after the monitor's gates pass. Manual/release task routing is still future
+service API work; those paths remain available through the compatibility
+dogfood scripts.
 
 Get one workspace:
 
@@ -524,6 +529,12 @@ the same auth into agent containers. Local service mode mounts
 and worker containers. Set `AWF_HOST_HOME` if the shell running Docker Compose
 does not expose the operator home as `${HOME}`.
 
+The worker reuses the per-workspace Compose file and project created during
+provisioning. It does not launch a second stack for agent execution,
+validation, PR creation, or PR monitoring; those stages run against the same
+workspace services and keep agent, validation, and monitor logs in the durable
+workspace log store.
+
 Start from a clean checkout:
 
 ```bash
@@ -570,11 +581,13 @@ MCP is a straightforward next slice.
 
 ## Local Dogfood Runner
 
-The fastest way to exercise the full local pipeline today is
-`scripts/run_awf.py`. It is a compatibility dogfood runner until API-backed
-full execution lands. It creates a local SQLite control-plane database under a
-run directory, provisions workspaces, launches Docker Compose, runs the agent,
-creates a PR, and runs the PR monitor.
+`scripts/run_awf.py` is the compatibility dogfood runner for exercising the
+same building blocks outside the always-on service. It creates a local SQLite
+control-plane database under a run directory, provisions workspaces, launches
+Docker Compose, runs the agent, creates a PR, and runs the PR monitor. The
+service worker is now the normal always-on feature PR executor; use the script
+for isolated experiments, checked-in task specs, and release/sync flows that
+the service API does not express yet.
 
 Example config:
 

@@ -94,7 +94,7 @@ class WorkspaceExecutor:
         pr_creator: PullRequestCreator,
         config: ExecutorConfig,
         pr_monitor: _MonitorRunnerProto | None = None,
-        pr_monitor_factory: Callable[[AgentAdapter], _MonitorRunnerProto] | None = None,
+        pr_monitor_factory: Callable[..., _MonitorRunnerProto] | None = None,
         log_store: LogStore | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
@@ -106,7 +106,9 @@ class WorkspaceExecutor:
         * ``pr_monitor_factory`` — a callable the executor invokes AFTER
           the adapter is resolved. Production path: ``run_awf.py`` passes
           a factory that builds a ``PullRequestMonitorRunner`` from the
-          adapter, GitHub client, and worktree paths.
+          adapter, GitHub client, worktree paths, and resolved workspace
+          profile. Adapter-only factories are still accepted for older
+          tests and compatibility scripts.
 
         If both are None the monitor stage is skipped and the executor
         preserves the original ``pushing → completed`` contract (the
@@ -687,7 +689,11 @@ class WorkspaceExecutor:
             # from the per-task adapter now that we have it.
             monitor: _MonitorRunnerProto | None = self._pr_monitor
             if monitor is None and self._pr_monitor_factory is not None:
-                monitor = self._pr_monitor_factory(adapter)
+                monitor = _call_pr_monitor_factory(
+                    self._pr_monitor_factory,
+                    adapter=adapter,
+                    profile=profile,
+                )
 
             if monitor is not None:
                 # Hand off to the monitor — it will transition to completed
@@ -800,6 +806,28 @@ def _extract_pr_number(pr_url: str) -> int | None:
     """
     match = _PR_NUMBER_RE.search(pr_url)
     return int(match.group(1)) if match else None
+
+
+def _call_pr_monitor_factory(
+    factory: Callable[..., _MonitorRunnerProto],
+    *,
+    adapter: AgentAdapter,
+    profile: WorkspaceProfile,
+) -> _MonitorRunnerProto:
+    """Call a monitor factory with the resolved profile when it accepts it.
+
+    ``run_awf.py`` and some existing tests predate profile-aware service
+    execution and expose an adapter-only factory. The service worker uses the
+    two-argument form so feature PR monitors inherit the workspace profile's
+    initial review grace period.
+    """
+    try:
+        return factory(adapter, profile)
+    except TypeError as exc:
+        try:
+            return factory(adapter)
+        except TypeError:
+            raise exc from None
 
 
 def _build_pr_body(ws: Workspace) -> str:

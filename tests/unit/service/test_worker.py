@@ -176,6 +176,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2
 
+    default_monitor = created["executor_monitor_factory"](object(), WorkspaceProfile(name="default"))
+    assert default_monitor is not None
+    assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 900
+
     profile = WorkspaceProfile(
         name="custom",
         monitor=ProfileMonitor(initial_review_grace_period_seconds=321),
