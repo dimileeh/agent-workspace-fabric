@@ -375,6 +375,56 @@ class TestHappyMerge:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
 
+    @pytest.mark.unit
+    async def test_missing_started_at_is_persisted_before_initial_grace_sleep(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_started_at = None
+            await s.commit()
+
+        sleep_calls: list[float] = []
+
+        async def sleep_after_asserting_started(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                assert ws.monitor_started_at is not None
+
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # initially merge-ready
+        # Keep the test finite by simulating an external merge while AWF waits
+        # out the initial review window.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_after_asserting_started,
+            worktrees_root=tmp_path / "worktrees",
+            initial_review_grace_period_seconds=900,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        assert sleep_calls == [60]
+
 
 class TestMergeBlockedFallsBackToNotify:
     @pytest.mark.unit

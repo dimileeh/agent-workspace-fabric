@@ -148,6 +148,12 @@ class PullRequestMonitorRunner:
                 return
 
             state = self._load_state(ws)
+            if ws.monitor_started_at is None:
+                # Legacy/remonitor rows may enter the runner without the
+                # repository transition stamp. Persist before any action can
+                # sleep, otherwise a restart during the initial review grace
+                # window would start that window over.
+                await self._persist_state(workspace_id, state)
             repo = RepoRef.from_url(ws.repo_url)
             pr_number = ws.pr_number
             if pr_number is None:
@@ -975,7 +981,8 @@ class PullRequestMonitorRunner:
         started_raw = ws.monitor_started_at
         # ``MonitorState.started_at`` is monotonic; tests prefer wall-clock
         # semantics so we reconstruct by subtracting the elapsed seconds.
-        # If monitor_started_at is unset (just entered monitoring_pr), use now.
+        # If monitor_started_at is unset (legacy/remonitor row), use now; run()
+        # persists it before actions that can sleep.
         import time as _time  # local to avoid confusion with datetime above
 
         if started_raw is None:
