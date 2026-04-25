@@ -9,6 +9,11 @@ from __future__ import annotations
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_session_factory
 
 _MINIMAL_BODY = {
     "repo_url": "git@github.com:dimileeh/aira-agent.git",
@@ -18,6 +23,28 @@ _MINIMAL_BODY = {
     "agent": "codex",
     "test_commands": ["pytest -q"],
 }
+
+
+async def _create_workspace(client: AsyncClient, **overrides: object) -> str:
+    body = {**_MINIMAL_BODY, **overrides}
+    response = await client.post("/v1/workspaces", json=body)
+    assert response.status_code == 202
+    return str(response.json()["workspace_id"])
+
+
+async def _transition_workspace(
+    engine: AsyncEngine,
+    workspace_id: str,
+    *targets: WorkspaceStatus,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        for target in targets:
+            await repo.transition(ws, to=target, reason_code="TEST")
+        await session.commit()
 
 
 class TestCreateWorkspace:
@@ -120,3 +147,159 @@ class TestListWorkspaces:
         assert len(results) == 3
         # Newest first.
         assert [r["id"] for r in results] == list(reversed(ids))
+
+    @pytest.mark.unit
+    async def test_filters_by_status(
+        self, client: AsyncClient, engine: AsyncEngine
+    ) -> None:
+        ready_id = await _create_workspace(client, task_title="ready")
+        await _create_workspace(client, task_title="still requested")
+        await _transition_workspace(
+            engine,
+            ready_id,
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+        )
+
+        response = await client.get("/v1/workspaces", params={"status": "ready"})
+
+        assert response.status_code == 200
+        results = response.json()
+        assert [r["id"] for r in results] == [ready_id]
+        assert {r["status"] for r in results} == {"ready"}
+
+    @pytest.mark.unit
+    async def test_filters_by_agent(self, client: AsyncClient) -> None:
+        await _create_workspace(client, task_title="codex", agent="codex")
+        claude_id = await _create_workspace(
+            client,
+            task_title="claude",
+            agent="claude_code",
+        )
+
+        response = await client.get("/v1/workspaces", params={"agent": "claude_code"})
+
+        assert response.status_code == 200
+        results = response.json()
+        assert [r["id"] for r in results] == [claude_id]
+        assert {r["agent"] for r in results} == {"claude_code"}
+
+    @pytest.mark.unit
+    async def test_filters_by_exact_repo_url(self, client: AsyncClient) -> None:
+        repo_url = "git@github.com:example/app.git"
+        matching_id = await _create_workspace(
+            client,
+            task_title="matching repo",
+            repo_url=repo_url,
+        )
+        await _create_workspace(
+            client,
+            task_title="similar repo",
+            repo_url="git@github.com:example/app-extra.git",
+        )
+
+        response = await client.get("/v1/workspaces", params={"repo_url": repo_url})
+
+        assert response.status_code == 200
+        results = response.json()
+        assert [r["id"] for r in results] == [matching_id]
+        assert {r["repo_url"] for r in results} == {repo_url}
+
+    @pytest.mark.unit
+    async def test_combines_filters(
+        self, client: AsyncClient, engine: AsyncEngine
+    ) -> None:
+        repo_url = "git@github.com:example/combined.git"
+        matching_id = await _create_workspace(
+            client,
+            task_title="matching",
+            repo_url=repo_url,
+            agent="gemini",
+        )
+        wrong_status_id = await _create_workspace(
+            client,
+            task_title="wrong status",
+            repo_url=repo_url,
+            agent="gemini",
+        )
+        wrong_agent_id = await _create_workspace(
+            client,
+            task_title="wrong agent",
+            repo_url=repo_url,
+            agent="codex",
+        )
+        wrong_repo_id = await _create_workspace(
+            client,
+            task_title="wrong repo",
+            repo_url="git@github.com:example/other.git",
+            agent="gemini",
+        )
+        for workspace_id in [matching_id, wrong_agent_id, wrong_repo_id]:
+            await _transition_workspace(
+                engine,
+                workspace_id,
+                WorkspaceStatus.provisioning,
+                WorkspaceStatus.ready,
+            )
+
+        response = await client.get(
+            "/v1/workspaces",
+            params={"status": "ready", "agent": "gemini", "repo_url": repo_url},
+        )
+
+        assert response.status_code == 200
+        assert [r["id"] for r in response.json()] == [matching_id]
+        assert wrong_status_id not in [r["id"] for r in response.json()]
+
+    @pytest.mark.unit
+    async def test_limit_defaults_to_50(self, client: AsyncClient) -> None:
+        for idx in range(51):
+            await _create_workspace(client, task_title=f"workspace {idx}")
+
+        response = await client.get("/v1/workspaces")
+
+        assert response.status_code == 200
+        assert len(response.json()) == 50
+
+    @pytest.mark.unit
+    async def test_limit_bounds_newest_first(self, client: AsyncClient) -> None:
+        first_id = await _create_workspace(client, task_title="first")
+        second_id = await _create_workspace(client, task_title="second")
+
+        response = await client.get("/v1/workspaces", params={"limit": 1})
+
+        assert response.status_code == 200
+        assert [r["id"] for r in response.json()] == [second_id]
+        assert first_id not in [r["id"] for r in response.json()]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("limit", [0, 501])
+    async def test_rejects_limit_outside_bounds(
+        self, client: AsyncClient, limit: int
+    ) -> None:
+        response = await client.get("/v1/workspaces", params={"limit": limit})
+
+        assert response.status_code == 422
+
+    @pytest.mark.unit
+    async def test_returns_empty_list_when_filters_match_nothing(
+        self, client: AsyncClient
+    ) -> None:
+        await _create_workspace(client, task_title="not completed")
+
+        response = await client.get("/v1/workspaces", params={"status": "completed"})
+
+        assert response.status_code == 200
+        assert response.json() == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("param", "value"),
+        [("status", "not-a-status"), ("agent", "not-an-agent")],
+    )
+    async def test_rejects_unknown_filter_enums(
+        self, client: AsyncClient, param: str, value: str
+    ) -> None:
+        response = await client.get("/v1/workspaces", params={param: value})
+
+        assert response.status_code == 422

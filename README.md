@@ -81,6 +81,13 @@ curl "http://localhost:8000/v1/events?workspace_id=ws_123&limit=50"
 The response is shaped for future pagination:
 `{"items": [...], "next_cursor": null, "has_more": false}`.
 
+Operators can also list recent workspaces for dashboard views. Results are newest
+first, `limit` defaults to 50 and accepts 1-500, and filters are exact matches:
+
+```bash
+curl "http://localhost:8000/v1/workspaces?status=running&agent=codex&repo_url=git@github.com:example/app.git&limit=25"
+```
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
