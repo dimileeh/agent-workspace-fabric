@@ -12,13 +12,15 @@ cleanly when they show up alongside other MCP servers.
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, cast
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 
-from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
+from awf.api.schemas import ErrorResponse, WorkspaceCreateRequest, WorkspaceCreateV2Request
 from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.profiles.resolver import ProfileResolutionError
 from awf.service.workspaces import WorkspaceService
 
 # ── MCP tool registration ─────────────────────────────────────────────────
@@ -152,7 +154,19 @@ def build_mcp_server(
             workspace={"profile_ref": profile_ref, "profile": profile},
             validation={"commands": validation_commands, "requested_tier": requested_tier},
         )
-        return (await service.create_v2(req)).model_dump(mode="json")
+        try:
+            ws = await service.create_v2(req)
+        except ProfileResolutionError as exc:
+            error = ErrorResponse(error_code="INVALID_PROFILE", message=str(exc))
+            return cast(
+                dict[str, Any],
+                CallToolResult(
+                    content=[TextContent(type="text", text=error.model_dump_json())],
+                    structuredContent=error.model_dump(mode="json"),
+                    isError=True,
+                ),
+            )
+        return ws.model_dump(mode="json")
 
     @mcp.tool(name="awf_get_workspace")
     async def awf_get_workspace(

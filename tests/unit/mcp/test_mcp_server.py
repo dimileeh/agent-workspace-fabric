@@ -162,6 +162,34 @@ class TestCreateWorkspaceV2:
         assert ws.auto_merge is False
         assert ws.initial_review_grace_period_seconds == 12.5
 
+    @pytest.mark.unit
+    async def test_unknown_profile_ref_returns_structured_invalid_profile_error(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from mcp.types import CallToolResult
+
+        result = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {
+                "repo_url": "git@github.com:example/app.git",
+                "base_branch": "main",
+                "task_title": "Add planner hook",
+                "task_prompt": "Implement the planner hook.",
+                "profile_ref": "missing-profile",
+            },
+        )
+
+        message = "unknown workspace profile_ref: missing-profile"
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "INVALID_PROFILE",
+            "message": message,
+            "detail": None,
+        }
+        assert result.content[0].type == "text"
+
 
 class TestGetAndList:
     @pytest.mark.unit
