@@ -50,7 +50,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
@@ -267,7 +267,7 @@ async def orchestrate_attach(
 
 
 def _load_companions(path: Path) -> list[dict[str, Any]]:
-    return json.loads(path.read_text())
+    return cast(list[dict[str, Any]], json.loads(path.read_text()))
 
 
 async def _main(ns: argparse.Namespace) -> int:
