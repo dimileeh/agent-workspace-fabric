@@ -1,0 +1,144 @@
+"""Workspace artifact metadata API tests."""
+
+from __future__ import annotations
+
+from datetime import datetime
+from pathlib import Path
+
+import pytest
+from httpx import AsyncClient
+
+from awf.common.config import get_settings
+
+_MINIMAL_BODY = {
+    "repo_url": "git@github.com:example/artifacts.git",
+    "branch_base": "main",
+    "task_title": "List artifacts",
+    "task_prompt": "Expose workspace artifact metadata.",
+    "agent": "codex",
+    "test_commands": ["pytest -q"],
+}
+
+
+@pytest.fixture(autouse=True)
+def _clear_settings_cache() -> None:
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
+
+
+async def _create_workspace(client: AsyncClient) -> str:
+    response = await client.post("/v1/workspaces", json=_MINIMAL_BODY)
+    assert response.status_code == 202
+    return str(response.json()["workspace_id"])
+
+
+def _configure_artifact_api(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> tuple[Path, dict[str, str]]:
+    work_dir = tmp_path / "awf-state"
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+    get_settings.cache_clear()
+    return work_dir, {"Authorization": "Bearer secret"}
+
+
+class TestWorkspaceArtifacts:
+    @pytest.mark.unit
+    async def test_requires_local_bearer_token_when_configured(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        _configure_artifact_api(monkeypatch, tmp_path)
+
+        response = await client.get(f"/v1/workspaces/{workspace_id}/artifacts")
+
+        assert response.status_code == 401
+        assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+    @pytest.mark.unit
+    async def test_missing_workspace_returns_not_found(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        _, headers = _configure_artifact_api(monkeypatch, tmp_path)
+
+        response = await client.get(
+            "/v1/workspaces/ws_missing/artifacts",
+            headers=headers,
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["error_code"] == "NOT_FOUND"
+
+    @pytest.mark.unit
+    async def test_existing_workspace_without_artifact_directory_returns_empty_list(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        _, headers = _configure_artifact_api(monkeypatch, tmp_path)
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"items": [], "next_cursor": None, "has_more": False}
+
+    @pytest.mark.unit
+    async def test_lists_recursive_file_metadata_and_skips_escaping_symlinks(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        work_dir, headers = _configure_artifact_api(monkeypatch, tmp_path)
+        artifact_dir = work_dir / "artifacts" / workspace_id
+        nested = artifact_dir / "logs"
+        nested.mkdir(parents=True)
+        stdout_path = nested / "stdout.txt"
+        stdout_path.write_text("alpha\n", encoding="utf-8")
+        screenshot_path = artifact_dir / "screenshot.png"
+        screenshot_path.write_bytes(b"\x89PNG\r\n")
+        (artifact_dir / "empty-dir").mkdir()
+        outside_path = tmp_path / "outside.txt"
+        outside_path.write_text("secret\n", encoding="utf-8")
+        (artifact_dir / "outside-link.txt").symlink_to(outside_path)
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["next_cursor"] is None
+        assert body["has_more"] is False
+        assert [item["relative_path"] for item in body["items"]] == [
+            "logs/stdout.txt",
+            "screenshot.png",
+        ]
+
+        stdout_item = body["items"][0]
+        second_read = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            headers=headers,
+        )
+        assert stdout_item["artifact_id"] == second_read.json()["items"][0]["artifact_id"]
+        assert stdout_item["workspace_id"] == workspace_id
+        assert stdout_item["name"] == "stdout.txt"
+        assert stdout_item["path"] == str(stdout_path.resolve())
+        assert stdout_item["kind"] == "txt"
+        assert stdout_item["size_bytes"] == len("alpha\n")
+        datetime.fromisoformat(stdout_item["modified_at"])
