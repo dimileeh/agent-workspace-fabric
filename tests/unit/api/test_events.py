@@ -166,10 +166,8 @@ class TestListWorkspaceEvents:
         client: AsyncClient,
         limit: int,
     ) -> None:
-        workspace_id = await _create_workspace(client, "limit validation")
-
         response = await client.get(
-            f"/v1/workspaces/{workspace_id}/events",
+            "/v1/workspaces/ws_missing/events",
             params={"limit": limit},
         )
 
