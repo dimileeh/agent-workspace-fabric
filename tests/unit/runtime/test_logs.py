@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
+from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -59,6 +62,38 @@ async def test_log_store_persists_stream_metadata_and_bytes(
     )
     assert data == "hel"
     assert next_offset == 3
+    assert eof is False
+
+
+@pytest.mark.unit
+async def test_log_store_read_uses_threaded_bounded_file_read(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "workspace.log"
+    path.write_bytes(b"0123456789")
+    to_thread_called = False
+
+    async def fake_to_thread(func: Callable[..., object], /, *args: Any) -> object:
+        nonlocal to_thread_called
+        to_thread_called = True
+        return func(*args)
+
+    def fail_read_bytes(self: Path) -> bytes:
+        raise AssertionError("read_bytes would load the entire log")
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(Path, "read_bytes", fail_read_bytes)
+
+    data, next_offset, eof = await LogStore(root=tmp_path).read(
+        path=path,
+        offset=3,
+        limit_bytes=4,
+    )
+
+    assert to_thread_called is True
+    assert data == "3456"
+    assert next_offset == 7
     assert eof is False
 
 

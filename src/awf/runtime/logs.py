@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
@@ -166,11 +167,19 @@ class LogStore:
         offset: int,
         limit_bytes: int,
     ) -> tuple[str, int, bool]:
-        data = path.read_bytes()
-        safe_offset = min(max(offset, 0), len(data))
-        chunk = data[safe_offset : safe_offset + limit_bytes]
-        next_offset = safe_offset + len(chunk)
-        return chunk.decode("utf-8", errors="replace"), next_offset, next_offset >= len(data)
+        return await asyncio.to_thread(_read_log_chunk, path, offset, limit_bytes)
+
+
+def _read_log_chunk(path: Path, offset: int, limit_bytes: int) -> tuple[str, int, bool]:
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        file_size = handle.tell()
+        safe_offset = min(max(offset, 0), file_size)
+        handle.seek(safe_offset)
+        chunk = handle.read(max(limit_bytes, 0))
+
+    next_offset = safe_offset + len(chunk)
+    return chunk.decode("utf-8", errors="replace"), next_offset, next_offset >= file_size
 
 
 async def stream_compose_service_logs(
