@@ -518,6 +518,12 @@ host-visible path that is mounted at the same absolute path inside the
 containers. The local stack defaults this to `${HOME}/.awf/service`, overridable
 with `AWF_HOST_WORK_DIR=/absolute/path`.
 
+The worker also needs host-visible credential paths so workspace stacks can bind
+the same auth into agent containers. Local service mode mounts
+`${AWF_HOST_HOME:-${HOME}}` read-only at the same absolute path inside the API
+and worker containers. Set `AWF_HOST_HOME` if the shell running Docker Compose
+does not expose the operator home as `${HOME}`.
+
 Start from a clean checkout:
 
 ```bash
@@ -713,6 +719,7 @@ AWF_API_TOKEN=local-dev-token
 AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
 AWF_WORK_DIR=.awf
 AWF_HOST_WORK_DIR=
+AWF_HOST_HOME=
 AWF_GITHUB_TOKEN=
 ```
 
@@ -721,9 +728,11 @@ not require a separate Postgres control-plane database.
 
 ### Agent Credentials in Containers
 
-`scripts/run_awf.py` maps local auth into the agent container:
+`scripts/run_awf.py` and local service worker-created workspace stacks map local
+auth into the agent container:
 
 - `~/.config/gh`
+- `~/.config/gcloud`
 - `~/.gitconfig`
 - `~/.ssh`
 - `~/.codex` copied into a per-workspace isolated auth directory.
@@ -733,6 +742,13 @@ not require a separate Postgres control-plane database.
 
 Codex auth is intentionally isolated per workspace because a live host
 `~/.codex` contains state and locks that can collide with Codex Desktop.
+
+For local service mode, these host paths must be visible to the worker at their
+host absolute paths. `docker/compose/local-service.yml` does this by mounting
+`${AWF_HOST_HOME:-${HOME}}` read-only into the control-plane containers; the
+worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
+`rules/` into `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/codex`
+before launching the workspace stack.
 
 Default agent models and effort are centralized in
 `src/awf/adapters/defaults.py`:

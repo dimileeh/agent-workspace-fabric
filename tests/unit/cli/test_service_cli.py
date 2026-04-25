@@ -47,6 +47,18 @@ def test_service_config_uses_postgres_default_and_redacts_secrets() -> None:
 
 
 @pytest.mark.unit
+def test_service_config_carries_host_home_for_service_auth_mounts(tmp_path: Path) -> None:
+    from awf.service.config import resolve_service_settings
+
+    host_home = tmp_path / "host-home"
+    base = Settings(_env_file=None, host_home=str(host_home))
+
+    settings = resolve_service_settings(base, environ={"AWF_HOST_HOME": str(host_home)})
+
+    assert settings.host_home == str(host_home)
+
+
+@pytest.mark.unit
 def test_service_mode_uses_postgres_when_database_env_unset() -> None:
     from awf.service.config import DEFAULT_LOCAL_SERVICE_DATABASE_URL, resolve_service_settings
 
@@ -323,9 +335,16 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             created["compose_template_path"] = template_path
 
     class _ComposeStackLauncher:
-        def __init__(self, *, compose: object, agent_runtime_image: str) -> None:
+        def __init__(
+            self,
+            *,
+            compose: object,
+            agent_runtime_image: str,
+            auth_mount_resolver: object | None = None,
+        ) -> None:
             created["stack_compose"] = compose
             created["stack_agent_runtime_image"] = agent_runtime_image
+            created["stack_auth_mount_resolver"] = auth_mount_resolver
 
     class _Provisioner:
         def __init__(
@@ -383,6 +402,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         docker_host="unix:///var/run/docker.sock",
         agent_runtime_image="custom-agent-runtime:dev",
         work_dir=str(host_work_dir),
+        host_home=str(tmp_path / "host-home"),
         api_token=None,
         github_token=None,
         worker_poll_interval_seconds=0.25,
@@ -399,6 +419,9 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["compose_template_path"].name == "workspace.base.yml.j2"
     assert created["stack_compose"].__class__ is _ComposeManager
     assert created["stack_agent_runtime_image"] == "custom-agent-runtime:dev"
+    assert created["stack_auth_mount_resolver"] is not None
+    assert created["stack_auth_mount_resolver"].host_home == (tmp_path / "host-home").resolve()
+    assert created["stack_auth_mount_resolver"].work_dir == host_work_dir
     assert created["provisioner_session_factory"] is session_factory
     assert created["worker_session_factory"] is session_factory
     assert created["provisioner_stack_launcher"].__class__ is _ComposeStackLauncher

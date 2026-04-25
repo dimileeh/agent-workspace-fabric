@@ -74,6 +74,13 @@ class Settings(BaseSettings):
         default=".awf",
         description="Local AWF state root. Log streams live under <work_dir>/logs.",
     )
+    host_home: str = Field(
+        default="~",
+        description=(
+            "Host home directory used by local service mode to discover and copy "
+            "agent/GitHub credentials for workspace container auth mounts."
+        ),
+    )
 
     # Worker
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0)

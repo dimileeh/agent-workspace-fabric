@@ -32,16 +32,19 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     assert "docker-compose-plugin" in dockerfile
 
     expected_work_dir = "${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}"
+    expected_host_home = "${AWF_HOST_HOME:-${HOME}}"
     for service_name in ("api", "worker"):
         volumes = services[service_name]["volumes"]
         assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
         assert f"{expected_work_dir}:{expected_work_dir}" in volumes
+        assert f"{expected_host_home}:{expected_host_home}:ro" in volumes
         environment = services[service_name]["environment"]
         assert environment["AWF_API_BASE_URL"] == "http://api:8000"
         assert environment["AWF_API_TOKEN"] == "${AWF_API_TOKEN:-local-dev-token}"
         assert environment["AWF_DATABASE_URL"].startswith("postgresql+asyncpg://")
         assert "@postgres:5432/" in environment["AWF_DATABASE_URL"]
         assert environment["AWF_WORK_DIR"] == expected_work_dir
+        assert environment["AWF_HOST_HOME"] == expected_host_home
         assert environment["UV_PROJECT_ENVIRONMENT"] == "/tmp/awf-venv"
         assert environment["UV_LINK_MODE"] == "copy"
 
