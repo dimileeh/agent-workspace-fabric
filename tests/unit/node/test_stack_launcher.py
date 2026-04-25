@@ -77,4 +77,4 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     assert [service.name for service in spec.services] == ["postgres"]
     assert spec.auth_mounts[0].source == str(layout.mirror_path)
     assert spec.auth_mounts[0].target == str(layout.mirror_path)
-    assert spec.auth_mounts[0].mode == "rw"
+    assert spec.auth_mounts[0].mode == "ro"

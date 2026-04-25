@@ -44,7 +44,6 @@ class ComposeStackLauncher:
         mirror_mount = AuthMount(
             source=str(layout.mirror_path),
             target=str(layout.mirror_path),
-            mode="rw",
         )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
