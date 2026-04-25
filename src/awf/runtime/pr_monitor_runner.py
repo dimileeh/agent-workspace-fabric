@@ -594,6 +594,13 @@ class PullRequestMonitorRunner:
             # resolve the non-defer threads on GitHub.
             pass
 
+        # Record the pushed HEAD before resolving review threads. The
+        # pushed commit is local git state; a transient GraphQL resolve
+        # failure should not affect the monitor's push bookkeeping.
+        if pushed:
+            head_sha = await self._rev_parse_head(worktree_path)
+            state.last_push_sha = head_sha
+
         # 4) Resolve threads on GitHub. Only inline threads have IDs we can
         # resolve via the GraphQL mutation; review-level comments are
         # marked addressed in state and the reviewer's re-read usually
@@ -613,11 +620,6 @@ class PullRequestMonitorRunner:
                 # failed resolve would make the next poll treat an open
                 # GitHub thread as handled forever.
                 state.threads_addressed_ids.pop(tid, None)
-
-        # 5) Update last_push_sha.
-        if pushed:
-            head_sha = await self._rev_parse_head(worktree_path)
-            state.last_push_sha = head_sha
 
     async def _address_thread(
         self,
