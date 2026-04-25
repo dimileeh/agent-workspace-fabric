@@ -220,7 +220,7 @@ class TestMonitorActionLogging:
             author="coderabbitai",
             body=(
                 "## Review skipped\n\n"
-                "Auto reviews are disabled on base/target branches other than development.\n"
+                "Required review has not run yet. Trigger review before merging.\n"
                 "- [ ] Trigger review"
             ),
         )
@@ -269,6 +269,61 @@ class TestMonitorActionLogging:
         assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
         assert len(adapter.calls) == 1
         assert "new review feedback after AWF notified human" in adapter.calls[0]
+
+    @pytest.mark.unit
+    async def test_non_actionable_review_disabled_comment_waits_for_initial_grace(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        disabled_review_comment = issue_comment_node(
+            cid=78,
+            author="coderabbitai",
+            body=(
+                "## Review skipped\n\n"
+                "Auto reviews are disabled on base/target branches other than development.\n"
+                "- [ ] Trigger review"
+            ),
+        )
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[disabled_review_comment]))
+        # Keep the test finite by simulating an external merge while AWF waits
+        # out the initial review grace window.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            initial_review_grace_period_seconds=900,
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["Merge", "ShortCircuitCompleted"]
+        assert sleep_fn.calls == [60]
+        assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+        assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_merge_sha is None
 
     @pytest.mark.unit
     async def test_short_circuit_completed_emits_log_line(
@@ -494,7 +549,7 @@ class TestMonitorActionLogging:
             author="coderabbitai",
             body=(
                 "## Review skipped\n\n"
-                "Auto reviews are disabled on base/target branches other than development.\n"
+                "Required review has not run yet. Trigger review before merging.\n"
                 "- [ ] Trigger review"
             ),
         )

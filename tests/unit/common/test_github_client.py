@@ -145,7 +145,7 @@ class TestFetchPrStatus:
         assert c.blocks_merge is False
 
     @pytest.mark.unit
-    async def test_parses_blocking_review_skipped_issue_comment(self) -> None:
+    async def test_ignores_non_actionable_review_disabled_issue_comment(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(
             returncode=0,
@@ -158,6 +158,33 @@ class TestFetchPrStatus:
                             "> ## Review skipped\n\n"
                             "Auto reviews are disabled on base/target branches "
                             "other than the configured development branch.\n\n"
+                            "- [ ] Trigger review"
+                        ),
+                        "isMinimized": False,
+                        "author": {"login": "coderabbitai"},
+                    }
+                ]
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+        assert status.unresolved_review_comments == ()
+
+    @pytest.mark.unit
+    async def test_parses_actionable_trigger_review_issue_comment_as_blocking(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                comments=[
+                    {
+                        "databaseId": 77,
+                        "body": (
+                            "> [!IMPORTANT]\n"
+                            "> ## Review skipped\n\n"
+                            "Required review was skipped. Trigger review before merging.\n\n"
                             "- [ ] Trigger review"
                         ),
                         "isMinimized": False,

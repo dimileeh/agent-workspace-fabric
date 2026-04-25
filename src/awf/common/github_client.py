@@ -239,10 +239,9 @@ class GitHubClient:
 
         # ── Top-level PR comments ──────────────────────────────────────
         # Review bots sometimes report gating state as an issue comment
-        # instead of a review object. PR #15 exposed the failure mode:
-        # CodeRabbit posted "Review skipped" + an unchecked "Trigger
-        # review" checklist, but the monitor only queried review objects
-        # and therefore merged as if no reviewer work remained.
+        # instead of a review object. Actionable trigger-review blockers
+        # still need to gate merge, but non-actionable status comments like
+        # "auto reviews are disabled for this base branch" are ignored.
         for node in _dig(pr, "comments", "nodes") or []:
             body = node.get("body") or ""
             if node.get("isMinimized") or not body.strip():
@@ -250,6 +249,10 @@ class GitHubClient:
             if _is_awf_status_issue_comment(body):
                 continue
             author = _dig(node, "author", "login")
+            if _is_known_bot_comment_author(author) and _is_non_actionable_review_skip_comment(
+                body
+            ):
+                continue
             blocks_merge = _is_merge_blocking_issue_comment(body)
             if not blocks_merge and _is_known_bot_comment_author(author):
                 continue
@@ -549,6 +552,11 @@ def _is_merge_blocking_issue_comment(body: str) -> bool:
     return "review skipped" in lower and (
         "trigger review" in lower or "auto reviews are disabled" in lower
     )
+
+
+def _is_non_actionable_review_skip_comment(body: str) -> bool:
+    lower = " ".join(body.lower().split())
+    return "review skipped" in lower and "auto reviews are disabled" in lower
 
 
 def _is_awf_status_issue_comment(body: str) -> bool:

@@ -418,11 +418,10 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
 
     # 3. Policy/checklist blockers that cannot be code-fixed must stop
     # auto-merge, but they must not terminate the monitor. Example:
-    # CodeRabbit can post a top-level "review skipped" comment with an
-    # unchecked "Trigger review" task when the PR base branch is outside
-    # its configured review set. The runner posts a single human-attention
-    # comment and keeps polling so later code-review comments are still
-    # handled.
+    # Review bots can post top-level policy/checklist blockers that require
+    # an external action rather than a code edit. The runner posts a single
+    # human-attention comment and keeps polling so later code-review comments
+    # are still handled.
     if any(c.blocks_merge for c in status.unresolved_review_comments):
         return NotifyHuman()
 
