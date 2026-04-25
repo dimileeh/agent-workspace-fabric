@@ -1,5 +1,6 @@
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
@@ -121,10 +122,13 @@ async def test_list_operations_ordering(client: AsyncClient, session: AsyncSessi
         test_commands=[]
     )
 
-    # Create ops with slight delay or just trust the ID/created_at ordering
     op1 = await op_repo.create(workspace_id=ws.id, operation_type=OperationType.create)
     op2 = await op_repo.create(workspace_id=ws.id, operation_type=OperationType.validate)
     op3 = await op_repo.create(workspace_id=ws.id, operation_type=OperationType.start)
+    base_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+    op1.created_at = base_created_at
+    op2.created_at = base_created_at + timedelta(seconds=1)
+    op3.created_at = base_created_at + timedelta(seconds=2)
 
     await session.commit()
 
