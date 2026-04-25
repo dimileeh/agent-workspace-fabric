@@ -132,17 +132,17 @@ def _prepare_isolated_codex_home(*, host_home: Path, target_root: Path) -> Path 
     if not source.exists():
         return None
 
-    if target_root.exists():
-        shutil.rmtree(target_root)
     target_root.mkdir(parents=True, exist_ok=True)
 
     for filename in ("auth.json", "config.toml", "installation_id"):
         src = source / filename
-        if src.is_file():
-            shutil.copy2(src, target_root / filename)
+        dst = target_root / filename
+        if src.is_file() and not dst.exists():
+            shutil.copy2(src, dst)
 
     rules = source / "rules"
-    if rules.is_dir():
+    rules_target = target_root / "rules"
+    if rules.is_dir() and not rules_target.exists():
         shutil.copytree(rules, target_root / "rules")
 
     return target_root

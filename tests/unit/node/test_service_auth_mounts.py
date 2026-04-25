@@ -79,6 +79,38 @@ def test_service_auth_mounts_copy_codex_into_workspace_isolated_home(tmp_path: P
 
 
 @pytest.mark.unit
+def test_service_auth_mounts_preserve_existing_workspace_codex_home(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_codex = host_home / ".codex"
+    host_codex.mkdir(parents=True)
+    (host_codex / "auth.json").write_text('{"token": "initial"}')
+    (host_codex / "config.toml").write_text("model = 'gpt-5.5'\n")
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+    codex_home = Path({m.target: m for m in mounts}["/home/agent/.codex"].source)
+    (codex_home / "auth.json").write_text('{"token": "agent-refreshed"}')
+    (codex_home / "sessions").mkdir()
+    (codex_home / "sessions" / "session.jsonl").write_text("{}\n")
+    (host_codex / "auth.json").write_text('{"token": "host-updated"}')
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    assert (codex_home / "auth.json").read_text() == '{"token": "agent-refreshed"}'
+    assert (codex_home / "sessions" / "session.jsonl").read_text() == "{}\n"
+
+
+@pytest.mark.unit
 def test_service_auth_mounts_include_google_application_credentials_file(
     tmp_path: Path,
 ) -> None:
