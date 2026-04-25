@@ -173,6 +173,8 @@ class Operation(Base):
     __table_args__ = (
         Index("ix_operations_workspace", "workspace_id"),
         Index("ix_operations_status", "status"),
+        Index("ix_operations_type", "type"),
+        Index("ix_operations_created_at_id", "created_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
