@@ -11,8 +11,9 @@ returns 409 ``IDEMPOTENCY_CONFLICT`` per docs/PLAN_MVP.md § Error code taxonomy
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Annotated
 
-from fastapi import APIRouter, Depends, Header, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -24,7 +25,7 @@ from awf.api.schemas import (
     WorkspaceCreateV2Request,
     WorkspaceResponse,
 )
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
@@ -170,11 +171,19 @@ async def get_workspace(
 
 @router.get("", response_model=list[WorkspaceResponse])
 async def list_workspaces(
-    limit: int = 50,
+    workspace_status: Annotated[WorkspaceStatus | None, Query(alias="status")] = None,
+    agent: AgentRuntime | None = None,
+    repo_url: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session: AsyncSession = Depends(get_db_session),
 ) -> list[WorkspaceResponse]:
     repo = WorkspaceRepository(session)
-    rows = await repo.list(limit=limit)
+    rows = await repo.list(
+        status=workspace_status,
+        agent=agent,
+        repo_url=repo_url,
+        limit=limit,
+    )
     return [WorkspaceResponse.model_validate(r) for r in rows]
 
 

@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.base import Base
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import WorkspaceEvent
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
@@ -101,6 +101,74 @@ class TestIdempotency:
     ) -> None:
         repo = WorkspaceRepository(session)
         assert await repo.get_by_idempotency_key("never-used") is None
+
+
+class TestListWorkspaces:
+    @pytest.mark.unit
+    async def test_combines_status_agent_and_repo_filters(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        matching = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="matching",
+            task_prompt="p",
+            agent=AgentRuntime.gemini.value,
+            test_commands=[],
+        )
+        await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="wrong agent",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+        )
+        await repo.create(
+            repo_url="git@github.com:example/other.git",
+            branch_base="development",
+            task_title="wrong repo",
+            task_prompt="p",
+            agent=AgentRuntime.gemini.value,
+            test_commands=[],
+        )
+
+        rows = await repo.list(
+            status=WorkspaceStatus.requested,
+            agent=AgentRuntime.gemini,
+            repo_url="git@github.com:example/app.git",
+            limit=10,
+        )
+
+        assert [row.id for row in rows] == [matching.id]
+
+    @pytest.mark.unit
+    async def test_applies_filters_before_limit(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        matching = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="older matching",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+        )
+        newer_non_matching = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="newer non-matching",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+        )
+        await repo.transition(matching, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        await repo.transition(matching, to=WorkspaceStatus.ready, reason_code="TEST")
+        matching.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        newer_non_matching.created_at = datetime(2026, 1, 2, tzinfo=UTC)
+        await session.commit()
+
+        rows = await repo.list(status=WorkspaceStatus.ready, limit=1)
+
+        assert [row.id for row in rows] == [matching.id]
 
 
 class TestTransition:

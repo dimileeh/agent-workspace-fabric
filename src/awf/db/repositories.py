@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.ids import new_event_id, new_workspace_id
 from awf.control.state_machine import WorkspaceStateMachine
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 
 
@@ -95,8 +95,22 @@ class WorkspaceRepository:
         stmt = select(Workspace).where(Workspace.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def list(self, *, limit: int = 50) -> list[Workspace]:
-        stmt = select(Workspace).order_by(Workspace.created_at.desc()).limit(limit)
+    async def list(
+        self,
+        *,
+        status: WorkspaceStatus | None = None,
+        agent: AgentRuntime | None = None,
+        repo_url: str | None = None,
+        limit: int = 50,
+    ) -> list[Workspace]:
+        stmt = select(Workspace)
+        if status is not None:
+            stmt = stmt.where(Workspace.status == status.value)
+        if agent is not None:
+            stmt = stmt.where(Workspace.agent == agent.value)
+        if repo_url is not None:
+            stmt = stmt.where(Workspace.repo_url == repo_url)
+        stmt = stmt.order_by(Workspace.created_at.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
     async def transition(
