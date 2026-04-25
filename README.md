@@ -72,6 +72,15 @@ awf workspace create \
   --test "pytest -q"
 ```
 
+Operators can poll immutable workspace events for dashboard or console timelines:
+
+```bash
+curl "http://localhost:8000/v1/events?workspace_id=ws_123&limit=50"
+```
+
+The response is shaped for future pagination:
+`{"items": [...], "next_cursor": null, "has_more": false}`.
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

@@ -9,6 +9,7 @@ under tests/integration/ with testcontainers.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -16,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.models import WorkspaceEvent
+from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 
 
@@ -174,3 +176,49 @@ class TestTransition:
         # Nothing changed.
         assert ws.status == WorkspaceStatus.requested.value
         assert ws.version == 1
+
+
+class TestListEvents:
+    @pytest.mark.unit
+    async def test_uses_event_id_as_stable_timestamp_tie_breaker(
+        self, session: AsyncSession
+    ) -> None:
+        workspace_repo = WorkspaceRepository(session)
+        workspace = await workspace_repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.flush()
+
+        occurred_at = datetime(2100, 1, 1, tzinfo=UTC)
+        session.add_all(
+            [
+                WorkspaceEvent(
+                    id="evt_aaa",
+                    workspace_id=workspace.id,
+                    event_type="workspace.state_changed",
+                    old_state=WorkspaceStatus.requested.value,
+                    new_state=WorkspaceStatus.provisioning.value,
+                    reason_code="A",
+                    occurred_at=occurred_at,
+                ),
+                WorkspaceEvent(
+                    id="evt_zzz",
+                    workspace_id=workspace.id,
+                    event_type="workspace.state_changed",
+                    old_state=WorkspaceStatus.provisioning.value,
+                    new_state=WorkspaceStatus.ready.value,
+                    reason_code="B",
+                    occurred_at=occurred_at,
+                ),
+            ]
+        )
+        await session.commit()
+
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id, limit=2)
+
+        assert [event.id for event in events] == ["evt_zzz", "evt_aaa"]

@@ -130,3 +130,25 @@ class WorkspaceRepository:
             )
         )
         return workspace
+
+
+class WorkspaceEventRepository:
+    """Read-only queries for immutable workspace events."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list(
+        self,
+        *,
+        workspace_id: str | None = None,
+        limit: int = 50,
+    ) -> list[WorkspaceEvent]:
+        stmt = select(WorkspaceEvent)
+        if workspace_id is not None:
+            stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
+        stmt = stmt.order_by(
+            WorkspaceEvent.occurred_at.desc(),
+            WorkspaceEvent.id.desc(),
+        ).limit(limit)
+        return list((await self._session.execute(stmt)).scalars())
