@@ -31,7 +31,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     work_dir = Path(settings.work_dir).expanduser().resolve()
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
     git = GitManager(work_dir / "git")
-    compose = ComposeManager(work_dir=work_dir / "compose", template_path=template)
+    compose = ComposeManager(work_dir=work_dir, template_path=template)
     stack_launcher = ComposeStackLauncher(
         compose=compose,
         agent_runtime_image=settings.agent_runtime_image,

@@ -395,7 +395,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["db_url"] == settings.database_url
     assert created["session_engine"] is engine
     assert created["git_work_dir"] == host_work_dir / "git"
-    assert created["compose_work_dir"] == host_work_dir / "compose"
+    assert created["compose_work_dir"] == host_work_dir
     assert created["compose_template_path"].name == "workspace.base.yml.j2"
     assert created["stack_compose"].__class__ is _ComposeManager
     assert created["stack_agent_runtime_image"] == "custom-agent-runtime:dev"
