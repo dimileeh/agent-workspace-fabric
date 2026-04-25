@@ -172,7 +172,7 @@ async def get_workspace(
 @router.get("", response_model=list[WorkspaceResponse])
 async def list_workspaces(
     workspace_status: Annotated[WorkspaceStatus | None, Query(alias="status")] = None,
-    agent: AgentRuntime | None = None,
+    agent: Annotated[AgentRuntime | None, Query()] = None,
     repo_url: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session: AsyncSession = Depends(get_db_session),
