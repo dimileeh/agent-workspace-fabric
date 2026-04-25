@@ -10,6 +10,7 @@ SQLAlchemy calls everywhere. Rules:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from sqlalchemy import select
@@ -116,6 +117,8 @@ class WorkspaceRepository:
         old_state = workspace.status
         workspace.status = to.value
         workspace.version += 1
+        if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
+            workspace.monitor_started_at = datetime.now(UTC)
 
         workspace.events.append(
             WorkspaceEvent(

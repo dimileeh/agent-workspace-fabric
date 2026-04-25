@@ -23,8 +23,20 @@ def test_profile_schema_accepts_minimal_valid_profile() -> None:
         }
     )
     assert profile.name == "go-explicit"
+    assert profile.monitor.initial_review_grace_period_seconds == 900
     assert profile.phases.setup[0].command == "go mod download"
     assert profile.phases.validate_commands[0].command == "go test ./..."
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_monitor_initial_review_grace() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "python-explicit",
+            "monitor": {"initial_review_grace_period_seconds": 120},
+        }
+    )
+    assert profile.monitor.initial_review_grace_period_seconds == 120
 
 
 @pytest.mark.unit

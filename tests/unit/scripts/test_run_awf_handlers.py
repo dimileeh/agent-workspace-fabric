@@ -229,6 +229,7 @@ def patch_handlers(
 
     executors: list[_FakeExecutor] = []
     monitors: list[_FakeMonitor] = []
+    monitor_builder_calls: list[dict[str, Any]] = []
 
     def _exec_ctor(**kwargs: Any) -> _FakeExecutor:
         e = _FakeExecutor(
@@ -241,11 +242,13 @@ def patch_handlers(
     monkeypatch.setattr(run_awf, "WorkspaceExecutor", _exec_ctor)
 
     def _build_release_monitor(**kwargs: Any) -> _FakeMonitor:
+        monitor_builder_calls.append({"kind": "release", "kwargs": kwargs})
         m = _FakeMonitor(session_factory=kwargs["session_factory"])
         monitors.append(m)
         return m
 
     def _build_feature_monitor(**kwargs: Any) -> _FakeMonitor:
+        monitor_builder_calls.append({"kind": "feature", "kwargs": kwargs})
         m = _FakeMonitor(session_factory=kwargs["session_factory"])
         monitors.append(m)
         return m
@@ -262,6 +265,7 @@ def patch_handlers(
         _build_feature_monitor,
     )
     monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _build_feature_monitor)
+    monkeypatch.setattr(run_awf, "build_release_pr_monitor", _build_release_monitor)
 
     # ValidationRunner + PullRequestCreator + GitHubClient get constructed
     # but their methods aren't exercised because the fake executor never
@@ -280,6 +284,7 @@ def patch_handlers(
         "git_factory": fake_gitmanager_cls,
         "executors": executors,
         "monitors": monitors,
+        "monitor_builder_calls": monitor_builder_calls,
         "compose_instances": compose_instances,
     }
 
@@ -343,6 +348,64 @@ class TestFeatureBranchPrHandler:
         execs = patch_handlers["executors"]
         assert len(execs) == 1
         assert execs[0].calls == [ws_id]
+
+    @pytest.mark.unit
+    async def test_auto_merge_false_routes_feature_branch_pr_to_manual_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(auto_merge=False),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="tester",
+            git_email="t@example.com",
+        )
+        assert patch_handlers["monitor_builder_calls"][0]["kind"] == "release"
+
+    @pytest.mark.unit
+    async def test_task_grace_override_is_passed_to_feature_pr_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(initial_review_grace_period_seconds=0),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="tester",
+            git_email="t@example.com",
+        )
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert kwargs["initial_review_grace_period_seconds"] == 0
+
+    @pytest.mark.unit
+    async def test_profile_grace_is_passed_when_task_omits_override(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(
+                profile={
+                    "name": "custom",
+                    "monitor": {"initial_review_grace_period_seconds": 321},
+                },
+            ),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="tester",
+            git_email="t@example.com",
+        )
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert kwargs["initial_review_grace_period_seconds"] == 321
 
     @pytest.mark.unit
     async def test_companions_get_materialized_before_compose_up(
@@ -644,6 +707,7 @@ class TestSyncFeaturePrHandler:
             "awf.runtime.release_pr_monitor.build_feature_pr_monitor", _tiny_feature
         )
         monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _tiny_feature)
+        monkeypatch.setattr(run_awf, "build_release_pr_monitor", _tiny_release)
         monkeypatch.setattr(run_awf, "GitManager", lambda p: _FakeGitManager(p))
         monkeypatch.setattr(run_awf, "ComposeManager", _FakeComposeManager)
         monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
@@ -715,6 +779,7 @@ class TestSyncFeaturePrHandler:
             "awf.runtime.release_pr_monitor.build_feature_pr_monitor", _tiny_feature
         )
         monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _tiny_feature)
+        monkeypatch.setattr(run_awf, "build_release_pr_monitor", _tiny_release)
         monkeypatch.setattr(run_awf, "GitManager", lambda p: _FakeGitManager(p))
         monkeypatch.setattr(run_awf, "ComposeManager", _FakeComposeManager)
         monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)

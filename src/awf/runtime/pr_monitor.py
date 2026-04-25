@@ -190,6 +190,11 @@ class MonitorConfig:
     # travels in one object.
     poll_interval_seconds: float = 60.0
     settle_interval_seconds: float = 30.0
+    initial_review_grace_period_seconds: float = 900.0
+    """One-time wait after the PR first enters monitoring before the first
+    auto-merge. This gives slow first-pass reviewers time to post feedback.
+    It is PR-scoped, not HEAD-scoped, and never restarts after fix commits."""
+
     pre_merge_settle_seconds: float = 90.0
     """Final quiet-period wait before an auto-merge. Review apps often
     post comments shortly after checks first turn green; merging on the

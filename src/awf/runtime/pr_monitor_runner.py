@@ -27,9 +27,10 @@ import asyncio
 import json
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -355,6 +356,25 @@ class PullRequestMonitorRunner:
             return False
 
         if isinstance(action, Merge):
+            grace_wait_seconds = _initial_review_grace_wait_seconds(
+                state,
+                pr_number=pr_number,
+                now=time.monotonic(),
+                grace_seconds=self._config.initial_review_grace_period_seconds,
+                poll_interval_seconds=self._config.poll_interval_seconds,
+            )
+            if grace_wait_seconds > 0:
+                _log.info(
+                    "monitor.initial_review_grace_waiting",
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    wait_seconds=grace_wait_seconds,
+                    grace_seconds=self._config.initial_review_grace_period_seconds,
+                    head_sha=status.head_sha[:10],
+                )
+                await self._deps.sleep(grace_wait_seconds)
+                return False
+
             if self._config.pre_merge_settle_seconds > 0:
                 await self._deps.sleep(self._config.pre_merge_settle_seconds)
                 try:
@@ -979,7 +999,8 @@ class PullRequestMonitorRunner:
             if state.last_push_sha is not None:
                 ws.monitor_last_commit_sha = state.last_push_sha
             if ws.monitor_started_at is None:
-                ws.monitor_started_at = datetime.now(UTC)
+                elapsed_seconds = max(time.monotonic() - state.started_at, 0.0)
+                ws.monitor_started_at = datetime.now(UTC) - timedelta(seconds=elapsed_seconds)
             await s.commit()
 
     async def _terminate_completed(
@@ -1163,6 +1184,49 @@ def _merge_rejection_reason(stderr: str) -> str:
 def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
     reason = blocker_reason or "ready-to-merge"
     return f"__awf_notify__:{head_sha}:{reason}"
+
+
+def _initial_review_grace_started_key(pr_number: int) -> str:
+    return f"__awf_initial_review_grace_started__:{pr_number}"
+
+
+def _initial_review_grace_done_key(pr_number: int) -> str:
+    return f"__awf_initial_review_grace_done__:{pr_number}"
+
+
+def _initial_review_grace_wait_seconds(
+    state: MonitorState,
+    *,
+    pr_number: int,
+    now: float,
+    grace_seconds: float,
+    poll_interval_seconds: float,
+) -> float:
+    """Return the one-time initial-review wait, mutating persisted state.
+
+    The key is PR-scoped rather than HEAD-scoped by design: the grace window
+    starts when the workspace enters ``monitoring_pr`` and must not restart
+    when AWF pushes fix commits.
+    """
+
+    if grace_seconds <= 0:
+        return 0.0
+
+    done_key = _initial_review_grace_done_key(pr_number)
+    if state.threads_addressed_ids.get(done_key) == "elapsed":
+        return 0.0
+
+    started_key = _initial_review_grace_started_key(pr_number)
+    started_at = state.started_at
+    if started_key not in state.threads_addressed_ids:
+        state.mark_addressed(started_key, f"{started_at:.6f}")
+
+    remaining_seconds = grace_seconds - max(now - started_at, 0.0)
+    if remaining_seconds <= 0:
+        state.mark_addressed(done_key, "elapsed")
+        return 0.0
+
+    return min(poll_interval_seconds, remaining_seconds)
 
 
 def _collect_defer_items(

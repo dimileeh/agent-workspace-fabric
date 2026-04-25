@@ -200,6 +200,7 @@ def make_runner(
     worktrees_root: Path,
     auto_merge: bool = True,
     pre_merge_settle_seconds: float = 0,
+    initial_review_grace_period_seconds: float = 0,
     artifacts_root: Path | None = None,
 ) -> PullRequestMonitorRunner:
     kwargs: dict = {
@@ -211,6 +212,7 @@ def make_runner(
             auto_merge=auto_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
+            initial_review_grace_period_seconds=initial_review_grace_period_seconds,
             pre_merge_settle_seconds=pre_merge_settle_seconds,
         ),
         "runner_config": MonitorRunnerConfig(max_outer_iterations=20, max_fix_cycle_passes=3),

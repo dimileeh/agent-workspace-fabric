@@ -112,6 +112,14 @@ class ProfileValidation(BaseModel):
     requested_tier: int = Field(default=1, ge=1, le=3)
 
 
+class ProfileMonitor(BaseModel):
+    """PR monitor policy supplied by the workspace profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    initial_review_grace_period_seconds: float = Field(default=900.0, ge=0, le=86400)
+
+
 class ProfileService(BaseModel):
     """A service in the outer AWF compose stack.
 
@@ -170,6 +178,7 @@ class WorkspaceProfile(BaseModel):
     services: list[ProfileService] = Field(default_factory=list)
     phases: ProfilePhaseSet = Field(default_factory=ProfilePhaseSet)
     validation: ProfileValidation = Field(default_factory=ProfileValidation)
+    monitor: ProfileMonitor = Field(default_factory=ProfileMonitor)
     secrets: list[ProfileSecret] = Field(default_factory=list)
     ports: dict[str, str] = Field(default_factory=dict)
 

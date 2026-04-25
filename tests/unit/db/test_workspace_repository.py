@@ -128,6 +128,32 @@ class TestTransition:
         assert ws.events[-1].reason_code == "WORKER_CLAIMED"
 
     @pytest.mark.unit
+    async def test_transition_to_monitoring_pr_stamps_monitor_start(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+        ):
+            await repo.transition(ws, to=target, reason_code="X")
+        await session.commit()
+
+        assert ws.monitor_started_at is not None
+
+    @pytest.mark.unit
     async def test_invalid_transition_raises_and_does_not_mutate(
         self, session: AsyncSession
     ) -> None:

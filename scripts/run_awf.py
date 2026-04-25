@@ -64,7 +64,7 @@ from awf.profiles.models import WorkspaceProfile
 from awf.profiles.registry import aira_profile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.pr_creator import PullRequestCreator
-from awf.runtime.release_pr_monitor import build_feature_pr_monitor
+from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -145,8 +145,8 @@ class TaskConfig:
     exists (the scheduler should always populate this)."""
 
     auto_merge: bool = True
-    """For ``sync_feature_pr`` only. ``True`` → monitor lands the feature
-    PR (into ``development``) once all gates turn green; ``False`` →
+    """For ``feature_branch_pr`` and ``sync_feature_pr``. ``True`` →
+    monitor lands the feature PR once all gates turn green; ``False`` →
     monitor posts a "ready to merge" notification and waits for a human.
 
     Defaults to ``True``: a feature→development PR with all gates green
@@ -155,6 +155,12 @@ class TaskConfig:
     Release PRs (development→main) are a separate task kind
     (``sync_release_pr``) and still hardcode ``auto_merge=False`` — the
     dev→main gate is where human approval lives."""
+
+    initial_review_grace_period_seconds: float | None = None
+    """Optional per-task override for the one-time PR-review grace window.
+
+    ``None`` means use the resolved profile monitor setting; ``0`` preserves
+    the old immediate-auto-merge behavior for explicit fast-path tests."""
 
 
 def _resolve_task_profile(
@@ -169,6 +175,14 @@ def _resolve_task_profile(
         validation_commands=cfg.test_commands,
     ).profile
     return _with_legacy_aira_postgres_if_needed(profile, cfg)
+
+
+def _initial_review_grace_period_seconds(cfg: TaskConfig, profile: WorkspaceProfile) -> float:
+    if cfg.initial_review_grace_period_seconds is not None:
+        if cfg.initial_review_grace_period_seconds < 0:
+            raise ValueError("initial_review_grace_period_seconds must be >= 0")
+        return cfg.initial_review_grace_period_seconds
+    return profile.monitor.initial_review_grace_period_seconds
 
 
 def _with_legacy_aira_postgres_if_needed(
@@ -743,13 +757,15 @@ async def _run_task(
     gh = GitHubClient(runner)
 
     def _monitor_factory(adapter: AgentAdapter) -> Any:
-        return build_feature_pr_monitor(
+        factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
+        return factory(
             session_factory=session_factory,
             runner=runner,
             adapter=adapter,
             gh=gh,
             worktrees_root=work_dir / "git" / "worktrees",
             artifacts_root=work_dir / "artifacts",
+            initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
         )
 
     executor = WorkspaceExecutor(
@@ -807,8 +823,6 @@ async def _run_sync_release_pr(
     errors out — the scheduler's job is to call ``ensure_release_pr_open``
     first so a PR exists.
     """
-    from awf.runtime.release_pr_monitor import build_release_pr_monitor
-
     if cfg.pr_number is None:
         raise ValueError(
             "sync_release_pr requires cfg.pr_number — the scheduler must "
@@ -972,6 +986,7 @@ async def _run_sync_release_pr(
         gh=gh,
         worktrees_root=work_dir / "git" / "worktrees",
         artifacts_root=work_dir / "artifacts",
+        initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
     )
     print(
         f"[{cfg.task_title[:40]}] release-monitor running for PR #{cfg.pr_number} ...",
@@ -1199,6 +1214,7 @@ async def _run_sync_feature_pr(
         gh=gh,
         worktrees_root=work_dir / "git" / "worktrees",
         artifacts_root=work_dir / "artifacts",
+        initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
     )
     print(
         f"[{cfg.task_title[:40]}] feature-pr-monitor running for PR "

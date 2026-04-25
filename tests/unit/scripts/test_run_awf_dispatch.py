@@ -167,3 +167,40 @@ class TestTaskConfigDefaults:
             auto_merge=False,
         )
         assert cfg.auto_merge is False
+
+    @pytest.mark.unit
+    def test_initial_review_grace_defaults_to_profile_monitor_setting(self) -> None:
+        cfg = run_awf.TaskConfig(
+            repo_url="git@github.com:x/y.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        profile = run_awf.WorkspaceProfile.model_validate(
+            {
+                "name": "custom",
+                "monitor": {"initial_review_grace_period_seconds": 123},
+            }
+        )
+        assert run_awf._initial_review_grace_period_seconds(cfg, profile) == 123
+
+    @pytest.mark.unit
+    def test_initial_review_grace_task_override_can_disable_wait(self) -> None:
+        cfg = run_awf.TaskConfig(
+            repo_url="git@github.com:x/y.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+            initial_review_grace_period_seconds=0,
+        )
+        profile = run_awf.WorkspaceProfile.model_validate(
+            {
+                "name": "custom",
+                "monitor": {"initial_review_grace_period_seconds": 123},
+            }
+        )
+        assert run_awf._initial_review_grace_period_seconds(cfg, profile) == 0

@@ -207,6 +207,7 @@ def _make_runner(
     worktrees_root: Path,
     auto_merge: bool = True,
     max_outer_iterations: int = 20,
+    initial_review_grace_period_seconds: float = 0,
 ) -> PullRequestMonitorRunner:
     return PullRequestMonitorRunner(
         session_factory=factory,
@@ -217,6 +218,7 @@ def _make_runner(
             auto_merge=auto_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
+            initial_review_grace_period_seconds=initial_review_grace_period_seconds,
             pre_merge_settle_seconds=0,
         ),
         runner_config=MonitorRunnerConfig(
@@ -333,6 +335,45 @@ class TestHappyMerge:
         merge_args = next(c.args for c in cmd.calls if "merge" in c.args)
         assert "--squash" in merge_args
         assert "--delete-branch" in merge_args
+
+    @pytest.mark.unit
+    async def test_green_pr_waits_initial_review_grace_before_auto_merge(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # initially merge-ready
+        # Keep the test finite by simulating that a human/bot merged it while
+        # AWF was respecting the initial review window.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            initial_review_grace_period_seconds=900,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        assert sleep_fn.calls == [60]
+        assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
 
 
 class TestMergeBlockedFallsBackToNotify:
