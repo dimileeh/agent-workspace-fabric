@@ -91,6 +91,10 @@ class WorkspaceRepository:
     async def get(self, workspace_id: str) -> Workspace | None:
         return await self._session.get(Workspace, workspace_id)
 
+    async def exists(self, workspace_id: str) -> bool:
+        stmt = select(Workspace.id).where(Workspace.id == workspace_id).limit(1)
+        return (await self._session.execute(stmt)).scalar_one_or_none() is not None
+
     async def get_by_idempotency_key(self, key: str) -> Workspace | None:
         stmt = select(Workspace).where(Workspace.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
@@ -177,11 +181,14 @@ class WorkspaceEventRepository:
         self,
         *,
         workspace_id: str | None = None,
+        event_type: str | None = None,
         limit: int = 50,
     ) -> list[WorkspaceEvent]:
         stmt = select(WorkspaceEvent)
         if workspace_id is not None:
             stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
+        if event_type is not None:
+            stmt = stmt.where(WorkspaceEvent.event_type == event_type)
         stmt = stmt.order_by(
             WorkspaceEvent.occurred_at.desc(),
             WorkspaceEvent.id.desc(),
