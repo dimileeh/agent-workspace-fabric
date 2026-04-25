@@ -142,143 +142,98 @@ async def _run_bounded(runner: AsyncCommandRunner, args: list[str]) -> CommandRe
         return exc
 
 
-async def _check_docker_cli(runner: AsyncCommandRunner) -> CheckResult:
-    outcome = await _run_bounded(runner, ["docker", "--version"])
+async def _docker_check(
+    runner: AsyncCommandRunner,
+    *,
+    args: list[str],
+    description: str,
+    fail_reason: str,
+    timeout_reason: str,
+    detail_prefix: str = "",
+    cli_missing_detail: str = "docker binary not found on PATH",
+) -> CheckResult:
+    """Run a docker subprocess and map its outcome to a stable CheckResult.
+
+    Every docker dependency follows the same outcome → reason mapping: missing
+    binary, timeout, transport/permission failure, non-zero exit. ``description``
+    is the human-readable command shown in the timeout message; ``detail_prefix``
+    lets per-image checks tag detail strings (e.g. ``"<image>: ..."``) so the
+    operator sees which image was missing without parsing.
+    """
+    outcome = await _run_bounded(runner, args)
     if isinstance(outcome, FileNotFoundError):
         return CheckResult(
             ok=False,
             status="fail",
             reason="DOCKER_CLI_NOT_FOUND",
-            detail="docker binary not found on PATH",
+            detail=cli_missing_detail,
         )
     if isinstance(outcome, TimeoutError):
         return CheckResult(
             ok=False,
             status="fail",
-            reason="DOCKER_CLI_TIMEOUT",
-            detail=f"docker --version exceeded {_CHECK_TIMEOUT_SECONDS}s",
+            reason=timeout_reason,
+            detail=f"{description} exceeded {_CHECK_TIMEOUT_SECONDS}s",
         )
     if isinstance(outcome, Exception):
         return CheckResult(
             ok=False,
             status="fail",
-            reason="DOCKER_CLI_ERROR",
-            detail=_truncate(f"{type(outcome).__name__}: {outcome}"),
+            reason=fail_reason,
+            detail=_truncate(f"{detail_prefix}{type(outcome).__name__}: {outcome}"),
         )
     if outcome.returncode != 0:
         return CheckResult(
             ok=False,
             status="fail",
-            reason="DOCKER_CLI_ERROR",
-            detail=_truncate(outcome.stderr or outcome.stdout),
+            reason=fail_reason,
+            detail=_truncate(f"{detail_prefix}{outcome.stderr or outcome.stdout}"),
         )
-    version = outcome.stdout.strip() or None
-    return CheckResult(ok=True, status="ok", version=version)
+    return CheckResult(ok=True, status="ok", version=outcome.stdout.strip() or None)
+
+
+async def _check_docker_cli(runner: AsyncCommandRunner) -> CheckResult:
+    return await _docker_check(
+        runner,
+        args=["docker", "--version"],
+        description="docker --version",
+        fail_reason="DOCKER_CLI_ERROR",
+        timeout_reason="DOCKER_CLI_TIMEOUT",
+    )
 
 
 async def _check_docker_daemon(runner: AsyncCommandRunner) -> CheckResult:
     # ``--format`` keeps output to just the server version (one short line) so we
     # don't have to parse the verbose default ``docker info`` output.
-    outcome = await _run_bounded(
-        runner, ["docker", "info", "--format", "{{.ServerVersion}}"]
+    return await _docker_check(
+        runner,
+        args=["docker", "info", "--format", "{{.ServerVersion}}"],
+        description="docker info",
+        fail_reason="DOCKER_DAEMON_UNREACHABLE",
+        timeout_reason="DOCKER_DAEMON_TIMEOUT",
     )
-    if isinstance(outcome, FileNotFoundError):
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="DOCKER_CLI_NOT_FOUND",
-            detail="docker binary not found on PATH",
-        )
-    if isinstance(outcome, TimeoutError):
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="DOCKER_DAEMON_TIMEOUT",
-            detail=f"docker info exceeded {_CHECK_TIMEOUT_SECONDS}s",
-        )
-    if isinstance(outcome, Exception):
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="DOCKER_DAEMON_UNREACHABLE",
-            detail=_truncate(f"{type(outcome).__name__}: {outcome}"),
-        )
-    if outcome.returncode != 0:
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="DOCKER_DAEMON_UNREACHABLE",
-            detail=_truncate(outcome.stderr or outcome.stdout),
-        )
-    return CheckResult(ok=True, status="ok", version=outcome.stdout.strip() or None)
 
 
 async def _check_docker_compose(runner: AsyncCommandRunner) -> CheckResult:
-    outcome = await _run_bounded(runner, ["docker", "compose", "version", "--short"])
-    if isinstance(outcome, FileNotFoundError):
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="DOCKER_CLI_NOT_FOUND",
-            detail="docker binary not found on PATH",
-        )
-    if isinstance(outcome, TimeoutError):
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="DOCKER_COMPOSE_TIMEOUT",
-            detail=f"docker compose version exceeded {_CHECK_TIMEOUT_SECONDS}s",
-        )
-    if isinstance(outcome, Exception):
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="DOCKER_COMPOSE_NOT_AVAILABLE",
-            detail=_truncate(f"{type(outcome).__name__}: {outcome}"),
-        )
-    if outcome.returncode != 0:
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="DOCKER_COMPOSE_NOT_AVAILABLE",
-            detail=_truncate(outcome.stderr or outcome.stdout),
-        )
-    return CheckResult(ok=True, status="ok", version=outcome.stdout.strip() or None)
+    return await _docker_check(
+        runner,
+        args=["docker", "compose", "version", "--short"],
+        description="docker compose version",
+        fail_reason="DOCKER_COMPOSE_NOT_AVAILABLE",
+        timeout_reason="DOCKER_COMPOSE_TIMEOUT",
+    )
 
 
 async def _check_agent_runtime_image(runner: AsyncCommandRunner, image: str) -> CheckResult:
-    outcome = await _run_bounded(
-        runner, ["docker", "image", "inspect", image, "--format", "{{.Id}}"]
+    return await _docker_check(
+        runner,
+        args=["docker", "image", "inspect", image, "--format", "{{.Id}}"],
+        description=f"docker image inspect {image}",
+        fail_reason="AGENT_RUNTIME_IMAGE_MISSING",
+        timeout_reason="AGENT_RUNTIME_IMAGE_TIMEOUT",
+        detail_prefix=f"{image}: ",
+        cli_missing_detail=f"docker binary not found on PATH (cannot inspect {image})",
     )
-    if isinstance(outcome, FileNotFoundError):
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="DOCKER_CLI_NOT_FOUND",
-            detail=f"docker binary not found on PATH (cannot inspect {image})",
-        )
-    if isinstance(outcome, TimeoutError):
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="AGENT_RUNTIME_IMAGE_TIMEOUT",
-            detail=f"docker image inspect {image} exceeded {_CHECK_TIMEOUT_SECONDS}s",
-        )
-    if isinstance(outcome, Exception):
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="AGENT_RUNTIME_IMAGE_MISSING",
-            detail=_truncate(f"{image}: {type(outcome).__name__}: {outcome}"),
-        )
-    if outcome.returncode != 0:
-        return CheckResult(
-            ok=False,
-            status="fail",
-            reason="AGENT_RUNTIME_IMAGE_MISSING",
-            detail=_truncate(f"{image}: {outcome.stderr or outcome.stdout}"),
-        )
-    return CheckResult(ok=True, status="ok", version=outcome.stdout.strip() or None)
 
 
 @router.get("/readyz", response_model=ReadyResponse)
