@@ -139,6 +139,29 @@ class TestDown:
         assert "down" in cmd and "-v" in cmd
 
     @pytest.mark.unit
+    async def test_down_project_uses_supplied_compose_file_path(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        compose_file = tmp_path / "custom-compose.yml"
+        compose_file.write_text("services: {}\n", encoding="utf-8")
+
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            return_value=_mock_proc(),
+        ) as mock_exec:
+            await manager.down_project(
+                project_name="awf_ws_custom",
+                compose_file=compose_file,
+                workspace_id="ws_custom",
+                remove_volumes=True,
+            )
+
+        cmd = mock_exec.call_args[0]
+        assert "--project-name" in cmd and "awf_ws_custom" in cmd
+        assert "--file" in cmd and str(compose_file) in cmd
+        assert "down" in cmd and "-v" in cmd
+
+    @pytest.mark.unit
     async def test_down_without_volumes_omits_v(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:

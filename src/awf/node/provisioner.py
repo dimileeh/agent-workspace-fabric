@@ -24,7 +24,7 @@ from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
-from awf.node.compose_manager import ComposeOperationError
+from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import WorkspaceProfile
@@ -97,8 +97,9 @@ class Provisioner:
                 profile = profile_resolution.profile
             else:
                 profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+            stack_paths: ComposeProjectPaths | None = None
             if self._stack_launcher is not None:
-                await self._stack_launcher.launch(
+                stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
                         workspace_id=workspace_id,
                         layout=layout,
@@ -158,6 +159,8 @@ class Provisioner:
             persisted.branch_name = layout.branch_name
             persisted.base_commit = base_commit
             persisted.compose_project_name = f"awf_{workspace_id}"
+            if stack_paths is not None:
+                persisted.compose_file_path = str(stack_paths.compose_file)
             if profile_resolution is not None:
                 persisted.resolved_profile = profile_resolution.profile.model_dump(
                     mode="json", by_alias=True

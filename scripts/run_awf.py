@@ -788,6 +788,7 @@ async def _run_task(
             repo = WorkspaceRepository(s)
             persisted = await repo.get(ws_id)
             assert persisted is not None
+            persisted.compose_file_path = str(compose_file)
             await repo.transition(persisted, to=WorkspaceStatus.ready, reason_code="STACK_READY")
             await s.commit()
 
@@ -999,7 +1000,12 @@ async def _run_sync_release_pr(
         companions=tuple(companion_services),
     )
     print(f"[{cfg.task_title[:40]}] compose up ...", flush=True)
-    await compose.up(spec, wait=True)
+    compose_paths = await compose.up(spec, wait=True)
+    compose_file = getattr(
+        compose_paths,
+        "compose_file",
+        work_dir / "compose" / "compose" / ws_id / "compose.yml",
+    )
     print(f"[{cfg.task_title[:40]}] compose up OK", flush=True)
 
     # Step 5: walk the state machine directly to monitoring_pr —
@@ -1008,6 +1014,7 @@ async def _run_sync_release_pr(
         repo = WorkspaceRepository(s)
         persisted = await repo.get(ws_id)
         assert persisted is not None
+        persisted.compose_file_path = str(compose_file)
         for to_state, reason in [
             (WorkspaceStatus.ready, "SYNC_STACK_READY"),
             (WorkspaceStatus.running, "SYNC_SKIP_AGENT"),
@@ -1043,7 +1050,6 @@ async def _run_sync_release_pr(
         f"[{cfg.task_title[:40]}] release-monitor running for PR #{cfg.pr_number} ...",
         flush=True,
     )
-    compose_file = work_dir / "compose" / "compose" / ws_id / "compose.yml"
     await monitor.run(
         workspace_id=ws_id,
         compose_project=f"awf_{ws_id}",
@@ -1229,7 +1235,12 @@ async def _run_sync_feature_pr(
         companions=tuple(companion_services),
     )
     print(f"[{cfg.task_title[:40]}] compose up ...", flush=True)
-    await compose.up(spec, wait=True)
+    compose_paths = await compose.up(spec, wait=True)
+    compose_file = getattr(
+        compose_paths,
+        "compose_file",
+        work_dir / "compose" / "compose" / ws_id / "compose.yml",
+    )
     print(f"[{cfg.task_title[:40]}] compose up OK", flush=True)
 
     # Step 5: walk the state machine directly to monitoring_pr — the
@@ -1238,6 +1249,7 @@ async def _run_sync_feature_pr(
         repo = WorkspaceRepository(s)
         persisted = await repo.get(ws_id)
         assert persisted is not None
+        persisted.compose_file_path = str(compose_file)
         for to_state, reason in [
             (WorkspaceStatus.ready, "SYNC_STACK_READY"),
             (WorkspaceStatus.running, "SYNC_SKIP_AGENT"),
@@ -1275,7 +1287,6 @@ async def _run_sync_feature_pr(
         f"#{cfg.pr_number} (auto_merge={cfg.auto_merge}) ...",
         flush=True,
     )
-    compose_file = work_dir / "compose" / "compose" / ws_id / "compose.yml"
     await monitor.run(
         workspace_id=ws_id,
         compose_project=f"awf_{ws_id}",

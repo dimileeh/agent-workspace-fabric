@@ -131,7 +131,11 @@ async def _main(
             return 2
 
     # Re-use the container + worktree that the original run set up.
-    compose_file = work_dir / "compose" / "compose" / workspace_id / "compose.yml"
+    compose_file = (
+        Path(ws.compose_file_path)
+        if ws.compose_file_path
+        else work_dir / "compose" / "compose" / workspace_id / "compose.yml"
+    )
     worktrees_root = work_dir / "git" / "worktrees"
     if not compose_file.exists():
         print(

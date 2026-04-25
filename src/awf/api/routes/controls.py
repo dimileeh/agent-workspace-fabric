@@ -165,6 +165,10 @@ async def destroy_workspace(
     failures = await cleaner.cleanup(
         workspace_id=workspace_id,
         repo_url=workspace.repo_url,
+        compose_project_name=workspace.compose_project_name,
+        compose_file_path=(
+            Path(workspace.compose_file_path) if workspace.compose_file_path else None
+        ),
         worktree_host_path=None,
     )
     if failures:

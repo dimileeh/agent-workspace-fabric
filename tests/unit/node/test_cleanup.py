@@ -39,6 +39,30 @@ class TestCleanup:
         )
 
     @pytest.mark.unit
+    async def test_uses_stored_compose_file_path_for_compose_down(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+        compose_file = Path("/var/lib/awf/compose/ws_stored/compose.yml")
+
+        failures = await wc.cleanup(
+            workspace_id="ws_stored",
+            repo_url="git@x:y.git",
+            compose_project_name="awf_ws_stored",
+            compose_file_path=compose_file,
+        )
+
+        assert failures == []
+        compose.down_project.assert_awaited_once_with(
+            project_name="awf_ws_stored",
+            compose_file=compose_file,
+            workspace_id="ws_stored",
+            remove_volumes=True,
+        )
+        compose.down.assert_not_awaited()
+        git.remove_worktree.assert_awaited_once()
+
+    @pytest.mark.unit
     async def test_compose_failure_does_not_block_worktree_removal(
         self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
     ) -> None:

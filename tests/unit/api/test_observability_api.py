@@ -436,12 +436,16 @@ class TestOperationsAndControls:
                 *,
                 workspace_id: str,
                 repo_url: str,
+                compose_project_name: str | None = None,
+                compose_file_path: Path | None = None,
                 worktree_host_path: Path | None = None,
             ) -> list[str]:
                 calls.append(
                     {
                         "workspace_id": workspace_id,
                         "repo_url": repo_url,
+                        "compose_project_name": compose_project_name,
+                        "compose_file_path": compose_file_path,
                         "worktree_host_path": worktree_host_path,
                     }
                 )
@@ -462,6 +466,8 @@ class TestOperationsAndControls:
             {
                 "workspace_id": workspace_id,
                 "repo_url": _BODY["repo_url"],
+                "compose_project_name": None,
+                "compose_file_path": None,
                 "worktree_host_path": None,
             }
         ]

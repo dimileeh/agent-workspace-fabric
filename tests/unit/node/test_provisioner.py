@@ -18,7 +18,7 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.node.compose_manager import ComposeOperationError
+from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 
@@ -89,7 +89,10 @@ class TestSuccess:
                     persisted = await WorkspaceRepository(s).get(request.workspace_id)
                     assert persisted is not None
                     self.statuses_seen.append(persisted.status)
-                return object()
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
 
         launcher = _RecordingStackLauncher()
         provisioner = Provisioner(
@@ -125,6 +128,7 @@ class TestSuccess:
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
+            assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
 
     @pytest.mark.unit
     async def test_transitions_requested_to_ready(

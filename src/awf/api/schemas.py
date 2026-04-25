@@ -121,6 +121,7 @@ class WorkspaceResponse(BaseModel):
 
     node_id: str | None
     compose_project_name: str | None
+    compose_file_path: str | None
 
     pr_url: str | None
     failure_reason: str | None
