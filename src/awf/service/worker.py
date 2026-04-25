@@ -10,8 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.session import make_engine, make_session_factory
+from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.node.stack_launcher import ComposeStackLauncher
 from awf.service.config import ServiceSettings
 
 
@@ -27,10 +29,17 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     work_dir = Path(settings.work_dir).expanduser().resolve()
-    git = GitManager(work_dir)
+    template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
+    git = GitManager(work_dir / "git")
+    compose = ComposeManager(work_dir=work_dir / "compose", template_path=template)
+    stack_launcher = ComposeStackLauncher(
+        compose=compose,
+        agent_runtime_image=settings.agent_runtime_image,
+    )
     provisioner = Provisioner(
         session_factory=session_factory,
         git=git,
+        stack_launcher=stack_launcher,
         config=ProvisionerConfig(
             node_id=settings.node_id or socket.gethostname(),
             branch_prefix=settings.branch_prefix,

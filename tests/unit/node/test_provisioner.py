@@ -9,6 +9,7 @@ from __future__ import annotations
 import subprocess
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -17,6 +18,7 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.node.compose_manager import ComposeOperationError
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 
@@ -69,6 +71,61 @@ def provisioner(
 
 
 class TestSuccess:
+    @pytest.mark.unit
+    async def test_transitions_to_ready_only_after_stack_launch_succeeds(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+                self.statuses_seen: list[str] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                async with session_factory() as s:
+                    persisted = await WorkspaceRepository(s).get(request.workspace_id)
+                    assert persisted is not None
+                    self.statuses_seen.append(persisted.status)
+                return object()
+
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert len(launcher.requests) == 1
+        request = launcher.requests[0]
+        assert request.workspace_id == ws_id
+        assert request.layout.worktree_path == git_manager.work_dir / "worktrees" / ws_id
+        assert request.layout.branch_name == f"awf/{ws_id}"
+        assert request.profile.name == "generic"
+        assert launcher.statuses_seen == [WorkspaceStatus.provisioning.value]
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.compose_project_name == f"awf_{ws_id}"
+
     @pytest.mark.unit
     async def test_transitions_requested_to_ready(
         self,
@@ -131,6 +188,52 @@ class TestSuccess:
 
 
 class TestFailureHandling:
+    @pytest.mark.unit
+    async def test_stack_startup_failure_marks_workspace_failed_with_actionable_message(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _FailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="pull access denied for awf-agent-runtime:test",
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "service_startup_failure"
+            assert reloaded.failure_message is not None
+            assert "docker compose up failed" in reloaded.failure_message
+            assert "pull access denied for awf-agent-runtime:test" in reloaded.failure_message
+
     @pytest.mark.unit
     async def test_missing_base_branch_marks_workspace_failed(
         self,

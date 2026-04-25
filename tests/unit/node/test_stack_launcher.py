@@ -1,0 +1,80 @@
+"""Stack launcher tests that avoid a Docker daemon."""
+
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+from awf.node.compose_manager import ComposeProjectPaths, WorkspaceComposeSpec
+from awf.node.git_manager import WorktreeLayout
+from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
+from awf.profiles.models import (
+    DockerMode,
+    ProfileDocker,
+    ProfileRuntime,
+    ProfileService,
+    WorkspaceProfile,
+)
+
+
+class _RecordingCompose:
+    def __init__(self) -> None:
+        self.specs: list[WorkspaceComposeSpec] = []
+        self.waits: list[bool] = []
+
+    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+        self.specs.append(spec)
+        self.waits.append(wait)
+        return ComposeProjectPaths(
+            project_dir=Path("/tmp/awf-compose/ws_launcher"),
+            compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+        )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    layout = WorktreeLayout(
+        mirror_path=Path("/host/awf/git/mirrors/repo.git"),
+        worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
+        branch_name="awf/ws_launcher",
+    )
+    profile = WorkspaceProfile(
+        name="serviceful",
+        runtime=ProfileRuntime(environment={"DATABASE_URL": "postgresql://awf@postgres/awf"}),
+        docker=ProfileDocker(mode=DockerMode.dind),
+        services=[
+            ProfileService(
+                name="postgres",
+                image="postgres:16-alpine",
+                healthcheck_cmd="pg_isready -U awf",
+            )
+        ],
+    )
+
+    paths = await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=profile,
+        )
+    )
+
+    assert paths.compose_file.name == "compose.yml"
+    assert compose.waits == [True]
+    assert len(compose.specs) == 1
+    spec = compose.specs[0]
+    assert spec.workspace_id == "ws_launcher"
+    assert spec.worktree_host_path == layout.worktree_path
+    assert spec.agent_runtime_image == "custom-agent-runtime:dev"
+    assert spec.agent_environment == (("DATABASE_URL", "postgresql://awf@postgres/awf"),)
+    assert spec.docker_mode == "dind"
+    assert [service.name for service in spec.services] == ["postgres"]
+    assert spec.auth_mounts[0].source == str(layout.mirror_path)
+    assert spec.auth_mounts[0].target == str(layout.mirror_path)
+    assert spec.auth_mounts[0].mode == "rw"

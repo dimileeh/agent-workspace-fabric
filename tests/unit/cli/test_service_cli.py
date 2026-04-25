@@ -317,10 +317,28 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         def __init__(self, work_dir: Path) -> None:
             created["git_work_dir"] = work_dir
 
+    class _ComposeManager:
+        def __init__(self, *, work_dir: Path, template_path: Path) -> None:
+            created["compose_work_dir"] = work_dir
+            created["compose_template_path"] = template_path
+
+    class _ComposeStackLauncher:
+        def __init__(self, *, compose: object, agent_runtime_image: str) -> None:
+            created["stack_compose"] = compose
+            created["stack_agent_runtime_image"] = agent_runtime_image
+
     class _Provisioner:
-        def __init__(self, *, session_factory: object, git: object, config: object) -> None:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            git: object,
+            stack_launcher: object,
+            config: object,
+        ) -> None:
             created["provisioner_session_factory"] = session_factory
             created["provisioner_git"] = git
+            created["provisioner_stack_launcher"] = stack_launcher
             created["provisioner_config"] = config
 
     class _ControlWorker:
@@ -351,17 +369,20 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         _make_session_factory,
     )
     monkeypatch.setattr(worker_mod, "GitManager", _GitManager)
+    monkeypatch.setattr(worker_mod, "ComposeManager", _ComposeManager, raising=False)
+    monkeypatch.setattr(worker_mod, "ComposeStackLauncher", _ComposeStackLauncher, raising=False)
     monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
     monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
 
+    host_work_dir = (tmp_path / "awf-work").resolve()
     settings = ServiceSettings(
         service_name="awf",
         env="local",
         api_base_url="http://localhost:8000",
         database_url="postgresql+asyncpg://awf:pw@localhost:5433/awf",
         docker_host="unix:///var/run/docker.sock",
-        agent_runtime_image="awf-agent-runtime:latest",
-        work_dir=str(tmp_path / "awf-work"),
+        agent_runtime_image="custom-agent-runtime:dev",
+        work_dir=str(host_work_dir),
         api_token=None,
         github_token=None,
         worker_poll_interval_seconds=0.25,
@@ -373,9 +394,14 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
 
     assert created["db_url"] == settings.database_url
     assert created["session_engine"] is engine
-    assert created["git_work_dir"] == (tmp_path / "awf-work").resolve()
+    assert created["git_work_dir"] == host_work_dir / "git"
+    assert created["compose_work_dir"] == host_work_dir / "compose"
+    assert created["compose_template_path"].name == "workspace.base.yml.j2"
+    assert created["stack_compose"].__class__ is _ComposeManager
+    assert created["stack_agent_runtime_image"] == "custom-agent-runtime:dev"
     assert created["provisioner_session_factory"] is session_factory
     assert created["worker_session_factory"] is session_factory
+    assert created["provisioner_stack_launcher"].__class__ is _ComposeStackLauncher
     assert created["provisioner_config"].node_id == "node-1"
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2
