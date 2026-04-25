@@ -414,6 +414,12 @@ class PullRequestMonitorRunner:
                             else None
                         ),
                     )
+                    # This re-enters the dispatcher at most one stack frame
+                    # deeper: the original action was Merge, and we only
+                    # recurse when the refreshed decision is explicitly not
+                    # Merge. Non-Merge actions do not perform this pre-merge
+                    # recheck, so decision oscillation is handled by the
+                    # outer monitor loop rather than recursive growth.
                     return await self._execute(
                         action=fresh_action,
                         workspace_id=workspace_id,
