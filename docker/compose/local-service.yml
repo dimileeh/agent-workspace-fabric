@@ -9,7 +9,7 @@ x-awf-service: &awf-service
   volumes:
     - ../..:/app
     - /var/run/docker.sock:/var/run/docker.sock
-    - awf-work:/awf-work
+    - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
   environment: &awf-environment
     AWF_SERVICE_NAME: awf
     AWF_ENV: local
@@ -21,7 +21,7 @@ x-awf-service: &awf-service
     AWF_DATABASE_URL: postgresql+asyncpg://awf:awf_dev@postgres:5432/awf
     AWF_DOCKER_HOST: unix:///var/run/docker.sock
     AWF_AGENT_RUNTIME_IMAGE: awf-agent-runtime:latest
-    AWF_WORK_DIR: /awf-work
+    AWF_WORK_DIR: ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
     AWF_WORKER_POLL_INTERVAL_SECONDS: "1.0"
     AWF_WORKER_MAX_CONCURRENT_PROVISIONS: "3"
     UV_PROJECT_ENVIRONMENT: /tmp/awf-venv
@@ -74,4 +74,3 @@ services:
 
 volumes:
   awf-postgres-data:
-  awf-work:

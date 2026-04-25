@@ -513,6 +513,11 @@ git/SSH tooling, the Docker CLI, and the Docker Compose plugin. Both the API and
 worker containers mount `/var/run/docker.sock` so AWF can create, inspect, and
 manage per-workspace Compose stacks on the host Docker daemon.
 
+Because the API and worker use the host Docker daemon, AWF state must live at a
+host-visible path that is mounted at the same absolute path inside the
+containers. The local stack defaults this to `${HOME}/.awf/service`, overridable
+with `AWF_HOST_WORK_DIR=/absolute/path`.
+
 Start from a clean checkout:
 
 ```bash
@@ -707,6 +712,7 @@ AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf
 AWF_API_TOKEN=local-dev-token
 AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
 AWF_WORK_DIR=.awf
+AWF_HOST_WORK_DIR=
 AWF_GITHUB_TOKEN=
 ```
 
