@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import subprocess
 from collections.abc import Awaitable, Callable, Mapping
@@ -67,11 +68,17 @@ async def collect_service_status(
     resolved_run = run_subprocess or _run_subprocess
     resolved_socket_exists = socket_exists or Path.exists
 
+    api_check, db_check, docker_check, image_check = await asyncio.gather(
+        asyncio.to_thread(_check_api, settings, resolved_api_get),
+        resolved_db_probe(settings.database_url),
+        asyncio.to_thread(_check_docker, settings, resolved_run, resolved_socket_exists),
+        asyncio.to_thread(_check_agent_runtime_image, settings, resolved_run),
+    )
     checks = {
-        "api": _check_api(settings, resolved_api_get),
-        "db": await resolved_db_probe(settings.database_url),
-        "docker": _check_docker(settings, resolved_run, resolved_socket_exists),
-        "agent_runtime_image": _check_agent_runtime_image(settings, resolved_run),
+        "api": api_check,
+        "db": db_check,
+        "docker": docker_check,
+        "agent_runtime_image": image_check,
     }
     overall_ok = all(bool(check["ok"]) for check in checks.values())
     return {

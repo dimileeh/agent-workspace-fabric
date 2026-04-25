@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -159,6 +160,87 @@ def test_service_status_uses_mocked_api_db_docker_and_image_checks(tmp_path: Pat
         "--format",
         "{{.Id}}",
     ] in subprocess_calls
+
+
+@pytest.mark.unit
+def test_service_status_runs_dependency_checks_concurrently(tmp_path: Path) -> None:
+    from awf.service.config import ServiceSettings
+    from awf.service.status import collect_service_status
+
+    started = {
+        "api": threading.Event(),
+        "docker": threading.Event(),
+        "image": threading.Event(),
+    }
+    release = threading.Event()
+
+    class _Response:
+        status_code = 200
+
+        def json(self) -> dict[str, str]:
+            return {"status": "ok"}
+
+        def raise_for_status(self) -> None:
+            return None
+
+    def _wait_for_release(name: str) -> None:
+        started[name].set()
+        if not release.wait(timeout=2):
+            raise AssertionError(f"{name} check was not released")
+
+    def _api_get(url: str, *, timeout: float) -> _Response:
+        _wait_for_release("api")
+        return _Response()
+
+    async def _db_probe(database_url: str) -> dict[str, Any]:
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + 2
+        while not all(event.is_set() for event in started.values()):
+            if loop.time() >= deadline:
+                missing = sorted(name for name, event in started.items() if not event.is_set())
+                raise AssertionError(f"checks did not run concurrently: {missing}")
+            await asyncio.sleep(0.01)
+        release.set()
+        return {"ok": True, "status": "ok"}
+
+    def _run_subprocess(args: list[str], **_kwargs: object) -> Any:
+        if args[:2] == ["docker", "info"]:
+            _wait_for_release("docker")
+            return type("Completed", (), {"returncode": 0, "stdout": "27.0.3\n", "stderr": ""})()
+        if args[:3] == ["docker", "image", "inspect"]:
+            _wait_for_release("image")
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "sha256:deadbeef\n", "stderr": ""},
+            )()
+        raise AssertionError(f"unexpected subprocess call: {args}")
+
+    settings = ServiceSettings(
+        service_name="awf",
+        env="local",
+        api_base_url="http://localhost:8000",
+        database_url="postgresql+asyncpg://awf:pw@localhost:5433/awf",
+        docker_host=f"unix://{tmp_path / 'docker.sock'}",
+        agent_runtime_image="awf-agent-runtime:latest",
+        work_dir=str(tmp_path / "work"),
+        api_token=None,
+        github_token=None,
+        worker_poll_interval_seconds=0.1,
+        worker_max_concurrent_provisions=1,
+    )
+
+    status = asyncio.run(
+        collect_service_status(
+            settings,
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_run_subprocess,
+            socket_exists=lambda _path: True,
+        )
+    )
+
+    assert status["status"] == "ok"
 
 
 @pytest.mark.unit
