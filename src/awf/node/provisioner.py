@@ -1,12 +1,13 @@
 """Workspace provisioner.
 
-Bridges the control-plane state machine to the node-local git manager.
+Bridges the control-plane state machine to node-local git and stack launchers.
 Given a workspace row in ``requested``, this module:
 
     1. Transitions it to ``provisioning`` and commits.
     2. Creates/updates the repo mirror, then adds a worktree at a fresh branch.
-    3. Records the assigned node, compose project name, branch, and base commit.
-    4. Transitions to ``ready`` and commits.
+    3. Resolves the workspace profile and starts the outer workspace stack.
+    4. Records the assigned node, compose project name, branch, and base commit.
+    5. Transitions to ``ready`` and commits.
 
 On any failure, the workspace is transitioned to ``failed`` with the most
 specific ``FailureReason`` we can derive, and the raised exception is
@@ -23,7 +24,10 @@ from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.git_manager import GitManager, GitOperationError
+from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
+from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 
 _log = get_logger(__name__)
@@ -53,10 +57,12 @@ class Provisioner:
         session_factory: async_sessionmaker[AsyncSession],
         git: GitManager,
         config: ProvisionerConfig,
+        stack_launcher: WorkspaceStackLauncher | None = None,
     ) -> None:
         self._session_factory = session_factory
         self._git = git
         self._config = config
+        self._stack_launcher = stack_launcher
 
     async def provision(self, workspace_id: str) -> None:
         """Drive a workspace from ``requested`` to ``ready`` (or ``failed``).
@@ -88,6 +94,18 @@ class Provisioner:
                     profile_ref=ws.profile_ref or ws.env_profile or "auto",
                     validation_commands=list(ws.test_commands),
                 )
+                profile = profile_resolution.profile
+            else:
+                profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+            stack_paths: ComposeProjectPaths | None = None
+            if self._stack_launcher is not None:
+                stack_paths = await self._stack_launcher.launch(
+                    WorkspaceStackLaunchRequest(
+                        workspace_id=workspace_id,
+                        layout=layout,
+                        profile=profile,
+                    )
+                )
         except GitOperationError as exc:
             _log.error(
                 "provisioner.git_failed",
@@ -115,6 +133,20 @@ class Provisioner:
                 from_status=WorkspaceStatus.provisioning,
             )
             raise
+        except ComposeOperationError as exc:
+            _log.error(
+                "provisioner.stack_startup_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:2000],
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.service_startup_failure,
+                message=str(exc)[:2000],
+                from_status=WorkspaceStatus.provisioning,
+            )
+            raise
 
         # 3. Commit success: write placement metadata and transition to ready.
         async with self._session_factory() as session:
@@ -127,6 +159,8 @@ class Provisioner:
             persisted.branch_name = layout.branch_name
             persisted.base_commit = base_commit
             persisted.compose_project_name = f"awf_{workspace_id}"
+            if stack_paths is not None:
+                persisted.compose_file_path = str(stack_paths.compose_file)
             if profile_resolution is not None:
                 persisted.resolved_profile = profile_resolution.profile.model_dump(
                     mode="json", by_alias=True

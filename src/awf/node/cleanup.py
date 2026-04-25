@@ -29,6 +29,8 @@ class WorkspaceCleaner:
         *,
         workspace_id: str,
         repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
     ) -> list[str]:
         """Best-effort cleanup. Returns list of failure-step names, empty on full success.
@@ -45,7 +47,15 @@ class WorkspaceCleaner:
             worktree_host_path=worktree_host_path or Path("/dev/null"),
         )
         try:
-            await self._compose.down(spec, remove_volumes=True)
+            if compose_file_path is not None:
+                await self._compose.down_project(
+                    project_name=compose_project_name or spec.project_name(),
+                    compose_file=compose_file_path,
+                    workspace_id=workspace_id,
+                    remove_volumes=True,
+                )
+            else:
+                await self._compose.down(spec, remove_volumes=True)
         except ComposeOperationError as exc:
             _log.warning(
                 "cleanup.compose_down_failed",

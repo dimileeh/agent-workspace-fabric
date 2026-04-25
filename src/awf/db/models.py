@@ -91,6 +91,7 @@ class Workspace(Base):
     # Runtime placement + compose project
     node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     compose_project_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    compose_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
 
     # Terminal-state metadata
     pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)

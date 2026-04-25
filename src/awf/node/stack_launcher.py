@@ -1,0 +1,57 @@
+"""Launch per-workspace service stacks from resolved workspace profiles."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Protocol
+
+from awf.node.compose_manager import (
+    AuthMount,
+    ComposeManager,
+    ComposeProjectPaths,
+    WorkspaceComposeSpec,
+)
+from awf.node.git_manager import WorktreeLayout
+from awf.profiles.compose import profile_agent_environment, profile_services
+from awf.profiles.models import WorkspaceProfile
+
+
+@dataclass(frozen=True)
+class WorkspaceStackLaunchRequest:
+    """Inputs required to launch a workspace's outer Compose stack."""
+
+    workspace_id: str
+    layout: WorktreeLayout
+    profile: WorkspaceProfile
+
+
+class WorkspaceStackLauncher(Protocol):
+    """Small seam for provisioning tests to avoid requiring Docker."""
+
+    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths: ...
+
+
+class ComposeStackLauncher:
+    """Render and start the profile-driven outer workspace Compose stack."""
+
+    def __init__(self, *, compose: ComposeManager, agent_runtime_image: str) -> None:
+        self._compose = compose
+        self._agent_runtime_image = agent_runtime_image
+
+    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths:
+        layout = request.layout
+        profile = request.profile
+        mirror_mount = AuthMount(
+            source=str(layout.mirror_path),
+            target=str(layout.mirror_path),
+        )
+        spec = WorkspaceComposeSpec(
+            workspace_id=request.workspace_id,
+            worktree_host_path=layout.worktree_path,
+            agent_runtime_image=self._agent_runtime_image,
+            agent_environment=profile_agent_environment(profile),
+            docker_mode=profile.docker.mode.value,
+            services=profile_services(profile),
+            auth_mounts=(mirror_mount,),
+        )
+        return await self._compose.up(spec, wait=True)

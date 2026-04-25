@@ -378,6 +378,9 @@ class TestFeatureBranchPrHandler:
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.base_commit == "a" * 40
             assert ws.compose_project_name == f"awf_{ws_id}"
+            assert ws.compose_file_path == str(
+                tmp_path / "compose" / "compose" / ws_id / "compose.yml"
+            )
 
         # The FakeExecutor was constructed exactly once and drove one
         # workspace to completion.

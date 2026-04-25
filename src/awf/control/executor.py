@@ -134,7 +134,11 @@ class WorkspaceExecutor:
         if ws is None:
             return
 
-        compose_file = self._config.compose_projects_root / workspace_id / "compose.yml"
+        compose_file = (
+            Path(ws.compose_file_path)
+            if ws.compose_file_path
+            else self._config.compose_projects_root / workspace_id / "compose.yml"
+        )
         compose_project = ws.compose_project_name or f"awf_{workspace_id}"
         worktree_path = self._config.worktrees_root / workspace_id
 

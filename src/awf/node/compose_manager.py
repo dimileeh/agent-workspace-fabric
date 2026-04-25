@@ -270,15 +270,31 @@ class ComposeManager:
     async def down(self, spec: WorkspaceComposeSpec, *, remove_volumes: bool = True) -> None:
         """Stop + remove the stack. Idempotent — absent projects are not errors."""
         paths = self._paths_for(spec)
-        if not paths.compose_file.exists():
+        await self.down_project(
+            project_name=spec.project_name(),
+            compose_file=paths.compose_file,
+            workspace_id=spec.workspace_id,
+            remove_volumes=remove_volumes,
+        )
+
+    async def down_project(
+        self,
+        *,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        remove_volumes: bool = True,
+    ) -> None:
+        """Stop + remove a stack using an already-rendered compose file path."""
+        if not compose_file.exists():
             # Nothing rendered; assume never launched.
-            _log.info("compose.down.noop", workspace_id=spec.workspace_id)
+            _log.info("compose.down.noop", workspace_id=workspace_id)
             return
 
         args = ["down"]
         if remove_volumes:
             args.append("-v")
-        await self._compose(spec.project_name(), paths.compose_file, args, operation="down")
+        await self._compose(project_name, compose_file, args, operation="down")
 
     # ── Internals ──────────────────────────────────────────────────────────
 

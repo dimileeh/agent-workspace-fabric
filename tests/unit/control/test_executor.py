@@ -96,6 +96,7 @@ async def _seed_ready_workspace(
     agent: str = "codex",
     test_commands: list[str] | None = None,
     requires_database: bool = False,
+    compose_file_path: str | None = None,
 ) -> str:
     """Insert a workspace already in the ``ready`` state for the executor to pick up."""
     async with factory() as s:
@@ -114,6 +115,7 @@ async def _seed_ready_workspace(
         ws.branch_name = f"awf/{ws.id}"
         ws.base_commit = "a" * 40
         ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = compose_file_path
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="X")
         await s.commit()
         return ws.id
@@ -500,7 +502,11 @@ class TestMonitorHandoff:
             pr_monitor=monitor,
         )
 
-        ws_id = await _seed_ready_workspace(factory)
+        stored_compose_file = tmp_path / "rendered-compose" / "ws" / "compose.yml"
+        ws_id = await _seed_ready_workspace(
+            factory,
+            compose_file_path=str(stored_compose_file),
+        )
         # 9-step sequence (same as happy path).
         fake.queue_result(returncode=0)  # adapter
         fake.queue_result(returncode=0)  # git add
@@ -531,6 +537,7 @@ class TestMonitorHandoff:
         # Monitor received the hand-off call with the right IDs.
         assert len(monitor.calls) == 1
         assert monitor.calls[0]["workspace_id"] == ws_id
+        assert monitor.calls[0]["compose_file"] == stored_compose_file
 
 
 class TestPrNumberExtraction:
