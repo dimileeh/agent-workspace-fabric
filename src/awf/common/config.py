@@ -44,6 +44,7 @@ class Settings(BaseSettings):
     # API
     api_host: str = Field(default="0.0.0.0")  # noqa: S104 (intentional in containers)
     api_port: int = Field(default=8000, ge=1, le=65535)
+    api_base_url: str = Field(default="http://localhost:8000")
     api_token: str | None = Field(
         default=None,
         description=(
@@ -73,6 +74,12 @@ class Settings(BaseSettings):
         default=".awf",
         description="Local AWF state root. Log streams live under <work_dir>/logs.",
     )
+
+    # Worker
+    worker_poll_interval_seconds: float = Field(default=1.0, gt=0)
+    worker_max_concurrent_provisions: int = Field(default=3, gt=0)
+    worker_node_id: str | None = Field(default=None)
+    worker_branch_prefix: str = Field(default="awf")
 
     # Workspace resource defaults (overridable per-request)
     workspace_steady_cpu: float = Field(default=3.0, gt=0)
