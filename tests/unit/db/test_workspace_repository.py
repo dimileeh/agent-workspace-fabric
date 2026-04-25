@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.models import WorkspaceEvent
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 
@@ -101,6 +101,42 @@ class TestIdempotency:
     ) -> None:
         repo = WorkspaceRepository(session)
         assert await repo.get_by_idempotency_key("never-used") is None
+
+
+class TestExists:
+    @pytest.mark.unit
+    async def test_returns_boolean_existence(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+        assert await repo.exists(ws.id) is True
+        assert await repo.exists("ws_missing") is False
+
+    @pytest.mark.unit
+    async def test_does_not_hydrate_workspace_entity(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="t",
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+        workspace_id = ws.id
+        session.expunge_all()
+
+        assert await repo.exists(workspace_id) is True
+        assert not any(isinstance(obj, Workspace) for obj in session.identity_map.values())
 
 
 class TestListWorkspaces:

@@ -220,8 +220,7 @@ async def list_workspace_events(
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceEventListResponse:
     workspace_repo = WorkspaceRepository(session)
-    workspace = await workspace_repo.get(workspace_id)
-    if workspace is None:
+    if not await workspace_repo.exists(workspace_id):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
