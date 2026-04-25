@@ -20,14 +20,14 @@ router = APIRouter(tags=["operations"])
 async def list_operations(
     workspace_id: str | None = None,
     status: OperationStatus | None = None,
-    type: OperationType | None = None,
+    operation_type: Annotated[OperationType | None, Query(alias="type")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session: AsyncSession = Depends(get_db_session),
 ) -> OperationListResponse:
     rows = await OperationRepository(session).list_all(
         workspace_id=workspace_id,
         status=status,
-        operation_type=type,
+        operation_type=operation_type,
         limit=limit,
     )
     return OperationListResponse(
@@ -55,7 +55,7 @@ async def get_operation(
 async def list_workspace_operations(
     workspace_id: str,
     status: OperationStatus | None = None,
-    type: OperationType | None = None,
+    operation_type: Annotated[OperationType | None, Query(alias="type")] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session: AsyncSession = Depends(get_db_session),
 ) -> OperationListResponse:
@@ -67,7 +67,7 @@ async def list_workspace_operations(
     rows = await OperationRepository(session).list_for_workspace(
         workspace_id,
         status=status,
-        operation_type=type,
+        operation_type=operation_type,
         limit=limit,
     )
     return OperationListResponse(
