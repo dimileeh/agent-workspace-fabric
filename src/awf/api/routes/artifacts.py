@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
@@ -45,7 +46,8 @@ async def list_workspace_artifacts(
 ) -> WorkspaceArtifactListResponse:
     await _require_workspace(session, workspace_id)
     artifact_dir = _workspace_artifact_dir(workspace_id)
-    return WorkspaceArtifactListResponse(items=_list_artifacts(workspace_id, artifact_dir))
+    items = await asyncio.to_thread(_list_artifacts, workspace_id, artifact_dir)
+    return WorkspaceArtifactListResponse(items=items)
 
 
 async def _require_workspace(session: AsyncSession, workspace_id: str) -> None:

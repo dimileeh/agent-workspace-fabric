@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import pytest
 from httpx import AsyncClient
 
+from awf.api.routes import artifacts
 from awf.common.config import get_settings
 
 _MINIMAL_BODY = {
@@ -142,3 +145,34 @@ class TestWorkspaceArtifacts:
         assert stdout_item["kind"] == "txt"
         assert stdout_item["size_bytes"] == len("alpha\n")
         datetime.fromisoformat(stdout_item["modified_at"])
+
+    @pytest.mark.unit
+    async def test_artifact_listing_offloads_filesystem_scan(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        _, headers = _configure_artifact_api(monkeypatch, tmp_path)
+        calls: list[tuple[Callable[..., object], tuple[Any, ...]]] = []
+
+        async def fake_to_thread(func: Callable[..., object], /, *args: Any) -> object:
+            calls.append((func, args))
+            return func(*args)
+
+        monkeypatch.setattr(artifacts.asyncio, "to_thread", fake_to_thread)
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"items": [], "next_cursor": None, "has_more": False}
+        assert calls == [
+            (
+                artifacts._list_artifacts,
+                (workspace_id, artifacts._workspace_artifact_dir(workspace_id)),
+            )
+        ]
