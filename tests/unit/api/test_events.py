@@ -4,6 +4,10 @@ from __future__ import annotations
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_session_factory
 
 _MINIMAL_BODY = {
     "repo_url": "git@github.com:dimileeh/aira-agent.git",
@@ -19,6 +23,27 @@ async def _create_workspace(client: AsyncClient, title: str) -> str:
     response = await client.post("/v1/workspaces", json={**_MINIMAL_BODY, "task_title": title})
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
+
+
+async def _add_event(
+    engine: AsyncEngine,
+    workspace_id: str,
+    event_type: str,
+    *,
+    reason_code: str = "TEST",
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.add_event(
+            workspace,
+            event_type=event_type,
+            reason_code=reason_code,
+            payload={"source": "test"},
+        )
+        await session.commit()
 
 
 class TestListEvents:
@@ -86,3 +111,66 @@ class TestListEvents:
 
         assert response.status_code == 200
         assert response.json() == {"items": [], "next_cursor": None, "has_more": False}
+
+
+class TestListWorkspaceEvents:
+    @pytest.mark.unit
+    async def test_lists_workspace_events_newest_first(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        first_id = await _create_workspace(client, "first")
+        second_id = await _create_workspace(client, "second")
+        await _add_event(engine, second_id, "workspace.phase_started")
+        await _add_event(engine, first_id, "workspace.phase_started")
+
+        response = await client.get(f"/v1/workspaces/{first_id}/events")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["next_cursor"] is None
+        assert body["has_more"] is False
+        assert [item["workspace_id"] for item in body["items"]] == [first_id, first_id]
+        assert [item["event_type"] for item in body["items"]] == [
+            "workspace.phase_started",
+            "workspace.created",
+        ]
+
+    @pytest.mark.unit
+    async def test_returns_empty_items_for_known_workspace_with_no_matching_events(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        workspace_id = await _create_workspace(client, "created only")
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/events",
+            params={"event_type": "workspace.phase_started"},
+        )
+
+        assert response.status_code == 200
+        assert response.json() == {"items": [], "next_cursor": None, "has_more": False}
+
+    @pytest.mark.unit
+    async def test_returns_404_for_unknown_workspace(self, client: AsyncClient) -> None:
+        response = await client.get("/v1/workspaces/ws_missing/events")
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["error_code"] == "NOT_FOUND"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("limit", [0, 501])
+    async def test_validates_limit_bounds_like_global_events(
+        self,
+        client: AsyncClient,
+        limit: int,
+    ) -> None:
+        workspace_id = await _create_workspace(client, "limit validation")
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/events",
+            params={"limit": limit},
+        )
+
+        assert response.status_code == 422

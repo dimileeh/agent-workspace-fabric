@@ -177,11 +177,14 @@ class WorkspaceEventRepository:
         self,
         *,
         workspace_id: str | None = None,
+        event_type: str | None = None,
         limit: int = 50,
     ) -> list[WorkspaceEvent]:
         stmt = select(WorkspaceEvent)
         if workspace_id is not None:
             stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
+        if event_type is not None:
+            stmt = stmt.where(WorkspaceEvent.event_type == event_type)
         stmt = stmt.order_by(
             WorkspaceEvent.occurred_at.desc(),
             WorkspaceEvent.id.desc(),

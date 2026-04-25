@@ -23,6 +23,7 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
+    WorkspaceEventListResponse,
     WorkspaceEventResponse,
     WorkspaceOverviewListResponse,
     WorkspaceOverviewResponse,
@@ -30,7 +31,7 @@ from awf.api.schemas import (
 )
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
@@ -209,6 +210,31 @@ async def list_workspace_overview(
             )
         )
     return WorkspaceOverviewListResponse(items=items)
+
+
+@router.get("/{workspace_id}/events", response_model=WorkspaceEventListResponse)
+async def list_workspace_events(
+    workspace_id: str,
+    event_type: Annotated[str | None, Query(min_length=1, max_length=64)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceEventListResponse:
+    workspace_repo = WorkspaceRepository(session)
+    workspace = await workspace_repo.get(workspace_id)
+    if workspace is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
+        )
+
+    rows = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace_id,
+        event_type=event_type,
+        limit=limit,
+    )
+    return WorkspaceEventListResponse(
+        items=[WorkspaceEventResponse.model_validate(row) for row in rows]
+    )
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)
