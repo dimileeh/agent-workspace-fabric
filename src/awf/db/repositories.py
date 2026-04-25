@@ -230,14 +230,39 @@ class OperationRepository:
     async def get(self, operation_id: str) -> Operation | None:
         return await self._session.get(Operation, operation_id)
 
-    async def list_for_workspace(self, workspace_id: str, *, limit: int = 50) -> list[Operation]:
-        stmt = (
-            select(Operation)
-            .where(Operation.workspace_id == workspace_id)
-            .order_by(Operation.created_at.desc(), Operation.id.desc())
-            .limit(limit)
-        )
+    async def list_all(
+        self,
+        *,
+        workspace_id: str | None = None,
+        status: OperationStatus | str | None = None,
+        operation_type: OperationType | str | None = None,
+        limit: int = 50,
+    ) -> list[Operation]:
+        stmt = select(Operation)
+        if workspace_id is not None:
+            stmt = stmt.where(Operation.workspace_id == workspace_id)
+        if status is not None:
+            stmt = stmt.where(Operation.status == status)
+        if operation_type is not None:
+            stmt = stmt.where(Operation.type == operation_type)
+
+        stmt = stmt.order_by(Operation.created_at.desc(), Operation.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+    async def list_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        status: OperationStatus | str | None = None,
+        operation_type: OperationType | str | None = None,
+        limit: int = 50,
+    ) -> list[Operation]:
+        return await self.list_all(
+            workspace_id=workspace_id,
+            status=status,
+            operation_type=operation_type,
+            limit=limit,
+        )
 
     async def finish(
         self,
