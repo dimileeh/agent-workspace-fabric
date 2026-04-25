@@ -18,7 +18,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.runtime.events import WORKSPACE_EVENT_BROADCASTER, WorkspaceEventFrame
-from awf.runtime.logs import LOG_BROADCASTER, LogFrame, LogStore
+from awf.runtime.logs import LOG_BROADCASTER, LogFrame, read_log_chunk
 
 router = APIRouter(tags=["workspace-streams"])
 
@@ -132,7 +132,7 @@ async def _send_initial_state(
                 if not path.is_file():
                     continue
                 offset = max(stream.byte_count - tail_bytes, 0)
-                data, next_offset, _eof = await LogStore(root=path.parent).read(
+                data, next_offset, _eof = await read_log_chunk(
                     path=path,
                     offset=offset,
                     limit_bytes=tail_bytes,

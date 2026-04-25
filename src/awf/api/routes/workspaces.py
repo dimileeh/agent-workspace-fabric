@@ -32,7 +32,8 @@ from awf.api.schemas import (
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
-from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
+from awf.profiles.resolver import ProfileResolutionError
+from awf.service.workspaces import create_workspace_v2_row
 
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
 router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
@@ -112,50 +113,20 @@ async def create_workspace_v2(
                 )
             return _accepted(existing.id, existing.status, existing.version, existing.created_at)
 
-    requested_profile = (
-        payload.workspace.profile.model_dump(mode="json", by_alias=True)
-        if payload.workspace.profile is not None
-        else None
-    )
-    resolved_profile = None
-    if payload.workspace.profile is not None or (
-        payload.workspace.profile_ref and payload.workspace.profile_ref != "auto"
-    ):
-        try:
-            resolved = resolve_workspace_profile(
-                worktree_path=None,
-                inline_profile=payload.workspace.profile,
-                profile_ref=payload.workspace.profile_ref,
-                validation_commands=payload.validation.commands,
-            )
-        except ProfileResolutionError as exc:
-            return JSONResponse(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                content=ErrorResponse(
-                    error_code="INVALID_PROFILE",
-                    message=str(exc),
-                ).model_dump(),
-            )
-        resolved_profile = resolved.profile.model_dump(mode="json", by_alias=True)
-
-    ws = await repo.create(
-        repo_url=payload.repo.url,
-        branch_base=payload.repo.base_branch,
-        task_title=payload.task.title,
-        task_prompt=payload.task.prompt,
-        task_external_id=payload.task.external_id,
-        auto_merge=payload.task.auto_merge,
-        initial_review_grace_period_seconds=payload.task.initial_review_grace_period_seconds,
-        agent=payload.task.agent.value,
-        env_profile=None,
-        profile_ref=payload.workspace.profile_ref,
-        requested_profile=requested_profile,
-        resolved_profile=resolved_profile,
-        test_commands=payload.validation.commands,
-        requires_database=False,
-        idempotency_key=idempotency_key,
-    )
-    ws.task_kind = payload.task.kind
+    try:
+        ws = await create_workspace_v2_row(
+            session,
+            payload,
+            idempotency_key=idempotency_key,
+        )
+    except ProfileResolutionError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            content=ErrorResponse(
+                error_code="INVALID_PROFILE",
+                message=str(exc),
+            ).model_dump(),
+        )
 
     return _accepted(ws.id, ws.status, ws.version, ws.created_at)
 
@@ -323,5 +294,20 @@ def _payloads_match_v2(existing: Workspace, payload: WorkspaceCreateV2Request) -
         and existing.task_kind == payload.task.kind
         and existing.profile_ref == payload.workspace.profile_ref
         and existing.requested_profile == requested_profile
+        and (
+            existing.resolved_profile is None
+            or _resolved_profile_requested_tier(existing) == payload.validation.requested_tier
+        )
         and list(existing.test_commands) == list(payload.validation.commands)
     )
+
+
+def _resolved_profile_requested_tier(existing: Workspace) -> int | None:
+    profile = existing.resolved_profile
+    if profile is None:
+        return None
+    validation = profile.get("validation")
+    if not isinstance(validation, dict):
+        return None
+    tier = validation.get("requested_tier")
+    return tier if isinstance(tier, int) else None

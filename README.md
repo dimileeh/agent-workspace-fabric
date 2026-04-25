@@ -579,13 +579,37 @@ shelling out to the REST API:
 | Tool | Purpose |
 | --- | --- |
 | `awf_create_workspace` | Create a legacy v1 workspace request. |
+| `awf_create_workspace_v2` | Create a profile-driven v2 workspace request. |
 | `awf_get_workspace` | Fetch one workspace by id. |
 | `awf_list_workspaces` | List recent workspaces newest-first. |
 | `awf_wait_for_workspace` | Poll until a workspace reaches a terminal state or times out. |
+| `awf_list_workspace_events` | List one workspace's immutable events newest-first, with optional event-type filtering. |
+| `awf_list_workspace_logs` | List indexed durable log streams for one workspace. |
+| `awf_read_workspace_log` | Read a bounded log chunk by stream id and byte offset. |
 
-The MCP surface is intentionally small today. The v2 profile-driven create
-shape is available through REST and the local dogfood runner; promoting it into
-MCP is a straightforward next slice.
+The observability tools return `null` for a missing workspace or log stream
+rather than surfacing raw storage errors. MCP remains read-only beyond create;
+operator controls such as cancel/destroy stay on the authenticated REST API.
+
+Example `awf_create_workspace_v2` arguments:
+
+```json
+{
+  "repo_url": "git@github.com:example/app.git",
+  "base_branch": "main",
+  "task_title": "Implement feature",
+  "task_prompt": "Build the requested feature and commit the result.",
+  "task_kind": "feature_branch_pr",
+  "agent": "codex",
+  "task_external_id": "AIRA-123",
+  "profile_ref": "auto",
+  "profile": null,
+  "validation_commands": ["pytest -q"],
+  "requested_tier": 1,
+  "auto_merge": true,
+  "initial_review_grace_period_seconds": null
+}
+```
 
 ## Local Dogfood Runner
 

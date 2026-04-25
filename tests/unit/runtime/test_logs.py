@@ -98,6 +98,21 @@ async def test_log_store_read_uses_threaded_bounded_file_read(
 
 
 @pytest.mark.unit
+async def test_log_store_read_rejects_paths_outside_root(tmp_path: Path) -> None:
+    root = tmp_path / "logs"
+    root.mkdir()
+    outside = tmp_path / "outside.log"
+    outside.write_text("outside\n")
+
+    with pytest.raises(ValueError, match="within root"):
+        await LogStore(root=root).read(
+            path=outside,
+            offset=0,
+            limit_bytes=16,
+        )
+
+
+@pytest.mark.unit
 async def test_log_sink_write_uses_threaded_file_append(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,

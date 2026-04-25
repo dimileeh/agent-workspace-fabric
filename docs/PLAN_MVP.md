@@ -123,10 +123,16 @@ Same underlying service, exposed as MCP tools so Codex / Claude Code can invoke 
 | Tool | Description |
 |---|---|
 | `awf_create_workspace` | Identical body to `POST /v1/workspaces`. Returns `workspace_id`. |
+| `awf_create_workspace_v2` | Clean v2 submission shape for profile-driven workspaces. |
 | `awf_get_workspace` | Fetch current state by `workspace_id`. |
 | `awf_wait_for_workspace` | Blocking helper: polls until terminal state or `timeout_seconds`. Useful for agents that want synchronous behavior. |
-| `awf_cancel_workspace` | Cancel. |
 | `awf_list_workspaces` | List with filters. |
+| `awf_list_workspace_events` | List one workspace's immutable events newest-first. |
+| `awf_list_workspace_logs` | List indexed durable log streams for one workspace. |
+| `awf_read_workspace_log` | Read a bounded log chunk by stream id and byte offset. |
+
+MCP stays read-only beyond create in the always-on service. Destructive controls
+remain on the authenticated REST/operator surface.
 
 ### Workspace lifecycle (MVP)
 
