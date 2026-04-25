@@ -68,9 +68,6 @@ def _build_host_auth_mounts(
     *,
     host_env: Mapping[str, str] | None = None,
 ) -> list[AuthMount]:
-    rw_mounts = [
-        (host_home / ".gemini", f"{_CONTAINER_HOME}/.gemini", "rw"),
-    ]
     ro_mounts = [
         (host_home / ".config" / "gh", f"{_CONTAINER_HOME}/.config/gh", "ro"),
         (host_home / ".config" / "gcloud", f"{_CONTAINER_HOME}/.config/gcloud", "ro"),
@@ -79,7 +76,7 @@ def _build_host_auth_mounts(
     ]
     mounts = [
         AuthMount(source=str(src), target=target, mode=mode)
-        for src, target, mode in [*rw_mounts, *ro_mounts]
+        for src, target, mode in ro_mounts
         if src.exists()
     ]
 
@@ -124,6 +121,12 @@ def _workspace_auth_mounts(
         _prepare_isolated_claude_auth(
             host_home=host_home,
             target_root=auth_root / "claude",
+        )
+    )
+    mounts.extend(
+        _prepare_isolated_gemini_auth(
+            host_home=host_home,
+            target_root=auth_root / "gemini",
         )
     )
     mounts.extend(base_mounts)
@@ -186,3 +189,24 @@ def _prepare_isolated_claude_auth(*, host_home: Path, target_root: Path) -> tupl
         )
 
     return tuple(mounts)
+
+
+def _prepare_isolated_gemini_auth(*, host_home: Path, target_root: Path) -> tuple[AuthMount, ...]:
+    """Seed per-workspace Gemini auth without sharing writable host files."""
+
+    source_dir = host_home / ".gemini"
+    target_dir = target_root / ".gemini"
+    if not source_dir.is_dir():
+        return ()
+
+    target_root.mkdir(parents=True, exist_ok=True)
+    if not target_dir.exists():
+        shutil.copytree(source_dir, target_dir)
+
+    return (
+        AuthMount(
+            source=str(target_dir),
+            target=f"{_CONTAINER_HOME}/.gemini",
+            mode="rw",
+        ),
+    )
