@@ -149,12 +149,12 @@ async def test_list_operations_empty(client: AsyncClient, session: AsyncSession)
         test_commands=[]
     )
     await session.commit()
-    
+
     # Empty global list
     response = await client.get("/v1/operations?type=validate")
     assert response.status_code == 200
     assert response.json()["items"] == []
-    
+
     # Empty workspace list
     response = await client.get(f"/v1/workspaces/{ws.id}/operations")
     assert response.status_code == 200
