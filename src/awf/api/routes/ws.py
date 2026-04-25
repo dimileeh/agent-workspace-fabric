@@ -7,11 +7,11 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any, cast
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, status
+from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.api.deps import require_api_token
 from awf.api.schemas import WorkspaceEventResponse, WorkspaceResponse
-from awf.common.config import get_settings
 from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
@@ -23,20 +23,16 @@ from awf.runtime.logs import LOG_BROADCASTER, LogFrame, LogStore
 router = APIRouter(tags=["workspace-streams"])
 
 
-@router.websocket("/v1/workspaces/{workspace_id}/ws")
+@router.websocket(
+    "/v1/workspaces/{workspace_id}/ws",
+    dependencies=[Depends(require_api_token)],
+)
 async def workspace_socket(
     websocket: WebSocket,
     workspace_id: str,
     channels: str = "events,agent,validation,services",
     tail_bytes: int = 65_536,
 ) -> None:
-    settings = get_settings()
-    if not settings.api_token or websocket.headers.get("authorization") != (
-        f"Bearer {settings.api_token}"
-    ):
-        await websocket.close(code=status.WS_1008_POLICY_VIOLATION)
-        return
-
     factory: async_sessionmaker[AsyncSession] | None = getattr(
         websocket.app.state,
         "db_session_factory",

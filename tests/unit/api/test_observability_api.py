@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
-from starlette.websockets import WebSocketDisconnect
+from starlette.testclient import WebSocketDenialResponse
 
 import awf.api.routes.controls as controls_route
 import awf.api.routes.runtime as runtime_route
@@ -255,11 +255,36 @@ class TestWorkspaceWebSocket:
         workspace_id, client, engine = _make_sync_test_client(monkeypatch, tmp_path)
         try:
             with (
-                pytest.raises(WebSocketDisconnect) as exc_info,
+                pytest.raises(WebSocketDenialResponse) as exc_info,
                 client.websocket_connect(f"/v1/workspaces/{workspace_id}/ws"),
             ):
                 pass
-            assert exc_info.value.code == 1008
+            assert exc_info.value.status_code == 401
+            assert exc_info.value.json()["detail"]["error_code"] == "UNAUTHORIZED"
+        finally:
+            asyncio.run(engine.dispose())
+
+    @pytest.mark.unit
+    def test_websocket_reports_missing_token_configuration(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id, client, engine = _make_sync_test_client(
+            monkeypatch,
+            tmp_path,
+            api_token=None,
+        )
+        try:
+            with (
+                pytest.raises(WebSocketDenialResponse) as exc_info,
+                client.websocket_connect(f"/v1/workspaces/{workspace_id}/ws"),
+            ):
+                pass
+            assert exc_info.value.status_code == 503
+            assert (
+                exc_info.value.json()["detail"]["error_code"] == "API_TOKEN_NOT_CONFIGURED"
+            )
         finally:
             asyncio.run(engine.dispose())
 
@@ -447,8 +472,13 @@ class TestOperationsAndControls:
 def _make_sync_test_client(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    *,
+    api_token: str | None = "secret",
 ) -> tuple[str, TestClient, AsyncEngine]:
-    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+    if api_token is None:
+        monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+    else:
+        monkeypatch.setenv("AWF_API_TOKEN", api_token)
     get_settings.cache_clear()
     db_path = tmp_path / "ws.db"
     engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
