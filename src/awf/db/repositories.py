@@ -239,12 +239,16 @@ class OperationRepository:
         limit: int = 50,
     ) -> list[Operation]:
         stmt = select(Operation)
+        status_value = status.value if isinstance(status, OperationStatus) else status
+        operation_type_value = (
+            operation_type.value if isinstance(operation_type, OperationType) else operation_type
+        )
         if workspace_id is not None:
             stmt = stmt.where(Operation.workspace_id == workspace_id)
-        if status is not None:
-            stmt = stmt.where(Operation.status == status)
-        if operation_type is not None:
-            stmt = stmt.where(Operation.type == operation_type)
+        if status_value is not None:
+            stmt = stmt.where(Operation.status == status_value)
+        if operation_type_value is not None:
+            stmt = stmt.where(Operation.type == operation_type_value)
 
         stmt = stmt.order_by(Operation.created_at.desc(), Operation.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
