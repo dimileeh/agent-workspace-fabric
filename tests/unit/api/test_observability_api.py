@@ -438,7 +438,7 @@ class TestOperationsAndControls:
                 *,
                 workspace_id: str,
                 repo_url: str,
-                worktree_host_path: str | None,
+                worktree_host_path: Path | None = None,
             ) -> list[str]:
                 calls.append(
                     {
