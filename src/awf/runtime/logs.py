@@ -7,7 +7,7 @@ import os
 from collections import defaultdict
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
@@ -248,14 +248,14 @@ class WorkspaceLogSink:
     path: Path
     session_factory: async_sessionmaker[AsyncSession] | None
     broadcaster: LogBroadcaster
+    _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
 
     async def write(self, data: str) -> None:
         if not data:
             return
         encoded = data.encode("utf-8")
-        offset = self.path.stat().st_size if self.path.exists() else 0
-        with self.path.open("ab") as handle:
-            handle.write(encoded)
+        async with self._write_lock:
+            offset = await asyncio.to_thread(_append_log_bytes, self.path, encoded)
         if self.session_factory is not None:
             async with self.session_factory() as session:
                 repo = WorkspaceLogStreamRepository(session)
@@ -282,6 +282,13 @@ class WorkspaceLogSink:
             repo = WorkspaceLogStreamRepository(session)
             await repo.close(workspace_id=self.workspace_id, stream_id=self.stream_id)
             await session.commit()
+
+
+def _append_log_bytes(path: Path, data: bytes) -> int:
+    offset = path.stat().st_size if path.exists() else 0
+    with path.open("ab") as handle:
+        handle.write(data)
+    return offset
 
 
 @dataclass

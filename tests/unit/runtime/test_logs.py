@@ -14,7 +14,7 @@ from awf.adapters.codex import CodexAdapter
 from awf.common.commands import FakeCommandRunner
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.logs import LogBroadcaster, LogStore
+from awf.runtime.logs import LogBroadcaster, LogStore, WorkspaceLogSink
 from awf.runtime.validation import ValidationRunner
 
 
@@ -95,6 +95,42 @@ async def test_log_store_read_uses_threaded_bounded_file_read(
     assert data == "3456"
     assert next_offset == 7
     assert eof is False
+
+
+@pytest.mark.unit
+async def test_log_sink_write_uses_threaded_file_append(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:
+    path = tmp_path / "workspace.log"
+    path.write_bytes(b"abc")
+    to_thread_calls: list[tuple[Callable[..., object], tuple[object, ...]]] = []
+
+    async def fake_to_thread(func: Callable[..., object], /, *args: object) -> object:
+        to_thread_calls.append((func, args))
+        return func(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    broadcaster = LogBroadcaster()
+    sink = WorkspaceLogSink(
+        workspace_id="ws_1",
+        stream_id="agent.stdout",
+        source="agent",
+        fd="stdout",
+        path=path,
+        session_factory=None,
+        broadcaster=broadcaster,
+    )
+
+    async with broadcaster.subscribe("ws_1") as queue:
+        await sink.write("def\n")
+        frame = queue.get_nowait()
+
+    assert len(to_thread_calls) == 1
+    assert to_thread_calls[0][0].__name__ == "_append_log_bytes"
+    assert path.read_bytes() == b"abcdef\n"
+    assert frame.offset == 3
+    assert frame.data == "def\n"
 
 
 @pytest.mark.unit
