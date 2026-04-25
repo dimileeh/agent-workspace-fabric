@@ -38,6 +38,7 @@ from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeManager
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
+from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationRunner
 
@@ -94,6 +95,7 @@ class WorkspaceExecutor:
         config: ExecutorConfig,
         pr_monitor: _MonitorRunnerProto | None = None,
         pr_monitor_factory: Callable[[AgentAdapter], _MonitorRunnerProto] | None = None,
+        log_store: LogStore | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -119,6 +121,7 @@ class WorkspaceExecutor:
         self._config = config
         self._pr_monitor = pr_monitor
         self._pr_monitor_factory = pr_monitor_factory
+        self._log_store = log_store
 
     async def execute(self, workspace_id: str) -> None:
         """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
@@ -140,7 +143,12 @@ class WorkspaceExecutor:
             agent = AgentRuntime(ws.agent)
             defaults = self._defaults_for(agent)
             default_model = defaults.model if defaults else None
-            adapter = get_adapter(agent, runner=self._runner, defaults=defaults)
+            adapter = get_adapter(
+                agent,
+                runner=self._runner,
+                defaults=defaults,
+                log_store=self._log_store,
+            )
             profile = _profile_for_workspace(ws, worktree_path=worktree_path)
             setup_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
@@ -167,6 +175,7 @@ class WorkspaceExecutor:
                 compose_file=compose_file,
                 prompt=ws.task_prompt,
                 model=default_model,
+                workspace_id=workspace_id,
             )
             agent_exit_note = None
         except AgentRunError as exc:
@@ -576,6 +585,7 @@ class WorkspaceExecutor:
                     compose_file=compose_file,
                     prompt=fix_prompt,
                     model=default_model,
+                    workspace_id=workspace_id,
                 )
             except AgentRunError as exc:
                 # Coding CLI exited non-zero on the fix pass. Mirrors the

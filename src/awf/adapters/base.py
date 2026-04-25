@@ -17,6 +17,7 @@ from pathlib import Path
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
+from awf.runtime.logs import LogStore
 
 _log = get_logger(__name__)
 
@@ -115,10 +116,12 @@ class AgentAdapter(ABC):
         runner: AsyncCommandRunner,
         default_model: str | None = None,
         default_effort: str | None = None,
+        log_store: LogStore | None = None,
     ) -> None:
         self._runner = runner
         self._default_model = default_model
         self._default_effort = default_effort
+        self._log_store = log_store
 
     @property
     @abstractmethod
@@ -138,6 +141,7 @@ class AgentAdapter(ABC):
         compose_file: Path,
         prompt: str,
         model: str | None = None,
+        workspace_id: str | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -180,7 +184,32 @@ class AgentAdapter(ABC):
         # "additional input" from stdin after argv parsing; if AWF is
         # launched from an interactive terminal, inheriting that open
         # stream makes the agent wait forever for EOF.
-        result = await self._runner.run(args, input_bytes=b"")
+        sinks = None
+        if self._log_store is not None and workspace_id is not None:
+            sinks = await self._log_store.open_command_streams(
+                workspace_id=workspace_id,
+                base_stream_id="agent",
+                source="agent",
+                name=self.name.value,
+            )
+
+        try:
+            run_streaming = getattr(self._runner, "run_streaming", None)
+            if sinks is not None and run_streaming is not None:
+                result = await run_streaming(
+                    args,
+                    input_bytes=b"",
+                    on_stdout=sinks.write_stdout,
+                    on_stderr=sinks.write_stderr,
+                )
+            else:
+                result = await self._runner.run(args, input_bytes=b"")
+                if sinks is not None:
+                    await sinks.write_stdout(result.stdout)
+                    await sinks.write_stderr(result.stderr)
+        finally:
+            if sinks is not None:
+                await sinks.close()
 
         if not result.ok:
             raise AgentRunError(
@@ -229,6 +258,7 @@ def get_adapter(
     default_model: str | None = None,
     default_effort: str | None = None,
     defaults: AgentDefaults | None = None,
+    log_store: LogStore | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime.
 
@@ -243,6 +273,7 @@ def get_adapter(
         runner=runner,
         default_model=default_model,
         default_effort=default_effort,
+        log_store=log_store,
     )
 
 

@@ -62,6 +62,7 @@ class OperationType(StrEnum):
     validate = "validate"
     push = "push"
     cancel = "cancel"
+    stop = "stop"
     destroy = "destroy"
 
 

@@ -22,6 +22,7 @@ from pathlib import Path
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.logging import get_logger
 from awf.profiles.models import ProfileCommand, WorkspaceProfile
+from awf.runtime.logs import LogStore
 
 _log = get_logger(__name__)
 
@@ -72,9 +73,16 @@ class ValidationResult:
 class ValidationRunner:
     """Runs profile phases inside the per-workspace agent container."""
 
-    def __init__(self, *, runner: AsyncCommandRunner, artifacts_dir: Path) -> None:
+    def __init__(
+        self,
+        *,
+        runner: AsyncCommandRunner,
+        artifacts_dir: Path,
+        log_store: LogStore | None = None,
+    ) -> None:
         self._runner = runner
         self._artifacts_dir = artifacts_dir
+        self._log_store = log_store
 
     async def run(
         self,
@@ -203,14 +211,46 @@ class ValidationRunner:
         ]
         started = time.monotonic()
         reason_code = "COMMAND_FAILED"
+        sinks = None
+        if self._log_store is not None:
+            sinks = await self._log_store.open_command_streams(
+                workspace_id=artifacts_dir.name,
+                base_stream_id=f"validation.{label}",
+                source="validation",
+                name=f"{phase} {label}",
+            )
         try:
+            run_streaming = getattr(self._runner, "run_streaming", None)
             if timeout_seconds is None:
-                result: CommandResult = await self._runner.run(docker_args)
+                if sinks is not None and run_streaming is not None:
+                    result: CommandResult = await run_streaming(
+                        docker_args,
+                        on_stdout=sinks.write_stdout,
+                        on_stderr=sinks.write_stderr,
+                    )
+                else:
+                    result = await self._runner.run(docker_args)
+                    if sinks is not None:
+                        await sinks.write_stdout(result.stdout)
+                        await sinks.write_stderr(result.stderr)
             else:
-                result = await asyncio.wait_for(
-                    self._runner.run(docker_args),
-                    timeout=timeout_seconds,
-                )
+                if sinks is not None and run_streaming is not None:
+                    result = await asyncio.wait_for(
+                        run_streaming(
+                            docker_args,
+                            on_stdout=sinks.write_stdout,
+                            on_stderr=sinks.write_stderr,
+                        ),
+                        timeout=timeout_seconds,
+                    )
+                else:
+                    result = await asyncio.wait_for(
+                        self._runner.run(docker_args),
+                        timeout=timeout_seconds,
+                    )
+                    if sinks is not None:
+                        await sinks.write_stdout(result.stdout)
+                        await sinks.write_stderr(result.stderr)
         except TimeoutError:
             result = CommandResult(
                 returncode=124,
@@ -218,6 +258,11 @@ class ValidationRunner:
                 stderr=f"command timed out after {timeout_seconds}s",
             )
             reason_code = "PHASE_TIMEOUT"
+            if sinks is not None:
+                await sinks.write_stderr(result.stderr)
+        finally:
+            if sinks is not None:
+                await sinks.close()
         duration = time.monotonic() - started
 
         stdout_path = artifacts_dir / f"{label}.stdout"

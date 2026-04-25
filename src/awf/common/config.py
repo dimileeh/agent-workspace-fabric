@@ -44,6 +44,14 @@ class Settings(BaseSettings):
     # API
     api_host: str = Field(default="0.0.0.0")  # noqa: S104 (intentional in containers)
     api_port: int = Field(default=8000, ge=1, le=65535)
+    api_token: str | None = Field(
+        default=None,
+        description=(
+            "Optional local bearer token for sensitive operator APIs. When set, "
+            "log streams, WebSocket streams, and destructive workspace controls "
+            "require Authorization: Bearer <token>."
+        ),
+    )
 
     # Database (control-plane)
     database_url: str = Field(
@@ -61,6 +69,10 @@ class Settings(BaseSettings):
     # Docker
     docker_host: str = Field(default="unix:///var/run/docker.sock")
     agent_runtime_image: str = Field(default="awf-agent-runtime:latest")
+    work_dir: str = Field(
+        default=".awf",
+        description="Local AWF state root. Log streams live under <work_dir>/logs.",
+    )
 
     # Workspace resource defaults (overridable per-request)
     workspace_steady_cpu: float = Field(default=3.0, gt=0)

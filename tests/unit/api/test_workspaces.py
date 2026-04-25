@@ -149,9 +149,7 @@ class TestListWorkspaces:
         assert [r["id"] for r in results] == list(reversed(ids))
 
     @pytest.mark.unit
-    async def test_filters_by_status(
-        self, client: AsyncClient, engine: AsyncEngine
-    ) -> None:
+    async def test_filters_by_status(self, client: AsyncClient, engine: AsyncEngine) -> None:
         ready_id = await _create_workspace(client, task_title="ready")
         await _create_workspace(client, task_title="still requested")
         await _transition_workspace(
@@ -206,9 +204,7 @@ class TestListWorkspaces:
         assert {r["repo_url"] for r in results} == {repo_url}
 
     @pytest.mark.unit
-    async def test_combines_filters(
-        self, client: AsyncClient, engine: AsyncEngine
-    ) -> None:
+    async def test_combines_filters(self, client: AsyncClient, engine: AsyncEngine) -> None:
         repo_url = "git@github.com:example/combined.git"
         matching_id = await _create_workspace(
             client,
@@ -274,17 +270,13 @@ class TestListWorkspaces:
 
     @pytest.mark.unit
     @pytest.mark.parametrize("limit", [0, 501])
-    async def test_rejects_limit_outside_bounds(
-        self, client: AsyncClient, limit: int
-    ) -> None:
+    async def test_rejects_limit_outside_bounds(self, client: AsyncClient, limit: int) -> None:
         response = await client.get("/v1/workspaces", params={"limit": limit})
 
         assert response.status_code == 422
 
     @pytest.mark.unit
-    async def test_returns_empty_list_when_filters_match_nothing(
-        self, client: AsyncClient
-    ) -> None:
+    async def test_returns_empty_list_when_filters_match_nothing(self, client: AsyncClient) -> None:
         await _create_workspace(client, task_title="not completed")
 
         response = await client.get("/v1/workspaces", params={"status": "completed"})

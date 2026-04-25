@@ -35,6 +35,7 @@ import re
 import shutil
 import sys
 from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass
 from pathlib import Path
 from typing import IO, Any
@@ -63,6 +64,7 @@ from awf.profiles.compose import profile_agent_environment, profile_services
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.registry import aira_profile
 from awf.profiles.resolver import resolve_workspace_profile
+from awf.runtime.logs import LogStore, stream_compose_service_logs
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
@@ -183,6 +185,26 @@ def _initial_review_grace_period_seconds(cfg: TaskConfig, profile: WorkspaceProf
             raise ValueError("initial_review_grace_period_seconds must be >= 0")
         return cfg.initial_review_grace_period_seconds
     return profile.monitor.initial_review_grace_period_seconds
+
+
+async def _stream_service_logs_best_effort(
+    *,
+    workspace_id: str,
+    compose_project: str,
+    compose_file: Path,
+    log_store: LogStore,
+) -> None:
+    try:
+        await stream_compose_service_logs(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            log_store=log_store,
+        )
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        print(f"[{workspace_id}] service log stream stopped: {exc!r}", flush=True)
 
 
 def _with_legacy_aira_postgres_if_needed(
@@ -635,7 +657,12 @@ async def _run_task(
     runner = AsyncioSubprocessRunner()
     git = GitManager(work_dir / "git")
     compose = ComposeManager(work_dir=work_dir / "compose", template_path=_TEMPLATE)
-    validation = ValidationRunner(runner=runner, artifacts_dir=work_dir / "artifacts")
+    log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
+    validation = ValidationRunner(
+        runner=runner,
+        artifacts_dir=work_dir / "artifacts",
+        log_store=log_store,
+    )
     pr_creator = PullRequestCreator(runner)
 
     # Step 1: create the workspace in DB.
@@ -740,64 +767,84 @@ async def _run_task(
         companions=tuple(companion_services),
     )
     print(f"[{cfg.task_title[:40]}] compose up ...", flush=True)
-    await compose.up(spec, wait=True)
+    compose_paths = await compose.up(spec, wait=True)
     print(f"[{cfg.task_title[:40]}] compose up OK", flush=True)
+    compose_file = getattr(
+        compose_paths,
+        "compose_file",
+        work_dir / "compose" / "compose" / ws_id / "compose.yml",
+    )
+    service_log_task = asyncio.create_task(
+        _stream_service_logs_best_effort(
+            workspace_id=ws_id,
+            compose_project=spec.project_name(),
+            compose_file=compose_file,
+            log_store=log_store,
+        )
+    )
+    try:
+        # Step 4: transition to ready.
+        async with session_factory() as s:
+            repo = WorkspaceRepository(s)
+            persisted = await repo.get(ws_id)
+            assert persisted is not None
+            await repo.transition(persisted, to=WorkspaceStatus.ready, reason_code="STACK_READY")
+            await s.commit()
 
-    # Step 4: transition to ready.
-    async with session_factory() as s:
-        repo = WorkspaceRepository(s)
-        persisted = await repo.get(ws_id)
-        assert persisted is not None
-        await repo.transition(persisted, to=WorkspaceStatus.ready, reason_code="STACK_READY")
-        await s.commit()
+        # Step 5: execute. Wire the PR monitor factory — the executor calls
+        # it once it has the per-task adapter, and the returned monitor drives
+        # the ``monitoring_pr`` stage (comments, CI, base sync, merge).
+        gh = GitHubClient(runner)
 
-    # Step 5: execute. Wire the PR monitor factory — the executor calls
-    # it once it has the per-task adapter, and the returned monitor drives
-    # the ``monitoring_pr`` stage (comments, CI, base sync, merge).
-    gh = GitHubClient(runner)
+        def _monitor_factory(adapter: AgentAdapter) -> Any:
+            factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
+            return factory(
+                session_factory=session_factory,
+                runner=runner,
+                adapter=adapter,
+                gh=gh,
+                worktrees_root=work_dir / "git" / "worktrees",
+                artifacts_root=work_dir / "artifacts",
+                initial_review_grace_period_seconds=_initial_review_grace_period_seconds(
+                    cfg, profile
+                ),
+            )
 
-    def _monitor_factory(adapter: AgentAdapter) -> Any:
-        factory = build_feature_pr_monitor if cfg.auto_merge else build_release_pr_monitor
-        return factory(
+        executor = WorkspaceExecutor(
             session_factory=session_factory,
             runner=runner,
-            adapter=adapter,
-            gh=gh,
-            worktrees_root=work_dir / "git" / "worktrees",
-            artifacts_root=work_dir / "artifacts",
-            initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
+            compose=compose,
+            validation=validation,
+            pr_creator=pr_creator,
+            config=ExecutorConfig(
+                worktrees_root=work_dir / "git" / "worktrees",
+                compose_projects_root=work_dir / "compose" / "compose",
+                agent_defaults=_DEFAULT_AGENT_DEFAULTS,
+            ),
+            pr_monitor_factory=_monitor_factory,
+            log_store=log_store,
         )
+        print(f"[{cfg.task_title[:40]}] executor starting ...", flush=True)
+        await executor.execute(ws_id)
 
-    executor = WorkspaceExecutor(
-        session_factory=session_factory,
-        runner=runner,
-        compose=compose,
-        validation=validation,
-        pr_creator=pr_creator,
-        config=ExecutorConfig(
-            worktrees_root=work_dir / "git" / "worktrees",
-            compose_projects_root=work_dir / "compose" / "compose",
-            agent_defaults=_DEFAULT_AGENT_DEFAULTS,
-        ),
-        pr_monitor_factory=_monitor_factory,
-    )
-    print(f"[{cfg.task_title[:40]}] executor starting ...", flush=True)
-    await executor.execute(ws_id)
-
-    # Step 6: final state.
-    async with session_factory() as s:
-        persisted = await WorkspaceRepository(s).get(ws_id)
-        assert persisted is not None
-        return {
-            "workspace_id": ws_id,
-            "title": cfg.task_title,
-            "status": persisted.status,
-            "pr_url": persisted.pr_url,
-            "failure_reason": persisted.failure_reason,
-            "failure_message": persisted.failure_message,
-            "branch": persisted.branch_name,
-            "base_commit": persisted.base_commit,
-        }
+        # Step 6: final state.
+        async with session_factory() as s:
+            persisted = await WorkspaceRepository(s).get(ws_id)
+            assert persisted is not None
+            return {
+                "workspace_id": ws_id,
+                "title": cfg.task_title,
+                "status": persisted.status,
+                "pr_url": persisted.pr_url,
+                "failure_reason": persisted.failure_reason,
+                "failure_message": persisted.failure_message,
+                "branch": persisted.branch_name,
+                "base_commit": persisted.base_commit,
+            }
+    finally:
+        service_log_task.cancel()
+        with suppress(asyncio.CancelledError):
+            await service_log_task
 
 
 async def _run_sync_release_pr(

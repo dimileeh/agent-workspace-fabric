@@ -23,9 +23,12 @@ from awf.api.schemas import (
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
+    WorkspaceEventResponse,
+    WorkspaceOverviewListResponse,
+    WorkspaceOverviewResponse,
     WorkspaceResponse,
 )
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
@@ -152,6 +155,60 @@ async def create_workspace_v2(
     ws.task_kind = payload.task.kind
 
     return _accepted(ws.id, ws.status, ws.version, ws.created_at)
+
+
+@router.get("/overview", response_model=WorkspaceOverviewListResponse)
+async def list_workspace_overview(
+    workspace_status: Annotated[WorkspaceStatus | None, Query(alias="status")] = None,
+    agent: Annotated[AgentRuntime | None, Query()] = None,
+    repo_url: Annotated[str | None, Query(min_length=1, max_length=512)] = None,
+    limit: Annotated[int, Query(ge=1, le=500)] = 50,
+    cursor: Annotated[str | None, Query(max_length=128)] = None,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceOverviewListResponse:
+    del cursor
+    rows = await WorkspaceRepository(session).list(
+        status=workspace_status,
+        agent=agent,
+        repo_url=repo_url,
+        limit=limit,
+    )
+    items: list[WorkspaceOverviewResponse] = []
+    for ws in rows:
+        latest_event = max(ws.events, key=lambda e: e.occurred_at, default=None)
+        active_operation = next(
+            (
+                op
+                for op in sorted(ws.operations, key=lambda item: item.created_at, reverse=True)
+                if op.status in {OperationStatus.pending.value, OperationStatus.running.value}
+            ),
+            None,
+        )
+        items.append(
+            WorkspaceOverviewResponse(
+                workspace_id=ws.id,
+                task_id=ws.task_external_id or ws.id,
+                title=ws.task_title,
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                branch_name=ws.branch_name,
+                agent=AgentRuntime(ws.agent),
+                status=WorkspaceStatus(ws.status),
+                current_phase=ws.status,
+                active_operation=active_operation.type if active_operation is not None else None,
+                last_event=(
+                    WorkspaceEventResponse.model_validate(latest_event)
+                    if latest_event is not None
+                    else None
+                ),
+                pr_url=ws.pr_url,
+                failure_reason=ws.failure_reason,
+                failure_message=ws.failure_message,
+                created_at=ws.created_at,
+                updated_at=ws.updated_at,
+            )
+        )
+    return WorkspaceOverviewListResponse(items=items)
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)

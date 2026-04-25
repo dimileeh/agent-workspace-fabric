@@ -168,6 +168,139 @@ class WorkspaceEventListResponse(BaseModel):
     has_more: bool = False
 
 
+class TaskResponse(BaseModel):
+    """Workspace-backed task row for operator consoles."""
+
+    task_id: str
+    workspace_id: str
+    title: str
+    repo_url: str
+    base_branch: str
+    agent: AgentRuntime
+    status: WorkspaceStatus
+    pr_url: str | None
+    failure_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaskListResponse(BaseModel):
+    items: list[TaskResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class WorkspaceOverviewResponse(BaseModel):
+    workspace_id: str
+    task_id: str
+    title: str
+    repo_url: str
+    base_branch: str
+    branch_name: str | None
+    agent: AgentRuntime
+    status: WorkspaceStatus
+    current_phase: str
+    active_operation: str | None
+    last_event: WorkspaceEventResponse | None
+    pr_url: str | None
+    failure_reason: str | None
+    failure_message: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceOverviewListResponse(BaseModel):
+    items: list[WorkspaceOverviewResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class RuntimeServiceResponse(BaseModel):
+    name: str
+    container_id: str | None = None
+    image: str | None = None
+    state: str
+    status: str | None = None
+    health: str | None = None
+    ports: list[str] = Field(default_factory=list)
+    started_at: str | None = None
+
+
+class WorkspaceRuntimeResponse(BaseModel):
+    workspace_id: str
+    compose_project_name: str | None
+    stack_state: str
+    services: list[RuntimeServiceResponse] = Field(default_factory=list)
+    logs_available: bool
+    control_available: bool
+    reason: str | None = None
+
+
+class WorkspaceLogStreamResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    stream_id: str
+    source: str
+    name: str
+    kind: str
+    path: str
+    byte_count: int
+    line_count: int
+    opened_at: datetime
+    closed_at: datetime | None
+
+
+class WorkspaceLogListResponse(BaseModel):
+    items: list[WorkspaceLogStreamResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class WorkspaceLogReadResponse(BaseModel):
+    stream_id: str
+    offset: int
+    next_offset: int
+    eof: bool
+    data: str
+
+
+class OperationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    type: str
+    status: str
+    error_code: str | None
+    error_message: str | None
+    payload: dict[str, Any] | None
+    result: dict[str, Any] | None
+    idempotency_key: str | None
+    created_at: datetime
+    started_at: datetime | None
+    finished_at: datetime | None
+
+
+class OperationListResponse(BaseModel):
+    items: list[OperationResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class WorkspaceControlRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    reason: Annotated[str | None, Field(default=None, max_length=1024)]
+    stop_stack: bool = True
+
+
+class WorkspaceControlResponse(BaseModel):
+    workspace_id: str
+    operation_id: str
+    status: WorkspaceStatus
+    message: str
+
+
 class ErrorResponse(BaseModel):
     """Uniform error envelope.
 
