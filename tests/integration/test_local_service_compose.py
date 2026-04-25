@@ -22,6 +22,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         volumes = services[service_name]["volumes"]
         assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
         environment = services[service_name]["environment"]
+        assert environment["AWF_API_BASE_URL"] == "http://api:8000"
         assert environment["AWF_DATABASE_URL"].startswith("postgresql+asyncpg://")
         assert "@postgres:5432/" in environment["AWF_DATABASE_URL"]
 
