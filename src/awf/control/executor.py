@@ -828,7 +828,10 @@ def _call_pr_monitor_factory(
     try:
         signature = inspect.signature(factory)
     except (TypeError, ValueError):
-        return factory(adapter, profile, workspace)
+        # Without a signature, preserve the historical two-argument fallback;
+        # probing by calling would risk masking TypeErrors raised inside the
+        # factory body.
+        return factory(adapter, profile)
 
     bind_errors: list[TypeError] = []
     for args in ((adapter, profile, workspace), (adapter, profile), (adapter,)):

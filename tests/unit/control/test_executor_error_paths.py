@@ -23,6 +23,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.control.executor as executor_module
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor, _call_pr_monitor_factory
@@ -500,6 +501,39 @@ class TestPrMonitorFactoryPath:
             profile=profile,
             workspace=workspace,
         ) == ("three", adapter, profile, workspace)
+
+    @pytest.mark.unit
+    def test_uninspectable_factory_uses_two_argument_fallback(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        adapter = object()
+        profile = object()
+        workspace = SimpleNamespace(id="ws_policy", auto_merge=True)
+        calls: list[tuple[object, object]] = []
+
+        def _monitor_factory(adapter: object, profile: object) -> object:
+            calls.append((adapter, profile))
+            return "monitor"
+
+        original_signature = executor_module.inspect.signature
+
+        def _signature(callable_: object) -> object:
+            if callable_ is _monitor_factory:
+                raise ValueError("signature unavailable")
+            return original_signature(callable_)
+
+        monkeypatch.setattr(executor_module.inspect, "signature", _signature)
+
+        assert (
+            _call_pr_monitor_factory(
+                _monitor_factory,
+                adapter=adapter,
+                profile=profile,
+                workspace=workspace,
+            )
+            == "monitor"
+        )
+        assert calls == [(adapter, profile)]
 
     @pytest.mark.unit
     def test_adapter_only_factory_preserves_internal_type_error(self) -> None:
