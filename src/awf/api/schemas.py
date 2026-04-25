@@ -53,6 +53,12 @@ class WorkspaceV2Task(BaseModel):
     kind: Annotated[str, Field(default="feature_branch_pr", max_length=32)]
     agent: AgentRuntime = Field(default=AgentRuntime.codex)
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
+    auto_merge: bool = True
+    initial_review_grace_period_seconds: float | None = Field(
+        default=None,
+        ge=0,
+        le=86400,
+    )
 
 
 class WorkspaceV2Workspace(BaseModel):
@@ -109,6 +115,8 @@ class WorkspaceResponse(BaseModel):
     task_title: str
     task_prompt: str
     task_external_id: str | None
+    auto_merge: bool
+    initial_review_grace_period_seconds: float | None
 
     agent: AgentRuntime
     env_profile: str | None
