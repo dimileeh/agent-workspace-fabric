@@ -398,8 +398,9 @@ curl -X POST http://localhost:8000/v2/workspaces \
 ```
 
 Current MVP note: the REST API persists workspace requests and exposes state.
-The full local end-to-end executor is `scripts/run_awf.py` until the dedicated
-worker/scheduler path is promoted.
+The always-on worker path currently proves provisioning only
+(`requested -> provisioning -> ready`). The full local end-to-end executor is
+still `scripts/run_awf.py` until API-backed full execution lands.
 
 Get one workspace:
 
@@ -445,6 +446,20 @@ Start the API:
 uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
 ```
 
+Run the provisioning worker:
+
+```bash
+uv run --python 3.12 --extra dev awf worker
+```
+
+Inspect local service settings and dependency status:
+
+```bash
+uv run --python 3.12 --extra dev awf service config
+uv run --python 3.12 --extra dev awf service status
+uv run --python 3.12 --extra dev awf service status --format pretty
+```
+
 Create a workspace:
 
 ```bash
@@ -482,6 +497,43 @@ Preview profile resolution:
 uv run --python 3.12 --extra dev awf profile preview ~/Projects/example-repo --profile auto
 ```
 
+## Local Service Stack
+
+Docker Compose is the default local runtime for the always-on AWF control
+plane. The stack runs:
+
+- Postgres for the AWF control-plane database.
+- A one-shot `migrate` service that runs Alembic before API/worker startup.
+- The AWF API service.
+- The AWF worker service.
+
+Both the API and worker containers mount `/var/run/docker.sock` so AWF can
+create and manage per-workspace Compose stacks on the host Docker daemon.
+
+Start from a clean checkout:
+
+```bash
+cp .env.example .env
+docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
+docker compose -f docker/compose/local-service.yml up --build
+```
+
+Check the service from another terminal:
+
+```bash
+uv run --python 3.12 --extra dev awf service status
+```
+
+The service-mode default database URL is local Postgres
+(`postgresql+asyncpg://awf:...@localhost:5433/awf`). SQLite remains supported
+for tests and throwaway script runs, but the always-on service should run
+against Postgres.
+
+The AWF Postgres database is only the control-plane database. Project and
+workspace databases remain separate and profile-isolated; if a workspace
+profile needs Postgres or another datastore, that service belongs to the
+per-workspace Compose stack, not the AWF control-plane DB.
+
 ## MCP Surface
 
 AWF also exposes MCP tools for clients that want typed tool calls instead of
@@ -501,7 +553,8 @@ MCP is a straightforward next slice.
 ## Local Dogfood Runner
 
 The fastest way to exercise the full local pipeline today is
-`scripts/run_awf.py`. It creates a local SQLite control-plane database under a
+`scripts/run_awf.py`. It is a compatibility dogfood runner until API-backed
+full execution lands. It creates a local SQLite control-plane database under a
 run directory, provisions workspaces, launches Docker Compose, runs the agent,
 creates a PR, and runs the PR monitor.
 
@@ -626,23 +679,26 @@ docker image inspect awf-agent-runtime:latest
 
 ### Configure Environment
 
-Local API development can use the default SQLite database:
-
-```bash
-export AWF_DATABASE_URL="sqlite+aiosqlite:///./awf.db"
-```
-
-For Postgres control-plane development, copy `.env.example`:
+Local service development should use Postgres via the Compose stack:
 
 ```bash
 cp .env.example .env
+docker compose -f docker/compose/local-service.yml up --build
 ```
 
-Then edit:
+For API-only throwaway development, SQLite remains supported:
+
+```bash
+export AWF_DATABASE_URL="sqlite+aiosqlite:///./awf.db"
+uv run --python 3.12 --extra dev awf serve --host 127.0.0.1 --port 8000
+```
+
+Key local service values:
 
 ```text
 AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf
 AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
+AWF_WORK_DIR=.awf
 AWF_GITHUB_TOKEN=
 ```
 
@@ -680,7 +736,14 @@ dogfood tests can use a Flash preview model when Pro is unavailable.
 ### Database Migrations
 
 SQLite local API runs create tables automatically at startup. For Postgres,
-apply migrations before starting the API:
+apply migrations before starting the API and worker. The Compose stack does
+this through its `migrate` service:
+
+```bash
+docker compose -f docker/compose/local-service.yml up migrate
+```
+
+Manual Postgres migration:
 
 ```bash
 AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf \

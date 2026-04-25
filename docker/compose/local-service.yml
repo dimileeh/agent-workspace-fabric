@@ -1,0 +1,71 @@
+name: awf-local-service
+
+x-awf-service: &awf-service
+  image: ghcr.io/astral-sh/uv:python3.12-bookworm
+  working_dir: /app
+  volumes:
+    - ../..:/app
+    - /var/run/docker.sock:/var/run/docker.sock
+    - awf-work:/awf-work
+  environment: &awf-environment
+    AWF_SERVICE_NAME: awf
+    AWF_ENV: local
+    AWF_LOG_LEVEL: INFO
+    AWF_API_HOST: 0.0.0.0
+    AWF_API_PORT: "8000"
+    AWF_API_BASE_URL: http://localhost:8000
+    AWF_DATABASE_URL: postgresql+asyncpg://awf:awf_dev@postgres:5432/awf
+    AWF_DOCKER_HOST: unix:///var/run/docker.sock
+    AWF_AGENT_RUNTIME_IMAGE: awf-agent-runtime:latest
+    AWF_WORK_DIR: /awf-work
+    AWF_WORKER_POLL_INTERVAL_SECONDS: "1.0"
+    AWF_WORKER_MAX_CONCURRENT_PROVISIONS: "3"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: awf
+      POSTGRES_PASSWORD: awf_dev
+      POSTGRES_DB: awf
+    ports:
+      - "5433:5432"
+    volumes:
+      - awf-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U awf -d awf"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+  migrate:
+    <<: *awf-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: sh -c "uv run --python 3.12 --extra dev alembic upgrade head"
+    restart: "no"
+
+  api:
+    <<: *awf-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    ports:
+      - "8000:8000"
+    command: sh -c "uv run --python 3.12 --extra dev awf serve --host 0.0.0.0 --port 8000"
+
+  worker:
+    <<: *awf-service
+    depends_on:
+      postgres:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+    command: sh -c "uv run --python 3.12 --extra dev awf worker"
+
+volumes:
+  awf-postgres-data:
+  awf-work:

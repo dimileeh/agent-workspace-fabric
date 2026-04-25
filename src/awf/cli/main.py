@@ -12,6 +12,7 @@ friendly formatting is opt-in via ``--format pretty``.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -30,8 +31,10 @@ app = typer.Typer(
 
 workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy).")
 profile_app = typer.Typer(help="Workspace profile inspection.")
+service_app = typer.Typer(help="Local service operations.")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
+app.add_typer(service_app, name="service")
 
 
 class OutputFormat(StrEnum):
@@ -109,6 +112,46 @@ def serve(
         port=port,
         reload=reload,
     )
+
+
+@app.command("worker")
+def worker(
+    once: bool = typer.Option(
+        False,
+        "--once",
+        help="Run one poll batch and exit.",
+        hidden=True,
+    ),
+) -> None:
+    """Run the AWF control worker."""
+    from awf.service.config import resolve_service_settings
+    from awf.service.worker import run_worker
+
+    asyncio.run(run_worker(resolve_service_settings(), once=once))
+
+
+@service_app.command("status")
+def service_status(
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Check local AWF service dependencies."""
+    from awf.service.config import resolve_service_settings
+    from awf.service.status import collect_service_status
+
+    payload = asyncio.run(collect_service_status(resolve_service_settings()))
+    _emit(payload, fmt)
+    if payload.get("status") != "ok":
+        raise typer.Exit(code=1)
+
+
+@service_app.command("config")
+def service_config(
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Print resolved local service settings with secrets redacted."""
+    from awf.service.config import resolve_service_settings, service_config_payload
+
+    _emit(service_config_payload(resolve_service_settings()), fmt)
 
 
 @workspace_app.command("create")

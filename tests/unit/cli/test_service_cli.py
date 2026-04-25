@@ -220,8 +220,8 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from awf.service.config import ServiceSettings
     from awf.service import worker as worker_mod
+    from awf.service.config import ServiceSettings
 
     created: dict[str, Any] = {}
 
@@ -251,11 +251,20 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
 
     engine = _Engine()
     session_factory = object()
-    monkeypatch.setattr(worker_mod, "make_engine", lambda url: created.setdefault("db_url", url) or engine)
+
+    def _make_engine(url: str) -> _Engine:
+        created["db_url"] = url
+        return engine
+
+    def _make_session_factory(eng: _Engine) -> object:
+        created["session_engine"] = eng
+        return session_factory
+
+    monkeypatch.setattr(worker_mod, "make_engine", _make_engine)
     monkeypatch.setattr(
         worker_mod,
         "make_session_factory",
-        lambda eng: created.setdefault("session_engine", eng) or session_factory,
+        _make_session_factory,
     )
     monkeypatch.setattr(worker_mod, "GitManager", _GitManager)
     monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
