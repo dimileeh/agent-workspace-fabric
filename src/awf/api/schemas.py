@@ -145,6 +145,29 @@ class WorkspaceAcceptedResponse(BaseModel):
     accepted_at: datetime
 
 
+class WorkspaceEventResponse(BaseModel):
+    """Representation of an immutable workspace event."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    event_type: str
+    old_state: str | None
+    new_state: str | None
+    reason_code: str | None
+    payload: dict[str, Any] | None
+    occurred_at: datetime
+
+
+class WorkspaceEventListResponse(BaseModel):
+    """List envelope reserved for cursor pagination in a later slice."""
+
+    items: list[WorkspaceEventResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
 class ErrorResponse(BaseModel):
     """Uniform error envelope.
 
