@@ -10,6 +10,7 @@ x-awf-service: &awf-service
     - ../..:/app
     - /var/run/docker.sock:/var/run/docker.sock
     - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
+    - ${AWF_HOST_HOME:-${HOME}}:${AWF_HOST_HOME:-${HOME}}:ro
   environment: &awf-environment
     AWF_SERVICE_NAME: awf
     AWF_ENV: local
@@ -22,6 +23,8 @@ x-awf-service: &awf-service
     AWF_DOCKER_HOST: unix:///var/run/docker.sock
     AWF_AGENT_RUNTIME_IMAGE: awf-agent-runtime:latest
     AWF_WORK_DIR: ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
+    AWF_HOST_HOME: ${AWF_HOST_HOME:-${HOME}}
+    GOOGLE_APPLICATION_CREDENTIALS: ${GOOGLE_APPLICATION_CREDENTIALS:-}
     AWF_WORKER_POLL_INTERVAL_SECONDS: "1.0"
     AWF_WORKER_MAX_CONCURRENT_PROVISIONS: "3"
     UV_PROJECT_ENVIRONMENT: /tmp/awf-venv

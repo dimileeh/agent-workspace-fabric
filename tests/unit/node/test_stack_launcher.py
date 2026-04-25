@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 
-from awf.node.compose_manager import ComposeProjectPaths, WorkspaceComposeSpec
+from awf.node import stack_launcher as stack_launcher_mod
+from awf.node.compose_manager import AuthMount, ComposeProjectPaths, WorkspaceComposeSpec
 from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import (
@@ -29,6 +31,26 @@ class _RecordingCompose:
         return ComposeProjectPaths(
             project_dir=Path("/tmp/awf-compose/ws_launcher"),
             compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+        )
+
+
+class _RecordingAuthMountResolver:
+    def __init__(self) -> None:
+        self.workspace_ids: list[str] = []
+
+    def resolve(self, *, workspace_id: str) -> tuple[AuthMount, ...]:
+        self.workspace_ids.append(workspace_id)
+        return (
+            AuthMount(
+                source="/host/home/.config/gh",
+                target="/home/agent/.config/gh",
+                mode="ro",
+            ),
+            AuthMount(
+                source="/host/work/auth/ws_launcher/codex",
+                target="/home/agent/.codex",
+                mode="rw",
+            ),
         )
 
 
@@ -78,3 +100,87 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     assert spec.auth_mounts[0].source == str(layout.mirror_path)
     assert spec.auth_mounts[0].target == str(layout.mirror_path)
     assert spec.auth_mounts[0].mode == "ro"
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_appends_service_auth_mounts() -> None:
+    compose = _RecordingCompose()
+    auth_mount_resolver = _RecordingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        auth_mount_resolver=auth_mount_resolver,
+    )
+    layout = WorktreeLayout(
+        mirror_path=Path("/host/awf/git/mirrors/repo.git"),
+        worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
+        branch_name="awf/ws_launcher",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=WorkspaceProfile(name="generic"),
+        )
+    )
+
+    assert auth_mount_resolver.workspace_ids == ["ws_launcher"]
+    spec = compose.specs[0]
+    assert spec.auth_mounts == (
+        AuthMount(source=str(layout.mirror_path), target=str(layout.mirror_path), mode="ro"),
+        AuthMount(
+            source="/host/home/.config/gh",
+            target="/home/agent/.config/gh",
+            mode="ro",
+        ),
+        AuthMount(
+            source="/host/work/auth/ws_launcher/codex",
+            target="/home/agent/.codex",
+            mode="rw",
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Callable[..., object], tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_to_thread(
+        func: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(stack_launcher_mod.asyncio, "to_thread", fake_to_thread)
+    compose = _RecordingCompose()
+    auth_mount_resolver = _RecordingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        auth_mount_resolver=auth_mount_resolver,
+    )
+    layout = WorktreeLayout(
+        mirror_path=Path("/host/awf/git/mirrors/repo.git"),
+        worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
+        branch_name="awf/ws_launcher",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=WorkspaceProfile(name="generic"),
+        )
+    )
+
+    assert len(calls) == 1
+    func, args, kwargs = calls[0]
+    assert func == auth_mount_resolver.resolve
+    assert args == ()
+    assert kwargs == {"workspace_id": "ws_launcher"}

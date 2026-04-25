@@ -28,6 +28,7 @@ class ServiceSettings:
     github_token: str | None
     worker_poll_interval_seconds: float
     worker_max_concurrent_provisions: int
+    host_home: str = "~"
     node_id: str | None = None
     branch_prefix: str = "awf"
 
@@ -65,6 +66,7 @@ def resolve_service_settings(
         docker_host=settings.docker_host,
         agent_runtime_image=settings.agent_runtime_image,
         work_dir=settings.work_dir,
+        host_home=settings.host_home or "~",
         api_token=_empty_to_none(settings.api_token),
         github_token=_empty_to_none(settings.github_token),
         worker_poll_interval_seconds=settings.worker_poll_interval_seconds,

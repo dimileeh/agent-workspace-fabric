@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
+from awf.node.auth_mounts import WorkspaceAuthMountResolver
 from awf.node.compose_manager import (
     AuthMount,
     ComposeManager,
@@ -34,9 +36,16 @@ class WorkspaceStackLauncher(Protocol):
 class ComposeStackLauncher:
     """Render and start the profile-driven outer workspace Compose stack."""
 
-    def __init__(self, *, compose: ComposeManager, agent_runtime_image: str) -> None:
+    def __init__(
+        self,
+        *,
+        compose: ComposeManager,
+        agent_runtime_image: str,
+        auth_mount_resolver: WorkspaceAuthMountResolver | None = None,
+    ) -> None:
         self._compose = compose
         self._agent_runtime_image = agent_runtime_image
+        self._auth_mount_resolver = auth_mount_resolver
 
     async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths:
         layout = request.layout
@@ -45,6 +54,14 @@ class ComposeStackLauncher:
             source=str(layout.mirror_path),
             target=str(layout.mirror_path),
         )
+        auth_mounts = [mirror_mount]
+        if self._auth_mount_resolver is not None:
+            auth_mounts.extend(
+                await asyncio.to_thread(
+                    self._auth_mount_resolver.resolve,
+                    workspace_id=request.workspace_id,
+                )
+            )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,
@@ -52,6 +69,6 @@ class ComposeStackLauncher:
             agent_environment=profile_agent_environment(profile),
             docker_mode=profile.docker.mode.value,
             services=profile_services(profile),
-            auth_mounts=(mirror_mount,),
+            auth_mounts=tuple(auth_mounts),
         )
         return await self._compose.up(spec, wait=True)
