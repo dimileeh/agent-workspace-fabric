@@ -147,5 +147,8 @@ class WorkspaceEventRepository:
         stmt = select(WorkspaceEvent)
         if workspace_id is not None:
             stmt = stmt.where(WorkspaceEvent.workspace_id == workspace_id)
-        stmt = stmt.order_by(WorkspaceEvent.occurred_at.desc()).limit(limit)
+        stmt = stmt.order_by(
+            WorkspaceEvent.occurred_at.desc(),
+            WorkspaceEvent.id.desc(),
+        ).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
