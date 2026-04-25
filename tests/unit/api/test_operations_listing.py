@@ -166,8 +166,8 @@ async def test_list_operations_empty(client: AsyncClient, session: AsyncSession)
     )
     await session.commit()
 
-    # Empty global list
-    response = await client.get("/v1/operations?type=validate")
+    # Empty global list scoped to this workspace
+    response = await client.get(f"/v1/operations?workspace_id={ws.id}&type=validate")
     assert response.status_code == 200
     assert response.json()["items"] == []
 
