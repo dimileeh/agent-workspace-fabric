@@ -1,4 +1,3 @@
-
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
@@ -17,6 +16,7 @@ async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     async with factory() as s:
         yield s
 
+
 @pytest.fixture
 async def sample_data(session: AsyncSession):
     ws_repo = WorkspaceRepository(session)
@@ -28,7 +28,7 @@ async def sample_data(session: AsyncSession):
         task_title="task1",
         task_prompt="prompt1",
         agent="claude-3-sonnet",
-        test_commands=[]
+        test_commands=[],
     )
     ws2 = await ws_repo.create(
         repo_url="https://github.com/org/repo2",
@@ -36,18 +36,25 @@ async def sample_data(session: AsyncSession):
         task_title="task2",
         task_prompt="prompt2",
         agent="claude-3-sonnet",
-        test_commands=[]
+        test_commands=[],
     )
 
     # op1: ws1, create, succeeded
-    await op_repo.create(workspace_id=ws1.id, operation_type=OperationType.create, status=OperationStatus.succeeded)
+    await op_repo.create(
+        workspace_id=ws1.id, operation_type=OperationType.create, status=OperationStatus.succeeded
+    )
     # op2: ws1, validate, running
-    await op_repo.create(workspace_id=ws1.id, operation_type=OperationType.validate, status=OperationStatus.running)
+    await op_repo.create(
+        workspace_id=ws1.id, operation_type=OperationType.validate, status=OperationStatus.running
+    )
     # op3: ws2, create, succeeded
-    await op_repo.create(workspace_id=ws2.id, operation_type=OperationType.create, status=OperationStatus.succeeded)
+    await op_repo.create(
+        workspace_id=ws2.id, operation_type=OperationType.create, status=OperationStatus.succeeded
+    )
 
     await session.commit()
     return ws1, ws2
+
 
 @pytest.mark.unit
 async def test_list_operations_global(client: AsyncClient, sample_data):
@@ -78,6 +85,7 @@ async def test_list_operations_global(client: AsyncClient, sample_data):
     assert len(response.json()["items"]) == 1
     assert response.json()["items"][0]["type"] == "validate"
 
+
 @pytest.mark.unit
 async def test_list_workspace_operations_filters(client: AsyncClient, sample_data):
     ws1, ws2 = sample_data
@@ -94,11 +102,13 @@ async def test_list_workspace_operations_filters(client: AsyncClient, sample_dat
     assert len(response.json()["items"]) == 1
     assert response.json()["items"][0]["status"] == "running"
 
+
 @pytest.mark.unit
 async def test_list_workspace_operations_not_found(client: AsyncClient):
     response = await client.get("/v1/workspaces/ws_missing/operations")
     assert response.status_code == 404
     assert response.json()["detail"]["error_code"] == "NOT_FOUND"
+
 
 @pytest.mark.unit
 async def test_list_operations_limit_validation(client: AsyncClient):
@@ -107,6 +117,7 @@ async def test_list_operations_limit_validation(client: AsyncClient):
 
     response = await client.get("/v1/operations?limit=501")
     assert response.status_code == 422
+
 
 @pytest.mark.unit
 async def test_list_operations_ordering(client: AsyncClient, session: AsyncSession):
@@ -119,7 +130,7 @@ async def test_list_operations_ordering(client: AsyncClient, session: AsyncSessi
         task_title="task",
         task_prompt="prompt",
         agent="claude-3-sonnet",
-        test_commands=[]
+        test_commands=[],
     )
 
     op1 = await op_repo.create(workspace_id=ws.id, operation_type=OperationType.create)
@@ -141,6 +152,7 @@ async def test_list_operations_ordering(client: AsyncClient, session: AsyncSessi
     assert items[1]["id"] == op2.id
     assert items[2]["id"] == op1.id
 
+
 @pytest.mark.unit
 async def test_list_operations_empty(client: AsyncClient, session: AsyncSession):
     ws_repo = WorkspaceRepository(session)
@@ -150,7 +162,7 @@ async def test_list_operations_empty(client: AsyncClient, session: AsyncSession)
         task_title="task",
         task_prompt="prompt",
         agent="claude-3-sonnet",
-        test_commands=[]
+        test_commands=[],
     )
     await session.commit()
 
