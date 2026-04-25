@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parent.parent
@@ -48,6 +49,12 @@ from awf.db.models import WorkspaceEvent  # noqa: E402
 from awf.db.repositories import WorkspaceRepository  # noqa: E402
 from awf.db.session import make_session_factory  # noqa: E402
 from awf.runtime.logs import LogStore  # noqa: E402
+from awf.runtime.pr_monitor_runner import (  # noqa: E402
+    _initial_review_grace_done_key,
+    _initial_review_grace_started_key,
+    _initial_review_grace_wall_seconds,
+    _initial_review_grace_wall_started_value_from_datetime,
+)
 from awf.runtime.release_pr_monitor import (  # noqa: E402
     build_feature_pr_monitor,
     build_release_pr_monitor,
@@ -109,6 +116,11 @@ async def _main(
         ws.failure_reason = None
         ws.failure_message = None
         ws.monitor_iter_count = 0
+        ws.monitor_threads_addressed = _preserve_initial_review_grace_state(
+            ws.monitor_threads_addressed,
+            pr_number=ws.pr_number,
+            monitor_started_at=ws.monitor_started_at,
+        )
         ws.monitor_started_at = None
         ws.events.append(
             WorkspaceEvent(
@@ -194,6 +206,30 @@ async def _main(
         )
     await engine.dispose()
     return 0 if final.status == WorkspaceStatus.completed.value else 1
+
+
+def _preserve_initial_review_grace_state(
+    monitor_threads_addressed: dict[str, str] | None,
+    *,
+    pr_number: int,
+    monitor_started_at: datetime | None,
+) -> dict[str, str]:
+    threads = dict(monitor_threads_addressed or {})
+    started_key = _initial_review_grace_started_key(pr_number)
+    done_key = _initial_review_grace_done_key(pr_number)
+    if threads.get(done_key) == "elapsed" or monitor_started_at is None:
+        return threads
+
+    started_dt = monitor_started_at
+    if started_dt.tzinfo is None:
+        started_dt = started_dt.replace(tzinfo=UTC)
+    if (
+        started_key in threads
+        and _initial_review_grace_wall_seconds(threads[started_key]) is not None
+    ):
+        return threads
+    threads[started_key] = _initial_review_grace_wall_started_value_from_datetime(started_dt)
+    return threads
 
 
 async def _push_pending_head(
