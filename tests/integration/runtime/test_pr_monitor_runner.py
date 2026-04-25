@@ -9,6 +9,7 @@ adapter so no subprocesses spawn. Tests drive full loops end-to-end.
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -23,10 +24,11 @@ from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.runtime.pr_monitor import MonitorConfig
+from awf.runtime.pr_monitor import MonitorConfig, MonitorState
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
+    _initial_review_grace_started_key,
     _parse_verdict,
 )
 
@@ -1818,6 +1820,114 @@ class TestMonitorDbHelpers:
             # If tzinfo wasn't applied, we'd have gotten a naive/aware
             # subtract TypeError — reaching here proves the branch ran.
             assert state.iter_count == 0
+
+    @pytest.mark.unit
+    async def test_load_state_converts_wall_clock_grace_marker_to_monotonic(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta
+
+        ws_id = await _seed_monitoring_workspace(factory)
+        started_wall = _dt.now(_UTC) - timedelta(minutes=10)
+        started_key = _initial_review_grace_started_key(42)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_threads_addressed = {started_key: f"{started_wall.timestamp():.6f}"}
+            await s.commit()
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            state = runner._load_state(ws)
+
+        started_monotonic = float(state.threads_addressed_ids[started_key])
+        assert time.monotonic() - started_monotonic == pytest.approx(600, abs=2)
+
+    @pytest.mark.unit
+    async def test_load_state_rebases_legacy_grace_marker_from_monitor_started_at(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        from datetime import UTC as _UTC
+        from datetime import datetime as _dt
+        from datetime import timedelta
+
+        ws_id = await _seed_monitoring_workspace(factory)
+        started_wall = _dt.now(_UTC) - timedelta(minutes=10)
+        started_key = _initial_review_grace_started_key(42)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_started_at = started_wall
+            ws.monitor_threads_addressed = {started_key: "1000.000000"}
+            await s.commit()
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            state = runner._load_state(ws)
+
+        started_monotonic = float(state.threads_addressed_ids[started_key])
+        assert time.monotonic() - started_monotonic == pytest.approx(600, abs=2)
+
+    @pytest.mark.unit
+    async def test_persist_state_writes_wall_clock_grace_marker(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        started_key = _initial_review_grace_started_key(42)
+        started_monotonic = time.monotonic() - 300
+        state = MonitorState(
+            threads_addressed_ids={started_key: f"{started_monotonic:.6f}"},
+            started_at=time.monotonic(),
+        )
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+
+        await runner._persist_state(ws_id, state)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            started_wall = float(ws.monitor_threads_addressed[started_key])
+        assert started_wall > 1_000_000_000
+        assert time.time() - started_wall == pytest.approx(300, abs=2)
 
 
 class TestCompleteWorkspaceTearsDownComposeStack:
