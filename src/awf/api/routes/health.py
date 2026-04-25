@@ -102,7 +102,18 @@ async def _check_db(factory: Any) -> CheckResult:
             reason="DB_NOT_CONFIGURED",
             detail="db_session_factory is not attached to app.state",
         )
-    session = factory()
+    try:
+        session = factory()
+    except Exception as exc:
+        # factory() can raise before we ever get a session — e.g. pool exhausted,
+        # bad DSN, engine misconfig. Surface it as a structured DB failure so
+        # /readyz returns 503 instead of an unhandled 500.
+        return CheckResult(
+            ok=False,
+            status="fail",
+            reason="DB_CONNECTION_FAILED",
+            detail=_truncate(f"{type(exc).__name__}: {exc}"),
+        )
     try:
         try:
             await asyncio.wait_for(

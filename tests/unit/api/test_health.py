@@ -196,6 +196,29 @@ async def test_readyz_db_query_failure_returns_503(
     assert "connection refused" in (db_check["detail"] or "")
 
 
+@pytest.mark.unit
+async def test_readyz_db_factory_raises_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    """Factory failure (pool exhausted, bad DSN) must surface as 503, not 500."""
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    def _exploding_factory() -> Any:
+        raise RuntimeError("QueuePool limit of size 5 overflow 10 reached")
+
+    app.state.db_session_factory = _exploding_factory
+
+    response = await client.get("/readyz")
+    assert response.status_code == 503
+    db_check = response.json()["checks"]["db"]
+    assert db_check["ok"] is False
+    assert db_check["reason"] == "DB_CONNECTION_FAILED"
+    assert "QueuePool" in (db_check["detail"] or "")
+
+
 # ---- /readyz: Docker CLI / daemon failures ----------------------------------
 
 
