@@ -212,9 +212,32 @@ class TestRunOnceExecution:
         dispatched = await worker.run_once()
         await worker.wait_for_execution_tasks()
 
-        assert dispatched == 3
+        assert dispatched == 2
         assert provisioner.calls == [requested_id]
         assert set(executor.calls) == {ready_id, requested_id}
+
+    @pytest.mark.unit
+    async def test_freshly_provisioned_workspace_is_not_counted_twice(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(session_factory, origin_repo, "new-request")
+        provisioner = _TransitioningProvisioner(session_factory)
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+        )
+
+        dispatched = await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        assert dispatched == 1
+        assert provisioner.calls == [requested_id]
+        assert executor.calls == [requested_id]
 
     @pytest.mark.unit
     async def test_ready_execution_does_not_block_future_poll_batches(

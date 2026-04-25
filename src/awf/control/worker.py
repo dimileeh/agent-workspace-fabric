@@ -69,7 +69,7 @@ class ControlWorker:
         for ``run_forever`` to sleep; non-zero means we may be throughput-bound
         and should immediately loop again.
         """
-        dispatched = 0
+        dispatched_ids: set[str] = set()
 
         requested_ids = await self._list_requested()
         if requested_ids:
@@ -77,14 +77,14 @@ class ControlWorker:
                 *(self._safely_provision(ws_id) for ws_id in requested_ids),
                 return_exceptions=False,
             )
-            dispatched += len(requested_ids)
+            dispatched_ids.update(requested_ids)
 
         if self._executor is not None:
             execution_slots = self._available_execution_slots()
             ready_ids = await self._list_ready(limit=execution_slots)
-            dispatched += self._dispatch_ready_executions(ready_ids)
+            dispatched_ids.update(self._dispatch_ready_executions(ready_ids))
 
-        return dispatched
+        return len(dispatched_ids)
 
     async def wait_for_execution_tasks(self) -> None:
         """Wait for ready-workspace execution tasks started by this worker."""
@@ -140,8 +140,8 @@ class ControlWorker:
     def _available_execution_slots(self) -> int:
         return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
 
-    def _dispatch_ready_executions(self, workspace_ids: list[str]) -> int:
-        dispatched = 0
+    def _dispatch_ready_executions(self, workspace_ids: list[str]) -> set[str]:
+        dispatched: set[str] = set()
         for workspace_id in workspace_ids:
             if workspace_id in self._execution_tasks:
                 continue
@@ -152,7 +152,7 @@ class ControlWorker:
             )
             self._execution_tasks[workspace_id] = task
             task.add_done_callback(partial(self._forget_execution_task, workspace_id))
-            dispatched += 1
+            dispatched.add(workspace_id)
         return dispatched
 
     def _forget_execution_task(self, workspace_id: str, _task: asyncio.Task[None]) -> None:
