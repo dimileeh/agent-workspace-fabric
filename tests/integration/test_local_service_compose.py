@@ -45,6 +45,9 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert "@postgres:5432/" in environment["AWF_DATABASE_URL"]
         assert environment["AWF_WORK_DIR"] == expected_work_dir
         assert environment["AWF_HOST_HOME"] == expected_host_home
+        assert (
+            environment["GOOGLE_APPLICATION_CREDENTIALS"] == "${GOOGLE_APPLICATION_CREDENTIALS:-}"
+        )
         assert environment["UV_PROJECT_ENVIRONMENT"] == "/tmp/awf-venv"
         assert environment["UV_LINK_MODE"] == "copy"
 
