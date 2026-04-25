@@ -21,7 +21,18 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import JSON, DateTime, ForeignKey, Index, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    DateTime,
+    Float,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    UniqueConstraint,
+    true,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from awf.db.base import Base, _now
@@ -68,6 +79,27 @@ class Workspace(Base):
     task_title: Mapped[str] = mapped_column(String(512), nullable=False)
     task_prompt: Mapped[str] = mapped_column(String(16384), nullable=False)
     task_external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    auto_merge: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    """Whether the service PR monitor may merge the PR once gates are green.
+
+    ``False`` routes feature workspaces through the release/manual monitor
+    behavior: post the ready-for-human comment and keep polling until an
+    external merge is observed.
+    """
+
+    initial_review_grace_period_seconds: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
+    """Optional workspace-specific override for the profile monitor grace.
+
+    ``None`` means use ``resolved_profile.monitor.initial_review_grace_period_seconds``.
+    """
 
     agent: Mapped[str] = mapped_column(String(32), nullable=False)
     env_profile: Mapped[str | None] = mapped_column(String(128), nullable=True)

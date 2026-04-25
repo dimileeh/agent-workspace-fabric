@@ -380,7 +380,9 @@ curl -X POST http://localhost:8000/v2/workspaces \
       "title": "Implement feature",
       "prompt": "Build the requested feature and commit the result.",
       "kind": "feature_branch_pr",
-      "agent": "codex"
+      "agent": "codex",
+      "auto_merge": true,
+      "initial_review_grace_period_seconds": null
     },
     "workspace": {
       "profile_ref": "auto",
@@ -402,10 +404,12 @@ exposes state, and the always-on worker drives feature PR workspaces through the
 full lifecycle: `requested -> provisioning -> ready -> running -> validating ->
 pushing -> monitoring_pr -> completed/failed`. Feature PR workspaces created
 through the service use the resolved profile's monitor grace window
-(`monitor.initial_review_grace_period_seconds`, default `900`) and auto-merge
-after the monitor's gates pass. Manual/release task routing is still future
-service API work; those paths remain available through the compatibility
-dogfood scripts.
+(`monitor.initial_review_grace_period_seconds`, default `900`) unless the task
+sets `initial_review_grace_period_seconds`. `auto_merge: true` routes to the
+feature monitor, which may merge after the gates pass. `auto_merge: false`
+routes to the manual/release monitor behavior: AWF posts the ready-for-human
+comment and keeps polling until a human merge is observed. Release/sync flows
+remain available through the compatibility dogfood scripts.
 
 Get one workspace:
 
@@ -477,6 +481,10 @@ uv run --python 3.12 --extra dev awf workspace create \
   --prompt "Build the requested feature and commit the result." \
   --test "pytest -q"
 ```
+
+Add `--no-auto-merge` to keep monitoring after AWF posts the ready-for-human
+comment, and `--initial-review-grace-period-seconds 0` only for explicit
+fast-path tests.
 
 Show a workspace:
 
@@ -586,8 +594,7 @@ same building blocks outside the always-on service. It creates a local SQLite
 control-plane database under a run directory, provisions workspaces, launches
 Docker Compose, runs the agent, creates a PR, and runs the PR monitor. The
 service worker is now the normal always-on feature PR executor; use the script
-for isolated experiments, checked-in task specs, and release/sync flows that
-the service API does not express yet.
+for isolated experiments, checked-in task specs, and release/sync flows.
 
 Example config:
 

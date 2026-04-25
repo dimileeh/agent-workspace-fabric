@@ -25,6 +25,23 @@ _MINIMAL_BODY = {
 }
 
 
+_V2_MINIMAL_BODY = {
+    "repo": {
+        "url": "git@github.com:dimileeh/aira-agent.git",
+        "base_branch": "development",
+    },
+    "task": {
+        "title": "Add module docstring",
+        "prompt": "Add a one-line docstring to src/aira_agent/api/main.py.",
+        "agent": "codex",
+        "kind": "feature_branch_pr",
+    },
+    "workspace": {"profile_ref": "auto", "profile": None},
+    "validation": {"commands": ["pytest -q"], "requested_tier": 1},
+    "resources": {},
+}
+
+
 async def _create_workspace(client: AsyncClient, **overrides: object) -> str:
     body = {**_MINIMAL_BODY, **overrides}
     response = await client.post("/v1/workspaces", json=body)
@@ -78,6 +95,76 @@ class TestCreateWorkspace:
         bad = {**_MINIMAL_BODY, "hax0r_field": "value"}
         response = await client.post("/v1/workspaces", json=bad)
         assert response.status_code == 422
+
+
+class TestCreateWorkspaceV2MonitorPolicy:
+    @pytest.mark.unit
+    async def test_old_v2_payload_defaults_to_auto_merge_and_profile_grace(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        create = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        assert create.status_code == 202
+
+        ws_id = create.json()["workspace_id"]
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["auto_merge"] is True
+        assert body["initial_review_grace_period_seconds"] is None
+
+    @pytest.mark.unit
+    async def test_persists_explicit_monitor_policy(self, client: AsyncClient) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                "auto_merge": False,
+                "initial_review_grace_period_seconds": 12.5,
+            },
+        }
+
+        create = await client.post("/v2/workspaces", json=payload)
+        assert create.status_code == 202
+
+        ws_id = create.json()["workspace_id"]
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["auto_merge"] is False
+        assert body["initial_review_grace_period_seconds"] == 12.5
+
+    @pytest.mark.unit
+    async def test_idempotency_conflicts_when_monitor_policy_changes(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        headers = {"Idempotency-Key": "monitor-policy-key"}
+        first_payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                "auto_merge": False,
+                "initial_review_grace_period_seconds": 30,
+            },
+        }
+        replay_payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                "auto_merge": True,
+                "initial_review_grace_period_seconds": 30,
+            },
+        }
+
+        first = await client.post("/v2/workspaces", json=first_payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 409
+        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
 class TestIdempotency:

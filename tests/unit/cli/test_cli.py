@@ -64,6 +64,57 @@ class TestWorkspaceCreate:
         assert body["validation"]["commands"] == ["pytest -q", "ruff check ."]
         assert body["workspace"]["profile_ref"] == "aira"
         assert body["task"]["agent"] == "codex"
+        assert body["task"]["auto_merge"] is True
+        assert body["task"]["initial_review_grace_period_seconds"] is None
+
+    @pytest.mark.unit
+    def test_monitor_policy_flags_are_sent(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_manual"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Manual merge",
+                    "--prompt",
+                    "Open a PR and wait for human merge.",
+                    "--no-auto-merge",
+                    "--initial-review-grace-period-seconds",
+                    "0",
+                ],
+            )
+
+        assert result.exit_code == 0
+
+        body = mock.call_args.kwargs["json"]
+        assert body["task"]["auto_merge"] is False
+        assert body["task"]["initial_review_grace_period_seconds"] == 0
+
+    @pytest.mark.unit
+    def test_initial_review_grace_period_rejects_values_above_one_day(self) -> None:
+        with patch("awf.cli.main.httpx.request") as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@github.com:x/y.git",
+                    "--title",
+                    "Manual merge",
+                    "--prompt",
+                    "Open a PR and wait for human merge.",
+                    "--initial-review-grace-period-seconds",
+                    "86401",
+                ],
+            )
+
+        assert result.exit_code != 0
+        mock.assert_not_called()
 
     @pytest.mark.unit
     def test_idempotency_key_forwarded_as_header(self) -> None:

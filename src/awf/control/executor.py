@@ -694,6 +694,7 @@ class WorkspaceExecutor:
                     self._pr_monitor_factory,
                     adapter=adapter,
                     profile=profile,
+                    workspace=persisted,
                 )
 
             if monitor is not None:
@@ -814,28 +815,34 @@ def _call_pr_monitor_factory(
     *,
     adapter: AgentAdapter,
     profile: WorkspaceProfile,
+    workspace: Workspace,
 ) -> _MonitorRunnerProto:
-    """Call a monitor factory with the resolved profile when it accepts it.
+    """Call a monitor factory with the richest supported context.
 
-    ``run_awf.py`` and some existing tests predate profile-aware service
-    execution and expose an adapter-only factory. The service worker uses the
-    two-argument form so feature PR monitors inherit the workspace profile's
-    initial review grace period.
+    Production factories may need the persisted workspace row for monitor
+    policy. Older tests and scripts predate profile/workspace-aware execution
+    and expose one- or two-argument factories. We inspect arity before the call
+    so a ``TypeError`` raised inside the factory body is never mistaken for an
+    argument-count mismatch.
     """
     try:
         signature = inspect.signature(factory)
     except (TypeError, ValueError):
+        # Without a signature, preserve the historical two-argument fallback;
+        # probing by calling would risk masking TypeErrors raised inside the
+        # factory body.
         return factory(adapter, profile)
 
-    try:
-        signature.bind(adapter, profile)
-    except TypeError as two_arg_error:
+    bind_errors: list[TypeError] = []
+    for args in ((adapter, profile, workspace), (adapter, profile), (adapter,)):
         try:
-            signature.bind(adapter)
-        except TypeError:
-            raise two_arg_error from None
-        return factory(adapter)
-    return factory(adapter, profile)
+            signature.bind(*args)
+        except TypeError as exc:
+            bind_errors.append(exc)
+            continue
+        return factory(*args)
+
+    raise bind_errors[0]
 
 
 def _build_pr_body(ws: Workspace) -> str:

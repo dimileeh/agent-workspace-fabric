@@ -15,6 +15,7 @@ from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.github_client import GitHubClient
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
+from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
 from awf.node.compose_manager import ComposeManager
@@ -24,7 +25,7 @@ from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator
-from awf.runtime.release_pr_monitor import build_feature_pr_monitor
+from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 from awf.service.config import ServiceSettings
 
@@ -72,23 +73,27 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         ),
     )
 
-    def _feature_pr_monitor_factory(
+    def _pr_monitor_factory(
         adapter: AgentAdapter,
         profile: WorkspaceProfile,
+        workspace: Workspace,
     ) -> Any:
-        # Local service-created API workspaces currently represent feature PR
-        # tasks only. Manual/release monitor routing needs a task-kind API
-        # surface before the service can select build_release_pr_monitor here.
-        return build_feature_pr_monitor(
+        monitor_builder = (
+            build_feature_pr_monitor if workspace.auto_merge else build_release_pr_monitor
+        )
+        grace_seconds = (
+            workspace.initial_review_grace_period_seconds
+            if workspace.initial_review_grace_period_seconds is not None
+            else profile.monitor.initial_review_grace_period_seconds
+        )
+        return monitor_builder(
             session_factory=session_factory,
             runner=runner,
             adapter=adapter,
             gh=gh,
             worktrees_root=work_dir / "git" / "worktrees",
             artifacts_root=work_dir / "artifacts",
-            initial_review_grace_period_seconds=(
-                profile.monitor.initial_review_grace_period_seconds
-            ),
+            initial_review_grace_period_seconds=grace_seconds,
             log_store=log_store,
         )
 
@@ -106,7 +111,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             # provisioner, so this is only a legacy-row fallback.
             compose_projects_root=work_dir / "compose",
         ),
-        pr_monitor_factory=_feature_pr_monitor_factory,
+        pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,
     )
     worker = ControlWorker(

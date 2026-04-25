@@ -8,8 +8,13 @@ under tests/integration/ with testcontainers.
 
 from __future__ import annotations
 
+import os
+import sqlite3
+import subprocess
+import sys
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from pathlib import Path
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -52,6 +57,8 @@ class TestCreate:
         assert ws.status == WorkspaceStatus.requested.value
         assert ws.version == 1
         assert ws.id.startswith("ws_")
+        assert ws.auto_merge is True
+        assert ws.initial_review_grace_period_seconds is None
 
     @pytest.mark.unit
     async def test_create_emits_creation_event(self, session: AsyncSession) -> None:
@@ -74,6 +81,64 @@ class TestCreate:
         assert events[0].event_type == "workspace.created"
         assert events[0].new_state == WorkspaceStatus.requested.value
         assert events[0].reason_code == "CREATED"
+
+
+class TestMonitorPolicyMigration:
+    @pytest.mark.unit
+    def test_monitor_policy_columns_backfill_existing_rows(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[3]
+        db_path = tmp_path / "awf.db"
+        env = {
+            **os.environ,
+            "AWF_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
+        }
+
+        def _alembic(*args: str) -> None:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                cwd=repo_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        monkeypatch.chdir(repo_root)
+        _alembic("upgrade", "e5f6a1b2c3d4")
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO workspaces (
+                    id, status, version, repo_url, branch_base,
+                    task_title, task_prompt, agent, test_commands,
+                    requires_database, created_at, updated_at
+                )
+                VALUES (
+                    'ws_old_policy', 'requested', 1, 'git@example.com:repo.git',
+                    'development', 'old row', 'do work', 'codex', '[]',
+                    0, '2026-04-25 00:00:00', '2026-04-25 00:00:00'
+                )
+                """
+            )
+            conn.commit()
+
+        _alembic("upgrade", "head")
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT auto_merge, initial_review_grace_period_seconds
+                FROM workspaces
+                WHERE id = 'ws_old_policy'
+                """
+            ).fetchone()
+
+        assert row == (1, None)
 
 
 class TestIdempotency:

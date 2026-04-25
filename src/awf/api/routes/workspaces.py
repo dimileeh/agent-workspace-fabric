@@ -144,6 +144,8 @@ async def create_workspace_v2(
         task_title=payload.task.title,
         task_prompt=payload.task.prompt,
         task_external_id=payload.task.external_id,
+        auto_merge=payload.task.auto_merge,
+        initial_review_grace_period_seconds=payload.task.initial_review_grace_period_seconds,
         agent=payload.task.agent.value,
         env_profile=None,
         profile_ref=payload.workspace.profile_ref,
@@ -312,6 +314,11 @@ def _payloads_match_v2(existing: Workspace, payload: WorkspaceCreateV2Request) -
         and existing.task_title == payload.task.title
         and existing.task_prompt == payload.task.prompt
         and existing.task_external_id == payload.task.external_id
+        and existing.auto_merge == payload.task.auto_merge
+        and (
+            existing.initial_review_grace_period_seconds
+            == payload.task.initial_review_grace_period_seconds
+        )
         and existing.agent == payload.task.agent.value
         and existing.task_kind == payload.task.kind
         and existing.profile_ref == payload.workspace.profile_ref
