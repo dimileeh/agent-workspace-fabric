@@ -230,7 +230,10 @@ class TestRemonitor:
         assert observed["monitor_iter_count"] == 0
         assert observed["monitor_started_at"] is None
         assert observed["monitor_threads_addressed"]["T1"] == "fix_committed"
-        assert _initial_review_grace_started_key(123) in observed["monitor_threads_addressed"]
+        started_value = float(
+            observed["monitor_threads_addressed"][_initial_review_grace_started_key(123)]
+        )
+        assert started_value == pytest.approx(original_monitor_start.timestamp(), abs=1)
 
     @pytest.mark.unit
     async def test_remonitor_preserves_existing_initial_grace_done_key(
@@ -253,6 +256,29 @@ class TestRemonitor:
         observed = patch_monitor_builder[0].observed_states[0]
         assert observed["monitor_started_at"] is None
         assert observed["monitor_threads_addressed"] == {done_key: "elapsed"}
+
+    @pytest.mark.unit
+    async def test_remonitor_normalizes_existing_legacy_initial_grace_start(
+        self,
+        tmp_path: Path,
+        patch_monitor_builder: list[_FakeMonitor],
+    ) -> None:
+        original_monitor_start = datetime.now(UTC) - timedelta(minutes=10)
+        started_key = _initial_review_grace_started_key(123)
+        ws_id = await _seed_workspace(
+            tmp_path / "awf.db",
+            monitor_started_at=original_monitor_start,
+            monitor_threads_addressed={started_key: "1000.000000"},
+        )
+        (tmp_path / "compose" / "compose" / ws_id).mkdir(parents=True)
+        (tmp_path / "compose" / "compose" / ws_id / "compose.yml").write_text("x")
+
+        rc = await remonitor_workspace._main(tmp_path, ws_id)
+
+        assert rc == 0
+        observed = patch_monitor_builder[0].observed_states[0]
+        started_value = float(observed["monitor_threads_addressed"][started_key])
+        assert started_value == pytest.approx(original_monitor_start.timestamp(), abs=1)
 
     @pytest.mark.unit
     async def test_missing_db_returns_two(self, tmp_path: Path) -> None:

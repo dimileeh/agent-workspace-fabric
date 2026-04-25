@@ -1103,18 +1103,29 @@ class PullRequestMonitorRunner:
         # persists it before actions that can sleep.
         import time as _time  # local to avoid confusion with datetime above
 
+        now_monotonic = _time.monotonic()
+        now_wall = datetime.now(UTC)
         if started_raw is None:
-            started_at = _time.monotonic()
+            started_at = now_monotonic
         else:
             started_dt = started_raw
             if started_dt.tzinfo is None:
                 started_dt = started_dt.replace(tzinfo=UTC)
-            elapsed = (datetime.now(UTC) - started_dt).total_seconds()
-            started_at = _time.monotonic() - max(elapsed, 0.0)
+            elapsed = (now_wall - started_dt).total_seconds()
+            started_at = now_monotonic - max(elapsed, 0.0)
+        threads_addressed = dict(ws.monitor_threads_addressed or {})
+        if ws.pr_number is not None:
+            threads_addressed = _initial_review_grace_state_for_runtime(
+                threads_addressed,
+                pr_number=ws.pr_number,
+                now_monotonic=now_monotonic,
+                now_wall_seconds=now_wall.timestamp(),
+                legacy_monotonic_fallback=started_at if started_raw is not None else None,
+            )
         return MonitorState(
             iter_count=ws.monitor_iter_count,
             last_push_sha=ws.monitor_last_commit_sha,
-            threads_addressed_ids=dict(ws.monitor_threads_addressed or {}),
+            threads_addressed_ids=threads_addressed,
             started_at=started_at,
         )
 
@@ -1123,13 +1134,23 @@ class PullRequestMonitorRunner:
             ws = await WorkspaceRepository(s).get(workspace_id)
             if ws is None:
                 return
+            now_monotonic = time.monotonic()
+            now_wall = datetime.now(UTC)
+            threads_addressed = dict(state.threads_addressed_ids)
+            if ws.pr_number is not None:
+                threads_addressed = _initial_review_grace_state_for_persistence(
+                    threads_addressed,
+                    pr_number=ws.pr_number,
+                    now_monotonic=now_monotonic,
+                    now_wall_seconds=now_wall.timestamp(),
+                )
             ws.monitor_iter_count = state.iter_count
-            ws.monitor_threads_addressed = dict(state.threads_addressed_ids)
+            ws.monitor_threads_addressed = threads_addressed
             if state.last_push_sha is not None:
                 ws.monitor_last_commit_sha = state.last_push_sha
             if ws.monitor_started_at is None:
-                elapsed_seconds = max(time.monotonic() - state.started_at, 0.0)
-                ws.monitor_started_at = datetime.now(UTC) - timedelta(seconds=elapsed_seconds)
+                elapsed_seconds = max(now_monotonic - state.started_at, 0.0)
+                ws.monitor_started_at = now_wall - timedelta(seconds=elapsed_seconds)
             await s.commit()
 
     async def _terminate_completed(
@@ -1321,6 +1342,81 @@ def _initial_review_grace_started_key(pr_number: int) -> str:
 
 def _initial_review_grace_done_key(pr_number: int) -> str:
     return f"__awf_initial_review_grace_done__:{pr_number}"
+
+
+def _initial_review_grace_wall_started_value(started_wall_seconds: float) -> str:
+    return f"{started_wall_seconds:.6f}"
+
+
+def _initial_review_grace_wall_started_value_from_datetime(started_at: datetime) -> str:
+    started_dt = started_at
+    if started_dt.tzinfo is None:
+        started_dt = started_dt.replace(tzinfo=UTC)
+    return _initial_review_grace_wall_started_value(started_dt.timestamp())
+
+
+def _initial_review_grace_wall_seconds(raw: object) -> float | None:
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    # Values at or above 2001-09-09T01:46:40Z are epoch seconds. Smaller
+    # values are legacy process-local ``time.monotonic()`` markers.
+    if value >= 1_000_000_000:
+        return value
+    return None
+
+
+def _initial_review_grace_state_for_runtime(
+    threads_addressed: dict[str, str],
+    *,
+    pr_number: int,
+    now_monotonic: float,
+    now_wall_seconds: float,
+    legacy_monotonic_fallback: float | None = None,
+) -> dict[str, str]:
+    started_key = _initial_review_grace_started_key(pr_number)
+    started_raw = threads_addressed.get(started_key)
+    started_wall_seconds = _initial_review_grace_wall_seconds(started_raw)
+    if started_wall_seconds is None:
+        if started_raw is not None and legacy_monotonic_fallback is not None:
+            threads_addressed[started_key] = f"{legacy_monotonic_fallback:.6f}"
+        return threads_addressed
+
+    elapsed_seconds = max(now_wall_seconds - started_wall_seconds, 0.0)
+    threads_addressed[started_key] = f"{now_monotonic - elapsed_seconds:.6f}"
+    return threads_addressed
+
+
+def _initial_review_grace_state_for_persistence(
+    threads_addressed: dict[str, str],
+    *,
+    pr_number: int,
+    now_monotonic: float,
+    now_wall_seconds: float,
+) -> dict[str, str]:
+    started_key = _initial_review_grace_started_key(pr_number)
+    started_raw = threads_addressed.get(started_key)
+    if started_raw is None:
+        return threads_addressed
+
+    started_wall_seconds = _initial_review_grace_wall_seconds(started_raw)
+    if started_wall_seconds is not None:
+        threads_addressed[started_key] = _initial_review_grace_wall_started_value(
+            started_wall_seconds
+        )
+        return threads_addressed
+
+    try:
+        started_monotonic = float(started_raw)
+    except (TypeError, ValueError):
+        return threads_addressed
+
+    elapsed_seconds = max(now_monotonic - started_monotonic, 0.0)
+    threads_addressed[started_key] = _initial_review_grace_wall_started_value(
+        now_wall_seconds - elapsed_seconds
+    )
+    return threads_addressed
 
 
 def _initial_review_grace_wait_seconds(
