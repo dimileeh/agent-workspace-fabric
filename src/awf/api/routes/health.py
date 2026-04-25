@@ -287,17 +287,24 @@ async def readyz(request: Request, response: Response) -> ReadyResponse:
     runner = _get_command_runner_for_request(request)
     factory = getattr(request.app.state, "db_session_factory", None)
 
-    # Sequential checks: keeps the FakeCommandRunner contract simple and the
-    # latency floor is dominated by docker info anyway, so concurrency wouldn't
-    # buy much for a probe endpoint.
+    # Run checks concurrently so the worst-case latency stays bounded by the
+    # single _CHECK_TIMEOUT_SECONDS rather than summing across all five (a
+    # k8s/uptime probe with multiple slow deps would otherwise hit 25s and
+    # time out at the orchestrator). Each check already returns a structured
+    # CheckResult on failure, so gather() never sees an exception.
+    db_check, cli_check, daemon_check, compose_check, image_check = await asyncio.gather(
+        _check_db(factory),
+        _check_docker_cli(runner),
+        _check_docker_daemon(runner),
+        _check_docker_compose(runner),
+        _check_agent_runtime_image(runner, settings.agent_runtime_image),
+    )
     checks = {
-        "db": await _check_db(factory),
-        "docker_cli": await _check_docker_cli(runner),
-        "docker_daemon": await _check_docker_daemon(runner),
-        "docker_compose": await _check_docker_compose(runner),
-        "agent_runtime_image": await _check_agent_runtime_image(
-            runner, settings.agent_runtime_image
-        ),
+        "db": db_check,
+        "docker_cli": cli_check,
+        "docker_daemon": daemon_check,
+        "docker_compose": compose_check,
+        "agent_runtime_image": image_check,
     }
 
     overall_ok = all(check.ok for check in checks.values())
