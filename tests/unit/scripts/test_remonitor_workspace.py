@@ -204,10 +204,8 @@ class TestRemonitor:
             # Monitor transitioned it forward; before the monitor ran,
             # iter_count would be 0. We can't prove the reset here, but
             # can prove the threads dict was preserved.
-            assert ws.monitor_threads_addressed == {
-                "T1": "fix_committed",
-                "T2": "false_positive",
-            }
+            assert ws.monitor_threads_addressed["T1"] == "fix_committed"
+            assert ws.monitor_threads_addressed["T2"] == "false_positive"
         await engine.dispose()
 
     @pytest.mark.unit

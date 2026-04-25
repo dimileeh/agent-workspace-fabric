@@ -1346,9 +1346,16 @@ def _initial_review_grace_wait_seconds(
         return 0.0
 
     started_key = _initial_review_grace_started_key(pr_number)
-    started_at = state.started_at
-    if started_key not in state.threads_addressed_ids:
+    started_raw = state.threads_addressed_ids.get(started_key)
+    if started_raw is None:
+        started_at = state.started_at
         state.mark_addressed(started_key, f"{started_at:.6f}")
+    else:
+        try:
+            started_at = float(started_raw)
+        except (TypeError, ValueError):
+            started_at = state.started_at
+            state.mark_addressed(started_key, f"{started_at:.6f}")
 
     remaining_seconds = grace_seconds - max(now - started_at, 0.0)
     if remaining_seconds <= 0:
