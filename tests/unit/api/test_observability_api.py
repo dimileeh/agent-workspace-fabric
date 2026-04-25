@@ -282,9 +282,7 @@ class TestWorkspaceWebSocket:
             ):
                 pass
             assert exc_info.value.status_code == 503
-            assert (
-                exc_info.value.json()["detail"]["error_code"] == "API_TOKEN_NOT_CONFIGURED"
-            )
+            assert exc_info.value.json()["detail"]["error_code"] == "API_TOKEN_NOT_CONFIGURED"
         finally:
             asyncio.run(engine.dispose())
 
