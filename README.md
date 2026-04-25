@@ -542,13 +542,17 @@ uv run --python 3.12 --extra dev python scripts/run_awf.py \
   --work-dir ~/.awf/runs/example-run
 ```
 
-Keep a previous run database:
+Run state is preserved by default. Reusing the same `--work-dir` appends new
+workspace rows to the existing `awf.db`, which keeps the API, PR monitors, and
+console looking at one consistent run history.
+
+Reset a throwaway run database only when no API or monitor process is using it:
 
 ```bash
 uv run --python 3.12 --extra dev python scripts/run_awf.py \
   --config /tmp/awf-task.json \
   --work-dir ~/.awf/runs/example-run \
-  --keep-state
+  --reset-state
 ```
 
 ## Setup
@@ -776,20 +780,42 @@ awf:
 
 ## Observability
 
-AWF is designed so a future dashboard can be built from ordinary API calls:
+AWF includes a local Next.js console under `apps/console`. It talks to AWF
+through Next.js BFF routes, so `AWF_API_TOKEN` stays server-side and is never
+sent to browser JavaScript.
 
-- `GET /v1/workspaces` for current workspace inventory, newest-first.
-- `GET /v1/workspaces/{id}` for detail views.
-- `GET /v1/events` for immutable timelines, newest-first.
-- workspace status fields for lifecycle state.
-- `failure_reason` and `failure_message` for triage.
-- PR URL and merge SHA for GitHub linkage.
-- structured logs for operational debugging.
+Start the AWF API with a local token:
+
+```bash
+AWF_API_TOKEN=local-dev-token uv run --python 3.12 --extra dev awf serve --reload
+```
+
+Then start the console:
+
+```bash
+cd apps/console
+cp .env.example .env.local
+# set AWF_API_TOKEN=local-dev-token in .env.local
+npm install
+npm run dev
+```
+
+The console uses these AWF endpoints:
+
+- `GET /v1/tasks` and `GET /v1/workspaces/overview` for the workspace list.
+- `GET /v1/workspaces/{id}` for selected workspace details.
+- `GET /v1/workspaces/{id}/runtime` for compose/container state.
+- `GET /v1/workspaces/{id}/events` for the workspace timeline.
+- `GET /v1/workspaces/{id}/operations` for active and completed operations.
+- `GET /v1/workspaces/{id}/logs` and `GET /v1/workspaces/{id}/logs/{stream_id}` for log metadata and tail reads.
+- `WebSocket /v1/workspaces/{id}/ws`, proxied as browser-safe SSE at `/api/awf/workspaces/{id}/stream`, for live events and log frames.
 
 Recent dogfood observability slices added:
 
-- `/v1/events`.
+- `/v1/events` and `/v1/workspaces/{id}/events`.
 - `/v1/workspaces` filters by status, agent, and repo URL.
+- Durable agent, validation, and service log streams.
+- Runtime, operation, and workspace control endpoints.
 
 ## Failure Handling
 

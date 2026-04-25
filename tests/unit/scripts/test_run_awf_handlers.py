@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from scripts import run_awf
@@ -188,6 +189,41 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
         await conn.run_sync(Base.metadata.create_all)
     try:
         yield make_session_factory(engine)
+    finally:
+        await engine.dispose()
+
+
+async def _seed_workspace_db(db_path: Path, workspace_id: str = "ws_existing") -> None:
+    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = make_session_factory(engine)
+    try:
+        async with factory() as session:
+            session.add(
+                Workspace(
+                    id=workspace_id,
+                    status=WorkspaceStatus.completed.value,
+                    repo_url="git@github.com:x/y.git",
+                    branch_base="main",
+                    task_title="existing workspace",
+                    task_prompt="keep me",
+                    agent="codex",
+                    test_commands=[],
+                    requires_database=False,
+                )
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def _workspace_exists(db_path: Path, workspace_id: str = "ws_existing") -> bool:
+    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+    factory = make_session_factory(engine)
+    try:
+        async with factory() as session:
+            return await session.get(Workspace, workspace_id) is not None
     finally:
         await engine.dispose()
 
@@ -998,19 +1034,69 @@ class TestMainEntry:
         assert rc == 1
 
     @pytest.mark.unit
-    async def test_main_wipes_db_when_keep_state_false(
+    async def test_main_preserves_existing_db_by_default(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Without ``--keep-state``, a pre-existing awf.db is removed on
-        startup so each run begins with a clean slate. With it, the db
-        survives."""
+        """A reused work dir must not silently replace ``awf.db``.
+
+        The API process may have this SQLite file open while an operator
+        launches another ``run_awf.py`` against the same work dir. If the
+        launcher unlinks the file, the API keeps serving the old anonymous
+        inode while the new run writes to a fresh DB path.
+        """
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        stale_db = work_dir / "awf.db"
-        stale_db.write_text("stale placeholder")
-        stale_stat = stale_db.stat().st_mtime_ns
+        db_path = work_dir / "awf.db"
+        await _seed_workspace_db(db_path)
+
+        config = tmp_path / "tasks.json"
+        config.write_text(
+            '[{"repo_url": "git@github.com:x/y.git", "branch_base": "main", '
+            '"task_title": "new task", "task_prompt": "p", "agent": "codex", '
+            '"test_commands": [], "requires_database": false}]'
+        )
+        saw_existing_row: list[bool] = []
+
+        async def _fake_run_task_with_guard(cfg, **kwargs):  # type: ignore[no-untyped-def]
+            async with kwargs["session_factory"]() as session:
+                saw_existing_row.append(await session.get(Workspace, "ws_existing") is not None)
+            return {
+                "workspace_id": "ws_new",
+                "title": cfg.task_title,
+                "status": "completed",
+                "pr_url": "https://example/pr/new",
+                "failure_reason": None,
+                "failure_message": None,
+                "branch": "awf/new",
+                "base_commit": "a" * 40,
+            }
+
+        monkeypatch.setattr(
+            run_awf,
+            "_run_task_with_failure_guard",
+            _fake_run_task_with_guard,
+        )
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        await run_awf._main(config_path=config, work_dir=work_dir, keep_state=False)
+
+        assert saw_existing_row == [True]
+        assert await _workspace_exists(db_path)
+
+    @pytest.mark.unit
+    async def test_main_resets_db_only_when_explicitly_requested(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        db_path = work_dir / "awf.db"
+        await _seed_workspace_db(db_path)
 
         config = tmp_path / "tasks.json"
         config.write_text("[]")
@@ -1023,13 +1109,14 @@ class TestMainEntry:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
 
-        await run_awf._main(config_path=config, work_dir=work_dir, keep_state=False)
-        # DB exists (recreated empty by SQLAlchemy), but is NOT the
-        # stale placeholder.
-        assert stale_db.exists()
-        assert (
-            stale_db.stat().st_mtime_ns != stale_stat or stale_db.read_text() != "stale placeholder"
+        await run_awf._main(
+            config_path=config,
+            work_dir=work_dir,
+            keep_state=False,
+            reset_state=True,
         )
+
+        assert not await _workspace_exists(db_path)
 
 
 class TestBuildAuthMounts:

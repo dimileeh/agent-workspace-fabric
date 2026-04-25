@@ -1344,7 +1344,8 @@ def _add_missing_columns(connection: Any) -> None:
     Driven from ``_ADDITIVE_MIGRATIONS`` rather than Alembic because
     local ``run_awf.py`` workspaces are a dev convenience that predates
     the alembic setup for the runtime DB. Production DBs get proper
-    migrations; this path keeps ``--keep-state`` alive for operators."""
+    migrations; this path keeps long-lived local run directories
+    resumable without dropping state."""
     import sqlalchemy as _sa
 
     inspector = _sa.inspect(connection)
@@ -1354,7 +1355,13 @@ def _add_missing_columns(connection: Any) -> None:
             connection.execute(_sa.text(f"ALTER TABLE {table} ADD COLUMN {column} {sql_type}"))
 
 
-async def _main(config_path: Path, work_dir: Path, keep_state: bool) -> int:
+async def _main(
+    config_path: Path,
+    work_dir: Path,
+    keep_state: bool,
+    *,
+    reset_state: bool = False,
+) -> int:
     with config_path.open() as f:
         raw = json.load(f)
     tasks = [TaskConfig(**t) for t in raw]
@@ -1376,15 +1383,16 @@ async def _main(config_path: Path, work_dir: Path, keep_state: bool) -> int:
 
     work_dir.mkdir(parents=True, exist_ok=True)
     db_path = work_dir / "awf.db"
-    if db_path.exists() and not keep_state:
+    if db_path.exists() and reset_state:
+        print(f"Resetting AWF run database at {db_path}", flush=True)
         db_path.unlink()
     engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         # ``create_all`` creates tables but never alters existing ones.
-        # When ``--keep-state`` points at a pre-migration SQLite DB,
-        # columns added by later migrations (e.g. ``remote_push_branch``
-        # in b2c3d4e5f6a1) are missing and the first write fails. Apply
+        # When a persisted local SQLite DB predates newer code, columns
+        # added by later migrations (e.g. ``remote_push_branch`` in
+        # b2c3d4e5f6a1) are missing and the first write fails. Apply
         # additive column migrations manually here so operators can
         # resume an old run_awf workspace without dropping state.
         await conn.run_sync(_add_missing_columns)
@@ -1445,7 +1453,23 @@ if __name__ == "__main__":
     parser.add_argument(
         "--keep-state",
         action="store_true",
-        help="Don't delete the SQLite DB from a previous run in the same work dir.",
+        help="Deprecated no-op; run state is preserved by default.",
+    )
+    parser.add_argument(
+        "--reset-state",
+        action="store_true",
+        help="Delete and recreate awf.db before launching tasks in this work dir.",
     )
     args = parser.parse_args()
-    sys.exit(asyncio.run(_main(args.config, args.work_dir, args.keep_state)))
+    if args.keep_state and args.reset_state:
+        parser.error("--keep-state is implicit and cannot be combined with --reset-state")
+    sys.exit(
+        asyncio.run(
+            _main(
+                args.config,
+                args.work_dir,
+                args.keep_state,
+                reset_state=args.reset_state,
+            )
+        )
+    )

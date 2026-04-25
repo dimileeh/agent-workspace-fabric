@@ -1,0 +1,33 @@
+{
+  "name": "@awf/console",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "start": "next start",
+    "build": "next build",
+    "lint": "eslint .",
+    "typecheck": "next typegen && tsc --noEmit"
+  },
+  "dependencies": {
+    "@tailwindcss/postcss": "^4.2.4",
+    "lucide-react": "^1.11.0",
+    "next": "^16.2.4",
+    "react": "^19.2.5",
+    "react-dom": "^19.2.5",
+    "ws": "^8.20.0"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@types/ws": "^8.18.1",
+    "eslint": "^9.39.1",
+    "eslint-config-next": "^16.2.4",
+    "tailwindcss": "^4.2.4",
+    "typescript": "^5.9.3"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
+  }
+}

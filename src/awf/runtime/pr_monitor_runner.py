@@ -601,8 +601,12 @@ class PullRequestMonitorRunner:
                     thread_id=tid,
                     stderr=exc.stderr,
                 )
-                # Do NOT drop out of the monitor — next outer poll will
-                # see the thread still unresolved and retry.
+                # Do NOT drop out of the monitor. Also do not keep the
+                # thread in addressed-state: decide() filters addressed
+                # IDs before it returns AddressComments, so retaining a
+                # failed resolve would make the next poll treat an open
+                # GitHub thread as handled forever.
+                state.threads_addressed_ids.pop(tid, None)
 
         # 5) Update last_push_sha.
         if pushed:

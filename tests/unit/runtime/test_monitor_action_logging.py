@@ -432,6 +432,70 @@ class TestMonitorActionLogging:
         assert ac_entry["iter"] == 0  # iter_count bumped AFTER dispatch
 
     @pytest.mark.unit
+    async def test_failed_thread_resolve_is_retried_not_merged(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """A fixed-but-still-unresolved thread must not be filtered out forever.
+
+        GitHub can reject ``resolveReviewThread`` even after the agent has
+        pushed a valid fix. The monitor should clear the addressed marker so
+        the next poll retries comment handling instead of flowing through to
+        Merge with an unresolved review thread.
+        """
+        ws_id = await seed_monitoring_workspace(factory)
+        thread = thread_node(tid="T_retry", author="greptile-apps")
+
+        # Outer iter 1: AddressComments, then resolveReviewThread fails.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="fixed first")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
+        cmd.queue_result(returncode=1, stderr="missing resolve permission")
+
+        # Outer iter 2: GitHub still reports the thread open, so retry it.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="fixed again")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head3\n")  # rev-parse
+        cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve
+
+        # Outer iter 3: clean → Merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        cmd.queue_result(returncode=0)  # merge
+        cmd.queue_result(returncode=0, stdout="M\n")
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["AddressComments", "AddressComments", "Merge"]
+        assert len(adapter.calls) == 2
+
+    @pytest.mark.unit
     async def test_wait_for_ci_action_emits_log_line(
         self,
         factory: async_sessionmaker[AsyncSession],

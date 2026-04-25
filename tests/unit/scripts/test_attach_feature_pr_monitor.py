@@ -151,8 +151,8 @@ class TestOrchestrateAttachHappyPath:
         assert task["agent"] == "claude_code"
 
         # run_awf.py was spawned with --config pointing at our spec and
-        # --work-dir matching what we asked for, plus --keep-state (the
-        # AWF DB must persist across the script invocation).
+        # --work-dir matching what we asked for, plus the legacy
+        # --keep-state flag for compatibility with older runners.
         assert len(spawn.calls) == 1
         call = spawn.calls[0]
         assert any("run_awf.py" in a for a in call)
