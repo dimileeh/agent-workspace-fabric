@@ -60,11 +60,14 @@ async function streamWorkspace(request: NextRequest, workspaceId: string): Promi
   const stream = new ReadableStream<Uint8Array>({
     start(controller) {
       const encoder = new TextEncoder();
+      let closed = false;
       const send = (payload: unknown, event?: string) => {
+        if (closed) {
+          return;
+        }
         controller.enqueue(encoder.encode(encodeSse(payload, event)));
       };
 
-      let closed = false;
       const close = () => {
         if (!closed) {
           closed = true;
@@ -73,8 +76,10 @@ async function streamWorkspace(request: NextRequest, workspaceId: string): Promi
       };
 
       const socket = openAwfWorkspaceSocket({ workspaceId, channels, tailBytes });
+      let socketOpened = false;
 
       socket.on("open", () => {
+        socketOpened = true;
         send({ type: "connected", workspace_id: workspaceId });
       });
       socket.on("message", (data) => {
@@ -87,6 +92,9 @@ async function streamWorkspace(request: NextRequest, workspaceId: string): Promi
       });
       socket.on("error", (error) => {
         send(normalizeError(error, "AWF_STREAM_ERROR", "AWF workspace stream failed."), "error");
+        if (!socketOpened) {
+          close();
+        }
       });
       socket.on("close", (code, reason) => {
         send(
