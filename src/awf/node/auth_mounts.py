@@ -69,8 +69,6 @@ def _build_host_auth_mounts(
     host_env: Mapping[str, str] | None = None,
 ) -> list[AuthMount]:
     rw_mounts = [
-        (host_home / ".claude", f"{_CONTAINER_HOME}/.claude", "rw"),
-        (host_home / ".claude.json", f"{_CONTAINER_HOME}/.claude.json", "rw"),
         (host_home / ".gemini", f"{_CONTAINER_HOME}/.gemini", "rw"),
     ]
     ro_mounts = [
@@ -108,20 +106,27 @@ def _workspace_auth_mounts(
     work_dir: Path,
     host_home: Path,
 ) -> tuple[AuthMount, ...]:
-    mounts = list(base_mounts)
+    auth_root = work_dir / "auth" / workspace_id
+    mounts = []
     codex_home = _prepare_isolated_codex_home(
         host_home=host_home,
-        target_root=work_dir / "auth" / workspace_id / "codex",
+        target_root=auth_root / "codex",
     )
     if codex_home is not None:
-        mounts.insert(
-            0,
+        mounts.append(
             AuthMount(
                 source=str(codex_home),
                 target=f"{_CONTAINER_HOME}/.codex",
                 mode="rw",
             ),
         )
+    mounts.extend(
+        _prepare_isolated_claude_auth(
+            host_home=host_home,
+            target_root=auth_root / "claude",
+        )
+    )
+    mounts.extend(base_mounts)
     return tuple(mounts)
 
 
@@ -146,3 +151,38 @@ def _prepare_isolated_codex_home(*, host_home: Path, target_root: Path) -> Path 
         shutil.copytree(rules, target_root / "rules")
 
     return target_root
+
+
+def _prepare_isolated_claude_auth(*, host_home: Path, target_root: Path) -> tuple[AuthMount, ...]:
+    """Seed per-workspace Claude auth without sharing writable host files."""
+
+    mounts: list[AuthMount] = []
+    source_dir = host_home / ".claude"
+    target_dir = target_root / ".claude"
+    if source_dir.is_dir():
+        target_root.mkdir(parents=True, exist_ok=True)
+        if not target_dir.exists():
+            shutil.copytree(source_dir, target_dir)
+        mounts.append(
+            AuthMount(
+                source=str(target_dir),
+                target=f"{_CONTAINER_HOME}/.claude",
+                mode="rw",
+            )
+        )
+
+    source_file = host_home / ".claude.json"
+    target_file = target_root / ".claude.json"
+    if source_file.is_file():
+        target_root.mkdir(parents=True, exist_ok=True)
+        if not target_file.exists():
+            shutil.copy2(source_file, target_file)
+        mounts.append(
+            AuthMount(
+                source=str(target_file),
+                target=f"{_CONTAINER_HOME}/.claude.json",
+                mode="rw",
+            )
+        )
+
+    return tuple(mounts)

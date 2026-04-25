@@ -12,22 +12,25 @@ from awf.node.auth_mounts import resolve_service_auth_mounts
 @pytest.mark.unit
 def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
+    work_dir = tmp_path / "work"
     (host_home / ".config" / "gh").mkdir(parents=True)
     (host_home / ".config" / "gcloud").mkdir(parents=True)
     (host_home / ".ssh").mkdir(parents=True)
     (host_home / ".claude").mkdir()
+    (host_home / ".claude" / "settings.json").write_text('{"theme": "dark"}\n')
     (host_home / ".gemini").mkdir()
     (host_home / ".gitconfig").write_text("[user]\n  name = Test\n")
     (host_home / ".claude.json").write_text("{}\n")
 
     mounts = resolve_service_auth_mounts(
         host_home=host_home,
-        work_dir=tmp_path / "work",
+        work_dir=work_dir,
         workspace_id="ws_auth",
         host_env={},
     )
 
     by_target = {m.target: m for m in mounts}
+    claude_home = work_dir / "auth" / "ws_auth" / "claude"
     assert by_target["/home/agent/.config/gh"].source == str(host_home / ".config" / "gh")
     assert by_target["/home/agent/.config/gh"].mode == "ro"
     assert by_target["/home/agent/.config/gcloud"].source == str(host_home / ".config" / "gcloud")
@@ -36,10 +39,12 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     assert by_target["/home/agent/.gitconfig"].mode == "ro"
     assert by_target["/home/agent/.ssh"].source == str(host_home / ".ssh")
     assert by_target["/home/agent/.ssh"].mode == "ro"
-    assert by_target["/home/agent/.claude"].source == str(host_home / ".claude")
+    assert by_target["/home/agent/.claude"].source == str(claude_home / ".claude")
     assert by_target["/home/agent/.claude"].mode == "rw"
-    assert by_target["/home/agent/.claude.json"].source == str(host_home / ".claude.json")
+    assert by_target["/home/agent/.claude.json"].source == str(claude_home / ".claude.json")
     assert by_target["/home/agent/.claude.json"].mode == "rw"
+    assert (claude_home / ".claude" / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert (claude_home / ".claude.json").read_text() == "{}\n"
     assert by_target["/home/agent/.gemini"].source == str(host_home / ".gemini")
     assert by_target["/home/agent/.gemini"].mode == "rw"
 
@@ -108,6 +113,40 @@ def test_service_auth_mounts_preserve_existing_workspace_codex_home(tmp_path: Pa
 
     assert (codex_home / "auth.json").read_text() == '{"token": "agent-refreshed"}'
     assert (codex_home / "sessions" / "session.jsonl").read_text() == "{}\n"
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_preserve_existing_workspace_claude_auth(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_claude = host_home / ".claude"
+    host_claude.mkdir(parents=True)
+    (host_claude / "settings.json").write_text('{"theme": "initial"}\n')
+    (host_home / ".claude.json").write_text('{"token": "initial"}\n')
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+    by_target = {m.target: m for m in mounts}
+    claude_dir = Path(by_target["/home/agent/.claude"].source)
+    claude_config = Path(by_target["/home/agent/.claude.json"].source)
+    (claude_dir / "settings.json").write_text('{"theme": "agent-refreshed"}\n')
+    claude_config.write_text('{"token": "agent-refreshed"}\n')
+    (host_claude / "settings.json").write_text('{"theme": "host-updated"}\n')
+    (host_home / ".claude.json").write_text('{"token": "host-updated"}\n')
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    assert (claude_dir / "settings.json").read_text() == '{"theme": "agent-refreshed"}\n'
+    assert claude_config.read_text() == '{"token": "agent-refreshed"}\n'
 
 
 @pytest.mark.unit
