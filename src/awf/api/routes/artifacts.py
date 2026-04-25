@@ -63,24 +63,27 @@ def _workspace_artifact_dir(workspace_id: str) -> Path:
 
 
 def _list_artifacts(workspace_id: str, artifact_dir: Path) -> list[WorkspaceArtifactResponse]:
-    if not artifact_dir.is_dir() or artifact_dir.is_symlink():
+    try:
+        if not artifact_dir.is_dir() or artifact_dir.is_symlink():
+            return []
+        root = artifact_dir.resolve(strict=True)
+    except OSError:
         return []
 
-    root = artifact_dir.resolve(strict=True)
     items: list[WorkspaceArtifactResponse] = []
     for directory, dirnames, filenames in artifact_dir.walk(follow_symlinks=False):
         dirnames.sort()
         for filename in sorted(filenames):
             candidate = directory / filename
-            if candidate.is_symlink():
-                continue
             try:
+                if candidate.is_symlink():
+                    continue
                 resolved = candidate.resolve(strict=True)
+                if not resolved.is_file() or not resolved.is_relative_to(root):
+                    continue
+                stat = resolved.stat()
             except OSError:
                 continue
-            if not resolved.is_file() or not resolved.is_relative_to(root):
-                continue
-            stat = resolved.stat()
             relative_path = candidate.relative_to(artifact_dir).as_posix()
             items.append(
                 WorkspaceArtifactResponse(

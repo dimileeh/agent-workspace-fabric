@@ -147,6 +147,47 @@ class TestWorkspaceArtifacts:
         datetime.fromisoformat(stdout_item["modified_at"])
 
     @pytest.mark.unit
+    def test_listing_skips_file_deleted_during_metadata_read(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = "ws_artifact_race"
+        artifact_dir = tmp_path / "artifacts" / workspace_id
+        artifact_dir.mkdir(parents=True)
+        stable_path = artifact_dir / "stable.txt"
+        stable_path.write_text("kept\n", encoding="utf-8")
+        deleted_path = artifact_dir / "deleted.txt"
+        deleted_path.write_text("removed\n", encoding="utf-8")
+        deleted_resolved = deleted_path.resolve()
+        original_resolve = Path.resolve
+        original_is_file = Path.is_file
+        original_stat = Path.stat
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == deleted_path:
+                return deleted_resolved
+            return original_resolve(self, *args, **kwargs)
+
+        def is_file_candidate(self: Path, *args: Any, **kwargs: Any) -> bool:
+            if self == deleted_resolved:
+                return True
+            return original_is_file(self, *args, **kwargs)
+
+        def stat_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == deleted_resolved:
+                raise FileNotFoundError(str(self))
+            return original_stat(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+        monkeypatch.setattr(Path, "is_file", is_file_candidate)
+        monkeypatch.setattr(Path, "stat", stat_candidate)
+
+        items = artifacts._list_artifacts(workspace_id, artifact_dir)
+
+        assert [item.relative_path for item in items] == ["stable.txt"]
+
+    @pytest.mark.unit
     async def test_artifact_listing_offloads_filesystem_scan(
         self,
         client: AsyncClient,
