@@ -1,6 +1,7 @@
 """MCP server surface for AWF.
 
-Builds a ``FastMCP`` instance with five tools that mirror the REST API.
+Builds a ``FastMCP`` instance with create, read, wait, and observability
+tools that mirror the REST API.
 Because both the MCP tools and the REST handlers want the same underlying
 logic (create workspace in DB, fetch by id, etc.) we expose a small
 ``WorkspaceService`` façade that both can call.
@@ -15,51 +16,10 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 from pydantic import Field
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import WorkspaceCreateRequest, WorkspaceResponse
+from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
-
-# ── Service layer: shared by REST + MCP ───────────────────────────────────
-
-
-class WorkspaceService:
-    """Domain operations shared across the REST router and MCP tools.
-
-    The router + tools stay thin (shape parsing only); the business logic
-    lives here so we don't duplicate the repository-and-commit dance.
-    """
-
-    def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
-        self._factory = session_factory
-
-    async def create(self, req: WorkspaceCreateRequest) -> WorkspaceResponse:
-        async with self._factory() as s:
-            ws = await WorkspaceRepository(s).create(
-                repo_url=req.repo_url,
-                branch_base=req.branch_base,
-                task_title=req.task_title,
-                task_prompt=req.task_prompt,
-                task_external_id=req.task_external_id,
-                agent=req.agent.value,
-                env_profile=req.env_profile,
-                test_commands=req.test_commands,
-                requires_database=req.requires_database,
-            )
-            await s.commit()
-            return WorkspaceResponse.model_validate(ws)
-
-    async def get(self, workspace_id: str) -> WorkspaceResponse | None:
-        async with self._factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
-            return WorkspaceResponse.model_validate(ws) if ws is not None else None
-
-    async def list(self, *, limit: int = 50) -> list[WorkspaceResponse]:
-        async with self._factory() as s:
-            rows = await WorkspaceRepository(s).list(limit=limit)
-            return [WorkspaceResponse.model_validate(r) for r in rows]
-
+from awf.service.workspaces import WorkspaceService
 
 # ── MCP tool registration ─────────────────────────────────────────────────
 
@@ -128,6 +88,72 @@ def build_mcp_server(
         )
         return (await service.create(req)).model_dump(mode="json")
 
+    @mcp.tool(name="awf_create_workspace_v2")
+    async def awf_create_workspace_v2(
+        repo_url: str = Field(..., description="Git URL the workspace should check out."),
+        base_branch: str = Field(
+            default="main",
+            description="Branch to branch FROM; feature branch is created off it.",
+        ),
+        task_title: str = Field(..., description="Short title of the task (≤ 512 chars)."),
+        task_prompt: str = Field(..., description="Full prompt to hand to the coding CLI."),
+        task_kind: str = Field(
+            default="feature_branch_pr",
+            description="Task kind for scheduling/monitor behavior.",
+        ),
+        agent: AgentRuntime = Field(
+            default=AgentRuntime.codex,
+            description="Which coding CLI to run inside the container.",
+        ),
+        task_external_id: str | None = Field(
+            default=None, description="Optional caller-side task ID for correlation."
+        ),
+        profile_ref: str | None = Field(
+            default="auto",
+            description="Workspace profile reference, e.g. auto, python, node, aira.",
+        ),
+        profile: dict[str, Any] | None = Field(
+            default=None,
+            description="Optional inline workspace profile dictionary.",
+        ),
+        validation_commands: list[str] = Field(
+            default_factory=list,
+            description="Shell commands to validate the change.",
+        ),
+        requested_tier: int = Field(
+            default=1,
+            ge=1,
+            le=3,
+            description="Requested validation tier hint.",
+        ),
+        auto_merge: bool = Field(
+            default=True,
+            description="Whether AWF may merge once gates are green.",
+        ),
+        initial_review_grace_period_seconds: float | None = Field(
+            default=None,
+            ge=0,
+            le=86400,
+            description="Optional monitor grace override before auto-merge.",
+        ),
+    ) -> dict[str, Any]:
+        """Create a new AWF workspace using the clean v2 contract."""
+        req = WorkspaceCreateV2Request(
+            repo={"url": repo_url, "base_branch": base_branch},
+            task={
+                "title": task_title,
+                "prompt": task_prompt,
+                "kind": task_kind,
+                "agent": agent,
+                "external_id": task_external_id,
+                "auto_merge": auto_merge,
+                "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
+            },
+            workspace={"profile_ref": profile_ref, "profile": profile},
+            validation={"commands": validation_commands, "requested_tier": requested_tier},
+        )
+        return (await service.create_v2(req)).model_dump(mode="json")
+
     @mcp.tool(name="awf_get_workspace")
     async def awf_get_workspace(
         workspace_id: str = Field(..., description="ID returned by awf_create_workspace."),
@@ -177,5 +203,47 @@ def build_mcp_server(
             if time.monotonic() >= deadline:
                 return ws.model_dump(mode="json")
             await asyncio.sleep(poll_interval_seconds)
+
+    @mcp.tool(name="awf_list_workspace_events")
+    async def awf_list_workspace_events(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+        limit: int = Field(default=50, ge=1, le=500),
+        event_type: str | None = Field(default=None, description="Optional event-type filter."),
+    ) -> list[dict[str, Any]] | None:
+        """List immutable workspace events newest-first."""
+        rows = await service.list_events(
+            workspace_id,
+            limit=limit,
+            event_type=event_type,
+        )
+        return [row.model_dump(mode="json") for row in rows] if rows is not None else None
+
+    @mcp.tool(name="awf_list_workspace_logs")
+    async def awf_list_workspace_logs(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+    ) -> list[dict[str, Any]] | None:
+        """List indexed durable log streams for one workspace."""
+        rows = await service.list_logs(workspace_id)
+        return [row.model_dump(mode="json") for row in rows] if rows is not None else None
+
+    @mcp.tool(name="awf_read_workspace_log")
+    async def awf_read_workspace_log(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+        stream_id: str = Field(..., description="Stream ID from awf_list_workspace_logs."),
+        offset: int = Field(default=0, ge=0, description="Byte offset to start reading from."),
+        limit_bytes: int = Field(
+            default=65_536,
+            ge=1,
+            le=1_048_576,
+            description="Maximum bytes to read.",
+        ),
+    ) -> dict[str, Any] | None:
+        """Read a bounded chunk from an indexed durable log stream."""
+        return await service.read_log(
+            workspace_id,
+            stream_id,
+            offset=offset,
+            limit_bytes=limit_bytes,
+        )
 
     return mcp

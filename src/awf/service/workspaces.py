@@ -1,0 +1,207 @@
+"""Workspace service operations shared by REST routes and MCP tools."""
+
+from __future__ import annotations
+
+import builtins
+from pathlib import Path
+from typing import Any
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.api.schemas import (
+    WorkspaceCreateRequest,
+    WorkspaceCreateV2Request,
+    WorkspaceEventResponse,
+    WorkspaceLogStreamResponse,
+    WorkspaceResponse,
+)
+from awf.db.models import Workspace
+from awf.db.repositories import (
+    WorkspaceEventRepository,
+    WorkspaceLogStreamRepository,
+    WorkspaceRepository,
+)
+from awf.profiles.models import WorkspaceProfile
+from awf.profiles.resolver import resolve_workspace_profile
+from awf.runtime.logs import LogStore
+
+
+class WorkspaceService:
+    """Domain operations shared across REST routes and MCP tools."""
+
+    def __init__(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        *,
+        log_root: Path | str | None = None,
+    ) -> None:
+        self._factory = session_factory
+        self._log_root = Path(log_root) if log_root is not None else None
+
+    async def create(self, req: WorkspaceCreateRequest) -> WorkspaceResponse:
+        async with self._factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=req.repo_url,
+                branch_base=req.branch_base,
+                task_title=req.task_title,
+                task_prompt=req.task_prompt,
+                task_external_id=req.task_external_id,
+                agent=req.agent.value,
+                env_profile=req.env_profile,
+                test_commands=req.test_commands,
+                requires_database=req.requires_database,
+            )
+            await s.commit()
+            return WorkspaceResponse.model_validate(ws)
+
+    async def create_v2(self, req: WorkspaceCreateV2Request) -> WorkspaceResponse:
+        async with self._factory() as s:
+            ws = await create_workspace_v2_row(s, req)
+            await s.commit()
+            return WorkspaceResponse.model_validate(ws)
+
+    async def get(self, workspace_id: str) -> WorkspaceResponse | None:
+        async with self._factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            return WorkspaceResponse.model_validate(ws) if ws is not None else None
+
+    async def list(self, *, limit: int = 50) -> list[WorkspaceResponse]:
+        async with self._factory() as s:
+            rows = await WorkspaceRepository(s).list(limit=limit)
+            return [WorkspaceResponse.model_validate(r) for r in rows]
+
+    async def list_events(
+        self,
+        workspace_id: str,
+        *,
+        limit: int = 50,
+        event_type: str | None = None,
+    ) -> builtins.list[WorkspaceEventResponse] | None:
+        async with self._factory() as s:
+            workspace_repo = WorkspaceRepository(s)
+            if not await workspace_repo.exists(workspace_id):
+                return None
+            rows = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type=event_type,
+                limit=limit,
+            )
+            return [WorkspaceEventResponse.model_validate(row) for row in rows]
+
+    async def list_logs(
+        self, workspace_id: str
+    ) -> builtins.list[WorkspaceLogStreamResponse] | None:
+        async with self._factory() as s:
+            workspace_repo = WorkspaceRepository(s)
+            if not await workspace_repo.exists(workspace_id):
+                return None
+            rows = await WorkspaceLogStreamRepository(s).list_for_workspace(workspace_id)
+            return [WorkspaceLogStreamResponse.model_validate(row) for row in rows]
+
+    async def read_log(
+        self,
+        workspace_id: str,
+        stream_id: str,
+        *,
+        offset: int = 0,
+        limit_bytes: int = 65_536,
+    ) -> dict[str, Any] | None:
+        async with self._factory() as s:
+            workspace_repo = WorkspaceRepository(s)
+            if not await workspace_repo.exists(workspace_id):
+                return None
+            stream = await WorkspaceLogStreamRepository(s).get(
+                workspace_id=workspace_id,
+                stream_id=stream_id,
+            )
+            if stream is None:
+                return None
+            path = Path(stream.path)
+
+        if not path.is_file():
+            return None
+        data, next_offset, eof = await LogStore(root=self._log_root or path.parent).read(
+            path=path,
+            offset=offset,
+            limit_bytes=limit_bytes,
+        )
+        return {
+            "stream_id": stream_id,
+            "offset": offset,
+            "next_offset": next_offset,
+            "eof": eof,
+            "text": data,
+        }
+
+
+async def create_workspace_v2_row(
+    session: AsyncSession,
+    payload: WorkspaceCreateV2Request,
+    *,
+    idempotency_key: str | None = None,
+) -> Workspace:
+    """Persist one v2 workspace request without committing the session."""
+    requested_profile, resolved_profile = v2_profile_snapshots(payload)
+    ws = await WorkspaceRepository(session).create(
+        repo_url=payload.repo.url,
+        branch_base=payload.repo.base_branch,
+        task_title=payload.task.title,
+        task_prompt=payload.task.prompt,
+        task_external_id=payload.task.external_id,
+        auto_merge=payload.task.auto_merge,
+        initial_review_grace_period_seconds=(
+            payload.task.initial_review_grace_period_seconds
+        ),
+        agent=payload.task.agent.value,
+        env_profile=None,
+        profile_ref=payload.workspace.profile_ref,
+        requested_profile=requested_profile,
+        resolved_profile=resolved_profile,
+        test_commands=payload.validation.commands,
+        requires_database=False,
+        idempotency_key=idempotency_key,
+    )
+    ws.task_kind = payload.task.kind
+    await session.flush()
+    return ws
+
+
+def v2_profile_snapshots(
+    payload: WorkspaceCreateV2Request,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    requested_profile = (
+        payload.workspace.profile.model_dump(mode="json", by_alias=True)
+        if payload.workspace.profile is not None
+        else None
+    )
+    resolved_profile = None
+    if payload.workspace.profile is not None or (
+        payload.workspace.profile_ref and payload.workspace.profile_ref != "auto"
+    ):
+        resolved = resolve_workspace_profile(
+            worktree_path=None,
+            inline_profile=payload.workspace.profile,
+            profile_ref=payload.workspace.profile_ref,
+            validation_commands=payload.validation.commands,
+        )
+        profile = profile_with_requested_tier(
+            resolved.profile,
+            payload.validation.requested_tier,
+        )
+        resolved_profile = profile.model_dump(mode="json", by_alias=True)
+    return requested_profile, resolved_profile
+
+
+def profile_with_requested_tier(
+    profile: WorkspaceProfile,
+    requested_tier: int,
+) -> WorkspaceProfile:
+    if profile.validation.requested_tier == requested_tier:
+        return profile
+    return profile.model_copy(
+        update={
+            "validation": profile.validation.model_copy(
+                update={"requested_tier": requested_tier}
+            )
+        }
+    )
