@@ -15,6 +15,7 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 
 from __future__ import annotations
 
+import inspect
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
@@ -822,12 +823,19 @@ def _call_pr_monitor_factory(
     initial review grace period.
     """
     try:
+        signature = inspect.signature(factory)
+    except (TypeError, ValueError):
         return factory(adapter, profile)
-    except TypeError as exc:
+
+    try:
+        signature.bind(adapter, profile)
+    except TypeError as two_arg_error:
         try:
-            return factory(adapter)
+            signature.bind(adapter)
         except TypeError:
-            raise exc from None
+            raise two_arg_error from None
+        return factory(adapter)
+    return factory(adapter, profile)
 
 
 def _build_pr_body(ws: Workspace) -> str:
