@@ -3,6 +3,7 @@ import {
   encodeSse,
   normalizeError,
   openAwfWorkspaceSocket,
+  proxyAwf,
   proxyAwfGet,
 } from "@/lib/awf-server";
 
@@ -26,6 +27,30 @@ export async function GET(request: NextRequest, context: RouteContext) {
 
   const awfPath = `/v1/${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`;
   return proxyAwfGet(awfPath);
+}
+
+export async function POST(request: NextRequest, context: RouteContext) {
+  return proxyAwfWrite(request, context, "POST");
+}
+
+export async function DELETE(request: NextRequest, context: RouteContext) {
+  return proxyAwfWrite(request, context, "DELETE");
+}
+
+async function proxyAwfWrite(
+  request: NextRequest,
+  context: RouteContext,
+  method: "POST" | "DELETE",
+): Promise<Response> {
+  const { path = [] } = await context.params;
+  const awfPath = `/v1/${path.map(encodeURIComponent).join("/")}${request.nextUrl.search}`;
+  const body = await request.text();
+
+  return proxyAwf(awfPath, {
+    method,
+    body: body || undefined,
+    contentType: request.headers.get("content-type"),
+  });
 }
 
 async function streamWorkspace(request: NextRequest, workspaceId: string): Promise<Response> {

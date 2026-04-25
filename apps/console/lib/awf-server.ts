@@ -17,11 +17,28 @@ export function awfWebSocketUrl(path: string): string {
   return target.toString();
 }
 
-export async function proxyAwfGet(path: string): Promise<NextResponse> {
+type AwfProxyMethod = "GET" | "POST" | "DELETE";
+
+type AwfProxyOptions = {
+  method?: AwfProxyMethod;
+  body?: string;
+  contentType?: string | null;
+};
+
+export async function proxyAwf(path: string, options: AwfProxyOptions = {}): Promise<NextResponse> {
+  const { method = "GET", body, contentType } = options;
+
   try {
+    const headers = awfHeaders();
+    if (body !== undefined && contentType) {
+      headers["content-type"] = contentType;
+    }
+
     const response = await fetch(`${awfBaseUrl()}${path}`, {
+      method,
       cache: "no-store",
-      headers: awfHeaders(),
+      headers,
+      body,
     });
     const text = await response.text();
     return new NextResponse(text, {
@@ -37,6 +54,10 @@ export async function proxyAwfGet(path: string): Promise<NextResponse> {
       { status: 502 },
     );
   }
+}
+
+export async function proxyAwfGet(path: string): Promise<NextResponse> {
+  return proxyAwf(path);
 }
 
 export function awfHeaders(): Record<string, string> {
