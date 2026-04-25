@@ -241,7 +241,11 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=provisioner,  # type: ignore[arg-type]
             executor=executor,
-            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=1,
+            ),
         )
 
         assert await asyncio.wait_for(worker.run_once(), timeout=0.2) == 1
@@ -254,6 +258,32 @@ class TestRunOnceExecution:
 
         release.set()
         await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=0.2)
+
+    @pytest.mark.unit
+    async def test_execution_limit_is_independent_from_provisioning_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_ids = [
+            await _create_ready(session_factory, origin_repo, f"ready-{i}") for i in range(4)
+        ]
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=3,
+            ),
+        )
+
+        assert await worker.run_once() == 3
+        await worker.wait_for_execution_tasks()
+
+        assert set(executor.calls) == set(ready_ids[:3])
 
     @pytest.mark.unit
     async def test_ready_workspace_is_noop_when_no_executor_is_wired(

@@ -26,6 +26,7 @@ def _settings(tmp_path: Path) -> ServiceSettings:
         github_token=None,
         worker_poll_interval_seconds=0.25,
         worker_max_concurrent_provisions=2,
+        worker_max_concurrent_executions=4,
         node_id="node-1",
     )
 
@@ -175,6 +176,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["executor_config"].compose_projects_root == work_dir / "compose"
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2
+    assert created["worker_config"].max_concurrent_executions == 4
 
     default_monitor = created["executor_monitor_factory"](object(), WorkspaceProfile(name="default"))
     assert default_monitor is not None

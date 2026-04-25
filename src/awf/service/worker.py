@@ -116,6 +116,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         config=WorkerConfig(
             poll_interval_seconds=settings.worker_poll_interval_seconds,
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,
+            max_concurrent_executions=settings.worker_max_concurrent_executions,
         ),
     )
     return WorkerRuntime(engine=engine, worker=worker)

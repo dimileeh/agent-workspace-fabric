@@ -33,6 +33,7 @@ _log = get_logger(__name__)
 class WorkerConfig:
     poll_interval_seconds: float = 1.0
     max_concurrent_provisions: int = 3
+    max_concurrent_executions: int = 3
 
 
 class WorkspaceExecutorProtocol(Protocol):
@@ -112,17 +113,18 @@ class ControlWorker:
 
     async def _list_requested(self) -> list[str]:
         """Return up to ``max_concurrent_provisions`` workspace IDs in ``requested``."""
-        return await self._list_by_status(WorkspaceStatus.requested)
+        return await self._list_by_status(
+            WorkspaceStatus.requested,
+            limit=self._config.max_concurrent_provisions,
+        )
 
     async def _list_ready(self, *, limit: int | None = None) -> list[str]:
-        """Return up to ``max_concurrent_provisions`` workspace IDs in ``ready``."""
-        return await self._list_by_status(WorkspaceStatus.ready, limit=limit)
+        """Return up to ``max_concurrent_executions`` workspace IDs in ``ready``."""
+        row_limit = self._config.max_concurrent_executions if limit is None else limit
+        return await self._list_by_status(WorkspaceStatus.ready, limit=row_limit)
 
-    async def _list_by_status(
-        self, status: WorkspaceStatus, *, limit: int | None = None
-    ) -> list[str]:
-        row_limit = self._config.max_concurrent_provisions if limit is None else limit
-        if row_limit <= 0:
+    async def _list_by_status(self, status: WorkspaceStatus, *, limit: int) -> list[str]:
+        if limit <= 0:
             return []
 
         async with self._session_factory() as session:
@@ -130,13 +132,13 @@ class ControlWorker:
                 select(Workspace.id)
                 .where(Workspace.status == status.value)
                 .order_by(Workspace.created_at)
-                .limit(row_limit)
+                .limit(limit)
             )
             result = await session.execute(stmt)
             return [row[0] for row in result.all()]
 
     def _available_execution_slots(self) -> int:
-        return max(0, self._config.max_concurrent_provisions - len(self._execution_tasks))
+        return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
 
     def _dispatch_ready_executions(self, workspace_ids: list[str]) -> int:
         dispatched = 0

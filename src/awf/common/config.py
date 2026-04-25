@@ -85,6 +85,7 @@ class Settings(BaseSettings):
     # Worker
     worker_poll_interval_seconds: float = Field(default=1.0, gt=0)
     worker_max_concurrent_provisions: int = Field(default=3, gt=0)
+    worker_max_concurrent_executions: int = Field(default=3, gt=0)
     worker_node_id: str | None = Field(default=None)
     worker_branch_prefix: str = Field(default="awf")
 
