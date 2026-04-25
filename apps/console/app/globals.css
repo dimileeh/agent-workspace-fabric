@@ -1,0 +1,85 @@
+@import "tailwindcss";
+
+:root {
+  color-scheme: light;
+  --background: #f7f8fa;
+  --foreground: #17202b;
+  --panel: #ffffff;
+  --panel-muted: #f0f3f6;
+  --border: #d7dde5;
+  --border-strong: #aeb8c5;
+  --muted: #5e6a78;
+  --muted-strong: #3f4a56;
+  --accent: #1677ff;
+  --accent-soft: #e7f1ff;
+  --success: #148f63;
+  --warning: #a76100;
+  --danger: #c24135;
+  --terminal: #101722;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+  background: var(--background);
+  color: var(--foreground);
+  font-family:
+    Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  letter-spacing: 0;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button:focus-visible,
+input:focus-visible,
+select:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+
+pre,
+code,
+.mono {
+  font-family:
+    "SFMono-Regular", "SF Mono", Consolas, "Liberation Mono", Menlo, ui-monospace, monospace;
+}
+
+::selection {
+  background: #cfe3ff;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #c7d0dc;
+  border: 2px solid transparent;
+  border-radius: 999px;
+  background-clip: padding-box;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}

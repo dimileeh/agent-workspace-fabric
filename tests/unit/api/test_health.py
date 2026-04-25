@@ -1,23 +1,30 @@
-"""Health endpoint — the first contract AWF guarantees to operators and uptime probes.
+"""Health + readiness endpoint contracts.
 
-The contract under test:
-    GET /healthz returns 200 with a JSON body shaped as:
-        {"status": "ok", "service": "awf", "version": "<semver>"}
+``/healthz`` is the liveness probe — dependency-free, must never depend on DB or
+Docker. See module docstring in ``awf.api.routes.health`` for rationale.
 
-Rationale:
-    - Operators (and k8s/Cloud Run) need a liveness probe that never depends on
-      external services (DB, Docker daemon) so a single dependency outage doesn't
-      flap the whole control plane.
-    - The version field is non-optional so deploys can verify the rolled-out build
-      matches expectations.
+``/readyz`` is the readiness probe required by PRD v2.2 §12 and §18.2/§18.3 — it
+reports per-dependency status (DB + Docker stack + configured agent runtime
+image) so an operator can see *which* dependency is down rather than just "AWF
+unhealthy". The response shape lets dashboards and uptime probes alert on the
+specific failing check rather than a generic 503.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import Any
+
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf import __version__
+from awf.api.app import configure_database, create_app
+from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.db.session import make_session_factory
+
+# ---- /healthz ---------------------------------------------------------------
 
 
 @pytest.mark.unit
@@ -44,3 +51,335 @@ async def test_healthz_does_not_require_auth(client: AsyncClient) -> None:
     response = await client.get("/healthz")
     assert response.status_code != 401
     assert response.status_code != 403
+
+
+# ---- /readyz fixtures -------------------------------------------------------
+
+
+def _queue_all_ok(runner: FakeCommandRunner) -> None:
+    """Queue successful results for the four docker-related subprocess calls.
+
+    Order matches the readiness handler's sequential check order:
+    docker --version → docker info → docker compose version → docker image inspect.
+    """
+    runner.queue_result(stdout="Docker version 27.0.3, build abc1234\n")
+    runner.queue_result(stdout="27.0.3\n")
+    runner.queue_result(stdout="v2.29.2\n")
+    runner.queue_result(stdout="sha256:deadbeef\n")
+
+
+@pytest.fixture
+async def ready_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[Any, AsyncClient]]:
+    """App + client pair so tests can mutate ``app.state`` (inject command runner)."""
+    app = create_app(use_lifespan=False)
+    configure_database(app, make_session_factory(engine))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield app, c
+
+
+# ---- /readyz: happy path ----------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_readyz_all_ok_returns_200(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    assert response.status_code == 200
+
+
+@pytest.mark.unit
+async def test_readyz_response_shape_matches_contract(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    """Operators need a stable shape: service / version / status + per-check map."""
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert body["service"] == "awf"
+    assert body["version"] == __version__
+    assert body["status"] == "ok"
+
+    checks = body["checks"]
+    assert set(checks.keys()) == {
+        "db",
+        "docker_cli",
+        "docker_daemon",
+        "docker_compose",
+        "agent_runtime_image",
+    }
+    for name, check in checks.items():
+        assert check["ok"] is True, f"{name} should be ok"
+        assert check["status"] == "ok"
+        assert check.get("reason") is None
+
+
+@pytest.mark.unit
+async def test_readyz_reports_versions_when_available(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    """Surfacing versions helps operators verify the right Docker / image is rolled out."""
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    checks = response.json()["checks"]
+
+    assert "27.0.3" in checks["docker_cli"]["version"]
+    assert checks["docker_daemon"]["version"] == "27.0.3"
+    assert checks["docker_compose"]["version"] == "v2.29.2"
+    assert checks["agent_runtime_image"]["version"] == "sha256:deadbeef"
+
+
+# ---- /readyz: DB failures ---------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_readyz_db_not_configured_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    """If the session factory wasn't wired, the DB check must fail loudly."""
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+    app.state.db_session_factory = None  # Simulate misconfigured deploy.
+
+    response = await client.get("/readyz")
+    assert response.status_code == 503
+    body = response.json()
+    assert body["status"] == "fail"
+    db_check = body["checks"]["db"]
+    assert db_check["ok"] is False
+    assert db_check["reason"] == "DB_NOT_CONFIGURED"
+
+
+@pytest.mark.unit
+async def test_readyz_db_query_failure_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    """A live DB outage should be surfaced as a structured failure, not a 500."""
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    class _ExplodingSession:
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("connection refused: control-plane DB is down")
+
+        async def close(self) -> None:
+            return None
+
+    def _factory() -> _ExplodingSession:
+        return _ExplodingSession()
+
+    app.state.db_session_factory = _factory
+
+    response = await client.get("/readyz")
+    assert response.status_code == 503
+    db_check = response.json()["checks"]["db"]
+    assert db_check["ok"] is False
+    assert db_check["reason"] == "DB_CONNECTION_FAILED"
+    assert "connection refused" in (db_check["detail"] or "")
+
+
+@pytest.mark.unit
+async def test_readyz_db_factory_raises_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    """Factory failure (pool exhausted, bad DSN) must surface as 503, not 500."""
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    def _exploding_factory() -> Any:
+        raise RuntimeError("QueuePool limit of size 5 overflow 10 reached")
+
+    app.state.db_session_factory = _exploding_factory
+
+    response = await client.get("/readyz")
+    assert response.status_code == 503
+    db_check = response.json()["checks"]["db"]
+    assert db_check["ok"] is False
+    assert db_check["reason"] == "DB_CONNECTION_FAILED"
+    assert "QueuePool" in (db_check["detail"] or "")
+
+
+# ---- /readyz: Docker CLI / daemon failures ----------------------------------
+
+
+@pytest.mark.unit
+async def test_readyz_docker_cli_missing_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    """When the docker binary is absent, asyncio raises FileNotFoundError —
+    the readiness check must catch it and report an actionable reason."""
+    app, client = ready_app_and_client
+
+    class _DockerMissingRunner:
+        def __init__(self) -> None:
+            self.calls: list[list[str]] = []
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+        ) -> CommandResult:
+            self.calls.append(list(args))
+            if args and args[0] == "docker":
+                raise FileNotFoundError(args[0])
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    app.state.command_runner = _DockerMissingRunner()
+
+    response = await client.get("/readyz")
+    assert response.status_code == 503
+    body = response.json()
+
+    cli_check = body["checks"]["docker_cli"]
+    assert cli_check["ok"] is False
+    assert cli_check["reason"] == "DOCKER_CLI_NOT_FOUND"
+
+    # Daemon, compose, and image checks all depend on docker — they should also fail
+    # (gracefully) rather than crash the request.
+    assert body["checks"]["docker_daemon"]["ok"] is False
+    assert body["checks"]["docker_compose"]["ok"] is False
+    assert body["checks"]["agent_runtime_image"]["ok"] is False
+
+
+@pytest.mark.unit
+async def test_readyz_docker_daemon_unreachable_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    runner.queue_result(stdout="Docker version 27.0.3, build abc\n")  # docker --version
+    runner.queue_result(  # docker info
+        returncode=1,
+        stderr="Cannot connect to the Docker daemon at unix:///var/run/docker.sock\n",
+    )
+    runner.queue_result(stdout="v2.29.2\n")
+    runner.queue_result(stdout="sha256:deadbeef\n")
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    assert response.status_code == 503
+    daemon = response.json()["checks"]["docker_daemon"]
+    assert daemon["ok"] is False
+    assert daemon["reason"] == "DOCKER_DAEMON_UNREACHABLE"
+    assert "Cannot connect" in (daemon["detail"] or "")
+
+
+@pytest.mark.unit
+async def test_readyz_docker_compose_missing_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    runner.queue_result(stdout="Docker version 27.0.3\n")
+    runner.queue_result(stdout="27.0.3\n")
+    runner.queue_result(  # docker compose version
+        returncode=1,
+        stderr="docker: 'compose' is not a docker command.\n",
+    )
+    runner.queue_result(stdout="sha256:deadbeef\n")
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    assert response.status_code == 503
+    compose = response.json()["checks"]["docker_compose"]
+    assert compose["ok"] is False
+    assert compose["reason"] == "DOCKER_COMPOSE_NOT_AVAILABLE"
+
+
+@pytest.mark.unit
+async def test_readyz_agent_runtime_image_missing_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    runner.queue_result(stdout="Docker version 27.0.3\n")
+    runner.queue_result(stdout="27.0.3\n")
+    runner.queue_result(stdout="v2.29.2\n")
+    runner.queue_result(  # docker image inspect
+        returncode=1,
+        stderr="Error: No such image: awf-agent-runtime:latest\n",
+    )
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    assert response.status_code == 503
+    image_check = response.json()["checks"]["agent_runtime_image"]
+    assert image_check["ok"] is False
+    assert image_check["reason"] == "AGENT_RUNTIME_IMAGE_MISSING"
+    # The configured image name must show up in the detail so the operator knows
+    # which tag was expected — "image missing" with no name is unactionable.
+    assert "awf-agent-runtime:latest" in (image_check["detail"] or "")
+
+
+@pytest.mark.unit
+async def test_readyz_uses_configured_agent_runtime_image(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    """The image inspect call must reference the runtime image from settings."""
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    await client.get("/readyz")
+
+    image_inspect_call = runner.calls[3]  # 4th call: docker image inspect ...
+    assert image_inspect_call.args[:3] == ["docker", "image", "inspect"]
+    assert "awf-agent-runtime:latest" in image_inspect_call.args
+
+
+# ---- /readyz: never-crash contract ------------------------------------------
+
+
+@pytest.mark.unit
+async def test_readyz_never_crashes_when_docker_completely_unavailable(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    """Even with every docker call exploding, /readyz must return a structured
+    response (503 with per-check reasons) rather than a 500."""
+    app, client = ready_app_and_client
+
+    class _AlwaysExplodingRunner:
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+        ) -> CommandResult:
+            raise OSError("no such file or directory")
+
+    app.state.command_runner = _AlwaysExplodingRunner()
+
+    response = await client.get("/readyz")
+    assert response.status_code == 503
+    body = response.json()
+    # DB check should still report OK (it doesn't touch docker).
+    assert body["checks"]["db"]["ok"] is True
+    # All docker-related checks fail with structured reasons, not tracebacks.
+    for name in ("docker_cli", "docker_daemon", "docker_compose", "agent_runtime_image"):
+        check = body["checks"][name]
+        assert check["ok"] is False
+        assert check["reason"] is not None

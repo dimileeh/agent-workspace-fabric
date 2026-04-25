@@ -11,14 +11,18 @@ error wrapping, structured result); each CLI-specific subclass only defines
 
 from awf.adapters.base import (
     AgentAdapter,
+    AgentDefaults,
     AgentRunError,
     AgentRunResult,
     get_adapter,
 )
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 
 __all__ = [
     "AgentAdapter",
+    "AgentDefaults",
     "AgentRunError",
     "AgentRunResult",
+    "DEFAULT_AGENT_DEFAULTS",
     "get_adapter",
 ]

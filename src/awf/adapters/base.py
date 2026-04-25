@@ -17,8 +17,25 @@ from pathlib import Path
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
+from awf.runtime.logs import LogStore
 
 _log = get_logger(__name__)
+
+
+_AUTH_FAILURE_MARKERS = (
+    "not logged in",
+    "please run /login",
+    "please set an auth method",
+    "manual authorization is required",
+    "could not authenticate",
+    "error authenticating",
+    "invalid_grant",
+    "anthropic_api_key",
+    "gemini_api_key",
+    "google_api_key",
+    "google_genai_use_vertexai",
+    "google_genai_use_gca",
+)
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
@@ -82,6 +99,14 @@ class AgentRunError(Exception):
         )
 
 
+@dataclass(frozen=True)
+class AgentDefaults:
+    """Default model and reasoning/thinking policy for one agent CLI."""
+
+    model: str
+    effort: str | None = None
+
+
 class AgentAdapter(ABC):
     """Shared scaffolding for coding-CLI adapters."""
 
@@ -90,9 +115,13 @@ class AgentAdapter(ABC):
         *,
         runner: AsyncCommandRunner,
         default_model: str | None = None,
+        default_effort: str | None = None,
+        log_store: LogStore | None = None,
     ) -> None:
         self._runner = runner
         self._default_model = default_model
+        self._default_effort = default_effort
+        self._log_store = log_store
 
     @property
     @abstractmethod
@@ -112,6 +141,7 @@ class AgentAdapter(ABC):
         compose_file: Path,
         prompt: str,
         model: str | None = None,
+        workspace_id: str | None = None,
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -148,11 +178,45 @@ class AgentAdapter(ABC):
             agent=self.name.value,
             compose_project=compose_project,
             model=model or self._default_model,
+            effort=self._default_effort,
         )
-        result = await self._runner.run(args)
+        # Close stdin explicitly. Some CLIs (Codex in particular) read
+        # "additional input" from stdin after argv parsing; if AWF is
+        # launched from an interactive terminal, inheriting that open
+        # stream makes the agent wait forever for EOF.
+        sinks = None
+        if self._log_store is not None and workspace_id is not None:
+            sinks = await self._log_store.open_command_streams(
+                workspace_id=workspace_id,
+                base_stream_id="agent",
+                source="agent",
+                name=self.name.value,
+            )
+
+        try:
+            run_streaming = getattr(self._runner, "run_streaming", None)
+            if sinks is not None and run_streaming is not None:
+                result = await run_streaming(
+                    args,
+                    input_bytes=b"",
+                    on_stdout=sinks.write_stdout,
+                    on_stderr=sinks.write_stderr,
+                )
+            else:
+                result = await self._runner.run(args, input_bytes=b"")
+                if sinks is not None:
+                    await sinks.write_stdout(result.stdout)
+                    await sinks.write_stderr(result.stderr)
+        finally:
+            if sinks is not None:
+                await sinks.close()
 
         if not result.ok:
-            raise AgentRunError(agent=self.name, result=result)
+            raise AgentRunError(
+                agent=self.name,
+                result=result,
+                reason_code=_failure_reason_for_result(result),
+            )
 
         _log.info(
             "agent.run.ok",
@@ -192,6 +256,9 @@ def get_adapter(
     *,
     runner: AsyncCommandRunner,
     default_model: str | None = None,
+    default_effort: str | None = None,
+    defaults: AgentDefaults | None = None,
+    log_store: LogStore | None = None,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime.
 
@@ -199,4 +266,19 @@ def get_adapter(
     subclass forgot to import. Tests verify the registry is populated.
     """
     cls = _REGISTRY[runtime]
-    return cls(runner=runner, default_model=default_model)
+    if defaults is not None:
+        default_model = defaults.model
+        default_effort = defaults.effort
+    return cls(
+        runner=runner,
+        default_model=default_model,
+        default_effort=default_effort,
+        log_store=log_store,
+    )
+
+
+def _failure_reason_for_result(result: CommandResult) -> str:
+    output = f"{result.stderr}\n{result.stdout}".lower()
+    if any(marker in output for marker in _AUTH_FAILURE_MARKERS):
+        return "AGENT_AUTH_FAILED"
+    return "AGENT_CLI_FAILED"

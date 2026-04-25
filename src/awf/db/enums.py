@@ -62,6 +62,7 @@ class OperationType(StrEnum):
     validate = "validate"
     push = "push"
     cancel = "cancel"
+    stop = "stop"
     destroy = "destroy"
 
 
@@ -78,6 +79,10 @@ class FailureReason(StrEnum):
     infrastructure_failure = "infrastructure_failure"
     policy_failure = "policy_failure"
     cleanup_failure = "cleanup_failure"
+    profile_resolution_failure = "profile_resolution_failure"
+    service_startup_failure = "service_startup_failure"
+    phase_timeout = "phase_timeout"
+    health_check_failure = "health_check_failure"
 
 
 class TaskKind(StrEnum):

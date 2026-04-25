@@ -91,15 +91,12 @@ class TestFailureStopsEarly:
 
 class TestMigration:
     @pytest.mark.unit
-    async def test_runs_alembic_upgrade_head_after_first_command_when_required(
+    async def test_requires_database_no_longer_injects_alembic(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:
-        # New ordering: migration runs AFTER the first test command (typically
-        # dep-install) so Alembic + the app package are importable.
         fake, val = runner
-        fake.queue_result(returncode=0, stdout="deps installed")  # cmd_01
-        fake.queue_result(returncode=0, stdout="migrated")  # migration
-        fake.queue_result(returncode=0, stdout="tests ok")  # cmd_02
+        fake.queue_result(returncode=0, stdout="deps installed")
+        fake.queue_result(returncode=0, stdout="tests ok")
 
         result = await val.run(
             workspace_id="ws_mig",
@@ -110,52 +107,31 @@ class TestMigration:
         )
 
         assert result.all_passed
-        assert result.migration is not None
-        assert result.migration.ok
-        # Three invocations: cmd_01 (install), migration, cmd_02 (pytest).
-        assert len(fake.calls) == 3
-
-        first_cmd = fake.calls[0].args
-        assert "sh" in first_cmd and "-lc" in first_cmd
-
-        migration_cmd = fake.calls[1].args
-        # Migration runs through sh -lc with a venv-activate preamble, so
-        # `alembic upgrade head` is embedded in the last arg, not a separate
-        # argv entry.
-        assert "alembic upgrade head" in migration_cmd[-1]
-
-        second_cmd = fake.calls[2].args
-        assert "pytest tests/ -q" in second_cmd[-1]
+        assert result.migration is None
+        assert len(fake.calls) == 2
+        assert all("alembic upgrade head" not in call.args[-1] for call in fake.calls)
 
     @pytest.mark.unit
-    async def test_skips_remaining_commands_when_migration_fails(
+    async def test_alembic_runs_when_declared_as_profile_setup(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:
-        # cmd_01 (dep install) succeeds, migration fails, remaining test
-        # commands must NOT run — they'd just execute against a broken schema.
-        fake, val = runner
-        fake.queue_result(returncode=0, stdout="deps installed")  # cmd_01
-        fake.queue_result(returncode=1, stderr="alembic: conflict")  # migration
+        from awf.profiles.registry import aira_profile
 
-        result = await val.run(
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="deps installed")
+        fake.queue_result(returncode=0, stdout="migrated")
+
+        result = await val.run_profile_phases(
             workspace_id="ws_mig_fail",
             compose_project=_COMPOSE_PROJECT,
             compose_file=_COMPOSE_FILE,
-            test_commands=[
-                'uv pip install -e ".[dev]"',
-                "pytest -q",  # must NOT be executed
-            ],
-            requires_database=True,
+            profile=aira_profile(),
+            phase_names=("setup",),
         )
 
-        assert not result.all_passed
-        assert result.migration is not None
-        assert not result.migration.ok
-        # cmd_01 ran and succeeded; cmd_02 never ran.
-        assert len(result.commands) == 1
-        assert result.commands[0].ok
-        # FakeCommandRunner got cmd_01 + migration, nothing else.
+        assert result.all_passed
         assert len(fake.calls) == 2
+        assert "alembic upgrade head" in fake.calls[1].args[-1]
 
     @pytest.mark.unit
     async def test_migration_not_run_if_first_command_fails(

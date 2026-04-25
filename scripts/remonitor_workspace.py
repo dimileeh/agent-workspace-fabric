@@ -28,24 +28,38 @@ from pathlib import Path
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
 
-from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
+from sqlalchemy.ext.asyncio import (  # noqa: E402
+    AsyncSession,
+    async_sessionmaker,
+    create_async_engine,
+)
 
 # Populate the adapter registry.
 import awf.adapters.claude_code  # noqa: E402, F401
 import awf.adapters.codex  # noqa: E402, F401
 import awf.adapters.gemini  # noqa: E402, F401
 from awf.adapters.base import get_adapter  # noqa: E402
-from awf.common.commands import AsyncioSubprocessRunner  # noqa: E402
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS  # noqa: E402
+from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner  # noqa: E402
 from awf.common.github_client import GitHubClient  # noqa: E402
 from awf.common.ids import new_event_id  # noqa: E402
 from awf.db.enums import AgentRuntime, WorkspaceStatus  # noqa: E402
 from awf.db.models import WorkspaceEvent  # noqa: E402
 from awf.db.repositories import WorkspaceRepository  # noqa: E402
 from awf.db.session import make_session_factory  # noqa: E402
-from awf.runtime.release_pr_monitor import build_feature_pr_monitor  # noqa: E402
+from awf.runtime.release_pr_monitor import (  # noqa: E402
+    build_feature_pr_monitor,
+    build_release_pr_monitor,
+)
 
 
-async def _main(work_dir: Path, workspace_id: str) -> int:
+async def _main(
+    work_dir: Path,
+    workspace_id: str,
+    *,
+    auto_merge: bool = True,
+    push_pending: bool = False,
+) -> int:
     db_path = work_dir / "awf.db"
     if not db_path.exists():
         print(f"No AWF DB at {db_path}", file=sys.stderr)
@@ -107,6 +121,7 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
         await s.commit()
         agent_runtime = AgentRuntime(ws.agent)
         compose_project = ws.compose_project_name or f"awf_{workspace_id}"
+        remote_push_branch = ws.remote_push_branch or ws.branch_name
 
     # Re-use the container + worktree that the original run set up.
     compose_file = work_dir / "compose" / "compose" / workspace_id / "compose.yml"
@@ -120,9 +135,22 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
         return 2
 
     runner = AsyncioSubprocessRunner()
-    adapter = get_adapter(agent_runtime, runner=runner, default_model=None)
+    if push_pending:
+        await _push_pending_head(
+            runner=runner,
+            factory=factory,
+            workspace_id=workspace_id,
+            worktree_path=worktrees_root / workspace_id,
+            remote_push_branch=remote_push_branch,
+        )
+    adapter = get_adapter(
+        agent_runtime,
+        runner=runner,
+        defaults=DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+    )
     gh = GitHubClient(runner)
-    monitor = build_feature_pr_monitor(
+    monitor_builder = build_feature_pr_monitor if auto_merge else build_release_pr_monitor
+    monitor = monitor_builder(
         session_factory=factory,
         runner=runner,
         adapter=adapter,
@@ -154,9 +182,65 @@ async def _main(work_dir: Path, workspace_id: str) -> int:
     return 0 if final.status == WorkspaceStatus.completed.value else 1
 
 
+async def _push_pending_head(
+    *,
+    runner: AsyncCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    worktree_path: Path,
+    remote_push_branch: str,
+) -> None:
+    """Push a remonitor worktree's current HEAD before entering the loop.
+
+    This is recovery glue for a monitor process that died mid-fix-cycle:
+    the coding agent may have committed real fixes locally, but the runner
+    never reached its normal post-settle push. Keep the push in this AWF
+    operator tool instead of asking a human to run a raw git command.
+    """
+    refspec = f"HEAD:refs/heads/{remote_push_branch}"
+    result = await runner.run(["git", "-C", str(worktree_path), "push", "origin", refspec])
+    if not result.ok:
+        print(
+            "remonitor: pending-head push failed; continuing so the monitor "
+            f"can retry later. stderr: {(result.stderr or '')[:400]}",
+            file=sys.stderr,
+        )
+        return
+    head = await runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
+    if not head.ok:
+        return
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        if ws is None:
+            return
+        ws.monitor_last_commit_sha = head.stdout.strip() or None
+        await s.commit()
+
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--work-dir", required=True, type=Path)
     parser.add_argument("--workspace-id", required=True)
+    parser.add_argument(
+        "--no-auto-merge",
+        dest="auto_merge",
+        action="store_false",
+        help="Use the release/manual monitor mode: notify and wait for a human merge.",
+    )
+    parser.set_defaults(auto_merge=True)
+    parser.add_argument(
+        "--push-pending",
+        action="store_true",
+        help="Push the workspace worktree HEAD to its PR branch before re-entering monitoring.",
+    )
     args = parser.parse_args()
-    sys.exit(asyncio.run(_main(args.work_dir, args.workspace_id)))
+    sys.exit(
+        asyncio.run(
+            _main(
+                args.work_dir,
+                args.workspace_id,
+                auto_merge=args.auto_merge,
+                push_pending=args.push_pending,
+            )
+        )
+    )

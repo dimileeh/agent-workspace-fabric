@@ -1,0 +1,20 @@
+awf:
+  name: awf-self
+  version: 1
+  description: AWF self-dogfood profile for Python CLI/control-plane work.
+  docker:
+    mode: none
+  runtime:
+    environment:
+      PYTHONUNBUFFERED: "1"
+  phases:
+    setup:
+      - command: uv sync --extra dev
+        timeout_seconds: 900
+    validate:
+      - command: uv run ruff check src/awf/cli tests/unit/cli
+        timeout_seconds: 300
+      - command: uv run mypy src/awf/cli
+        timeout_seconds: 300
+      - command: uv run pytest tests/unit/cli -q
+        timeout_seconds: 300

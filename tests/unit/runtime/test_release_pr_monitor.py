@@ -72,6 +72,10 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
         worktrees_root=tmp_path,
         poll_interval_seconds=15,
         settle_interval_seconds=7,
+        initial_review_grace_period_seconds=123,
+        pre_merge_settle_seconds=11,
     )
     assert runner._config.poll_interval_seconds == 15
     assert runner._config.settle_interval_seconds == 7
+    assert runner._config.initial_review_grace_period_seconds == 123
+    assert runner._config.pre_merge_settle_seconds == 11

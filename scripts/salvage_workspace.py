@@ -88,8 +88,14 @@ def _make_noop_factory(runtime_value: AgentRuntime) -> type[AgentAdapter]:
     class _Factory(AgentAdapter):  # type: ignore[misc]
         runtime = runtime_value  # type: ignore[assignment]
 
-        def __init__(self, *, runner: object = None, default_model: str | None = None) -> None:
-            # runner / default_model accepted for signature compat, unused.
+        def __init__(
+            self,
+            *,
+            runner: object = None,
+            default_model: str | None = None,
+            default_effort: str | None = None,
+        ) -> None:
+            # runner / defaults accepted for signature compat, unused.
             self._runtime = runtime_value
 
         @property

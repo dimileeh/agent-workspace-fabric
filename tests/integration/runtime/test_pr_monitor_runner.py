@@ -95,6 +95,7 @@ def _pr_payload(
     check_state: str = "SUCCESS",
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
+    comments: list[dict] | None = None,
 ) -> str:
     return json.dumps(
         {
@@ -114,6 +115,7 @@ def _pr_payload(
                         },
                         "reviewThreads": {"nodes": threads or []},
                         "reviews": {"nodes": reviews or []},
+                        "comments": {"nodes": comments or []},
                     }
                 }
             }
@@ -205,6 +207,7 @@ def _make_runner(
     worktrees_root: Path,
     auto_merge: bool = True,
     max_outer_iterations: int = 20,
+    initial_review_grace_period_seconds: float = 0,
 ) -> PullRequestMonitorRunner:
     return PullRequestMonitorRunner(
         session_factory=factory,
@@ -215,6 +218,8 @@ def _make_runner(
             auto_merge=auto_merge,
             poll_interval_seconds=60,
             settle_interval_seconds=30,
+            initial_review_grace_period_seconds=initial_review_grace_period_seconds,
+            pre_merge_settle_seconds=0,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations, max_fix_cycle_passes=3
@@ -331,6 +336,95 @@ class TestHappyMerge:
         assert "--squash" in merge_args
         assert "--delete-branch" in merge_args
 
+    @pytest.mark.unit
+    async def test_green_pr_waits_initial_review_grace_before_auto_merge(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # initially merge-ready
+        # Keep the test finite by simulating that a human/bot merged it while
+        # AWF was respecting the initial review window.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            initial_review_grace_period_seconds=900,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+        assert sleep_fn.calls == [60]
+        assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+    @pytest.mark.unit
+    async def test_missing_started_at_is_persisted_before_initial_grace_sleep(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.monitor_started_at = None
+            await s.commit()
+
+        sleep_calls: list[float] = []
+
+        async def sleep_after_asserting_started(seconds: float) -> None:
+            sleep_calls.append(seconds)
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(ws_id)
+                assert ws is not None
+                assert ws.monitor_started_at is not None
+
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload())  # initially merge-ready
+        # Keep the test finite by simulating an external merge while AWF waits
+        # out the initial review window.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+
+        runner = _make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_after_asserting_started,
+            worktrees_root=tmp_path / "worktrees",
+            initial_review_grace_period_seconds=900,
+        )
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        assert sleep_calls == [60]
+
 
 class TestMergeBlockedFallsBackToNotify:
     @pytest.mark.unit
@@ -342,14 +436,18 @@ class TestMergeBlockedFallsBackToNotify:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """Branch protection blocks the merge → runner posts ready-to-merge
-        and completes (no failure)."""
+        """Branch protection blocks the merge → runner posts human-attention
+        and keeps monitoring until the PR is actually merged."""
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=1, stderr="branch protection rule blocks merge")
         cmd.queue_result(returncode=0)  # gh pr comment
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
@@ -367,9 +465,11 @@ class TestMergeBlockedFallsBackToNotify:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_merge_sha is None
-        # gh pr comment was invoked with the ready-to-merge body.
+        # gh pr comment was invoked with the human-attention body.
         comment_args = next(c.args for c in cmd.calls if c.args[:3] == ["gh", "pr", "comment"])
-        assert any("Ready" in a or "ready" in a.lower() for a in comment_args)
+        body = comment_args[comment_args.index("--body") + 1]
+        assert "needs human attention" in body
+        assert "branch protection rule blocks merge" in body
 
 
 class TestNotifyHumanVariant:
@@ -387,6 +487,10 @@ class TestNotifyHumanVariant:
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # PR state
         cmd.queue_result(returncode=0)  # gh pr comment
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
@@ -577,7 +681,13 @@ class TestAddressComments:
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))  # still there
-        cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman terminal)
+        cmd.queue_result(returncode=0)  # gh pr comment
+        # NotifyHuman is not terminal: the monitor stays alive and only
+        # completes after the PR is actually merged.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True, threads=[thread]))
+        cmd.queue_result(returncode=0)  # docker compose down
         runner = _make_runner(
             factory=factory,
             cmd=cmd,
@@ -601,14 +711,10 @@ class TestAddressComments:
         assert not any(c.args[:3] == ["gh", "pr", "merge"] for c in cmd.calls), (
             "deferred-still-open must block merge — maintainer-driven only"
         )
-        # Workspace ended in a terminal state (NotifyHuman → completed-ish).
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status in (
-                WorkspaceStatus.completed.value,
-                WorkspaceStatus.failed.value,
-            ), "monitor must terminate the workspace after NotifyHuman, not loop forever"
+            assert ws.status == WorkspaceStatus.completed.value
 
 
 class TestFixCyclePasses:
@@ -1823,7 +1929,7 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         assert "awf_ws_short" in teardown_calls[0].args
 
     @pytest.mark.unit
-    async def test_merge_blocked_notify_human_tears_down_compose(
+    async def test_merge_blocked_notify_human_tears_down_after_external_merge(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -1832,7 +1938,7 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         tmp_path: Path,
     ) -> None:
         """``Merge`` blocked by branch protection → fallback to
-        NotifyHuman → completes the workspace. Must tear down."""
+        NotifyHuman and keep the workspace alive until the PR is merged."""
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
@@ -1841,6 +1947,9 @@ class TestCompleteWorkspaceTearsDownComposeStack:
             returncode=1, stderr="Pull request protected: approvals required"
         )  # gh pr merge blocked
         cmd.queue_result(returncode=0)  # post_comment (ready-to-merge)
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
         cmd.queue_result(returncode=0)  # docker compose down
 
         runner = _make_runner(
@@ -1862,7 +1971,7 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         assert "awf_ws_blocked" in teardown_calls[0].args
 
     @pytest.mark.unit
-    async def test_plain_notify_human_tears_down_compose(
+    async def test_plain_notify_human_tears_down_after_external_merge(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -1871,13 +1980,16 @@ class TestCompleteWorkspaceTearsDownComposeStack:
         tmp_path: Path,
     ) -> None:
         """Release-PR-style monitor (``auto_merge=False``) posts a
-        ready-to-merge comment when gates green and completes — must
-        tear down too."""
+        ready-to-merge comment, keeps polling, then tears down after
+        external merge."""
         ws_id = await _seed_monitoring_workspace(factory)
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload())
         cmd.queue_result(returncode=0)  # post_comment
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=_pr_payload(merged=True))
         cmd.queue_result(returncode=0)  # docker compose down
 
         runner = _make_runner(
@@ -2026,6 +2138,7 @@ class TestMaxOuterIterationsSafetyNet:
                 auto_merge=True,
                 poll_interval_seconds=60,
                 settle_interval_seconds=30,
+                pre_merge_settle_seconds=0,
             ),
             runner_config=MonitorRunnerConfig(
                 max_outer_iterations=3,  # tight cap so the safety net fires

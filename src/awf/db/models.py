@@ -71,6 +71,18 @@ class Workspace(Base):
 
     agent: Mapped[str] = mapped_column(String(32), nullable=False)
     env_profile: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    profile_ref: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    """Requested v2 workspace profile reference (``auto``, ``python``,
+    ``docker-compose``, ``aira``, etc.). Nullable for legacy v1 rows."""
+
+    requested_profile: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    """Inline v2 profile supplied by the caller. Stored separately from the
+    immutable resolved snapshot so operators can see what was requested."""
+
+    resolved_profile: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
+    """Immutable profile snapshot used for this workspace after repo-local
+    config / registry / detector resolution. This makes runs reproducible even
+    if a repo's ``.awf/workspace.yml`` changes later."""
 
     # Validation inputs (list of shell commands, stored as JSON for portability)
     test_commands: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
@@ -148,6 +160,12 @@ class Workspace(Base):
         lazy="selectin",
         order_by="WorkspaceEvent.occurred_at",
     )
+    log_streams: Mapped[list[WorkspaceLogStream]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="WorkspaceLogStream.opened_at",
+    )
 
 
 class Operation(Base):
@@ -155,6 +173,8 @@ class Operation(Base):
     __table_args__ = (
         Index("ix_operations_workspace", "workspace_id"),
         Index("ix_operations_status", "status"),
+        Index("ix_operations_type", "type"),
+        Index("ix_operations_created_at_id", "created_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)
@@ -209,3 +229,37 @@ class WorkspaceEvent(Base):
     )
 
     workspace: Mapped[Workspace] = relationship(back_populates="events")
+
+
+class WorkspaceLogStream(Base):
+    """Durable index for one workspace log stream.
+
+    The bytes live on disk so high-volume agent output does not bloat the
+    control-plane database. This table stores enough metadata for console
+    clients to list streams and read from stable byte offsets.
+    """
+
+    __tablename__ = "workspace_log_streams"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "stream_id", name="uq_workspace_log_stream"),
+        Index("ix_workspace_log_streams_workspace", "workspace_id"),
+        Index("ix_workspace_log_streams_opened_at", "opened_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    stream_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    source: Mapped[str] = mapped_column(String(64), nullable=False)
+    name: Mapped[str] = mapped_column(String(256), nullable=False)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    path: Mapped[str] = mapped_column(String(1024), nullable=False)
+    byte_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    line_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    opened_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    workspace: Mapped[Workspace] = relationship(back_populates="log_streams")

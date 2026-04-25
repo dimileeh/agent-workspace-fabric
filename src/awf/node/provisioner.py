@@ -24,6 +24,7 @@ from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.node.git_manager import GitManager, GitOperationError
+from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 
 _log = get_logger(__name__)
 
@@ -79,6 +80,14 @@ class Provisioner:
                 new_branch=branch_name,
             )
             base_commit = await self._git.head_sha(workspace_id=workspace_id)
+            profile_resolution = None
+            if ws.resolved_profile is None:
+                profile_resolution = resolve_workspace_profile(
+                    worktree_path=layout.worktree_path,
+                    inline_profile=ws.requested_profile,
+                    profile_ref=ws.profile_ref or ws.env_profile or "auto",
+                    validation_commands=list(ws.test_commands),
+                )
         except GitOperationError as exc:
             _log.error(
                 "provisioner.git_failed",
@@ -89,6 +98,19 @@ class Provisioner:
             await self._mark_failed(
                 workspace_id=workspace_id,
                 failure_reason=FailureReason.infrastructure_failure,
+                message=str(exc)[:2000],
+                from_status=WorkspaceStatus.provisioning,
+            )
+            raise
+        except ProfileResolutionError as exc:
+            _log.error(
+                "provisioner.profile_resolution_failed",
+                workspace_id=workspace_id,
+                error=str(exc),
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.profile_resolution_failure,
                 message=str(exc)[:2000],
                 from_status=WorkspaceStatus.provisioning,
             )
@@ -105,6 +127,11 @@ class Provisioner:
             persisted.branch_name = layout.branch_name
             persisted.base_commit = base_commit
             persisted.compose_project_name = f"awf_{workspace_id}"
+            if profile_resolution is not None:
+                persisted.resolved_profile = profile_resolution.profile.model_dump(
+                    mode="json", by_alias=True
+                )
+                persisted.profile_ref = persisted.profile_ref or profile_resolution.profile.name
 
             await repo.transition(
                 persisted,

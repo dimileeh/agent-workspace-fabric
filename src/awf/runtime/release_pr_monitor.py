@@ -4,8 +4,9 @@ A release PR (development → main, typically) must NOT be auto-merged —
 only a human can land that. This module exposes a ``run_release_monitor``
 helper that drives the same monitor loop as a feature PR but with
 ``auto_merge=False``. The decision core in ``pr_monitor.decide`` flips
-its terminal success action to ``NotifyHuman``, and the runner posts a
-"ready to merge" comment instead of calling ``gh pr merge``.
+its green-gates action to ``NotifyHuman``; the runner posts a "ready to
+merge" comment instead of calling ``gh pr merge`` and then keeps polling
+until the PR is actually merged or closed.
 
 Usage:
 
@@ -44,6 +45,8 @@ def build_release_pr_monitor(
     artifacts_root: Path | None = None,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
+    initial_review_grace_period_seconds: float = 900.0,
+    pre_merge_settle_seconds: float = 90.0,
     max_outer_iterations: int = 10_000,
     max_fix_cycle_passes: int = 5,
 ) -> PullRequestMonitorRunner:
@@ -59,6 +62,8 @@ def build_release_pr_monitor(
             auto_merge=False,  # the point of this whole module
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,
+            initial_review_grace_period_seconds=initial_review_grace_period_seconds,
+            pre_merge_settle_seconds=pre_merge_settle_seconds,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations,
@@ -79,6 +84,8 @@ def build_feature_pr_monitor(
     artifacts_root: Path | None = None,
     poll_interval_seconds: float = 60.0,
     settle_interval_seconds: float = 30.0,
+    initial_review_grace_period_seconds: float = 900.0,
+    pre_merge_settle_seconds: float = 90.0,
     max_outer_iterations: int = 10_000,
     max_fix_cycle_passes: int = 5,
 ) -> PullRequestMonitorRunner:
@@ -94,6 +101,8 @@ def build_feature_pr_monitor(
             auto_merge=True,
             poll_interval_seconds=poll_interval_seconds,
             settle_interval_seconds=settle_interval_seconds,
+            initial_review_grace_period_seconds=initial_review_grace_period_seconds,
+            pre_merge_settle_seconds=pre_merge_settle_seconds,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations,

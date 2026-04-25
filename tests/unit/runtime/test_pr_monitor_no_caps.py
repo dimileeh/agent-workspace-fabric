@@ -8,11 +8,11 @@ traffic — every review cycle consumed one iteration, and 5 bot reviewers
 on a single PR would exhaust the 10-iteration budget before the PR could
 land.
 
-Policy: the monitor takes FULL responsibility for driving a PR to
-``Merge`` or ``NotifyHuman``. Volume is not a terminal condition; only
-branch-protection / human-defer / explicit GitHub refusal are. So both
-fields are deleted from ``MonitorConfig`` and both branches are removed
-from ``decide()``. These tests lock that in.
+Policy: the monitor takes FULL responsibility for driving a PR until it
+is merged or closed. Volume is not a terminal condition; branch-protection,
+human-defer, and explicit GitHub refusal only produce live ``NotifyHuman``
+wait states. So both fields are deleted from ``MonitorConfig`` and both
+branches are removed from ``decide()``. These tests lock that in.
 """
 
 from __future__ import annotations

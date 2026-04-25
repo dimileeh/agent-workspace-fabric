@@ -20,3 +20,7 @@ def new_operation_id() -> str:
 
 def new_event_id() -> str:
     return f"evt_{uuid4().hex[:24]}"
+
+
+def new_log_stream_id() -> str:
+    return f"log_{uuid4().hex[:24]}"

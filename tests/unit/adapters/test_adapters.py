@@ -21,6 +21,7 @@ from awf.adapters import get_adapter  # noqa: F401 - populates registry via __in
 from awf.adapters.base import AgentRunError
 from awf.adapters.claude_code import ClaudeCodeAdapter
 from awf.adapters.codex import CodexAdapter
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.gemini import GeminiAdapter
 from awf.common.commands import FakeCommandRunner
 from awf.db.enums import AgentRuntime
@@ -44,7 +45,7 @@ class TestCodexAdapter:
     @pytest.mark.unit
     async def test_produces_correct_cli_invocation(self) -> None:
         runner = FakeCommandRunner()
-        adapter = CodexAdapter(runner=runner, default_model="gpt-5")
+        adapter = CodexAdapter(runner=runner, default_model="gpt-5", default_effort="xhigh")
 
         result = await adapter.run(
             compose_project=_COMPOSE_PROJECT,
@@ -72,7 +73,7 @@ class TestCodexAdapter:
         assert "AWF workspace contract" in args[-1]
         assert "--model" in args and "gpt-5" in args
         assert "-c" in args
-        assert any(a.startswith("model_reasoning_effort=") for a in args)
+        assert 'model_reasoning_effort="xhigh"' in args
 
     @pytest.mark.unit
     async def test_no_model_omits_model_flags(self) -> None:
@@ -103,12 +104,29 @@ class TestCodexAdapter:
         assert exc.value.result.returncode == 2
         assert "codex: auth required" in exc.value.result.stderr
 
+    @pytest.mark.unit
+    async def test_closes_stdin_for_noninteractive_exec(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        assert runner.calls[0].input_bytes == b""
+
 
 class TestClaudeCodeAdapter:
     @pytest.mark.unit
     async def test_produces_correct_cli_invocation(self) -> None:
         runner = FakeCommandRunner()
-        adapter = ClaudeCodeAdapter(runner=runner, default_model="sonnet")
+        adapter = ClaudeCodeAdapter(
+            runner=runner,
+            default_model="sonnet",
+            default_effort="xhigh",
+        )
 
         await adapter.run(
             compose_project=_COMPOSE_PROJECT,
@@ -132,6 +150,22 @@ class TestClaudeCodeAdapter:
         assert args[-1].endswith(_PROMPT)
         assert "AWF workspace contract" in args[-1]
         assert "--model" in args and "sonnet" in args
+        assert "--effort" in args and "max" in args
+
+    @pytest.mark.unit
+    async def test_auth_failure_gets_structured_reason_code(self) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="Not logged in · Please run /login")
+        adapter = ClaudeCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+            )
+
+        assert exc.value.reason_code == "AGENT_AUTH_FAILED"
 
 
 class TestGeminiAdapter:
@@ -149,7 +183,11 @@ class TestGeminiAdapter:
         _assert_docker_exec_prefix(args)
 
         gemini_start = args.index("gemini")
-        assert args[gemini_start : gemini_start + 2] == ["gemini", "--yolo"]
+        assert args[gemini_start : gemini_start + 3] == [
+            "gemini",
+            "--skip-trust",
+            "--yolo",
+        ]
         assert args[-2] == "-p"
         # AWF prepends a contract preamble ("do not switch branches")
         # before the user-supplied prompt; the last argv element is
@@ -158,6 +196,53 @@ class TestGeminiAdapter:
         assert args[-1].endswith(_PROMPT)
         assert "AWF workspace contract" in args[-1]
         assert "-m" in args and "gemini-2.5-pro" in args
+
+    @pytest.mark.unit
+    async def test_xhigh_effort_uses_system_settings_wrapper(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = GeminiAdapter(
+            runner=runner,
+            default_model="gemini-3.1-pro",
+            default_effort="xhigh",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+        args = runner.calls[0].args
+        sh_start = args.index("sh")
+        assert args[sh_start : sh_start + 3] == ["sh", "-lc", args[sh_start + 2]]
+        script = args[sh_start + 2]
+        assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in script
+        assert '"thinkingLevel":"HIGH"' in script
+        assert "GEMINI_CLI_TRUST_WORKSPACE" in script
+        assert "exec gemini" in script
+        assert "-m" in args and "gemini-3.1-pro" in args
+        assert args[-1].endswith(_PROMPT)
+
+
+class TestCentralDefaults:
+    @pytest.mark.unit
+    def test_defaults_map_uses_requested_models_and_xhigh_effort(self) -> None:
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-7"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.5"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3.1-pro"
+        assert {d.effort for d in DEFAULT_AGENT_DEFAULTS.values()} == {"xhigh"}
+
+    @pytest.mark.unit
+    def test_get_adapter_applies_full_defaults(self) -> None:
+        runner = FakeCommandRunner()
+
+        codex = get_adapter(
+            AgentRuntime.codex,
+            runner=runner,
+            defaults=DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex],
+        )
+
+        assert codex._default_model == "gpt-5.5"
+        assert codex._default_effort == "xhigh"
 
 
 class TestRegistry:

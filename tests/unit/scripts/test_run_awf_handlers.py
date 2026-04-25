@@ -37,6 +37,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from scripts import run_awf
@@ -192,6 +193,41 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
         await engine.dispose()
 
 
+async def _seed_workspace_db(db_path: Path, workspace_id: str = "ws_existing") -> None:
+    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    factory = make_session_factory(engine)
+    try:
+        async with factory() as session:
+            session.add(
+                Workspace(
+                    id=workspace_id,
+                    status=WorkspaceStatus.completed.value,
+                    repo_url="git@github.com:x/y.git",
+                    branch_base="main",
+                    task_title="existing workspace",
+                    task_prompt="keep me",
+                    agent="codex",
+                    test_commands=[],
+                    requires_database=False,
+                )
+            )
+            await session.commit()
+    finally:
+        await engine.dispose()
+
+
+async def _workspace_exists(db_path: Path, workspace_id: str = "ws_existing") -> bool:
+    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+    factory = make_session_factory(engine)
+    try:
+        async with factory() as session:
+            return await session.get(Workspace, workspace_id) is not None
+    finally:
+        await engine.dispose()
+
+
 @pytest.fixture
 def fake_gitmanager_cls(tmp_path: Path) -> Callable[..., _FakeGitManager]:
     """Returns a class-like factory that also exposes the single instance
@@ -217,11 +253,19 @@ def patch_handlers(
     """Swap every heavy-I/O collaborator in ``scripts.run_awf`` with a
     fake. Returns a dict of hooks the test can inspect."""
     monkeypatch.setattr(run_awf, "GitManager", fake_gitmanager_cls)
-    monkeypatch.setattr(run_awf, "ComposeManager", _FakeComposeManager)
+    compose_instances: list[_FakeComposeManager] = []
+
+    def _compose_ctor(*, work_dir: Path, template_path: Path) -> _FakeComposeManager:
+        inst = _FakeComposeManager(work_dir=work_dir, template_path=template_path)
+        compose_instances.append(inst)
+        return inst
+
+    monkeypatch.setattr(run_awf, "ComposeManager", _compose_ctor)
     monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
 
     executors: list[_FakeExecutor] = []
     monitors: list[_FakeMonitor] = []
+    monitor_builder_calls: list[dict[str, Any]] = []
 
     def _exec_ctor(**kwargs: Any) -> _FakeExecutor:
         e = _FakeExecutor(
@@ -234,11 +278,13 @@ def patch_handlers(
     monkeypatch.setattr(run_awf, "WorkspaceExecutor", _exec_ctor)
 
     def _build_release_monitor(**kwargs: Any) -> _FakeMonitor:
+        monitor_builder_calls.append({"kind": "release", "kwargs": kwargs})
         m = _FakeMonitor(session_factory=kwargs["session_factory"])
         monitors.append(m)
         return m
 
     def _build_feature_monitor(**kwargs: Any) -> _FakeMonitor:
+        monitor_builder_calls.append({"kind": "feature", "kwargs": kwargs})
         m = _FakeMonitor(session_factory=kwargs["session_factory"])
         monitors.append(m)
         return m
@@ -255,6 +301,7 @@ def patch_handlers(
         _build_feature_monitor,
     )
     monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _build_feature_monitor)
+    monkeypatch.setattr(run_awf, "build_release_pr_monitor", _build_release_monitor)
 
     # ValidationRunner + PullRequestCreator + GitHubClient get constructed
     # but their methods aren't exercised because the fake executor never
@@ -273,6 +320,8 @@ def patch_handlers(
         "git_factory": fake_gitmanager_cls,
         "executors": executors,
         "monitors": monitors,
+        "monitor_builder_calls": monitor_builder_calls,
+        "compose_instances": compose_instances,
     }
 
 
@@ -337,6 +386,64 @@ class TestFeatureBranchPrHandler:
         assert execs[0].calls == [ws_id]
 
     @pytest.mark.unit
+    async def test_auto_merge_false_routes_feature_branch_pr_to_manual_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(auto_merge=False),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="tester",
+            git_email="t@example.com",
+        )
+        assert patch_handlers["monitor_builder_calls"][0]["kind"] == "release"
+
+    @pytest.mark.unit
+    async def test_task_grace_override_is_passed_to_feature_pr_monitor(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(initial_review_grace_period_seconds=0),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="tester",
+            git_email="t@example.com",
+        )
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert kwargs["initial_review_grace_period_seconds"] == 0
+
+    @pytest.mark.unit
+    async def test_profile_grace_is_passed_when_task_omits_override(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        patch_handlers: dict[str, Any],
+        tmp_path: Path,
+    ) -> None:
+        await run_awf._run_task(
+            _cfg(
+                profile={
+                    "name": "custom",
+                    "monitor": {"initial_review_grace_period_seconds": 321},
+                },
+            ),
+            work_dir=tmp_path,
+            session_factory=factory,
+            auth_mounts=[],
+            git_name="tester",
+            git_email="t@example.com",
+        )
+        kwargs = patch_handlers["monitor_builder_calls"][0]["kwargs"]
+        assert kwargs["initial_review_grace_period_seconds"] == 321
+
+    @pytest.mark.unit
     async def test_companions_get_materialized_before_compose_up(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -377,6 +484,10 @@ class TestFeatureBranchPrHandler:
         assert main_add["new_branch"] == f"awf/{ws_id}"
         assert "backend" in companion_add["new_branch"]
         assert ws_id in companion_add["new_branch"]  # owner-scoped path fix
+        # Legacy companion specs that depend on postgres now get an explicit
+        # profile service rather than relying on the base template.
+        compose_spec = patch_handlers["compose_instances"][0].ups[0]
+        assert any(s.name == "postgres" for s in compose_spec.services)
 
     @pytest.mark.unit
     async def test_result_shape_contains_contract_fields(
@@ -632,6 +743,7 @@ class TestSyncFeaturePrHandler:
             "awf.runtime.release_pr_monitor.build_feature_pr_monitor", _tiny_feature
         )
         monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _tiny_feature)
+        monkeypatch.setattr(run_awf, "build_release_pr_monitor", _tiny_release)
         monkeypatch.setattr(run_awf, "GitManager", lambda p: _FakeGitManager(p))
         monkeypatch.setattr(run_awf, "ComposeManager", _FakeComposeManager)
         monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
@@ -703,6 +815,7 @@ class TestSyncFeaturePrHandler:
             "awf.runtime.release_pr_monitor.build_feature_pr_monitor", _tiny_feature
         )
         monkeypatch.setattr(run_awf, "build_feature_pr_monitor", _tiny_feature)
+        monkeypatch.setattr(run_awf, "build_release_pr_monitor", _tiny_release)
         monkeypatch.setattr(run_awf, "GitManager", lambda p: _FakeGitManager(p))
         monkeypatch.setattr(run_awf, "ComposeManager", _FakeComposeManager)
         monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
@@ -921,19 +1034,69 @@ class TestMainEntry:
         assert rc == 1
 
     @pytest.mark.unit
-    async def test_main_wipes_db_when_keep_state_false(
+    async def test_main_preserves_existing_db_by_default(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Without ``--keep-state``, a pre-existing awf.db is removed on
-        startup so each run begins with a clean slate. With it, the db
-        survives."""
+        """A reused work dir must not silently replace ``awf.db``.
+
+        The API process may have this SQLite file open while an operator
+        launches another ``run_awf.py`` against the same work dir. If the
+        launcher unlinks the file, the API keeps serving the old anonymous
+        inode while the new run writes to a fresh DB path.
+        """
         work_dir = tmp_path / "work"
         work_dir.mkdir()
-        stale_db = work_dir / "awf.db"
-        stale_db.write_text("stale placeholder")
-        stale_stat = stale_db.stat().st_mtime_ns
+        db_path = work_dir / "awf.db"
+        await _seed_workspace_db(db_path)
+
+        config = tmp_path / "tasks.json"
+        config.write_text(
+            '[{"repo_url": "git@github.com:x/y.git", "branch_base": "main", '
+            '"task_title": "new task", "task_prompt": "p", "agent": "codex", '
+            '"test_commands": [], "requires_database": false}]'
+        )
+        saw_existing_row: list[bool] = []
+
+        async def _fake_run_task_with_guard(cfg, **kwargs):  # type: ignore[no-untyped-def]
+            async with kwargs["session_factory"]() as session:
+                saw_existing_row.append(await session.get(Workspace, "ws_existing") is not None)
+            return {
+                "workspace_id": "ws_new",
+                "title": cfg.task_title,
+                "status": "completed",
+                "pr_url": "https://example/pr/new",
+                "failure_reason": None,
+                "failure_message": None,
+                "branch": "awf/new",
+                "base_commit": "a" * 40,
+            }
+
+        monkeypatch.setattr(
+            run_awf,
+            "_run_task_with_failure_guard",
+            _fake_run_task_with_guard,
+        )
+        fake_home = tmp_path / "fake_home"
+        fake_home.mkdir()
+        monkeypatch.setenv("HOME", str(fake_home))
+
+        await run_awf._main(config_path=config, work_dir=work_dir, keep_state=False)
+
+        assert saw_existing_row == [True]
+        assert await _workspace_exists(db_path)
+
+    @pytest.mark.unit
+    async def test_main_resets_db_only_when_explicitly_requested(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        work_dir = tmp_path / "work"
+        work_dir.mkdir()
+        db_path = work_dir / "awf.db"
+        await _seed_workspace_db(db_path)
 
         config = tmp_path / "tasks.json"
         config.write_text("[]")
@@ -946,13 +1109,14 @@ class TestMainEntry:
         fake_home.mkdir()
         monkeypatch.setenv("HOME", str(fake_home))
 
-        await run_awf._main(config_path=config, work_dir=work_dir, keep_state=False)
-        # DB exists (recreated empty by SQLAlchemy), but is NOT the
-        # stale placeholder.
-        assert stale_db.exists()
-        assert (
-            stale_db.stat().st_mtime_ns != stale_stat or stale_db.read_text() != "stale placeholder"
+        await run_awf._main(
+            config_path=config,
+            work_dir=work_dir,
+            keep_state=False,
+            reset_state=True,
         )
+
+        assert not await _workspace_exists(db_path)
 
 
 class TestBuildAuthMounts:
@@ -963,21 +1127,23 @@ class TestBuildAuthMounts:
         # .claude.json exists as a file
         (tmp_path / ".claude.json").write_text("{}")
         (tmp_path / ".config" / "gh").mkdir(parents=True)
+        (tmp_path / ".config" / "gcloud").mkdir(parents=True)
         (tmp_path / ".gitconfig").write_text("")
         # .gemini and .ssh are missing on purpose
         mounts = run_awf._build_auth_mounts(tmp_path)
         targets = [m.target for m in mounts]
-        assert "/home/agent/.codex" in targets
+        assert "/home/agent/.codex" not in targets
         assert "/home/agent/.claude" in targets
         assert "/home/agent/.claude.json" in targets
         assert "/home/agent/.config/gh" in targets
+        assert "/home/agent/.config/gcloud" in targets
         assert "/home/agent/.gitconfig" in targets
         assert "/home/agent/.gemini" not in targets
         assert "/home/agent/.ssh" not in targets
 
     @pytest.mark.unit
     def test_rw_vs_ro_mount_modes(self, tmp_path: Path) -> None:
-        """Credentials that need in-session writes (codex/claude/gemini
+        """Credentials that need in-session writes (claude/gemini
         caches) must be rw; stable creds (gh, gitconfig, ssh) must be
         ro. The handler's first principle is not letting task runs
         pollute the operator's home — so the ro list is the important
@@ -986,17 +1152,33 @@ class TestBuildAuthMounts:
             (tmp_path / d).mkdir()
         (tmp_path / ".claude.json").write_text("{}")
         (tmp_path / ".config" / "gh").mkdir(parents=True)
+        (tmp_path / ".config" / "gcloud").mkdir(parents=True)
         (tmp_path / ".gitconfig").write_text("")
         (tmp_path / ".ssh").mkdir()
 
         mounts = run_awf._build_auth_mounts(tmp_path)
         by_target = {m.target: m for m in mounts}
-        assert by_target["/home/agent/.codex"].mode == "rw"
+        assert "/home/agent/.codex" not in by_target
         assert by_target["/home/agent/.claude"].mode == "rw"
         assert by_target["/home/agent/.gemini"].mode == "rw"
         assert by_target["/home/agent/.config/gh"].mode == "ro"
+        assert by_target["/home/agent/.config/gcloud"].mode == "ro"
         assert by_target["/home/agent/.gitconfig"].mode == "ro"
         assert by_target["/home/agent/.ssh"].mode == "ro"
+
+    @pytest.mark.unit
+    def test_google_application_credentials_file_is_mounted(self, tmp_path: Path) -> None:
+        credentials = tmp_path / "svc.json"
+        credentials.write_text("{}")
+
+        mounts = run_awf._build_auth_mounts(
+            tmp_path,
+            host_env={"GOOGLE_APPLICATION_CREDENTIALS": str(credentials)},
+        )
+
+        by_target = {m.target: m for m in mounts}
+        assert by_target[str(credentials)].source == str(credentials)
+        assert by_target[str(credentials)].mode == "ro"
 
     @pytest.mark.unit
     def test_missing_home_returns_empty(self, tmp_path: Path) -> None:
@@ -1005,3 +1187,86 @@ class TestBuildAuthMounts:
         empty.mkdir()
         mounts = run_awf._build_auth_mounts(empty)
         assert mounts == []
+
+    @pytest.mark.unit
+    def test_workspace_auth_mounts_seed_isolated_codex_home(self, tmp_path: Path) -> None:
+        host_home = tmp_path / "host"
+        host_codex = host_home / ".codex"
+        host_codex.mkdir(parents=True)
+        (host_codex / "auth.json").write_text('{"token": "redacted"}')
+        (host_codex / "config.toml").write_text("model = 'gpt-5.5'\n")
+        (host_codex / "installation_id").write_text("install-123")
+        (host_codex / "logs_2.sqlite").write_text("do not copy")
+        (host_codex / "sessions").mkdir()
+        (host_codex / "rules").mkdir()
+        (host_codex / "rules" / "default.rules").write_text("rule")
+        base_mount = run_awf.AuthMount(
+            source=str(host_home / ".claude"),
+            target="/home/agent/.claude",
+            mode="rw",
+        )
+
+        mounts = run_awf._workspace_auth_mounts(
+            [base_mount],
+            workspace_id="ws_test",
+            work_dir=tmp_path / "work",
+            host_home=host_home,
+        )
+
+        codex_mount = mounts[0]
+        codex_home = Path(codex_mount.source)
+        assert codex_mount.target == "/home/agent/.codex"
+        assert codex_mount.mode == "rw"
+        assert codex_home == tmp_path / "work" / "auth" / "ws_test" / "codex"
+        assert (codex_home / "auth.json").read_text() == '{"token": "redacted"}'
+        assert (codex_home / "config.toml").read_text() == "model = 'gpt-5.5'\n"
+        assert (codex_home / "installation_id").read_text() == "install-123"
+        assert (codex_home / "rules" / "default.rules").read_text() == "rule"
+        assert not (codex_home / "logs_2.sqlite").exists()
+        assert not (codex_home / "sessions").exists()
+        assert mounts[1] == base_mount
+
+    @pytest.mark.unit
+    def test_workspace_auth_mounts_skip_codex_when_missing(self, tmp_path: Path) -> None:
+        host_home = tmp_path / "host"
+        host_home.mkdir()
+        base_mount = run_awf.AuthMount(
+            source=str(host_home / ".claude"),
+            target="/home/agent/.claude",
+            mode="rw",
+        )
+
+        mounts = run_awf._workspace_auth_mounts(
+            [base_mount],
+            workspace_id="ws_test",
+            work_dir=tmp_path / "work",
+            host_home=host_home,
+        )
+
+        assert mounts == (base_mount,)
+
+
+class TestAgentEnvironmentWithHostAuth:
+    @pytest.mark.unit
+    def test_passes_known_provider_env_as_compose_placeholders(self) -> None:
+        env = run_awf._agent_environment_with_host_auth(
+            (("PYTHONUNBUFFERED", "1"),),
+            host_env={
+                "ANTHROPIC_API_KEY": "secret-anthropic",
+                "GEMINI_API_KEY": "secret-gemini",
+            },
+        )
+
+        assert ("PYTHONUNBUFFERED", "1") in env
+        assert ("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}") in env
+        assert ("GEMINI_API_KEY", "${GEMINI_API_KEY}") in env
+        assert ("ANTHROPIC_API_KEY", "secret-anthropic") not in env
+
+    @pytest.mark.unit
+    def test_profile_env_wins_over_host_passthrough(self) -> None:
+        env = run_awf._agent_environment_with_host_auth(
+            (("GEMINI_API_KEY", "profile-value"),),
+            host_env={"GEMINI_API_KEY": "host-secret"},
+        )
+
+        assert env == (("GEMINI_API_KEY", "profile-value"),)

@@ -37,8 +37,18 @@ def _thread(tid: str = "T1", body: str = "fix this", is_resolved: bool = False) 
     )
 
 
-def _review(cid: str = "C1", body: str = "see below", is_resolved: bool = False) -> ReviewComment:
-    return ReviewComment(comment_id=cid, body_excerpt=body, is_resolved=is_resolved)
+def _review(
+    cid: str = "C1",
+    body: str = "see below",
+    is_resolved: bool = False,
+    blocks_merge: bool = False,
+) -> ReviewComment:
+    return ReviewComment(
+        comment_id=cid,
+        body_excerpt=body,
+        is_resolved=is_resolved,
+        blocks_merge=blocks_merge,
+    )
 
 
 def _status(
@@ -179,6 +189,48 @@ class TestAddressComments:
         state = MonitorState(threads_addressed_ids={"C_done": "false_positive"})
         action = decide(_status(reviews=(c,)), state, MonitorConfig())
         assert isinstance(action, Merge)
+
+    @pytest.mark.unit
+    def test_policy_blocker_notifies_human_instead_of_addressing(self) -> None:
+        c = _review(
+            "issue:77",
+            body="Review skipped. Trigger review before merging.",
+            blocks_merge=True,
+        )
+        action = decide(
+            _status(reviews=(c,)),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, NotifyHuman)
+
+    @pytest.mark.unit
+    def test_fixable_comments_win_over_policy_blocker(self) -> None:
+        t = _thread("T_fresh")
+        blocker = _review(
+            "issue:77",
+            body="Review skipped. Trigger review before merging.",
+            blocks_merge=True,
+        )
+        action = decide(
+            _status(inline=(t,), reviews=(blocker,)),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, AddressComments)
+        assert action.threads == (t,)
+        assert action.review_comments == ()
+
+    @pytest.mark.unit
+    def test_non_blocking_review_comment_still_routes_to_fix_cycle(self) -> None:
+        c = _review("C_fresh", body="please rename this")
+        action = decide(
+            _status(reviews=(c,)),
+            MonitorState(),
+            MonitorConfig(auto_merge=True),
+        )
+        assert isinstance(action, AddressComments)
+        assert action.review_comments == (c,)
 
 
 # ── CI failure ─────────────────────────────────────────────────────────────
@@ -471,7 +523,7 @@ class TestConflictingAbort:
         assert isinstance(action, AddressComments)
 
 
-# ── Terminal success — Merge / NotifyHuman ─────────────────────────────────
+# ── Green-gate actions — Merge / NotifyHuman ────────────────────────────────
 
 
 class TestTerminalSuccess:
@@ -488,7 +540,7 @@ class TestTerminalSuccess:
     @pytest.mark.unit
     def test_release_variant_never_reaches_merge(self) -> None:
         """Release-PR variant's ONLY divergence from the feature-PR flow is
-        at the terminal-success gate. Every other action is identical."""
+        at the green-gates action. Every other action is identical."""
         # Test several non-terminal states to assert same action as feature PR.
         cfg_feat = MonitorConfig(auto_merge=True)
         cfg_rel = MonitorConfig(auto_merge=False)

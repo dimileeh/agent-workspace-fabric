@@ -21,9 +21,9 @@ Behaviour:
      ``<work_dir>/feature-pr-specs/<slug>-feature-pr<N>.json``.
   3. If a ``run_awf.py`` process is already driving that spec,
      exit 0 without re-spawning (idempotency).
-  4. Otherwise, ``Popen`` ``run_awf.py --config <spec> --work-dir <dir>
-     --keep-state`` and detach. The monitor runs in its own process
-     group so this script can exit cleanly while the monitor lives.
+  4. Otherwise, ``Popen`` ``run_awf.py --config <spec> --work-dir <dir>``
+     and detach. The monitor runs in its own process group so this
+     script can exit cleanly while the monitor lives.
 
 Exit codes:
   0 — spec written + monitor spawned (or no-op because a monitor was
@@ -50,7 +50,7 @@ import subprocess
 import sys
 from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(_ROOT / "src"))
@@ -234,8 +234,9 @@ async def orchestrate_attach(
         # run_awf.py expects a LIST of task specs — wrap ours in one.
         spec_path.write_text(json.dumps([spec], indent=2))
 
-        # Spawn run_awf.py detached. We pass --keep-state so the shared
-        # SQLite DB in work_dir isn't wiped on startup.
+        # Spawn run_awf.py detached. --keep-state is retained for
+        # compatibility with older runners; current run_awf.py preserves
+        # the shared SQLite DB by default.
         #
         # ``sys.executable`` (not a hardcoded ``.venv/bin/python``) so the
         # script works under ``uv run``, system python, or a venv rooted
@@ -266,7 +267,7 @@ async def orchestrate_attach(
 
 
 def _load_companions(path: Path) -> list[dict[str, Any]]:
-    return json.loads(path.read_text())
+    return cast(list[dict[str, Any]], json.loads(path.read_text()))
 
 
 async def _main(ns: argparse.Namespace) -> int:

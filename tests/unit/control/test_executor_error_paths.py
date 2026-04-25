@@ -188,7 +188,13 @@ class TestUnexpectedErrorDuringAgentRun:
         class _BoomAdapter(adapter_base.AgentAdapter):
             runtime = AgentRuntime.codex
 
-            def __init__(self, *, runner: Any = None, default_model: Any = None) -> None:
+            def __init__(
+                self,
+                *,
+                runner: Any = None,
+                default_model: Any = None,
+                default_effort: Any = None,
+            ) -> None:
                 pass
 
             @property

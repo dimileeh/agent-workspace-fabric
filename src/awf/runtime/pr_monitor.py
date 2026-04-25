@@ -24,8 +24,9 @@ Design notes:
   thread is already addressed, ``decide`` skips to the other gates.
 * **Release-PR variant** (``task_kind="monitor_release_pr"``) differs in
   exactly one place: when all 5 gates are green it returns
-  ``NotifyHuman`` instead of ``Merge``. The caller flips
-  ``config.auto_merge`` accordingly.
+  ``NotifyHuman`` instead of ``Merge``. The runner treats that as a live
+  wait state, not a terminal completion, and keeps polling until the PR
+  is actually merged or closed.
 """
 
 from __future__ import annotations
@@ -100,13 +101,18 @@ class ReviewThread:
 class ReviewComment:
     """A review-level (outside-diff) comment — CodeRabbit summary, etc.
 
-    No file/line anchor. Still must be resolved under gate #2.
+    No file/line anchor. Still must be resolved under the review-comment
+    gate unless it represents a policy blocker.
     """
 
     comment_id: str
     body_excerpt: str
     author: str | None = None
     is_resolved: bool = False
+    blocks_merge: bool = False
+    """True for policy/checklist comments that the coding CLI cannot
+    resolve by editing code, for example a bot saying review was skipped
+    and exposing an unchecked "trigger review" task."""
 
 
 @dataclass(frozen=True)
@@ -176,14 +182,23 @@ class MonitorConfig:
     conditions. In practice the cap fired on legitimate PRs with heavy
     bot review (5 reviewers × N cycles each > 10 iterations), stranding
     green-CI PRs behind an Abort. Policy now: the monitor drives every
-    PR to ``Merge`` / ``NotifyHuman`` no matter the volume; the only
-    terminal NotifyHuman paths are branch-protection and human-defer."""
+    PR until it is merged or closed no matter the volume; NotifyHuman is
+    only a live wait state for branch-protection and human-defer."""
 
     auto_merge: bool = True  # False = release-PR variant
     # Only used by the RUNNER, not decide(); listed here so the full config
     # travels in one object.
     poll_interval_seconds: float = 60.0
     settle_interval_seconds: float = 30.0
+    initial_review_grace_period_seconds: float = 900.0
+    """One-time wait after the PR first enters monitoring before the first
+    auto-merge. This gives slow first-pass reviewers time to post feedback.
+    It is PR-scoped, not HEAD-scoped, and never restarts after fix commits."""
+
+    pre_merge_settle_seconds: float = 90.0
+    """Final quiet-period wait before an auto-merge. Review apps often
+    post comments shortly after checks first turn green; merging on the
+    first green snapshot can race those reviewers."""
 
 
 # ── Actions — the vocabulary decide() returns to the runner ────────────────
@@ -243,7 +258,12 @@ class Merge:
 
 @dataclass(frozen=True)
 class NotifyHuman:
-    """Release-PR variant: post a 'ready to merge' comment, exit completed."""
+    """Post a human-attention comment and keep monitoring.
+
+    This is deliberately not terminal. A monitor owns the PR until it is
+    merged, closed, or fails; human-attention comments are just status
+    notifications while the workspace remains alive.
+    """
 
 
 @dataclass(frozen=True)
@@ -317,28 +337,31 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         probably waiting for the reviewer to actually mark them
         resolved on GitHub after our push, or the GraphQL query was
         stale; either way, gate forward to CI/merge checks.
-    3.  CI FAILURE → ReportCiFailure.
-    4.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
+        Policy/checklist blockers are excluded from this batch because
+        the coding CLI cannot fix them.
+    3.  Policy/checklist blockers that cannot be code-fixed →
+        NotifyHuman.
+    4.  CI FAILURE → ReportCiFailure.
+    5.  CI PENDING (or mergeable UNKNOWN with no other blocker) →
         WaitForCI (does not consume an iteration).
-    5.  Legacy ``mergeable == CONFLICTING`` (without the richer
+    6.  Legacy ``mergeable == CONFLICTING`` (without the richer
         mergeStateStatus / BEHIND / DIRTY signal) → SyncBase. The
         coding CLI gets a chance to resolve via the
         `git merge origin/<base>` + fix cycle; runs AFTER comments so
         a mergeable-CONFLICTING PR's conflict + comments can be fixed
         in one CLI pass.
-    6.  ``merge_state_status`` BLOCKED / HAS_HOOKS (branch protection
+    7.  ``merge_state_status`` BLOCKED / HAS_HOOKS (branch protection
         or required-review) → NotifyHuman regardless of auto_merge.
-    7.  Deferred HUMAN feedback still unresolved on GitHub →
+    8.  Deferred HUMAN feedback still unresolved on GitHub →
         NotifyHuman. Deferred BOT feedback does not block — bots
         can't themselves mark threads resolved, so their deferred
         nits would linger forever.
-    8.  All green → Merge (or NotifyHuman if auto_merge=False).
+    9.  All green → Merge (or NotifyHuman if auto_merge=False).
 
     There is NO iteration or wall-clock budget gate — volume is not a
     terminal condition. A PR that attracts 500 comment cycles is fine
     as long as the monitor keeps making progress; the only way to exit
-    is Merge, ShortCircuitCompleted, Abort(pr_closed_externally), or
-    NotifyHuman.
+    is Merge, ShortCircuitCompleted, or Abort(pr_closed_externally).
     """
 
     # 0. Terminal upstream states short-circuit everything.
@@ -377,6 +400,9 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
         return SyncBase()
 
     # 2. Unresolved comments, filtered to those we haven't handled yet.
+    # Policy/checklist blockers remain visible to the merge gate, but are
+    # not sent to the coding CLI: no code edit can click a review-bot
+    # "Trigger review" checkbox or change organization review settings.
     new_threads = tuple(
         t
         for t in status.unresolved_inline_threads
@@ -385,10 +411,19 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     new_reviews = tuple(
         c
         for c in status.unresolved_review_comments
-        if c.comment_id not in state.threads_addressed_ids
+        if not c.blocks_merge and c.comment_id not in state.threads_addressed_ids
     )
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)
+
+    # 3. Policy/checklist blockers that cannot be code-fixed must stop
+    # auto-merge, but they must not terminate the monitor. Example:
+    # Review bots can post top-level policy/checklist blockers that require
+    # an external action rather than a code edit. The runner posts a single
+    # human-attention comment and keeps polling so later code-review comments
+    # are still handled.
+    if any(c.blocks_merge for c in status.unresolved_review_comments):
+        return NotifyHuman()
 
     # 4. CI failures.
     if status.check_state == CheckState.FAILURE:
@@ -419,7 +454,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     # here too; that fix (base_behind_count fallback) is preserved at
     # step 1 above.
 
-    # 5. Legacy ``mergeable == CONFLICTING`` without the richer
+    # 6. Legacy ``mergeable == CONFLICTING`` without the richer
     # mergeStateStatus signal — same treatment as DIRTY: let SyncBase
     # attempt to reproduce + resolve. Runs AFTER comments because a
     # mergeable CONFLICTING PR is often resolvable in the same pass as
@@ -428,7 +463,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if status.mergeable == MergeableState.CONFLICTING:
         return SyncBase()
 
-    # 6. Branch protection / required-review blocker → hand off to human
+    # 7. Branch protection / required-review blocker → hand off to human
     # regardless of auto_merge setting. Monitor can't bypass branch
     # protection; the only useful action is to tell the maintainer the
     # PR is otherwise ready.
@@ -438,7 +473,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     ):
         return NotifyHuman()
 
-    # 7. Deferred HUMAN feedback still unresolved on GitHub → block
+    # 8. Deferred HUMAN feedback still unresolved on GitHub → block
     # auto-merge. Deferred BOT feedback does not block.
     #
     # "Defer" means the coding CLI decided a reviewer comment needs
@@ -463,7 +498,7 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     if has_human_defer:
         return NotifyHuman()
 
-    # 8. All green — terminal success action.
+    # 9. All green — terminal success action.
     if config.auto_merge:
         return Merge()
     return NotifyHuman()

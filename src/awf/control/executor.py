@@ -16,14 +16,15 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.base import AgentAdapter, AgentRunError, get_adapter
+from awf.adapters.base import AgentAdapter, AgentDefaults, AgentRunError, get_adapter
+from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
 from awf.common.commands import AsyncCommandRunner
 from awf.common.logging import get_logger
 from awf.control.validation_fix_cycle import (
@@ -35,6 +36,9 @@ from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeManager
+from awf.profiles.models import WorkspaceProfile
+from awf.profiles.resolver import resolve_workspace_profile
+from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationRunner
 
@@ -63,8 +67,11 @@ class ExecutorConfig:
     compose_projects_root: Path
     """Where per-workspace compose.yml was rendered by the Provisioner."""
 
-    default_models: dict[AgentRuntime, str]
-    """Default LLM model to pass each adapter when the request doesn't set one."""
+    default_models: Mapping[AgentRuntime, str] | None = None
+    """Legacy model-only overrides. Prefer ``agent_defaults`` for new code."""
+
+    agent_defaults: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS
+    """Default model and effort policy for each agent runtime."""
 
     max_validation_fix_passes: int = 5
     """Maximum fix attempts on validation failure. After the initial agent
@@ -88,6 +95,7 @@ class WorkspaceExecutor:
         config: ExecutorConfig,
         pr_monitor: _MonitorRunnerProto | None = None,
         pr_monitor_factory: Callable[[AgentAdapter], _MonitorRunnerProto] | None = None,
+        log_store: LogStore | None = None,
     ) -> None:
         """``pr_monitor`` and ``pr_monitor_factory`` are mutually exclusive
         optional hooks that wire the ``monitoring_pr`` stage:
@@ -113,6 +121,7 @@ class WorkspaceExecutor:
         self._config = config
         self._pr_monitor = pr_monitor
         self._pr_monitor_factory = pr_monitor_factory
+        self._log_store = log_store
 
     async def execute(self, workspace_id: str) -> None:
         """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
@@ -132,13 +141,41 @@ class WorkspaceExecutor:
         # ── Step 1: agent CLI runs the task inside the container ────────────
         try:
             agent = AgentRuntime(ws.agent)
-            default_model = self._config.default_models.get(agent)
-            adapter = get_adapter(agent, runner=self._runner, default_model=default_model)
+            defaults = self._defaults_for(agent)
+            default_model = defaults.model if defaults else None
+            adapter = get_adapter(
+                agent,
+                runner=self._runner,
+                defaults=defaults,
+                log_store=self._log_store,
+            )
+            profile = _profile_for_workspace(ws, worktree_path=worktree_path)
+            setup_result = await self._validation.run_profile_phases(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+                phase_names=("setup", "pre_agent"),
+            )
+            if not setup_result.all_passed:
+                first_fail = setup_result.first_failure
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=_failure_reason_for_phase(first_fail),
+                    message=(
+                        f"profile setup failed: {first_fail.command}"
+                        if first_fail is not None
+                        else "profile setup failed"
+                    )[:2000],
+                )
+                return
             await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 prompt=ws.task_prompt,
                 model=default_model,
+                workspace_id=workspace_id,
             )
             agent_exit_note = None
         except AgentRunError as exc:
@@ -470,18 +507,23 @@ class WorkspaceExecutor:
         await self._transition(workspace_id, to=WorkspaceStatus.validating, reason="AGENT_RUN_OK")
 
         max_fix_passes = self._config.max_validation_fix_passes
-        test_commands_tuple = tuple(ws.test_commands)
+        profile = _profile_for_workspace(ws, worktree_path=worktree_path)
+        validation_commands = [
+            command.command
+            for _, command in profile.phases.commands_for(("post_agent", "validate"))
+        ]
+        test_commands_tuple = tuple(validation_commands)
         last_failure_message: str | None = None
         for pass_number in range(max_fix_passes + 1):
             # pass_number == 0 is the initial run (already-committed agent
             # work). 1..N are fix attempts driven by the retry prompt.
-            val_result = await self._validation.run(
+            val_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
-                test_commands=list(ws.test_commands),
-                requires_database=ws.requires_database,
-                workspace_worktree=worktree_path,
+                profile=profile,
+                phase_names=("post_agent", "validate"),
+                run_healthchecks=True,
             )
             if val_result.all_passed:
                 if pass_number > 0:
@@ -510,7 +552,7 @@ class WorkspaceExecutor:
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.validating,
-                    failure_reason=FailureReason.validation_failure,
+                    failure_reason=_failure_reason_for_phase(first_fail),
                     message=(
                         last_failure_message
                         + (f" (after {max_fix_passes} fix attempts)" if max_fix_passes > 0 else "")
@@ -543,6 +585,7 @@ class WorkspaceExecutor:
                     compose_file=compose_file,
                     prompt=fix_prompt,
                     model=default_model,
+                    workspace_id=workspace_id,
                 )
             except AgentRunError as exc:
                 # Coding CLI exited non-zero on the fix pass. Mirrors the
@@ -678,6 +721,13 @@ class WorkspaceExecutor:
 
     # ── Internals ──────────────────────────────────────────────────────────
 
+    def _defaults_for(self, agent: AgentRuntime) -> AgentDefaults | None:
+        defaults = defaults_with_model_overrides(
+            self._config.default_models,
+            base=self._config.agent_defaults,
+        )
+        return defaults.get(agent)
+
     async def _claim_ready(self, workspace_id: str) -> Workspace | None:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -757,5 +807,35 @@ def _build_pr_body(ws: Workspace) -> str:
         f"{external_id}\n\n"
         f"### Task\n{ws.task_prompt}\n\n"
         f"---\nValidation: "
-        f"{len(ws.test_commands)} test command(s) passed inside the workspace container.\n"
+        f"{_validation_command_count(ws)} profile command(s) passed inside the workspace container.\n"
     )
+
+
+def _profile_for_workspace(ws: Workspace, *, worktree_path: Path) -> WorkspaceProfile:
+    if ws.resolved_profile:
+        return WorkspaceProfile.model_validate(ws.resolved_profile)
+    return resolve_workspace_profile(
+        worktree_path=worktree_path,
+        inline_profile=ws.requested_profile,
+        profile_ref=ws.profile_ref or ws.env_profile or "auto",
+        validation_commands=list(ws.test_commands),
+    ).profile
+
+
+def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
+    phase = getattr(first_fail, "phase", None)
+    reason_code = getattr(first_fail, "reason_code", None)
+    if phase == "healthcheck":
+        return FailureReason.health_check_failure
+    if reason_code == "PHASE_TIMEOUT":
+        return FailureReason.phase_timeout
+    if phase in {"setup", "pre_agent"}:
+        return FailureReason.service_startup_failure
+    return FailureReason.validation_failure
+
+
+def _validation_command_count(ws: Workspace) -> int:
+    if ws.resolved_profile:
+        profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+        return len(profile.phases.post_agent) + len(profile.phases.validate_commands)
+    return len(ws.test_commands)

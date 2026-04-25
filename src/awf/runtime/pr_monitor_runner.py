@@ -15,8 +15,10 @@ The loop:
     arriving, and only push once a short settle window passes with no
     new activity. After the push, resolve the threads we addressed.
 6.  Persist updated state.
-7.  ``Merge`` / ``NotifyHuman`` / ``Abort`` / ``ShortCircuitCompleted``
-    are terminal — the runner transitions the workspace and returns.
+7.  ``Merge`` / ``Abort`` / ``ShortCircuitCompleted`` are terminal — the
+    runner transitions the workspace and returns. ``NotifyHuman`` is a
+    live wait state: the runner posts a deduped status comment and keeps
+    polling until the PR is merged, closed, or becomes actionable again.
 """
 
 from __future__ import annotations
@@ -25,9 +27,10 @@ import asyncio
 import json
 import os
 import re
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -52,6 +55,7 @@ from awf.runtime.pr_monitor import (
     AddressComments,
     CheckFailure,
     Merge,
+    MergeStateStatus,
     MonitorAction,
     MonitorConfig,
     MonitorState,
@@ -144,6 +148,12 @@ class PullRequestMonitorRunner:
                 return
 
             state = self._load_state(ws)
+            if ws.monitor_started_at is None:
+                # Legacy/remonitor rows may enter the runner without the
+                # repository transition stamp. Persist before any action can
+                # sleep, otherwise a restart during the initial review grace
+                # window would start that window over.
+                await self._persist_state(workspace_id, state)
             repo = RepoRef.from_url(ws.repo_url)
             pr_number = ws.pr_number
             if pr_number is None:
@@ -161,32 +171,13 @@ class PullRequestMonitorRunner:
                 )
                 return
 
-            # Refresh the worktree's remote-tracking ref BEFORE counting
-            # how far behind we are. Without this, origin/<base> is frozen
-            # at the time of the initial ``git worktree add`` and the
-            # count silently returns 0 even after the base branch has
-            # advanced on GitHub — the exact bug that let PR #335 / #336
-            # exit as "ready to merge" when they were BEHIND.
-            await self._fetch_base(
-                worktree_path=self._worktrees_root / workspace_id,
-                base_branch=ws.branch_base,
-            )
-            base_behind = await self._count_base_behind(
-                worktree_path=self._worktrees_root / workspace_id,
-                base_branch=ws.branch_base,
-            )
             try:
-                status = await self._deps.gh.fetch_pr_status(
-                    repo=repo, pr_number=pr_number, base_behind_count=base_behind
+                status = await self._fetch_status_for_decision(
+                    repo=repo,
+                    pr_number=pr_number,
+                    workspace_id=workspace_id,
+                    base_branch=ws.branch_base,
                 )
-                # If we got FAILURE we want the per-check logs for the prompt.
-                if status.check_state.value == "FAILURE":
-                    failures = await self._deps.gh.fetch_failing_check_logs(
-                        repo=repo,
-                        pr_number=pr_number,
-                        head_sha=status.head_sha,
-                    )
-                    status = _with_ci_failures(status, failures)
             except GitHubClientError as exc:
                 await self._terminate_failed(
                     workspace_id,
@@ -371,6 +362,78 @@ class PullRequestMonitorRunner:
             return False
 
         if isinstance(action, Merge):
+            grace_wait_seconds = _initial_review_grace_wait_seconds(
+                state,
+                pr_number=pr_number,
+                now=time.monotonic(),
+                grace_seconds=self._config.initial_review_grace_period_seconds,
+                poll_interval_seconds=self._config.poll_interval_seconds,
+            )
+            if grace_wait_seconds > 0:
+                _log.info(
+                    "monitor.initial_review_grace_waiting",
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    wait_seconds=grace_wait_seconds,
+                    grace_seconds=self._config.initial_review_grace_period_seconds,
+                    head_sha=status.head_sha[:10],
+                )
+                await self._deps.sleep(grace_wait_seconds)
+                return False
+
+            if self._config.pre_merge_settle_seconds > 0:
+                await self._deps.sleep(self._config.pre_merge_settle_seconds)
+                try:
+                    fresh_status = await self._fetch_status_for_decision(
+                        repo=repo,
+                        pr_number=pr_number,
+                        workspace_id=workspace_id,
+                        base_branch=base_branch,
+                    )
+                except GitHubClientError as exc:
+                    await self._terminate_failed(
+                        workspace_id,
+                        message=f"monitor: github error during pre-merge recheck: {exc}"[:2000],
+                    )
+                    return True
+                fresh_action = decide(fresh_status, state, self._config)
+                if not isinstance(fresh_action, Merge):
+                    _log.info(
+                        "monitor.pre_merge_recheck_changed_action",
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        original_action="Merge",
+                        fresh_action=type(fresh_action).__name__,
+                        head_sha=fresh_status.head_sha[:10],
+                        unresolved_threads=len(fresh_status.unresolved_inline_threads),
+                        unresolved_reviews=len(fresh_status.unresolved_review_comments),
+                        check_state=fresh_status.check_state.value,
+                        merge_state=(
+                            fresh_status.merge_state_status.value
+                            if fresh_status.merge_state_status
+                            else None
+                        ),
+                    )
+                    # This re-enters the dispatcher at most one stack frame
+                    # deeper: the original action was Merge, and we only
+                    # recurse when the refreshed decision is explicitly not
+                    # Merge. Non-Merge actions do not perform this pre-merge
+                    # recheck, so decision oscillation is handled by the
+                    # outer monitor loop rather than recursive growth.
+                    return await self._execute(
+                        action=fresh_action,
+                        workspace_id=workspace_id,
+                        repo=repo,
+                        pr_number=pr_number,
+                        status=fresh_status,
+                        state=state,
+                        base_branch=base_branch,
+                        remote_branch=remote_branch,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                    )
+                status = fresh_status
+
             try:
                 merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
             except GitHubClientError as exc:
@@ -381,26 +444,15 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     stderr=exc.stderr,
                 )
-                await self._deps.gh.post_comment(
+                await self._post_human_notification_once(
                     repo=repo,
                     pr_number=pr_number,
-                    body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
-                )
-                self._write_defer_signal(
-                    workspace_id=workspace_id,
-                    pr_number=pr_number,
-                    terminal_action="Merge",
-                    merged=False,
                     status=status,
                     state=state,
+                    blocker_reason=_merge_rejection_reason(exc.stderr),
                 )
-                await self._terminate_completed(
-                    workspace_id,
-                    pr_merge_sha=None,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                )
-                return True
+                await self._deps.sleep(self._config.poll_interval_seconds)
+                return False
             self._write_defer_signal(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
@@ -418,30 +470,57 @@ class PullRequestMonitorRunner:
             return True
 
         if isinstance(action, NotifyHuman):
-            await self._deps.gh.post_comment(
+            await self._post_human_notification_once(
                 repo=repo,
                 pr_number=pr_number,
-                body=ready_to_merge_comment(pr_number=pr_number, head_sha=status.head_sha),
-            )
-            self._write_defer_signal(
-                workspace_id=workspace_id,
-                pr_number=pr_number,
-                terminal_action="NotifyHuman",
-                merged=False,
                 status=status,
                 state=state,
             )
-            await self._terminate_completed(
-                workspace_id,
-                pr_merge_sha=None,
-                compose_project=compose_project,
-                compose_file=compose_file,
-            )
-            return True
+            await self._deps.sleep(self._config.poll_interval_seconds)
+            return False
 
         # If we got here the MonitorAction union gained a variant without
         # a dispatch arm — fail loudly so tests catch it.
         raise RuntimeError(f"unhandled monitor action: {action!r}")  # pragma: no cover
+
+    async def _post_human_notification_once(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        status: PRStatus,
+        state: MonitorState,
+        blocker_reason: str | None = None,
+    ) -> None:
+        """Post a human-facing status comment once per HEAD/reason.
+
+        ``NotifyHuman`` no longer completes the workspace. Without a
+        dedupe key, a live monitor would spam the same PR every poll while
+        waiting for a manual merge, a branch-protection setting, or a
+        review-bot checklist to clear.
+        """
+        reason = (
+            blocker_reason if blocker_reason is not None else _notify_human_reason(status, state)
+        )
+        key = _notification_key(head_sha=status.head_sha, blocker_reason=reason)
+        if state.threads_addressed_ids.get(key) == "notified":
+            _log.info(
+                "monitor.notify_human_already_posted",
+                pr_number=pr_number,
+                head_sha=status.head_sha[:10],
+                reason=reason,
+            )
+            return
+        await self._deps.gh.post_comment(
+            repo=repo,
+            pr_number=pr_number,
+            body=ready_to_merge_comment(
+                pr_number=pr_number,
+                head_sha=status.head_sha,
+                blocker_reason=reason,
+            ),
+        )
+        state.mark_addressed(key, "notified")
 
     # ── AddressComments / fix_cycle ────────────────────────────────────────
 
@@ -506,7 +585,7 @@ class PullRequestMonitorRunner:
             new_reviews = [
                 c
                 for c in status.unresolved_review_comments
-                if c.comment_id not in state.threads_addressed_ids
+                if not c.blocks_merge and c.comment_id not in state.threads_addressed_ids
             ]
             if not new_threads and not new_reviews:
                 break  # burst settled
@@ -525,6 +604,13 @@ class PullRequestMonitorRunner:
             # resolve the non-defer threads on GitHub.
             pass
 
+        # Record the pushed HEAD before resolving review threads. The
+        # pushed commit is local git state; a transient GraphQL resolve
+        # failure should not affect the monitor's push bookkeeping.
+        if pushed:
+            head_sha = await self._rev_parse_head(worktree_path)
+            state.last_push_sha = head_sha
+
         # 4) Resolve threads on GitHub. Only inline threads have IDs we can
         # resolve via the GraphQL mutation; review-level comments are
         # marked addressed in state and the reviewer's re-read usually
@@ -538,13 +624,12 @@ class PullRequestMonitorRunner:
                     thread_id=tid,
                     stderr=exc.stderr,
                 )
-                # Do NOT drop out of the monitor — next outer poll will
-                # see the thread still unresolved and retry.
-
-        # 5) Update last_push_sha.
-        if pushed:
-            head_sha = await self._rev_parse_head(worktree_path)
-            state.last_push_sha = head_sha
+                # Do NOT drop out of the monitor. Also do not keep the
+                # thread in addressed-state: decide() filters addressed
+                # IDs before it returns AddressComments, so retaining a
+                # failed resolve would make the next poll treat an open
+                # GitHub thread as handled forever.
+                state.threads_addressed_ids.pop(tid, None)
 
     async def _address_thread(
         self,
@@ -813,6 +898,39 @@ class PullRequestMonitorRunner:
         )
         return False
 
+    async def _fetch_status_for_decision(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        workspace_id: str,
+        base_branch: str,
+    ) -> PRStatus:
+        """Fetch the full PR snapshot used by the decision core.
+
+        Includes the local base-behind calculation and, for failing CI,
+        per-check logs. The same path is used for the main loop and the
+        pre-merge recheck so the final merge gate cannot accidentally use
+        weaker data than ordinary polling.
+        """
+        worktree_path = self._worktrees_root / workspace_id
+        await self._fetch_base(worktree_path=worktree_path, base_branch=base_branch)
+        base_behind = await self._count_base_behind(
+            worktree_path=worktree_path,
+            base_branch=base_branch,
+        )
+        status = await self._deps.gh.fetch_pr_status(
+            repo=repo, pr_number=pr_number, base_behind_count=base_behind
+        )
+        if status.check_state.value == "FAILURE":
+            failures = await self._deps.gh.fetch_failing_check_logs(
+                repo=repo,
+                pr_number=pr_number,
+                head_sha=status.head_sha,
+            )
+            status = _with_ci_failures(status, failures)
+        return status
+
     # ── Defer-signal artifact ─────────────────────────────────────────────
 
     def _write_defer_signal(
@@ -875,7 +993,8 @@ class PullRequestMonitorRunner:
         started_raw = ws.monitor_started_at
         # ``MonitorState.started_at`` is monotonic; tests prefer wall-clock
         # semantics so we reconstruct by subtracting the elapsed seconds.
-        # If monitor_started_at is unset (just entered monitoring_pr), use now.
+        # If monitor_started_at is unset (legacy/remonitor row), use now; run()
+        # persists it before actions that can sleep.
         import time as _time  # local to avoid confusion with datetime above
 
         if started_raw is None:
@@ -903,7 +1022,8 @@ class PullRequestMonitorRunner:
             if state.last_push_sha is not None:
                 ws.monitor_last_commit_sha = state.last_push_sha
             if ws.monitor_started_at is None:
-                ws.monitor_started_at = datetime.now(UTC)
+                elapsed_seconds = max(time.monotonic() - state.started_at, 0.0)
+                ws.monitor_started_at = datetime.now(UTC) - timedelta(seconds=elapsed_seconds)
             await s.commit()
 
     async def _terminate_completed(
@@ -1058,6 +1178,78 @@ def _with_ci_failures(status: PRStatus, failures: tuple[CheckFailure, ...]) -> P
     from dataclasses import replace
 
     return replace(status, ci_failures=failures)
+
+
+def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
+    if any(c.blocks_merge for c in status.unresolved_review_comments):
+        return (
+            "a review bot reported that review was skipped or left a trigger-review "
+            "checklist unresolved"
+        )
+    if status.merge_state_status in (MergeStateStatus.BLOCKED, MergeStateStatus.HAS_HOOKS):
+        return (
+            f"GitHub reports merge state {status.merge_state_status.value}; "
+            "required protection or review hooks need a human"
+        )
+    _, human_deferred = _collect_defer_items(status, state)
+    if human_deferred:
+        return "human review feedback was deferred by the agent and remains unresolved"
+    return None
+
+
+def _merge_rejection_reason(stderr: str) -> str:
+    detail = " ".join(stderr.split())[:240]
+    if detail:
+        return f"GitHub rejected the merge attempt: {detail}"
+    return "GitHub rejected the merge attempt"
+
+
+def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
+    reason = blocker_reason or "ready-to-merge"
+    return f"__awf_notify__:{head_sha}:{reason}"
+
+
+def _initial_review_grace_started_key(pr_number: int) -> str:
+    return f"__awf_initial_review_grace_started__:{pr_number}"
+
+
+def _initial_review_grace_done_key(pr_number: int) -> str:
+    return f"__awf_initial_review_grace_done__:{pr_number}"
+
+
+def _initial_review_grace_wait_seconds(
+    state: MonitorState,
+    *,
+    pr_number: int,
+    now: float,
+    grace_seconds: float,
+    poll_interval_seconds: float,
+) -> float:
+    """Return the one-time initial-review wait, mutating persisted state.
+
+    The key is PR-scoped rather than HEAD-scoped by design: the grace window
+    starts when the workspace enters ``monitoring_pr`` and must not restart
+    when AWF pushes fix commits.
+    """
+
+    if grace_seconds <= 0:
+        return 0.0
+
+    done_key = _initial_review_grace_done_key(pr_number)
+    if state.threads_addressed_ids.get(done_key) == "elapsed":
+        return 0.0
+
+    started_key = _initial_review_grace_started_key(pr_number)
+    started_at = state.started_at
+    if started_key not in state.threads_addressed_ids:
+        state.mark_addressed(started_key, f"{started_at:.6f}")
+
+    remaining_seconds = grace_seconds - max(now - started_at, 0.0)
+    if remaining_seconds <= 0:
+        state.mark_addressed(done_key, "elapsed")
+        return 0.0
+
+    return min(poll_interval_seconds, remaining_seconds)
 
 
 def _collect_defer_items(

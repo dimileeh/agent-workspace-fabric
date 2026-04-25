@@ -1,8 +1,9 @@
 """Defer-signal artifact at terminal transitions.
 
-On each terminal ``MonitorAction`` dispatch (``Merge`` / ``NotifyHuman`` /
+On each terminal ``MonitorAction`` dispatch (``Merge`` /
 ``ShortCircuitCompleted`` / ``Abort``) the runner writes a JSON file
-under ``<artifacts_root>/<workspace_id>.defer-signal.json``. The file
+under ``<artifacts_root>/<workspace_id>.defer-signal.json``. ``NotifyHuman``
+is a live wait state and must not publish a terminal artifact. The file
 tells an orchestrator outside AWF:
 
   * what terminal action fired (did we actually merge?),
@@ -131,7 +132,7 @@ class TestDeferSignalArtifact:
         assert data["deferred_human_items"] == []
 
     @pytest.mark.unit
-    async def test_artifact_written_on_merge_blocked_downgrade(
+    async def test_merge_blocked_notification_waits_until_external_merge_for_artifact(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -139,10 +140,12 @@ class TestDeferSignalArtifact:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """``gh pr merge`` can be rejected by branch protection. The
-        runner falls back to posting a "ready to merge" comment and
-        still writes the artifact, but with ``merged=False`` so the
-        orchestrator knows no squash actually landed."""
+        """``gh pr merge`` can be rejected by branch protection.
+
+        The runner posts a human-attention comment, but does not publish a
+        terminal artifact or tear down the workspace until the PR is
+        actually merged.
+        """
         ws_id = await seed_monitoring_workspace(factory)
         artifacts_root = tmp_path / "artifacts"
         bot_thread = thread_node(
@@ -169,6 +172,10 @@ class TestDeferSignalArtifact:
             stderr="pull request not mergeable: required status checks pending",
         )  # gh pr merge — blocked
         cmd.queue_result(returncode=0)  # gh pr comment (ready-to-merge fallback)
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True, threads=[bot_thread]))
+        cmd.queue_result(returncode=0)  # docker compose down
         runner = make_runner(
             factory=factory,
             cmd=cmd,
@@ -183,8 +190,8 @@ class TestDeferSignalArtifact:
             compose_file=tmp_path / "compose.yml",
         )
         data = _artifact_for(artifacts_root, ws_id)
-        assert data["terminal_action"] == "Merge"
-        assert data["merged"] is False
+        assert data["terminal_action"] == "ShortCircuitCompleted"
+        assert data["merged"] is True
         assert len(data["deferred_bot_items"]) == 1
         item = data["deferred_bot_items"][0]
         assert item["id"] == "T_bot"
@@ -194,7 +201,7 @@ class TestDeferSignalArtifact:
         assert data["deferred_human_items"] == []
 
     @pytest.mark.unit
-    async def test_artifact_written_on_notify_human_with_human_defers(
+    async def test_human_defer_notification_waits_until_external_merge_for_artifact(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -223,6 +230,12 @@ class TestDeferSignalArtifact:
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[human_thread]))
         cmd.queue_result(returncode=0)  # gh pr comment (NotifyHuman)
+        # NotifyHuman is not terminal; the monitor remains alive until the
+        # PR is actually merged.
+        cmd.queue_result(returncode=0)
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True, threads=[human_thread]))
+        cmd.queue_result(returncode=0)  # docker compose down
         runner = make_runner(
             factory=factory,
             cmd=cmd,
@@ -237,8 +250,8 @@ class TestDeferSignalArtifact:
             compose_file=tmp_path / "compose.yml",
         )
         data = _artifact_for(artifacts_root, ws_id)
-        assert data["terminal_action"] == "NotifyHuman"
-        assert data["merged"] is False
+        assert data["terminal_action"] == "ShortCircuitCompleted"
+        assert data["merged"] is True
         assert data["deferred_bot_items"] == []
         assert len(data["deferred_human_items"]) == 1
         item = data["deferred_human_items"][0]

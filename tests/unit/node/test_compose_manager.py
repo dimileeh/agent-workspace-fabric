@@ -40,7 +40,7 @@ class TestRender:
 
         parsed = yaml.safe_load(paths.compose_file.read_text())
         assert set(parsed.keys()) == {"services", "volumes", "networks"}
-        assert set(parsed["services"].keys()) == {"postgres", "agent"}
+        assert set(parsed["services"].keys()) == {"agent"}
 
     @pytest.mark.unit
     def test_mounts_worktree_into_agent_at_workspace(
@@ -54,10 +54,27 @@ class TestRender:
         assert volumes == [f"{spec.worktree_host_path}:/workspace"]
 
     @pytest.mark.unit
-    def test_postgres_password_propagates_to_database_url(
+    def test_profile_service_password_placeholders_are_resolved(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
-        spec = _spec(tmp_path, postgres_password="my-secret-1234")
+        from awf.node.compose_manager import ComposeService
+
+        spec = _spec(
+            tmp_path,
+            postgres_password="my-secret-1234",
+            agent_environment=(
+                ("DATABASE_URL", "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres/awf"),
+            ),
+            services=(
+                ComposeService(
+                    name="postgres",
+                    image="postgres:16",
+                    environment=(("POSTGRES_PASSWORD", "${AWF_POSTGRES_PASSWORD}"),),
+                    healthcheck_cmd="pg_isready -U awf",
+                    volumes=(("postgres_data", "/var/lib/postgresql/data"),),
+                ),
+            ),
+        )
         paths = manager.render(spec)
 
         parsed = yaml.safe_load(paths.compose_file.read_text())
@@ -66,21 +83,7 @@ class TestRender:
 
         assert pg_env["POSTGRES_PASSWORD"] == "my-secret-1234"
         assert "my-secret-1234" in agent_env["DATABASE_URL"]
-        assert agent_env["DATABASE_URL"].startswith("postgresql+psycopg://awf:")
-
-    @pytest.mark.unit
-    def test_unset_password_generates_one_each_render(
-        self, manager: ComposeManager, tmp_path: Path
-    ) -> None:
-        spec = _spec(tmp_path, postgres_password=None)
-        first = yaml.safe_load(manager.render(spec).compose_file.read_text())
-        second = yaml.safe_load(manager.render(spec).compose_file.read_text())
-
-        # Two distinct invocations = two distinct passwords (tokens are ~24 chars).
-        pw1 = first["services"]["postgres"]["environment"]["POSTGRES_PASSWORD"]
-        pw2 = second["services"]["postgres"]["environment"]["POSTGRES_PASSWORD"]
-        assert pw1 != pw2
-        assert len(pw1) >= 20
+        assert parsed["volumes"]["postgres_data"]["name"] == "awf-ws_test123-postgres_data"
 
     @pytest.mark.unit
     def test_project_name_is_deterministic(self, manager: ComposeManager, tmp_path: Path) -> None:
@@ -90,25 +93,53 @@ class TestRender:
         assert spec.project_name() == "awf_ws_test123"
 
         parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
-        assert parsed["services"]["postgres"]["container_name"] == "awf-ws_test123-postgres"
         assert parsed["services"]["agent"]["container_name"] == "awf-ws_test123-agent"
-        assert parsed["volumes"]["postgres_data"]["name"] == "awf-ws_test123-pgdata"
+        assert parsed["volumes"] == {}
         assert parsed["networks"]["awf_net"]["name"] == "awf-ws_test123-net"
 
     @pytest.mark.unit
-    def test_healthcheck_uses_pg_isready(self, manager: ComposeManager, tmp_path: Path) -> None:
-        parsed = yaml.safe_load(manager.render(_spec(tmp_path)).compose_file.read_text())
-        hc = parsed["services"]["postgres"]["healthcheck"]
-        assert hc["test"][0] == "CMD-SHELL"
-        assert "pg_isready" in hc["test"][1]
-
-    @pytest.mark.unit
-    def test_agent_depends_on_postgres_healthy(
+    def test_profile_service_healthcheck_renders(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
-        parsed = yaml.safe_load(manager.render(_spec(tmp_path)).compose_file.read_text())
+        from awf.node.compose_manager import ComposeService
+
+        spec = _spec(
+            tmp_path,
+            services=(
+                ComposeService(
+                    name="redis",
+                    image="redis:7",
+                    healthcheck_cmd="redis-cli ping",
+                ),
+            ),
+        )
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+        hc = parsed["services"]["redis"]["healthcheck"]
+        assert hc["test"][0] == "CMD-SHELL"
+        assert "redis-cli ping" in hc["test"][1]
+
+    @pytest.mark.unit
+    def test_agent_depends_on_profile_service_healthcheck(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        from awf.node.compose_manager import ComposeService
+
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    services=(
+                        ComposeService(
+                            name="redis",
+                            image="redis:7",
+                            healthcheck_cmd="redis-cli ping",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
         depends = parsed["services"]["agent"]["depends_on"]
-        assert depends == {"postgres": {"condition": "service_healthy"}}
+        assert depends == {"redis": {"condition": "service_healthy"}}
 
     @pytest.mark.unit
     def test_resource_limits_applied_when_set(
@@ -205,9 +236,9 @@ class TestRender:
         assert web["environment"] == {"AGENT_SERVICE_URL": "http://backend:8000"}
         assert web["depends_on"] == {"backend": {"condition": "service_healthy"}}
 
-        # Agent waits for postgres + backend + web (all have healthchecks).
+        # Agent waits for healthchecked companions.
         agent_deps = parsed["services"]["agent"]["depends_on"]
-        assert set(agent_deps.keys()) == {"postgres", "backend", "web"}
+        assert set(agent_deps.keys()) == {"backend", "web"}
         assert all(v == {"condition": "service_healthy"} for v in agent_deps.values())
 
     @pytest.mark.unit
@@ -227,10 +258,25 @@ class TestRender:
             ),
         )
         parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
-        agent_deps = parsed["services"]["agent"]["depends_on"]
         # fire_and_forget still exists as a service, but agent doesn't wait on it.
         assert "fire_and_forget" in parsed["services"]
-        assert set(agent_deps.keys()) == {"postgres"}
+        assert "depends_on" not in parsed["services"]["agent"]
+
+    @pytest.mark.unit
+    def test_dind_profile_adds_docker_daemon(self, manager: ComposeManager, tmp_path: Path) -> None:
+        spec = _spec(
+            tmp_path,
+            docker_mode="dind",
+            agent_environment=(("DOCKER_HOST", "tcp://docker:2375"),),
+        )
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+        assert parsed["services"]["docker"]["image"] == "docker:27-dind"
+        assert parsed["services"]["docker"]["privileged"] is True
+        assert parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://docker:2375"
+        assert parsed["services"]["agent"]["depends_on"] == {
+            "docker": {"condition": "service_healthy"}
+        }
+        assert parsed["volumes"]["dind_data"]["name"] == "awf-ws_test123-dind_data"
 
     @pytest.mark.unit
     def test_strict_undefined_catches_missing_vars(self) -> None:

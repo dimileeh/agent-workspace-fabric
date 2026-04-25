@@ -19,10 +19,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.db.base import Base
+from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
+    issue_comment_node,
     make_runner,
     pr_payload,
     seed_monitoring_workspace,
@@ -115,6 +118,10 @@ class TestMonitorActionLogging:
         cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
         cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # gh pr comment
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
         runner = make_runner(
             factory=factory,
             cmd=cmd,
@@ -130,8 +137,193 @@ class TestMonitorActionLogging:
                 compose_file=tmp_path / "compose.yml",
             )
         entries = _action_entries(captured)
-        assert len(entries) == 1
+        assert len(entries) == 2
         assert entries[0]["action"] == "NotifyHuman"
+        assert entries[1]["action"] == "ShortCircuitCompleted"
+        assert sleep_fn.calls == [60]
+
+    @pytest.mark.unit
+    async def test_notify_human_keeps_polling_and_addresses_later_comments(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        late_thread = thread_node(
+            tid="T_late",
+            author="gemini-code-assist",
+            body="late actionable review",
+        )
+        # Poll 1: all green, but release/manual mode posts a human notice.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        cmd.queue_result(returncode=0)  # gh pr comment
+        # Poll 2: a review comment arrived after the human notice.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[late_thread]))
+        adapter.queue(stdout="fixed")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle re-poll
+        cmd.queue_result(returncode=0)  # git push
+        cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
+        cmd.queue_result(returncode=0)  # resolveReviewThread
+        # Poll 3: maintainer merged externally; only now may the workspace complete.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            auto_merge=False,
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
+        assert len(adapter.calls) == 1
+        assert "late actionable review" in adapter.calls[0]
+        assert sleep_fn.calls == [60, 30]
+        comment_calls = [
+            call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]
+        ]
+        assert len(comment_calls) == 1
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+    @pytest.mark.unit
+    async def test_policy_blocker_waits_alive_and_addresses_later_comments(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        blocking_comment = issue_comment_node(
+            cid=77,
+            author="coderabbitai",
+            body=(
+                "## Review skipped\n\n"
+                "Required review has not run yet. Trigger review before merging.\n"
+                "- [ ] Trigger review"
+            ),
+        )
+        late_thread = thread_node(
+            tid="T_after_notify",
+            author="gemini-code-assist",
+            body="new review feedback after AWF notified human",
+        )
+        # Poll 1: only a non-code policy blocker exists, so AWF notifies.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
+        cmd.queue_result(returncode=0)  # gh pr comment
+        # Poll 2: actionable comments arrive after the notification.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(
+            returncode=0,
+            stdout=pr_payload(comments=[blocking_comment], threads=[late_thread]),
+        )
+        adapter.queue(stdout="fixed")
+        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
+        cmd.queue_result(returncode=0)  # git push
+        cmd.queue_result(returncode=0, stdout="def456\n")  # git rev-parse
+        cmd.queue_result(returncode=0)  # resolveReviewThread
+        # Poll 3: external merge is the terminal condition.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["NotifyHuman", "AddressComments", "ShortCircuitCompleted"]
+        assert len(adapter.calls) == 1
+        assert "new review feedback after AWF notified human" in adapter.calls[0]
+
+    @pytest.mark.unit
+    async def test_non_actionable_review_disabled_comment_waits_for_initial_grace(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        disabled_review_comment = issue_comment_node(
+            cid=78,
+            author="coderabbitai",
+            body=(
+                "## Review skipped\n\n"
+                "Auto reviews are disabled on base/target branches other than development.\n"
+                "- [ ] Trigger review"
+            ),
+        )
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[disabled_review_comment]))
+        # Keep the test finite by simulating an external merge while AWF waits
+        # out the initial review grace window.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            initial_review_grace_period_seconds=900,
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["Merge", "ShortCircuitCompleted"]
+        assert sleep_fn.calls == [60]
+        assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+        assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_merge_sha is None
 
     @pytest.mark.unit
     async def test_short_circuit_completed_emits_log_line(
@@ -240,6 +432,70 @@ class TestMonitorActionLogging:
         assert ac_entry["iter"] == 0  # iter_count bumped AFTER dispatch
 
     @pytest.mark.unit
+    async def test_failed_thread_resolve_is_retried_not_merged(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        """A fixed-but-still-unresolved thread must not be filtered out forever.
+
+        GitHub can reject ``resolveReviewThread`` even after the agent has
+        pushed a valid fix. The monitor should clear the addressed marker so
+        the next poll retries comment handling instead of flowing through to
+        Merge with an unresolved review thread.
+        """
+        ws_id = await seed_monitoring_workspace(factory)
+        thread = thread_node(tid="T_retry", author="greptile-apps")
+
+        # Outer iter 1: AddressComments, then resolveReviewThread fails.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="fixed first")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
+        cmd.queue_result(returncode=1, stderr="missing resolve permission")
+
+        # Outer iter 2: GitHub still reports the thread open, so retry it.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="fixed again")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head3\n")  # rev-parse
+        cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve
+
+        # Outer iter 3: clean → Merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        cmd.queue_result(returncode=0)  # merge
+        cmd.queue_result(returncode=0, stdout="M\n")
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["AddressComments", "AddressComments", "Merge"]
+        assert len(adapter.calls) == 2
+
+    @pytest.mark.unit
     async def test_wait_for_ci_action_emits_log_line(
         self,
         factory: async_sessionmaker[AsyncSession],
@@ -340,4 +596,73 @@ class TestMonitorActionLogging:
         # guard against.
         assert saw_merge_log_before_call == [True], (
             "expected the Merge monitor.action log to be emitted before `gh pr merge` was invoked"
+        )
+
+    @pytest.mark.unit
+    async def test_pre_merge_recheck_can_block_merge_on_late_review_comment(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        blocking_comment = issue_comment_node(
+            cid=77,
+            author="coderabbitai",
+            body=(
+                "## Review skipped\n\n"
+                "Required review has not run yet. Trigger review before merging.\n"
+                "- [ ] Trigger review"
+            ),
+        )
+
+        # Initial poll looks mergeable.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        # Final quiet-window recheck sees late bot/checklist feedback.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(comments=[blocking_comment]))
+        cmd.queue_result(returncode=0)  # gh pr comment from NotifyHuman
+        # The monitor stays alive after NotifyHuman; finish by observing an
+        # external merge on the next poll.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+        cmd.queue_result(returncode=0)  # docker compose down
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            pre_merge_settle_seconds=90,
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        assert sleep_fn.calls == [90, 60]
+        assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["Merge", "NotifyHuman", "ShortCircuitCompleted"]
+        comment_calls = [
+            call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "comment"]
+        ]
+        assert len(comment_calls) == 1
+        body = comment_calls[0][comment_calls[0].index("--body") + 1]
+        assert "needs human attention" in body
+        assert "review was skipped" in body
+        assert "All 5 AWF gates are green" not in body
+        assert any(
+            r.get("event") == "monitor.pre_merge_recheck_changed_action"
+            and r.get("fresh_action") == "NotifyHuman"
+            for r in captured
         )

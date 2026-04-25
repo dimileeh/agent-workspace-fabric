@@ -23,8 +23,7 @@ class CodexAdapter(AgentAdapter):
         args = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
         if model:
             args += ["--model", model]
-            # High reasoning effort is the right default for full tasks; callers
-            # can override via a future per-request knob.
-            args += ["-c", 'model_reasoning_effort="high"']
+        if self._default_effort:
+            args += ["-c", f'model_reasoning_effort="{self._default_effort}"']
         args.append(prompt)
         return args

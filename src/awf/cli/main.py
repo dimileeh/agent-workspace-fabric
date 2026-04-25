@@ -29,7 +29,9 @@ app = typer.Typer(
 )
 
 workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy).")
+profile_app = typer.Typer(help="Workspace profile inspection.")
 app.add_typer(workspace_app, name="workspace")
+app.add_typer(profile_app, name="profile")
 
 
 class OutputFormat(StrEnum):
@@ -116,26 +118,34 @@ def workspace_create(
     task_prompt: str = typer.Option(..., "--prompt"),
     branch_base: str = typer.Option("development", "--base"),
     agent: str = typer.Option("codex", "--agent"),
+    profile_ref: str = typer.Option("auto", "--profile"),
     test_commands: list[str] = typer.Option([], "--test", help="Repeatable."),
-    requires_database: bool = typer.Option(False, "--with-db"),
+    requires_database: bool = typer.Option(
+        False,
+        "--with-db",
+        help="Deprecated v1 shortcut; selects the aira profile when set.",
+    ),
     idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Submit a workspace creation request."""
     body = {
-        "repo_url": repo_url,
-        "branch_base": branch_base,
-        "task_title": task_title,
-        "task_prompt": task_prompt,
-        "agent": agent,
-        "test_commands": test_commands,
-        "requires_database": requires_database,
+        "repo": {"url": repo_url, "base_branch": branch_base},
+        "task": {
+            "title": task_title,
+            "prompt": task_prompt,
+            "agent": agent,
+            "kind": "feature_branch_pr",
+        },
+        "workspace": {"profile_ref": "aira" if requires_database else profile_ref, "profile": None},
+        "validation": {"commands": test_commands, "requested_tier": 1},
+        "resources": {},
     }
     headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
     response = _call(
         "POST",
-        "/v1/workspaces",
+        "/v2/workspaces",
         base_url=_base_url(base_url),
         json=body,
         headers=headers,
@@ -168,6 +178,26 @@ def workspace_list(
         params={"limit": limit},
     )
     _handle_response(response, fmt)
+
+
+@profile_app.command("preview")
+def profile_preview(
+    path: str = typer.Argument(..., help="Path to a checked-out repository."),
+    profile_ref: str = typer.Option("auto", "--profile"),
+    validation_command: list[str] = typer.Option([], "--validation-command", help="Repeatable."),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Preview the resolved workspace profile for a local checkout."""
+    from pathlib import Path
+
+    from awf.profiles.resolver import resolve_workspace_profile
+
+    resolution = resolve_workspace_profile(
+        worktree_path=Path(path).expanduser().resolve(),
+        profile_ref=profile_ref,
+        validation_commands=validation_command,
+    )
+    _emit(resolution.model_dump(mode="json", by_alias=True), fmt)
 
 
 if __name__ == "__main__":  # pragma: no cover - entry point

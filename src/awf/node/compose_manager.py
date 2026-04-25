@@ -117,12 +117,33 @@ class CompanionService:
 
 
 @dataclass(frozen=True)
+class ComposeService:
+    """Generic profile-declared service in the outer AWF stack."""
+
+    name: str
+    image: str | None = None
+    build_context: str | None = None
+    dockerfile: str = "Dockerfile"
+    env_file: str | None = None
+    environment: tuple[tuple[str, str], ...] = ()
+    depends_on: tuple[str, ...] = ()
+    healthcheck_cmd: str | None = None
+    ports: tuple[tuple[int, int], ...] = ()
+    command: str | None = None
+    volumes: tuple[tuple[str, str], ...] = ()
+    privileged: bool = False
+
+
+@dataclass(frozen=True)
 class WorkspaceComposeSpec:
     """Everything the template needs to render one workspace stack."""
 
     workspace_id: str
     worktree_host_path: Path
     agent_runtime_image: str = "awf-agent-runtime:latest"
+    agent_environment: tuple[tuple[str, str], ...] = ()
+    docker_mode: str = "none"
+    dind_image: str = "docker:27-dind"
     postgres_image: str = "postgres:16-alpine"
     postgres_user: str = "awf"
     postgres_db: str = "awf"
@@ -132,6 +153,7 @@ class WorkspaceComposeSpec:
     auth_mounts: tuple[AuthMount, ...] = ()
     git_name: str | None = None
     git_email: str | None = None
+    services: tuple[ComposeService, ...] = ()
     companions: tuple[CompanionService, ...] = ()
 
     def project_name(self) -> str:
@@ -174,26 +196,43 @@ class ComposeManager:
                 "memory_limit": spec.memory_limit or "8g",
             }
 
-        companions = [
+        services = [
+            self._render_service(s, postgres_password=password) for s in self._services_for(spec)
+        ]
+        named_volumes = self._named_volumes_for(services)
+
+        # Backwards-compatible companion input. Companions become ordinary
+        # profile services at render time.
+        companions: list[dict[str, object]] = [
             {
                 "name": c.name,
+                "image": None,
                 "build_context": c.build_context,
                 "dockerfile": c.dockerfile,
                 "env_file": c.env_file,
-                "environment": list(c.environment),
+                "environment": [
+                    (k, self._expand_placeholders(v, postgres_password=password))
+                    for k, v in c.environment
+                ],
                 "depends_on": list(c.depends_on),
                 "healthcheck_cmd": c.healthcheck_cmd,
                 "ports": list(c.ports),
                 "command": c.command,
                 "volumes": list(c.volumes),
+                "privileged": False,
             }
             for c in spec.companions
         ]
-        # Agent waits for postgres always, plus any companion that has a healthcheck
-        # (otherwise ``service_started`` would race the companion into existence
-        # but not readiness).
-        agent_depends_on = ["postgres"] + [
-            c.name for c in spec.companions if c.healthcheck_cmd is not None
+        services.extend(companions)
+        named_volumes = sorted({*named_volumes, *self._named_volumes_for(services)})
+
+        # Agent waits for profile services that expose healthchecks. Services
+        # without healthchecks may still run, but AWF cannot infer readiness.
+        agent_depends_on = [s["name"] for s in services if s.get("healthcheck_cmd") is not None]
+
+        agent_env = [
+            (k, self._expand_placeholders(v, postgres_password=password))
+            for k, v in spec.agent_environment
         ]
 
         rendered = self._env.get_template(self._template_name).render(
@@ -210,7 +249,9 @@ class ComposeManager:
             ],
             git_name=spec.git_name,
             git_email=spec.git_email,
-            companions=companions,
+            agent_environment=agent_env,
+            services=services,
+            named_volumes=named_volumes,
             agent_depends_on=agent_depends_on,
         )
         compose_file.write_text(rendered, encoding="utf-8")
@@ -277,3 +318,59 @@ class ComposeManager:
                 stdout=stdout,
                 stderr=stderr,
             )
+
+    def _services_for(self, spec: WorkspaceComposeSpec) -> list[ComposeService]:
+        services = list(spec.services)
+        if spec.docker_mode == "dind":
+            services.insert(
+                0,
+                ComposeService(
+                    name="docker",
+                    image=spec.dind_image,
+                    environment=(("DOCKER_TLS_CERTDIR", ""),),
+                    healthcheck_cmd="docker info >/dev/null 2>&1",
+                    volumes=(("dind_data", "/var/lib/docker"),),
+                    privileged=True,
+                ),
+            )
+        return services
+
+    def _render_service(
+        self, service: ComposeService, *, postgres_password: str | None
+    ) -> dict[str, object]:
+        return {
+            "name": service.name,
+            "image": service.image,
+            "build_context": service.build_context,
+            "dockerfile": service.dockerfile,
+            "env_file": service.env_file,
+            "environment": [
+                (k, self._expand_placeholders(v, postgres_password=postgres_password))
+                for k, v in service.environment
+            ],
+            "depends_on": list(service.depends_on),
+            "healthcheck_cmd": service.healthcheck_cmd,
+            "ports": list(service.ports),
+            "command": service.command,
+            "volumes": list(service.volumes),
+            "privileged": service.privileged,
+        }
+
+    def _named_volumes_for(self, services: list[dict[str, object]]) -> list[str]:
+        names: set[str] = set()
+        for service in services:
+            volumes = service.get("volumes")
+            if not isinstance(volumes, list):
+                continue
+            for item in volumes:
+                if not isinstance(item, tuple) or len(item) != 2:
+                    continue
+                source = str(item[0])
+                if source and "/" not in source and not source.startswith("."):
+                    names.add(source)
+        return sorted(names)
+
+    def _expand_placeholders(self, value: str, *, postgres_password: str | None) -> str:
+        if postgres_password is None:
+            return value
+        return value.replace("${AWF_POSTGRES_PASSWORD}", postgres_password)
