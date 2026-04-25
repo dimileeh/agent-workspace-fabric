@@ -48,6 +48,32 @@ async def test_asyncio_runner_streams_stdout_and_stderr_before_completion() -> N
 
 
 @pytest.mark.unit
+async def test_asyncio_runner_preserves_utf8_split_across_stream_chunks() -> None:
+    runner = AsyncioSubprocessRunner()
+    stdout: list[str] = []
+
+    result = await runner.run_streaming(
+        [
+            sys.executable,
+            "-c",
+            (
+                "import sys,time;"
+                "sys.stdout.buffer.write(b'before \\xf0\\x9f');"
+                "sys.stdout.flush();"
+                "time.sleep(0.05);"
+                "sys.stdout.buffer.write(b'\\x98\\x80 after\\n');"
+                "sys.stdout.flush()"
+            ),
+        ],
+        on_stdout=stdout.append,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "before \U0001f600 after\n"
+    assert "".join(stdout) == result.stdout
+
+
+@pytest.mark.unit
 async def test_fake_runner_replays_streaming_callbacks() -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=7, stdout="out\n", stderr="err\n")

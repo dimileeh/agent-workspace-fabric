@@ -13,6 +13,7 @@ directly. Two benefits:
 from __future__ import annotations
 
 import asyncio
+import codecs
 import inspect
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -120,16 +121,23 @@ class AsyncioSubprocessRunner:
             parts: list[str],
             callback: StreamCallback | None,
         ) -> None:
-            while True:
-                chunk = await reader.read(4096)
-                if not chunk:
+            decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+
+            async def _emit(text: str) -> None:
+                if not text:
                     return
-                text = chunk.decode("utf-8", errors="replace")
                 parts.append(text)
                 if callback is not None:
                     maybe_awaitable = callback(text)
                     if inspect.isawaitable(maybe_awaitable):
                         await maybe_awaitable
+
+            while True:
+                chunk = await reader.read(4096)
+                if not chunk:
+                    await _emit(decoder.decode(b"", final=True))
+                    return
+                await _emit(decoder.decode(chunk))
 
         await asyncio.gather(
             _feed_stdin(),
