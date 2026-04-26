@@ -380,6 +380,7 @@ class ValidationRunSummaryResponse(BaseModel):
     finished_at: datetime | None = None
     log_stream_refs: dict[str, Any] = Field(default_factory=dict)
     fresh_for_target: bool | None = None
+    retry_count: int = 0
 
 
 StaleReasonStatus = Literal["active", "resolved"]
@@ -554,6 +555,7 @@ class ValidationProvenanceItemResponse(BaseModel):
     finished_at: datetime | None = None
     log_stream_refs: dict[str, Any] = Field(default_factory=dict)
     fresh_for_target: bool | None = None
+    retry_count: int = 0
 
 
 class ValidationProvenanceListResponse(BaseModel):

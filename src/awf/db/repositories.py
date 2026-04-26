@@ -778,12 +778,14 @@ class ValidationRunRepository:
         status: str,
         reason_code: str | None,
         finished_at: datetime | None = None,
+        retry_count: int = 0,
     ) -> ValidationRun | None:
         run = await self.get(validation_run_id)
         if run is None:
             return None
         run.status = status
         run.reason_code = reason_code
+        run.retry_count = retry_count
         run.finished_at = finished_at or datetime.now(UTC)
         await self._session.flush()
         return run

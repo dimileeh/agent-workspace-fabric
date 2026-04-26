@@ -650,6 +650,7 @@ class WorkspaceExecutor:
                 validation_run_id,
                 status="succeeded" if val_result.all_passed else "failed",
                 reason_code=_validation_run_reason_code(val_result),
+                retry_count=val_result.total_retries,
             )
             if val_result.all_passed:
                 successful_validation_run_id = validation_run_id
@@ -1349,6 +1350,7 @@ class WorkspaceExecutor:
         *,
         status: str,
         reason_code: str | None,
+        retry_count: int = 0,
     ) -> None:
         async with self._session_factory() as session:
             await ValidationRunRepository(session).finish(
@@ -1356,6 +1358,7 @@ class WorkspaceExecutor:
                 status=status,
                 reason_code=reason_code,
                 finished_at=datetime.now(UTC),
+                retry_count=retry_count,
             )
             await session.commit()
 

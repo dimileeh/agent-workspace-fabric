@@ -45,6 +45,7 @@ class ValidationCommandResult:
     phase: str = "validate"
     reason_code: str = "COMMAND_FAILED"
     stream_ids: dict[str, str | None] = field(default_factory=dict)
+    retry_count: int = 0
 
     @property
     def ok(self) -> bool:
@@ -63,6 +64,10 @@ class ValidationResult:
         if self.migration is not None and not self.migration.ok:
             return False
         return all(c.ok for c in self.commands)
+
+    @property
+    def total_retries(self) -> int:
+        return sum(c.retry_count for c in self.commands)
 
     @property
     def first_failure(self) -> ValidationCommandResult | None:
@@ -143,6 +148,7 @@ class ValidationRunner:
                 for h in healthchecks
             ],
             legacy_command_labels=False,
+            retry_budget=profile.validation.retry_budget,
         )
 
     async def _run_commands(
@@ -154,6 +160,7 @@ class ValidationRunner:
         commands: list[tuple[str, ProfileCommand]],
         healthchecks: list[tuple[str, ProfileCommand]],
         legacy_command_labels: bool,
+        retry_budget: int = 0,
     ) -> ValidationResult:
         workspace_artifacts = self._artifacts_dir / workspace_id
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
@@ -167,17 +174,76 @@ class ValidationRunner:
             else:
                 phase_indices[phase] = phase_indices.get(phase, 0) + 1
                 label = f"{phase_indices[phase]:02d}_{phase}"
-            result = await self._exec(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                cli_args=["sh", "-lc", _VENV_ACTIVATE_PREAMBLE + command.command],
-                label=label,
-                artifacts_dir=workspace_artifacts,
-                phase=phase,
-                timeout_seconds=command.timeout_seconds,
-            )
-            results.append(result)
-            if not result.ok and command.required:
+
+            attempts = 0
+            while True:
+                result = await self._exec(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    cli_args=["sh", "-lc", _VENV_ACTIVATE_PREAMBLE + command.command],
+                    label=label,
+                    artifacts_dir=workspace_artifacts,
+                    phase=phase,
+                    timeout_seconds=command.timeout_seconds,
+                    is_retry=(attempts > 0),
+                )
+
+                if result.ok or not command.required:
+                    results.append(
+                        ValidationCommandResult(
+                            command=result.command,
+                            returncode=result.returncode,
+                            duration_seconds=result.duration_seconds,
+                            stdout_path=result.stdout_path,
+                            stderr_path=result.stderr_path,
+                            phase=result.phase,
+                            reason_code=result.reason_code,
+                            stream_ids=result.stream_ids,
+                            retry_count=attempts,
+                        )
+                    )
+                    break
+
+                is_flaky = result.returncode == 124 or result.returncode > 128
+                if is_flaky and attempts < retry_budget:
+                    attempts += 1
+                    _log.info(
+                        "validation.phase_command_flaky_retry",
+                        workspace_id=workspace_id,
+                        phase=phase,
+                        command=command.command,
+                        returncode=result.returncode,
+                        attempt=attempts,
+                        budget=retry_budget,
+                    )
+                    continue
+
+                if is_flaky and attempts >= retry_budget and retry_budget > 0:
+                    result = ValidationCommandResult(
+                        command=result.command,
+                        returncode=result.returncode,
+                        duration_seconds=result.duration_seconds,
+                        stdout_path=result.stdout_path,
+                        stderr_path=result.stderr_path,
+                        phase=result.phase,
+                        reason_code="VALIDATION_RETRY_EXHAUSTED",
+                        stream_ids=result.stream_ids,
+                        retry_count=attempts,
+                    )
+                else:
+                    result = ValidationCommandResult(
+                        command=result.command,
+                        returncode=result.returncode,
+                        duration_seconds=result.duration_seconds,
+                        stdout_path=result.stdout_path,
+                        stderr_path=result.stderr_path,
+                        phase=result.phase,
+                        reason_code=result.reason_code,
+                        stream_ids=result.stream_ids,
+                        retry_count=attempts,
+                    )
+
+                results.append(result)
                 _log.info(
                     "validation.phase_command_failed",
                     workspace_id=workspace_id,
@@ -200,6 +266,7 @@ class ValidationRunner:
         artifacts_dir: Path,
         phase: str = "validate",
         timeout_seconds: int | None = None,
+        is_retry: bool = False,
     ) -> ValidationCommandResult:
         docker_args = [
             "docker",
@@ -278,8 +345,11 @@ class ValidationRunner:
 
         stdout_path = artifacts_dir / f"{label}.stdout"
         stderr_path = artifacts_dir / f"{label}.stderr"
-        stdout_path.write_text(result.stdout, encoding="utf-8")
-        stderr_path.write_text(result.stderr, encoding="utf-8")
+        mode = "a" if is_retry else "w"
+        with stdout_path.open(mode, encoding="utf-8") as f:
+            f.write(result.stdout)
+        with stderr_path.open(mode, encoding="utf-8") as f:
+            f.write(result.stderr)
 
         display = _display_command(cli_args)
         return ValidationCommandResult(
@@ -301,3 +371,4 @@ def _display_command(cli_args: list[str]) -> str:
             shell_cmd = shell_cmd[len(_VENV_ACTIVATE_PREAMBLE) :]
         return shell_cmd
     return " ".join(shlex.quote(a) for a in cli_args)
+

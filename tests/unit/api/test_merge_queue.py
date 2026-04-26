@@ -538,4 +538,5 @@ class TestMergeQueueList:
                 ]
             },
             "fresh_for_target": False,
+            "retry_count": 0,
         }

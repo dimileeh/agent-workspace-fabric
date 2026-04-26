@@ -205,6 +205,7 @@ def _build_persisted_validation_items(
                         validation_target_head_sha=run.target_head_sha,
                         current_target_head_sha=current_target_head_sha,
                     ),
+                    retry_count=run.retry_count,
                 )
             )
     return items
