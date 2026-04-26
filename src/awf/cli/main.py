@@ -51,6 +51,13 @@ def _base_url(override: str | None) -> str:
     return override or os.environ.get("AWF_CLI_BASE_URL", _DEFAULT_BASE_URL)
 
 
+def _api_token_headers(override: str | None) -> dict[str, str]:
+    token = override or os.environ.get("AWF_API_TOKEN")
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
 def _emit(payload: object, fmt: OutputFormat) -> None:
     if fmt == OutputFormat.json:
         typer.echo(json.dumps(payload, indent=2, default=str))
@@ -274,6 +281,123 @@ def workspace_list(
         "/v1/workspaces",
         base_url=_base_url(base_url),
         params={"limit": limit},
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("events")
+def workspace_events(
+    workspace_id: str = typer.Argument(...),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    event_type: str | None = typer.Option(None, "--event-type"),
+    api_token: str | None = typer.Option(
+        None,
+        "--api-token",
+        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
+    ),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """List immutable events for one workspace."""
+    params: dict[str, Any] = {"limit": limit}
+    if event_type is not None:
+        params["event_type"] = event_type
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/events",
+        base_url=_base_url(base_url),
+        params=params,
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("runtime")
+def workspace_runtime(
+    workspace_id: str = typer.Argument(...),
+    api_token: str | None = typer.Option(
+        None,
+        "--api-token",
+        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
+    ),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Fetch runtime/container state for one workspace."""
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/runtime",
+        base_url=_base_url(base_url),
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("operations")
+def workspace_operations(
+    workspace_id: str = typer.Argument(...),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    api_token: str | None = typer.Option(
+        None,
+        "--api-token",
+        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
+    ),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """List operations for one workspace."""
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/operations",
+        base_url=_base_url(base_url),
+        params={"limit": limit},
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("logs")
+def workspace_logs(
+    workspace_id: str = typer.Argument(...),
+    api_token: str | None = typer.Option(
+        None,
+        "--api-token",
+        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
+    ),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """List durable log streams for one workspace."""
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/logs",
+        base_url=_base_url(base_url),
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("log")
+def workspace_log(
+    workspace_id: str = typer.Argument(...),
+    stream_id: str = typer.Argument(...),
+    offset: int = typer.Option(0, "--offset", min=0),
+    limit_bytes: int = typer.Option(65_536, "--limit-bytes", min=1, max=1_048_576),
+    api_token: str | None = typer.Option(
+        None,
+        "--api-token",
+        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
+    ),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Read a bounded durable log chunk for one stream."""
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/logs/{stream_id}",
+        base_url=_base_url(base_url),
+        params={"offset": offset, "limit_bytes": limit_bytes},
+        headers=_api_token_headers(api_token),
     )
     _handle_response(response, fmt)
 
