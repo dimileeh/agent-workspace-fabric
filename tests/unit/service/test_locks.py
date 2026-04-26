@@ -156,3 +156,51 @@ async def test_list_workspace_locks_applies_repo_task_class_status_and_limit_fil
     )
 
     assert [lock.workspace_id for lock in locks] == [matching_id]
+
+
+@pytest.mark.unit
+async def test_list_workspace_lock_page_reports_more_rows_and_uses_next_cursor(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.locks import list_workspace_lock_page
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    oldest_id = await _workspace(
+        session_factory,
+        title="Old 1",
+        status=WorkspaceStatus.ready,
+        created_at=now,
+    )
+    middle_id = await _workspace(
+        session_factory,
+        title="Middle 2",
+        status=WorkspaceStatus.ready,
+        created_at=now + timedelta(minutes=1),
+    )
+    newest_id = await _workspace(
+        session_factory,
+        title="Newest 3",
+        status=WorkspaceStatus.ready,
+        created_at=now + timedelta(minutes=2),
+    )
+
+    first_page = await list_workspace_lock_page(
+        session_factory,
+        status=WorkspaceStatus.ready,
+        limit=2,
+    )
+
+    assert [lock.workspace_id for lock in first_page.items] == [newest_id, middle_id]
+    assert first_page.has_more is True
+    assert first_page.next_cursor is not None
+
+    second_page = await list_workspace_lock_page(
+        session_factory,
+        status=WorkspaceStatus.ready,
+        limit=2,
+        cursor=first_page.next_cursor,
+    )
+
+    assert [lock.workspace_id for lock in second_page.items] == [oldest_id]
+    assert second_page.has_more is False
+    assert second_page.next_cursor is None

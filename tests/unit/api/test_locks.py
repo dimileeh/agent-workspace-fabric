@@ -160,3 +160,49 @@ async def test_get_locks_applies_repo_task_class_status_and_limit_filters(
 
     assert response.status_code == 200
     assert [item["workspace_id"] for item in response.json()["items"]] == [matching_id]
+
+
+@pytest.mark.unit
+async def test_get_locks_reports_has_more_and_accepts_next_cursor(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    first_id = await _create_lock_workspace(
+        client,
+        title="First reservation",
+        owned_paths=["src/first/**"],
+    )
+    second_id = await _create_lock_workspace(
+        client,
+        title="Second reservation",
+        owned_paths=["src/second/**"],
+    )
+    await _set_workspace_status(engine, first_id, WorkspaceStatus.ready)
+    await _set_workspace_status(engine, second_id, WorkspaceStatus.ready)
+
+    first_response = await client.get(
+        "/v1/locks",
+        params={"status": "ready", "limit": 1},
+    )
+
+    assert first_response.status_code == 200
+    first_body = first_response.json()
+    assert len(first_body["items"]) == 1
+    assert first_body["has_more"] is True
+    assert first_body["next_cursor"] is not None
+
+    second_response = await client.get(
+        "/v1/locks",
+        params={"status": "ready", "limit": 1, "cursor": first_body["next_cursor"]},
+    )
+
+    assert second_response.status_code == 200
+    second_body = second_response.json()
+    assert len(second_body["items"]) == 1
+    assert second_body["has_more"] is False
+    assert second_body["next_cursor"] is None
+    returned_ids = {
+        first_body["items"][0]["workspace_id"],
+        second_body["items"][0]["workspace_id"],
+    }
+    assert returned_ids == {first_id, second_id}
