@@ -10,6 +10,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.base import Base
@@ -51,6 +52,16 @@ async def _workspace(
 
 
 class TestTaskAttemptRepository:
+    @pytest.mark.unit
+    def test_attempt_number_sequence_lock_uses_postgres_for_update(self) -> None:
+        from awf.db.repositories import TaskAttemptRepository
+
+        stmt = TaskAttemptRepository._attempt_number_sequence_lock_stmt("task-123")
+        compiled = str(stmt.compile(dialect=postgresql.dialect()))
+
+        assert "FROM tasks" in compiled
+        assert "FOR UPDATE" in compiled
+
     @pytest.mark.unit
     async def test_create_or_get_task_reuses_external_id(self, session: AsyncSession) -> None:
         from awf.db.repositories import TaskRepository

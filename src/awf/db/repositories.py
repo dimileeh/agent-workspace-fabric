@@ -19,6 +19,7 @@ from typing import Any, Final
 from sqlalchemy import and_, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.sql import Select
 
 from awf.common.ids import (
     new_event_id,
@@ -136,6 +137,7 @@ class TaskAttemptRepository:
         task: Task,
         workspace: Workspace,
     ) -> TaskAttempt:
+        await self._lock_attempt_number_sequence(task.id)
         max_attempt_number = (
             await self._session.execute(
                 select(func.max(TaskAttempt.attempt_number)).where(
@@ -160,6 +162,17 @@ class TaskAttemptRepository:
         self._session.add(attempt)
         await self._session.flush()
         return attempt
+
+    async def _lock_attempt_number_sequence(self, task_id: str) -> None:
+        bind = self._session.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+
+        await self._session.execute(self._attempt_number_sequence_lock_stmt(task_id))
+
+    @staticmethod
+    def _attempt_number_sequence_lock_stmt(task_id: str) -> Select[tuple[str]]:
+        return select(Task.id).where(Task.id == task_id).with_for_update()
 
     async def get_by_workspace_id(self, workspace_id: str) -> TaskAttempt | None:
         stmt = select(TaskAttempt).where(TaskAttempt.workspace_id == workspace_id)
