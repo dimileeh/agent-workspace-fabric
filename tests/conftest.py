@@ -15,8 +15,27 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.app import configure_database, create_app
+from awf.common.config import Settings
 from awf.db.base import Base
 from awf.db.session import make_engine, make_session_factory
+from awf.service.disk import DiskCheck
+
+
+def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
+    threshold = settings.min_free_disk_bytes
+    free = threshold + 1
+    return DiskCheck(
+        path=settings.work_dir,
+        checked_path=settings.work_dir,
+        total_bytes=free,
+        used_bytes=0,
+        free_bytes=free,
+        percent_free=100.0,
+        threshold_bytes=threshold,
+        ok=True,
+        status="ok",
+        reason="SUFFICIENT_DISK",
+    )
 
 
 @pytest.fixture
@@ -40,6 +59,7 @@ async def client(engine: AsyncEngine) -> AsyncIterator[AsyncClient]:
     """
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    app.state.workspace_admission_disk_check = _ok_workspace_admission_disk_check
 
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield c

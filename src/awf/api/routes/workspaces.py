@@ -10,10 +10,11 @@ returns 409 ``IDEMPOTENCY_CONFLICT`` per docs/PLAN_MVP.md § Error code taxonomy
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, cast
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -29,14 +30,17 @@ from awf.api.schemas import (
     WorkspaceOverviewResponse,
     WorkspaceResponse,
 )
+from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError
+from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.workspaces import WorkspaceOwnedPathConflictError, create_workspace_v2_row
 
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
 router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
+DiskCheckProvider = Callable[[Settings], DiskCheck]
 
 
 @router.post(
@@ -88,10 +92,14 @@ async def create_workspace(
     "",
     response_model=WorkspaceAcceptedResponse,
     status_code=status.HTTP_202_ACCEPTED,
-    responses={409: {"model": ErrorResponse}},
+    responses={
+        409: {"model": ErrorResponse},
+        503: {"model": ErrorResponse},
+    },
 )
 async def create_workspace_v2(
     payload: WorkspaceCreateV2Request,
+    request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
@@ -112,6 +120,10 @@ async def create_workspace_v2(
                     ).model_dump(),
                 )
             return _accepted(existing.id, existing.status, existing.version, existing.created_at)
+
+    disk_check = _workspace_admission_disk_check(request)
+    if not disk_check.ok:
+        return _insufficient_disk_response(disk_check)
 
     try:
         ws = await create_workspace_v2_row(
@@ -138,6 +150,31 @@ async def create_workspace_v2(
         )
 
     return _accepted(ws.id, ws.status, ws.version, ws.created_at)
+
+
+def _workspace_admission_disk_check(request: Request) -> DiskCheck:
+    settings = get_settings()
+    provider = cast(
+        DiskCheckProvider | None,
+        getattr(request.app.state, "workspace_admission_disk_check", None),
+    )
+    if provider is not None:
+        return provider(settings)
+    return check_disk_space(
+        settings.work_dir,
+        min_free_bytes=settings.min_free_disk_bytes,
+    )
+
+
+def _insufficient_disk_response(disk_check: DiskCheck) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+        content=ErrorResponse(
+            error_code="INSUFFICIENT_DISK",
+            message="Insufficient free disk to create a new workspace.",
+            detail={"disk": disk_check.to_dict()},
+        ).model_dump(),
+    )
 
 
 @router.get("/overview", response_model=WorkspaceOverviewListResponse)

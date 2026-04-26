@@ -14,6 +14,7 @@ from sqlalchemy import text
 
 from awf.db.session import make_engine
 from awf.service.config import ServiceSettings
+from awf.service.disk import DiskUsage, check_disk_space
 
 _CHECK_TIMEOUT_SECONDS = 5.0
 
@@ -60,6 +61,7 @@ async def collect_service_status(
     db_probe: DbProbe | None = None,
     run_subprocess: SubprocessRun | None = None,
     socket_exists: SocketExists | None = None,
+    disk_usage: DiskUsage | None = None,
 ) -> dict[str, object]:
     """Collect service dependency status without requiring Docker in tests."""
 
@@ -68,17 +70,24 @@ async def collect_service_status(
     resolved_run = run_subprocess or _run_subprocess
     resolved_socket_exists = socket_exists or Path.exists
 
-    api_check, db_check, docker_check, image_check = await asyncio.gather(
+    api_check, db_check, docker_check, image_check, disk_check = await asyncio.gather(
         _check_api(settings, resolved_api_get),
         resolved_db_probe(settings.database_url),
         asyncio.to_thread(_check_docker, settings, resolved_run, resolved_socket_exists),
         asyncio.to_thread(_check_agent_runtime_image, settings, resolved_run),
+        asyncio.to_thread(
+            check_disk_space,
+            settings.work_dir,
+            min_free_bytes=settings.min_free_disk_bytes,
+            disk_usage=disk_usage,
+        ),
     )
     checks = {
         "api": api_check,
         "db": db_check,
         "docker": docker_check,
         "agent_runtime_image": image_check,
+        "disk": disk_check.to_dict(),
     }
     overall_ok = all(bool(check["ok"]) for check in checks.values())
     return {
