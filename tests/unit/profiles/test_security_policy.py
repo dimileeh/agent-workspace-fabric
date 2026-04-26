@@ -1,6 +1,8 @@
 import pytest
 from pydantic import ValidationError
-from awf.profiles.models import WorkspaceProfile, ProfileSecret, ProfileSecurity, ProfileEgress
+
+from awf.profiles.models import WorkspaceProfile
+
 
 @pytest.mark.unit
 def test_valid_egress_open():

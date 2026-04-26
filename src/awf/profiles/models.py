@@ -204,10 +204,8 @@ class ProfileSecret(BaseModel):
             if value.startswith(("sk-", "xoxb-", "xoxp-", "AIza")):
                 return True
             # Check length to prevent embedding large JWTs or keys in 'ref'
-            if len(value) > 128 and not bool(re.match(r"^[a-zA-Z0-9_\-./]+$", value)):
-                # Overly long strings not looking like a simple path or ARN
-                return True
-            return False
+            # Overly long strings not looking like a simple path or ARN
+            return len(value) > 128 and not bool(re.match(r"^[a-zA-Z0-9_\-./]+$", value))
 
         if _looks_like_raw_secret(self.ref):
             raise ValueError("secret 'ref' appears to contain a raw secret value")
