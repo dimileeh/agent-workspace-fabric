@@ -63,6 +63,62 @@ class TestCleanup:
         git.remove_worktree.assert_awaited_once()
 
     @pytest.mark.unit
+    async def test_remove_volumes_false_preserves_compose_volumes(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+
+        failures = await wc.cleanup(
+            workspace_id="ws_keep_volumes",
+            repo_url="git@x:y.git",
+            remove_volumes=False,
+        )
+
+        assert failures == []
+        compose.down.assert_awaited_once()
+        assert compose.down.await_args.kwargs["remove_volumes"] is False
+        git.remove_worktree.assert_awaited_once()
+
+    @pytest.mark.unit
+    async def test_remove_volumes_false_applies_to_stored_compose_file(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+        compose_file = Path("/var/lib/awf/compose/ws_keep_volumes/compose.yml")
+
+        failures = await wc.cleanup(
+            workspace_id="ws_keep_volumes",
+            repo_url="git@x:y.git",
+            compose_file_path=compose_file,
+            remove_volumes=False,
+        )
+
+        assert failures == []
+        compose.down_project.assert_awaited_once_with(
+            project_name="awf_ws_keep_volumes",
+            compose_file=compose_file,
+            workspace_id="ws_keep_volumes",
+            remove_volumes=False,
+        )
+        git.remove_worktree.assert_awaited_once()
+
+    @pytest.mark.unit
+    async def test_remove_worktree_false_skips_worktree_removal(
+        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+    ) -> None:
+        git, compose, wc = cleaner
+
+        failures = await wc.cleanup(
+            workspace_id="ws_keep_worktree",
+            repo_url="git@x:y.git",
+            remove_worktree=False,
+        )
+
+        assert failures == []
+        compose.down.assert_awaited_once()
+        git.remove_worktree.assert_not_awaited()
+
+    @pytest.mark.unit
     async def test_compose_failure_does_not_block_worktree_removal(
         self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
     ) -> None:

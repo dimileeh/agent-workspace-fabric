@@ -485,6 +485,8 @@ class TestOperationsAndControls:
                 *,
                 workspace_id: str,
                 repo_url: str,
+                remove_volumes: bool,
+                remove_worktree: bool,
                 compose_project_name: str | None = None,
                 compose_file_path: Path | None = None,
                 worktree_host_path: Path | None = None,
@@ -496,6 +498,8 @@ class TestOperationsAndControls:
                         "compose_project_name": compose_project_name,
                         "compose_file_path": compose_file_path,
                         "worktree_host_path": worktree_host_path,
+                        "remove_volumes": remove_volumes,
+                        "remove_worktree": remove_worktree,
                     }
                 )
                 return []
@@ -505,7 +509,7 @@ class TestOperationsAndControls:
 
         response = await client.delete(
             f"/v1/workspaces/{workspace_id}",
-            params={"force": True},
+            params={"force": True, "remove_volumes": False, "remove_worktree": False},
             headers=headers,
         )
 
@@ -518,6 +522,8 @@ class TestOperationsAndControls:
                 "compose_project_name": None,
                 "compose_file_path": None,
                 "worktree_host_path": None,
+                "remove_volumes": False,
+                "remove_worktree": False,
             }
         ]
 
