@@ -187,12 +187,6 @@ def _merge_blocker_reason(candidate: MergeCandidate) -> MergeBlockerReason:
         return "waiting_for_monitor"
     if candidate.ready:
         return "ready_to_merge_or_waiting_for_github"
-    workspace = candidate.workspace
-    workspace_status = WorkspaceStatus(workspace.status)
-    if workspace_status == WorkspaceStatus.completed:
-        return "completed"
-    if workspace_status in {WorkspaceStatus.failed, WorkspaceStatus.cancelled}:
-        return "failed_or_cancelled"
     return "workspace_not_terminal"
 
 
