@@ -132,11 +132,13 @@ class TestHappyPath:
         ws_id = await _seed_ready_workspace(factory)
 
         # Queue results for the full sequence:
-        # (1) adapter.run, (2) git add -A, (3) git diff --cached --name-only,
-        # (4) git commit, (5) git rev-list --count base..HEAD,
-        # (6) git merge-base --is-ancestor base HEAD,
-        # (7) validation (one test cmd), (8) git push, (9) gh pr create.
+        # (1) adapter.run, (2) branch-drift check, (3) git add -A,
+        # (4) git diff --cached --name-only, (5) git commit,
+        # (6) git rev-list --count base..HEAD,
+        # (7) git merge-base --is-ancestor base HEAD,
+        # (8) validation (one test cmd), (9) git push, (10) gh pr create.
         fake.queue_result(returncode=0, stdout="codex finished")  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff (non-empty)
         fake.queue_result(returncode=0)  # git commit
@@ -151,6 +153,11 @@ class TestHappyPath:
         )  # gh pr create
 
         await executor.execute(ws_id)
+
+        commit_calls = [call.args for call in fake.calls if "commit" in call.args]
+        assert commit_calls
+        assert "user.name=AWF Agent" in commit_calls[0]
+        assert "user.email=awf@example.com" in commit_calls[0]
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)

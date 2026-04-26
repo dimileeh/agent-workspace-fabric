@@ -96,6 +96,8 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     assert spec.agent_runtime_image == "custom-agent-runtime:dev"
     assert spec.agent_environment == (("DATABASE_URL", "postgresql://awf@postgres/awf"),)
     assert spec.docker_mode == "dind"
+    assert spec.git_name == "AWF Agent"
+    assert spec.git_email == "awf@example.com"
     assert [service.name for service in spec.services] == ["postgres"]
     assert spec.auth_mounts[0].source == str(layout.mirror_path)
     assert spec.auth_mounts[0].target == str(layout.mirror_path)

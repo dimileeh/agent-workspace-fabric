@@ -27,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter, AgentDefaults, AgentRunError, get_adapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
 from awf.common.commands import AsyncCommandRunner
+from awf.common.git_identity import git_identity_config_args
 from awf.common.logging import get_logger
 from awf.control.validation_fix_cycle import (
     ValidationFixContext,
@@ -401,6 +402,7 @@ class WorkspaceExecutor:
                         "git",
                         "-C",
                         str(worktree_host),
+                        *git_identity_config_args(),
                         "commit",
                         "-m",
                         commit_msg,
@@ -470,6 +472,7 @@ class WorkspaceExecutor:
                             "git",
                             "-C",
                             str(worktree_host),
+                            *git_identity_config_args(),
                             "commit",
                             "-m",
                             recovery_msg,

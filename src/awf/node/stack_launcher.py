@@ -6,6 +6,7 @@ import asyncio
 from dataclasses import dataclass
 from typing import Protocol
 
+from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
 from awf.node.auth_mounts import WorkspaceAuthMountResolver
 from awf.node.compose_manager import (
     AuthMount,
@@ -70,5 +71,7 @@ class ComposeStackLauncher:
             docker_mode=profile.docker.mode.value,
             services=profile_services(profile),
             auth_mounts=tuple(auth_mounts),
+            git_name=DEFAULT_GIT_AUTHOR_NAME,
+            git_email=DEFAULT_GIT_AUTHOR_EMAIL,
         )
         return await self._compose.up(spec, wait=True)
