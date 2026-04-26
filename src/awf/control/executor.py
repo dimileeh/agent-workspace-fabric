@@ -42,9 +42,17 @@ from awf.control.validation_fix_cycle import (
     build_fix_prompt,
     read_output_tail,
 )
-from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    FailureReason,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    WorkspaceStatus,
+)
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    OperationRepository,
     TaskAttemptRepository,
     ValidationRunRepository,
     WorkspaceRepository,
@@ -590,6 +598,7 @@ class WorkspaceExecutor:
             for _, command in profile.phases.commands_for(("post_agent", "validate"))
         ]
         test_commands_tuple = tuple(validation_commands)
+        validation_tier = _validation_tier_for_workspace(ws, profile)
         last_failure_message: str | None = None
         successful_validation_run_id: str | None = None
         for pass_number in range(max_fix_passes + 1):
@@ -607,6 +616,7 @@ class WorkspaceExecutor:
                 base_commit=base_commit,
                 target_branch=expected_branch,
                 target_head_sha=None,
+                tier=validation_tier,
             )
             try:
                 val_result = await self._validation.run_profile_phases(
@@ -643,6 +653,13 @@ class WorkspaceExecutor:
             )
             if val_result.all_passed:
                 successful_validation_run_id = validation_run_id
+                await self._finish_pending_validate_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.succeeded,
+                    validation_run_id=validation_run_id,
+                    requested_tier=validation_tier,
+                    reason_code="VALIDATION_OK",
+                )
                 if pass_number > 0:
                     _log.info(
                         "executor.validation_recovered",
@@ -666,6 +683,14 @@ class WorkspaceExecutor:
             if pass_number >= max_fix_passes or first_fail is None:
                 # Exhausted our budget (or no failure details to anchor a
                 # fix prompt on) — mark failed and let the operator triage.
+                await self._finish_pending_validate_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    validation_run_id=validation_run_id,
+                    requested_tier=validation_tier,
+                    reason_code=_validation_run_reason_code(val_result),
+                    error_message=last_failure_message,
+                )
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.validating,
@@ -1253,6 +1278,7 @@ class WorkspaceExecutor:
         base_commit: str | None,
         target_branch: str | None,
         target_head_sha: str | None,
+        tier: int,
     ) -> str:
         command_records = _validation_run_command_records(
             profile=profile,
@@ -1264,7 +1290,7 @@ class WorkspaceExecutor:
             run = await ValidationRunRepository(session).start(
                 workspace_id=workspace_id,
                 attempt_id=attempt.id if attempt is not None else None,
-                tier=1,
+                tier=tier,
                 commands=command_records,
                 base_commit=base_commit,
                 target_branch=target_branch,
@@ -1274,6 +1300,48 @@ class WorkspaceExecutor:
             )
             await session.commit()
             return run.id
+
+    async def _finish_pending_validate_operations(
+        self,
+        *,
+        workspace_id: str,
+        status: OperationStatus,
+        validation_run_id: str,
+        requested_tier: int,
+        reason_code: str | None,
+        error_message: str | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = OperationRepository(session)
+            pending = await repo.list_for_workspace(
+                workspace_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+                limit=100,
+            )
+            running = await repo.list_for_workspace(
+                workspace_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+                limit=100,
+            )
+            result = {
+                "validation_run_id": validation_run_id,
+                "requested_tier": requested_tier,
+                "reason_code": reason_code,
+            }
+            for operation in [*pending, *running]:
+                payload = dict(operation.payload or {})
+                payload.setdefault("requested_tier", requested_tier)
+                operation.payload = payload
+                await repo.finish(
+                    operation,
+                    status=status,
+                    result=result,
+                    error_code=reason_code if status == OperationStatus.failed else None,
+                    error_message=error_message,
+                )
+            await session.commit()
 
     async def _finish_validation_run(
         self,
@@ -1449,6 +1517,20 @@ def _validation_run_command_records(
             }
         )
     return records
+
+
+def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfile) -> int:
+    profile_tier = profile.validation.requested_tier
+    task_class_tier = 1
+    if workspace.task_class == TaskClass.migration_task.value:
+        task_class_tier = 3
+    elif workspace.task_class in {
+        TaskClass.refactor_task.value,
+        TaskClass.dependency_task.value,
+        TaskClass.build_config_task.value,
+    }:
+        task_class_tier = 2
+    return max(profile_tier, task_class_tier)
 
 
 def _validation_run_log_stream_refs(
