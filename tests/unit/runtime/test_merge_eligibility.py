@@ -37,3 +37,32 @@ async def test_merge_candidate_requires_sufficient_validation_tier() -> None:
     # And there should be a stale reason exposed
     assert hasattr(candidate, "stale_reason")
     assert candidate.stale_reason == "validation_insufficient_tier"
+
+
+@pytest.mark.asyncio
+async def test_merge_candidate_clears_validation_stale_state_when_reason_clears() -> None:
+    workspace = Workspace(
+        id="ws_1",
+        status=WorkspaceStatus.monitoring_pr.value,
+        auto_merge=True,
+        task_class=TaskClass.test_task.value,
+    )
+    attempt = TaskAttempt(
+        id="att_1",
+        agent="claude_code",
+        is_canonical_for_merge=True,
+    )
+    candidate = MergeCandidate(
+        id="mc_1",
+        workspace=workspace,
+        attempt=attempt,
+        status="open",
+        stale=True,
+        stale_reason="validation_insufficient_tier",
+    )
+
+    _sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
+
+    assert candidate.ready is True
+    assert candidate.stale is False
+    assert candidate.stale_reason is None

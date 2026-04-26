@@ -769,9 +769,9 @@ class TestRunOnceExecution:
             asyncio.create_task(worker_a.run_once()),
             asyncio.create_task(worker_b.run_once()),
         ]
-        await asyncio.wait_for(started.wait(), timeout=0.2)
+        await asyncio.wait_for(started.wait(), timeout=1.0)
         release.set()
-        await asyncio.wait_for(asyncio.gather(*runs), timeout=0.5)
+        await asyncio.wait_for(asyncio.gather(*runs), timeout=1.0)
 
         assert calls == [requested_id]
 

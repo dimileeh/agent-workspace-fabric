@@ -434,7 +434,7 @@ class TestOperationsAndControls:
             stopped.append(compose_project_name)
 
         monkeypatch.setattr(controls_route, "_stop_project", fake_stop)
-        headers = _auth(monkeypatch)
+        headers = {**_auth(monkeypatch), "Idempotency-Key": "stop-observability"}
 
         response = await client.post(
             f"/v1/workspaces/{workspace_id}/stop",
@@ -463,7 +463,10 @@ class TestOperationsAndControls:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         workspace_id = await _create_workspace(client)
-        headers = _auth(monkeypatch)
+        headers = {
+            **_auth(monkeypatch),
+            "Idempotency-Key": "destroy-active-without-force",
+        }
 
         response = await client.delete(f"/v1/workspaces/{workspace_id}", headers=headers)
 
@@ -505,7 +508,7 @@ class TestOperationsAndControls:
                 return []
 
         monkeypatch.setattr(controls_route, "_cleaner", FakeCleaner)
-        headers = _auth(monkeypatch)
+        headers = {**_auth(monkeypatch), "Idempotency-Key": "force-destroy-cleanup"}
 
         response = await client.delete(
             f"/v1/workspaces/{workspace_id}",

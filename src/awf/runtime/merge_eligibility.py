@@ -38,9 +38,8 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
     if has_rebased:
         required_tier = max(required_tier, 2)
 
-    actual_tier = 1
-
     default_op_tier = 1
+    actual_tier = 1
     if workspace.resolved_profile and "validation" in workspace.resolved_profile:
         default_op_tier = workspace.resolved_profile["validation"].get("requested_tier", 1)
 

@@ -1655,8 +1655,12 @@ def _sync_candidate_readiness(
     workspace: Workspace,
     attempt: TaskAttempt,
     sync_validation_staleness: bool = True,
+    recompute_stale: bool | None = None,
 ) -> None:
     from awf.runtime.merge_eligibility import compute_stale_reason
+
+    if recompute_stale is not None:
+        sync_validation_staleness = recompute_stale
 
     workspace_status = WorkspaceStatus(workspace.status)
     is_open = candidate.status == "open"
@@ -1760,6 +1764,14 @@ def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -
     return unsigned
 
 
+def _operation_idempotency_advisory_lock_key(key: str) -> int:
+    digest = hashlib.sha256(f"awf:operation-idempotency\x00{key}".encode()).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 1 << 63:
+        return unsigned - (1 << 64)
+    return unsigned
+
+
 def owned_paths_overlap(left: str, right: str) -> bool:
     return _owned_paths_overlap(left, right)
 
@@ -1838,8 +1850,20 @@ class WorkspaceEventRepository:
 class OperationRepository:
     """CRUD helpers for async control-plane operations."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+
+    async def acquire_idempotency_key_lock(self, key: str) -> None:
+        """Serialize operation idempotency decisions for one key on Postgres."""
+        if self._dialect_name != "postgresql":
+            return
+
+        lock_key = _operation_idempotency_advisory_lock_key(key)
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
 
     async def create(
         self,
@@ -1868,6 +1892,15 @@ class OperationRepository:
 
     async def get(self, operation_id: str) -> Operation | None:
         return await self._session.get(Operation, operation_id)
+
+    async def get_by_idempotency_key(self, key: str) -> Operation | None:
+        stmt = (
+            select(Operation)
+            .where(Operation.idempotency_key == key)
+            .order_by(Operation.created_at.asc(), Operation.id.asc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
 
     async def list_all(
         self,
