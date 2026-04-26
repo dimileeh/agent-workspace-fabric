@@ -65,6 +65,9 @@ def _sample_pr_payload(
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
     comments: list[dict] | None = None,
+    files: list[dict] | None = None,
+    files_has_next_page: bool = False,
+    files_end_cursor: str | None = None,
 ) -> str:
     """Build a canned ``gh api graphql`` stdout for one PR."""
     return json.dumps(
@@ -100,6 +103,13 @@ def _sample_pr_payload(
                         "reviewThreads": {"nodes": threads or []},
                         "reviews": {"nodes": reviews or []},
                         "comments": {"nodes": comments or []},
+                        "files": {
+                            "nodes": files or [],
+                            "pageInfo": {
+                                "hasNextPage": files_has_next_page,
+                                "endCursor": files_end_cursor,
+                            },
+                        },
                     }
                 }
             }
@@ -229,6 +239,52 @@ class TestFetchPrStatus:
             "fetched_contexts_limit": 100,
             "log_level": "warning",
         } in captured
+
+    @pytest.mark.unit
+    async def test_paginates_changed_paths_when_pr_files_have_more_pages(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                files=[{"path": "src/first.py"}],
+                files_has_next_page=True,
+                files_end_cursor="cursor-1",
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps(
+                {
+                    "data": {
+                        "repository": {
+                            "pullRequest": {
+                                "files": {
+                                    "nodes": [{"path": "src/second.py"}],
+                                    "pageInfo": {
+                                        "hasNextPage": False,
+                                        "endCursor": None,
+                                    },
+                                }
+                            }
+                        }
+                    }
+                }
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.changed_paths == ("src/first.py", "src/second.py")
+        assert len(fake.calls) == 2
+        next_page_args = fake.calls[1].args
+        assert any(
+            a.startswith("query=") and "files(first: 100, after: $cursor)" in a
+            for a in next_page_args
+        )
+        assert "cursor=cursor-1" in next_page_args
 
     @pytest.mark.unit
     async def test_ignores_non_actionable_review_disabled_issue_comment(self) -> None:
@@ -614,7 +670,7 @@ class TestFetchPrStatus:
         assert args[0:3] == ["gh", "api", "graphql"]
         # Query passed via -f query=…, numeric number passed via -F
         assert any(a.startswith("query=") and "pullRequest" in a for a in args)
-        assert any(a.startswith("query=") and "pageInfo { hasNextPage }" in a for a in args)
+        assert any(a.startswith("query=") and "pageInfo { hasNextPage endCursor }" in a for a in args)
         assert "number=123" in args and "-F" in args
         assert "owner=dimileeh" in args and "repo=aira-web" in args
 

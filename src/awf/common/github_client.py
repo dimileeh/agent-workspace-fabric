@@ -58,8 +58,8 @@ class GitHubClientError(Exception):
 
 
 # GraphQL: fetch PR state + review threads + review comments in one query.
-# Using Connection fields with first: 100 is fine for the MVP; in the
-# unlikely event a single PR accumulates >100 threads, we'd paginate here.
+# The changed-file list feeds merge policy, so it is paginated below whenever
+# GitHub reports more than the first 100 paths.
 _GQL_PR_STATE = """
 query($owner: String!, $repo: String!, $number: Int!) {
   repository(owner: $owner, name: $repo) {
@@ -133,7 +133,21 @@ query($owner: String!, $repo: String!, $number: Int!) {
       }
       files(first: 100) {
         nodes { path }
-        pageInfo { hasNextPage }
+        pageInfo { hasNextPage endCursor }
+      }
+    }
+  }
+}
+""".strip()
+
+
+_GQL_PR_FILES_PAGE = """
+query($owner: String!, $repo: String!, $number: Int!, $cursor: String!) {
+  repository(owner: $owner, name: $repo) {
+    pullRequest(number: $number) {
+      files(first: 100, after: $cursor) {
+        nodes { path }
+        pageInfo { hasNextPage endCursor }
       }
     }
   }
@@ -301,21 +315,11 @@ class GitHubClient:
                 )
             )
 
-        changed_path_items: list[str] = []
-        for node in _dig(pr, "files", "nodes") or []:
-            if not isinstance(node, dict):
-                continue
-            path = _clean_optional_str(node.get("path"))
-            if path is not None:
-                changed_path_items.append(path)
-        changed_paths = tuple(changed_path_items)
-        if _dig(pr, "files", "pageInfo", "hasNextPage") is True:
-            _log.warning(
-                "github.pr_files_truncated",
-                repo=repo.slug(),
-                pr_number=pr_number,
-                fetched_files_limit=100,
-            )
+        changed_paths = await self._fetch_changed_paths(
+            repo=repo,
+            pr_number=pr_number,
+            first_page=_dig(pr, "files"),
+        )
 
         return PRStatus(
             number=pr["number"],
@@ -332,6 +336,48 @@ class GitHubClient:
             closed=bool(pr.get("closed")),
             merged=bool(pr.get("merged")),
         )
+
+    async def _fetch_changed_paths(
+        self,
+        *,
+        repo: RepoRef,
+        pr_number: int,
+        first_page: Any,
+    ) -> tuple[str, ...]:
+        changed_path_items = _extract_pr_file_paths(first_page)
+        files_page = first_page
+
+        while _dig(files_page, "pageInfo", "hasNextPage") is True:
+            cursor = _clean_optional_str(_dig(files_page, "pageInfo", "endCursor"))
+            if cursor is None:
+                raise GitHubClientError(
+                    operation="fetch_pr_status",
+                    returncode=0,
+                    stderr=(
+                        "GitHub PR files pageInfo.hasNextPage was true "
+                        "without an endCursor"
+                    ),
+                )
+            payload = await self._graphql(
+                query=_GQL_PR_FILES_PAGE,
+                variables={
+                    "owner": repo.owner,
+                    "repo": repo.name,
+                    "number": pr_number,
+                    "cursor": cursor,
+                },
+            )
+            next_page = _dig(payload, "data", "repository", "pullRequest", "files")
+            if not isinstance(next_page, dict):
+                raise GitHubClientError(
+                    operation="fetch_pr_status",
+                    returncode=0,
+                    stderr="GitHub PR files pagination response did not include files",
+                )
+            files_page = next_page
+            changed_path_items.extend(_extract_pr_file_paths(files_page))
+
+        return tuple(changed_path_items)
 
     async def fetch_failing_check_logs(
         self,
@@ -589,6 +635,17 @@ def _parse_check_contexts(rollup: Any) -> tuple[CheckTiming, ...]:
             )
         )
     return tuple(checks)
+
+
+def _extract_pr_file_paths(files_page: Any) -> list[str]:
+    paths: list[str] = []
+    for node in _dig(files_page, "nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        path = _clean_optional_str(node.get("path"))
+        if path is not None:
+            paths.append(path)
+    return paths
 
 
 def _clean_optional_str(value: Any) -> str | None:
