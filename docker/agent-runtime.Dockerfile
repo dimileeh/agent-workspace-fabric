@@ -69,7 +69,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libxkbcommon0 \
     && rm -rf /var/lib/apt/lists/*
 
-# ── Stage 2: Node.js (for coding CLIs which are all npm packages) ──────────
+# ── Stage 2: GitHub CLI ───────────────────────────────────────────────────
+ARG GH_VERSION=2.91.0
+RUN mkdir -p -m 755 /etc/apt/keyrings \
+    && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /etc/apt/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+      > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends "gh=${GH_VERSION}" \
+    && rm -rf /var/lib/apt/lists/* \
+    && gh --version
+
+# ── Stage 3: Node.js (for coding CLIs which are all npm packages) ──────────
 ARG NODE_VERSION
 RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
     && apt-get install -y --no-install-recommends nodejs \
@@ -77,7 +90,7 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
     && node --version \
     && npm --version
 
-# ── Stage 3: coding CLIs ──────────────────────────────────────────────────
+# ── Stage 4: coding CLIs ──────────────────────────────────────────────────
 #
 # Each CLI is pinned to a version. Bump via PR so we can verify the output
 # format hasn't drifted in the adapters.
@@ -94,7 +107,7 @@ RUN npm install -g --no-fund --no-audit \
     && claude --version || true \
     && gemini --version || true
 
-# ── Stage 4: Python tooling the agent may need inside the container ────────
+# ── Stage 5: Python tooling the agent may need inside the container ────────
 RUN python -m pip install --upgrade pip \
     && python -m pip install --no-cache-dir \
         "alembic>=1.13" \
@@ -102,7 +115,7 @@ RUN python -m pip install --upgrade pip \
         "psycopg[binary]>=3.1" \
         "uv>=0.5"
 
-# ── Stage 5: non-root user + workspace mount point ─────────────────────────
+# ── Stage 6: non-root user + workspace mount point ─────────────────────────
 RUN useradd --create-home --shell /bin/bash agent \
     && mkdir -p /workspace \
     && chown -R agent:agent /workspace
