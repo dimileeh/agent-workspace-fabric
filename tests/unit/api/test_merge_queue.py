@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.db.enums import AgentRuntime, WorkspaceStatus
@@ -47,9 +49,7 @@ async def _create_queue_workspace(
         workspace.status = status.value
         workspace.branch_name = branch_name
         workspace.pr_url = pr_url
-        workspace.pr_number = (
-            int(pr_url.rstrip("/").split("/")[-1]) if pr_url is not None else None
-        )
+        workspace.pr_number = int(pr_url.rstrip("/").split("/")[-1]) if pr_url is not None else None
         if updated_at is not None:
             workspace.updated_at = updated_at
         task = await TaskRepository(session).create_or_get(
@@ -91,6 +91,104 @@ async def _create_queue_workspace(
         )
         await session.commit()
         return workspace.id
+
+
+async def _attempt_id_for_workspace(engine: AsyncEngine, workspace_id: str) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT id FROM task_attempts WHERE workspace_id = :workspace_id"),
+            {"workspace_id": workspace_id},
+        )
+        attempt_id = result.scalar_one()
+        assert isinstance(attempt_id, str)
+        return attempt_id
+
+
+async def _insert_validation_run(
+    engine: AsyncEngine,
+    *,
+    run_id: str,
+    workspace_id: str,
+    attempt_id: str,
+    target_head_sha: str,
+    status: str = "succeeded",
+    finished_at: datetime = datetime(2026, 4, 26, 12, 5, tzinfo=UTC),
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO validation_runs (
+                    id,
+                    workspace_id,
+                    attempt_id,
+                    tier,
+                    command_set_hash,
+                    commands,
+                    base_commit,
+                    target_branch,
+                    target_head_sha,
+                    status,
+                    reason_code,
+                    started_at,
+                    finished_at,
+                    log_stream_refs
+                )
+                VALUES (
+                    :id,
+                    :workspace_id,
+                    :attempt_id,
+                    1,
+                    :command_set_hash,
+                    :commands,
+                    'base123',
+                    'codex/merge-queue',
+                    :target_head_sha,
+                    :status,
+                    'VALIDATION_OK',
+                    :started_at,
+                    :finished_at,
+                    :log_stream_refs
+                )
+                """
+            ),
+            {
+                "id": run_id,
+                "workspace_id": workspace_id,
+                "attempt_id": attempt_id,
+                "target_head_sha": target_head_sha,
+                "status": status,
+                "command_set_hash": "b" * 64,
+                "commands": json.dumps(
+                    [
+                        {
+                            "phase": "validate",
+                            "command_index": 1,
+                            "command": "pytest -q",
+                            "stream_ids": {
+                                "stdout": "validation.01_validate.stdout",
+                                "stderr": "validation.01_validate.stderr",
+                            },
+                        }
+                    ]
+                ),
+                "started_at": datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+                "finished_at": finished_at,
+                "log_stream_refs": json.dumps(
+                    {
+                        "commands": [
+                            {
+                                "stdout": "validation.01_validate.stdout",
+                                "stderr": "validation.01_validate.stderr",
+                            }
+                        ]
+                    }
+                ),
+            },
+        )
+        await session.commit()
 
 
 class TestMergeQueueList:
@@ -155,7 +253,10 @@ class TestMergeQueueList:
             "required_next_action",
             "readiness",
             "canonical",
+            "latest_validation",
+            "stale_reasons",
         }
+        assert item["stale_reasons"] == []
         assert item["candidate_id"].startswith("mc_")
         assert item["candidate_status"] == "open"
         assert item["attempt_id"].startswith("att_")
@@ -182,6 +283,7 @@ class TestMergeQueueList:
             "stale": False,
             "stale_reason": None,
         }
+        assert item["latest_validation"] is None
         assert newer_id not in {row["workspace_id"] for row in body["items"]}
 
     @pytest.mark.unit
@@ -344,8 +446,7 @@ class TestMergeQueueList:
 
         assert response.status_code == 200
         actual = {
-            item["workspace_id"]: item["merge_blocker_reason"]
-            for item in response.json()["items"]
+            item["workspace_id"]: item["merge_blocker_reason"] for item in response.json()["items"]
         }
         assert actual == expected
 
@@ -368,9 +469,7 @@ class TestMergeQueueList:
 
         assert response.status_code == 200
         item = next(
-            item
-            for item in response.json()["items"]
-            if item["workspace_id"] == workspace_id
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
         )
         assert item["workspace_id"] == workspace_id
         assert item["status"] == WorkspaceStatus.monitoring_pr.value
@@ -387,3 +486,56 @@ class TestMergeQueueList:
             "stale_reason": None,
         }
         assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+
+    @pytest.mark.unit
+    async def test_exposes_latest_validation_provenance_and_freshness(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Validation provenance",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/22",
+            branch_name="codex/merge-queue",
+            updated_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        )
+        attempt_id = await _attempt_id_for_workspace(engine, workspace_id)
+        await _insert_validation_run(
+            engine,
+            run_id="vr_222222222222222222222222",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="old-head",
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["latest_validation"] == {
+            "validation_run_id": "vr_222222222222222222222222",
+            "attempt_id": attempt_id,
+            "tier": 1,
+            "command_set_hash": "b" * 64,
+            "base_commit": "base123",
+            "target_branch": "codex/merge-queue",
+            "target_head_sha": "old-head",
+            "current_target_head_sha": "head123",
+            "status": "succeeded",
+            "reason_code": "VALIDATION_OK",
+            "started_at": "2026-04-26T12:00:00Z",
+            "finished_at": "2026-04-26T12:05:00Z",
+            "log_stream_refs": {
+                "commands": [
+                    {
+                        "stdout": "validation.01_validate.stdout",
+                        "stderr": "validation.01_validate.stderr",
+                    }
+                ]
+            },
+            "fresh_for_target": False,
+        }
