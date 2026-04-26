@@ -732,6 +732,4 @@ class TestStaleReasonResponseShape:
         response = StaleReasonResponse.model_validate(row)
         dumped: dict[str, Any] = response.model_dump()
         assert set(dumped.keys()) >= _PAYLOAD_SHAPE_KEYS
-        assert isinstance(dumped["detected_at"], datetime) or isinstance(
-            dumped["detected_at"], str
-        )
+        assert isinstance(dumped["detected_at"], (datetime, str))

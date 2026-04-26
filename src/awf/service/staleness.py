@@ -235,19 +235,22 @@ def evaluate_staleness(
         )
         break
 
-    if not findings and target.advanced_commits > 0:
-        if candidate.task_class not in policy.lenient_task_classes:
-            findings.append(
-                StalenessFinding(
-                    reason_code=REASON_TARGET_ADVANCED,
-                    trigger_type=TRIGGER_TARGET_ADVANCED,
-                    trigger_ref=target.head_sha,
-                    explanation=(
-                        f"Target branch '{target.branch}' advanced "
-                        f"{target.advanced_commits} commit(s) past validation base."
-                    ),
-                )
+    if (
+        not findings
+        and target.advanced_commits > 0
+        and candidate.task_class not in policy.lenient_task_classes
+    ):
+        findings.append(
+            StalenessFinding(
+                reason_code=REASON_TARGET_ADVANCED,
+                trigger_type=TRIGGER_TARGET_ADVANCED,
+                trigger_ref=target.head_sha,
+                explanation=(
+                    f"Target branch '{target.branch}' advanced "
+                    f"{target.advanced_commits} commit(s) past validation base."
+                ),
             )
+        )
 
     return findings
 
