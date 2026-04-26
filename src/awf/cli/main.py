@@ -22,6 +22,8 @@ from typing import Any
 import httpx
 import typer
 
+from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
+
 app = typer.Typer(
     name="awf",
     help="Aira Agent Workspace Fabric — CLI operator surface.",
@@ -152,6 +154,43 @@ def service_config(
     from awf.service.config import resolve_service_settings, service_config_payload
 
     _emit(service_config_payload(resolve_service_settings()), fmt)
+
+
+@service_app.command("logs")
+def service_logs(
+    tail: int = typer.Option(
+        DEFAULT_LOG_TAIL,
+        "--tail",
+        min=0,
+        help="Number of log lines to show per service.",
+    ),
+    service: list[ServiceLogName] = typer.Option(
+        [],
+        "--service",
+        help="Repeatable service filter.",
+    ),
+    follow: bool = typer.Option(
+        False,
+        "--follow/--no-follow",
+        help="Stream logs until interrupted.",
+    ),
+) -> None:
+    """Tail local AWF service Compose logs."""
+    from awf.service.logs import ServiceLogsError, run_service_logs
+
+    try:
+        result = run_service_logs(services=service, tail=tail, follow=follow)
+    except ServiceLogsError as exc:
+        typer.echo(
+            f"error: docker compose logs failed (exit {exc.returncode}): {exc.detail}",
+            err=True,
+        )
+        raise typer.Exit(code=1) from None
+
+    if result.stdout:
+        typer.echo(result.stdout, nl=False)
+    if result.stderr:
+        typer.echo(result.stderr, err=True, nl=False)
 
 
 @workspace_app.command("create")
