@@ -109,6 +109,29 @@ class WorkspaceStackStopError(WorkspaceControlError):
         )
 
 
+class WorkspaceRemonitorMissingPrUrlError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_PR_URL_REQUIRED",
+            message="Workspace remonitor requires an existing PR URL.",
+            detail={"status": workspace.status},
+        )
+
+
+class WorkspaceRemonitorStateError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_STATE_NOT_REMONITORABLE",
+            message="Workspace is not in a state eligible for remonitor recovery.",
+            detail={
+                "status": workspace.status,
+                "eligible_statuses": [
+                    status.value for status in _REMONITOR_ELIGIBLE_STATUSES
+                ],
+            },
+        )
+
+
 class WorkspaceControlService:
     """Business logic for sensitive workspace lifecycle controls."""
 
@@ -250,6 +273,88 @@ class WorkspaceControlService:
             operation_id=operation.id,
             status=WorkspaceStatus(workspace.status),
             message="workspace stack stopped",
+        )
+
+    async def remonitor_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> WorkspaceControlResponse:
+        repo = WorkspaceRepository(self._session)
+        operations = OperationRepository(self._session)
+        payload: dict[str, object | None] = {"reason": reason}
+        operation_payload = _operation_payload(payload, expected_version=expected_version)
+        workspace, replay = await self._prepare_operation(
+            repo,
+            operations,
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            payload=operation_payload,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+        )
+        if replay is not None:
+            return _control_response(
+                workspace=workspace,
+                operation=replay,
+                message="workspace PR monitor recovery requested",
+            )
+
+        if not workspace.pr_url:
+            raise WorkspaceRemonitorMissingPrUrlError(workspace)
+
+        current = WorkspaceStatus(workspace.status)
+        if current not in _REMONITOR_ELIGIBLE_STATUSES:
+            raise WorkspaceRemonitorStateError(workspace)
+
+        operation = await operations.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+            payload=operation_payload,
+            idempotency_key=idempotency_key,
+        )
+        claims_reset = {
+            "monitor_claim": (
+                workspace.monitor_claimed_by is not None
+                or workspace.monitor_claim_expires_at is not None
+            ),
+            "execution_claim": (
+                workspace.execution_claimed_by is not None
+                or workspace.execution_claim_expires_at is not None
+            ),
+        }
+        workspace.monitor_claimed_by = None
+        workspace.monitor_claim_expires_at = None
+        workspace.execution_claimed_by = None
+        workspace.execution_claim_expires_at = None
+        workspace.version += 1
+        await repo.add_event(
+            workspace,
+            event_type="workspace.remonitor_requested",
+            reason_code="OPERATOR_REMONITOR",
+            payload={
+                "reason": reason,
+                "operation_id": operation.id,
+                "claims_reset": claims_reset,
+            },
+        )
+        await operations.finish(
+            operation,
+            status=OperationStatus.succeeded,
+            result={
+                "status": workspace.status,
+                "claims_reset": claims_reset,
+            },
+        )
+        return WorkspaceControlResponse(
+            workspace_id=workspace_id,
+            operation_id=operation.id,
+            status=WorkspaceStatus(workspace.status),
+            message="workspace PR monitor recovery requested",
         )
 
     async def destroy_workspace(
@@ -537,3 +642,6 @@ def _is_active(status_value: WorkspaceStatus) -> bool:
         WorkspaceStatus.pushing,
         WorkspaceStatus.monitoring_pr,
     }
+
+
+_REMONITOR_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
