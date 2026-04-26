@@ -469,6 +469,19 @@ uv run --python 3.12 --extra dev awf service status
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
 
+Inspect the local service Compose logs without writing Docker commands:
+
+```bash
+uv run --python 3.12 --extra dev awf service logs
+uv run --python 3.12 --extra dev awf service logs --tail 200 --service worker
+uv run --python 3.12 --extra dev awf service logs --follow --service api --service worker
+```
+
+`awf service logs` is a read-only wrapper around
+`docker compose -f docker/compose/local-service.yml logs`. By default it tails
+the `api` and `worker` services. Repeat `--service` to select `api`, `worker`,
+`migrate`, or `postgres`.
+
 Create a workspace:
 
 ```bash
@@ -559,6 +572,7 @@ Check the service from another terminal:
 
 ```bash
 uv run --python 3.12 --extra dev awf service status
+uv run --python 3.12 --extra dev awf service logs --follow --service worker
 ```
 
 The service-mode default database URL is local Postgres
