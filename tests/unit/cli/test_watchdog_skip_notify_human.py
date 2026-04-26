@@ -120,8 +120,7 @@ class TestShouldSkipRespawn:
         assert result is True
         # Operator should be able to grep logs for this exact event.
         assert any(
-            entry.get("event") == "watchdog.skipped_notify_human_terminal"
-            for entry in cap_logs
+            entry.get("event") == "watchdog.skipped_notify_human_terminal" for entry in cap_logs
         ), f"expected watchdog.skipped_notify_human_terminal log line, got {cap_logs!r}"
 
     def test_notify_human_terminal_with_different_sha_respawns(self, tmp_path: Path) -> None:
