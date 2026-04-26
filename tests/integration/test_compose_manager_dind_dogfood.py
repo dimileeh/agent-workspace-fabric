@@ -137,6 +137,8 @@ services:
 async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Path) -> None:
     workspace_id = f"test_dind_{tmp_path.name}"
     local_project = tmp_path / "local-project"
+    worktree_host_path = tmp_path / "agent-worktree"
+    worktree_host_path.mkdir()
     _write_tiny_project(local_project)
     agent_image = _build_agent_image(
         tmp_path, workspace_id, local_project / "tiny" / "compose.yml"
@@ -145,7 +147,7 @@ async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Pa
     manager = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
     spec = WorkspaceComposeSpec(
         workspace_id=workspace_id,
-        worktree_host_path=Path("/tmp"),
+        worktree_host_path=worktree_host_path,
         agent_runtime_image=agent_image,
         docker_mode="dind",
         dind_image=_DIND_IMAGE,
