@@ -10,11 +10,14 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.models import TaskAttempt
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 
@@ -49,6 +52,45 @@ async def _workspace(
     )
     await session.flush()
     return workspace
+
+
+async def _task(session: AsyncSession, *, external_id: str = "TICKET-LINEAGE") -> object:
+    from awf.db.repositories import TaskRepository
+
+    return await TaskRepository(session).create_or_get(
+        repo_url="git@github.com:example/app.git",
+        base_branch="development",
+        title="Merge lineage task",
+        prompt="Do the work.",
+        external_id=external_id,
+        idempotency_key=None,
+        task_class="test_task",
+        owned_paths=["src/awf/**"],
+    )
+
+
+async def _drive_to_monitoring_pr(
+    session: AsyncSession,
+    workspace: object,
+    *,
+    pr_number: int,
+    branch_name: str,
+) -> None:
+    repo = WorkspaceRepository(session)
+    for target in (
+        WorkspaceStatus.provisioning,
+        WorkspaceStatus.ready,
+        WorkspaceStatus.running,
+        WorkspaceStatus.validating,
+        WorkspaceStatus.pushing,
+    ):
+        await repo.transition(workspace, to=target, reason_code="TEST")
+    workspace.branch_name = branch_name
+    workspace.remote_push_branch = branch_name
+    workspace.base_commit = "a" * 40
+    workspace.pr_url = f"https://github.com/example/app/pull/{pr_number}"
+    workspace.pr_number = pr_number
+    await repo.transition(workspace, to=WorkspaceStatus.monitoring_pr, reason_code="PR_OPENED")
 
 
 class TestTaskAttemptRepository:
@@ -124,6 +166,136 @@ class TestTaskAttemptRepository:
         assert second_attempt.attempt_number == 2
         assert second_attempt.workspace_id == second_workspace.id
         assert second_attempt.agent == AgentRuntime.codex.value
+
+    @pytest.mark.unit
+    async def test_database_allows_only_one_canonical_attempt_per_task(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        from awf.db.repositories import TaskAttemptRepository
+
+        task = await _task(session)
+        first_workspace = await _workspace(session, title="first attempt")
+        second_workspace = await _workspace(session, title="second attempt")
+
+        attempt_repo = TaskAttemptRepository(session)
+        first_attempt = await attempt_repo.create_for_workspace(
+            task=task,
+            workspace=first_workspace,
+        )
+        second_attempt = await attempt_repo.create_for_workspace(
+            task=task,
+            workspace=second_workspace,
+        )
+
+        first_attempt.is_canonical_for_merge = True
+        second_attempt.is_canonical_for_merge = True
+
+        with pytest.raises(IntegrityError):
+            await session.flush()
+
+    @pytest.mark.unit
+    async def test_mark_canonical_for_merge_returns_previous_canonical_attempt(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        from awf.db.repositories import TaskAttemptRepository
+
+        task = await _task(session)
+        first_workspace = await _workspace(session, title="first attempt")
+        second_workspace = await _workspace(session, title="second attempt")
+
+        attempt_repo = TaskAttemptRepository(session)
+        first_attempt = await attempt_repo.create_for_workspace(
+            task=task,
+            workspace=first_workspace,
+        )
+        second_attempt = await attempt_repo.create_for_workspace(
+            task=task,
+            workspace=second_workspace,
+        )
+
+        initial_previous = await attempt_repo.mark_canonical_for_merge(first_attempt)
+        superseded_previous = await attempt_repo.mark_canonical_for_merge(second_attempt)
+
+        assert initial_previous is None
+        assert superseded_previous is not None
+        assert superseded_previous.id == first_attempt.id
+        assert first_attempt.is_canonical_for_merge is False
+        assert first_attempt.superseded_by_attempt_id == second_attempt.id
+        assert second_attempt.is_canonical_for_merge is True
+
+    @pytest.mark.unit
+    async def test_retry_pr_ready_attempt_supersedes_canonical_and_closes_old_candidate(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        from awf.db.repositories import MergeCandidateRepository, TaskAttemptRepository
+
+        task = await _task(session, external_id="TICKET-SUPERSEDE")
+        first_workspace = await _workspace(session, title="first attempt")
+        second_workspace = await _workspace(session, title="retry attempt")
+
+        attempt_repo = TaskAttemptRepository(session)
+        first_attempt = await attempt_repo.create_for_workspace(
+            task=task,
+            workspace=first_workspace,
+        )
+        second_attempt = await attempt_repo.create_for_workspace(
+            task=task,
+            workspace=second_workspace,
+            parent_attempt_id=first_attempt.id,
+            redispatch_from_attempt_id=first_attempt.id,
+        )
+
+        await _drive_to_monitoring_pr(
+            session,
+            first_workspace,
+            pr_number=11,
+            branch_name="awf/first-attempt",
+        )
+        first_candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+            first_attempt.id
+        )
+        assert first_candidate is not None
+        assert first_candidate.status == "open"
+
+        await _drive_to_monitoring_pr(
+            session,
+            second_workspace,
+            pr_number=12,
+            branch_name="awf/retry-attempt",
+        )
+
+        attempts = list(
+            (
+                await session.execute(
+                    select(TaskAttempt).order_by(TaskAttempt.attempt_number.asc())
+                )
+            ).scalars()
+        )
+        candidates = await MergeCandidateRepository(session).list_for_task(task.id, limit=10)
+        queued_candidates = await MergeCandidateRepository(session).list_queue(limit=10)
+
+        assert [attempt.id for attempt in attempts] == [first_attempt.id, second_attempt.id]
+        assert attempts[0].is_canonical_for_merge is False
+        assert attempts[0].superseded_by_attempt_id == second_attempt.id
+        assert attempts[1].is_canonical_for_merge is True
+        assert attempts[1].parent_attempt_id == first_attempt.id
+        assert attempts[1].redispatch_from_attempt_id == first_attempt.id
+
+        first_candidate = next(
+            candidate for candidate in candidates if candidate.attempt_id == first_attempt.id
+        )
+        second_candidate = next(
+            candidate for candidate in candidates if candidate.attempt_id == second_attempt.id
+        )
+        assert first_candidate.status == "closed"
+        assert first_candidate.close_reason == "CANONICAL_CHANGED"
+        assert first_candidate.not_canonical is True
+        assert second_candidate.status == "open"
+        assert second_candidate.close_reason is None
+        assert [candidate.attempt_id for candidate in queued_candidates] == [second_attempt.id]
 
 
 class TestTaskAttemptMigration:

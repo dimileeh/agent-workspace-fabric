@@ -23,7 +23,20 @@ MergeBlockerReason = Literal[
     "workspace_not_terminal",
     "completed",
     "failed_or_cancelled",
+    "not_canonical",
+    "stale",
 ]
+MergeCandidateStatus = Literal["open", "merged", "closed"]
+
+
+class MergeCandidateReadinessResponse(BaseModel):
+    ready: bool
+    manual_merge_required: bool
+    waiting_for_monitor: bool
+    failed_or_cancelled: bool
+    completed: bool
+    not_canonical: bool
+    stale: bool
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -209,6 +222,14 @@ class TaskResponse(BaseModel):
     task_id: str
     attempt_id: str | None = None
     attempt_number: int | None = None
+    parent_attempt_id: str | None = None
+    redispatch_from_attempt_id: str | None = None
+    superseded_by_attempt_id: str | None = None
+    is_canonical_for_merge: bool | None = None
+    canonical_attempt_id: str | None = None
+    candidate_id: str | None = None
+    candidate_status: MergeCandidateStatus | None = None
+    readiness: MergeCandidateReadinessResponse | None = None
     workspace_id: str
     title: str
     repo_url: str
@@ -225,6 +246,34 @@ class TaskResponse(BaseModel):
 
 class TaskListResponse(BaseModel):
     items: list[TaskResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class TaskAttemptResponse(BaseModel):
+    attempt_id: str
+    task_id: str
+    workspace_id: str
+    attempt_number: int
+    parent_attempt_id: str | None
+    redispatch_from_attempt_id: str | None
+    superseded_by_attempt_id: str | None
+    is_canonical_for_merge: bool
+    candidate_id: str | None = None
+    candidate_status: MergeCandidateStatus | None = None
+    readiness: MergeCandidateReadinessResponse | None = None
+    agent: AgentRuntime
+    status: WorkspaceStatus
+    pr_url: str | None
+    failure_reason: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class TaskAttemptListResponse(BaseModel):
+    task_id: str
+    task_ref: str
+    items: list[TaskAttemptResponse]
     next_cursor: str | None = None
     has_more: bool = False
 
@@ -257,6 +306,11 @@ class WorkspaceOverviewListResponse(BaseModel):
 
 
 class MergeQueueItemResponse(BaseModel):
+    candidate_id: str | None = None
+    candidate_status: MergeCandidateStatus | None = None
+    close_reason: str | None = None
+    attempt_id: str | None = None
+    task_id: str
     workspace_id: str
     title: str
     repo_url: str
@@ -271,6 +325,8 @@ class MergeQueueItemResponse(BaseModel):
     updated_at: datetime
     last_event: WorkspaceEventResponse | None
     merge_blocker_reason: MergeBlockerReason
+    readiness: MergeCandidateReadinessResponse | None = None
+    canonical: bool
 
 
 class MergeQueueListResponse(BaseModel):
