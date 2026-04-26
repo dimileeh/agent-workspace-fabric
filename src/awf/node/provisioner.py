@@ -76,6 +76,14 @@ class Provisioner:
             if ws is None:
                 return  # Workspace disappeared or wasn't requested; nothing to do.
 
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.provisioning,
+            action="provision",
+            reason_code="PROVISIONER_STALE_STATUS",
+        ):
+            return
+
         # 2. Do the git work outside a DB transaction (it's slow).
         branch_name = f"{self._config.branch_prefix}/{workspace_id}"
         try:
@@ -85,6 +93,13 @@ class Provisioner:
                 base_branch=ws.branch_base,
                 new_branch=branch_name,
             )
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.provisioning,
+                action="provision",
+                reason_code="PROVISIONER_STALE_STATUS",
+            ):
+                return
             base_commit = await self._git.head_sha(workspace_id=workspace_id)
             profile_resolution = None
             if ws.resolved_profile is None:
@@ -99,6 +114,13 @@ class Provisioner:
                 profile = WorkspaceProfile.model_validate(ws.resolved_profile)
             stack_paths: ComposeProjectPaths | None = None
             if self._stack_launcher is not None:
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.provisioning,
+                    action="provision",
+                    reason_code="PROVISIONER_STALE_STATUS",
+                ):
+                    return
                 stack_paths = await self._stack_launcher.launch(
                     WorkspaceStackLaunchRequest(
                         workspace_id=workspace_id,
@@ -166,6 +188,16 @@ class Provisioner:
             repo = WorkspaceRepository(session)
             persisted = await repo.get(workspace_id)
             if persisted is None:  # pragma: no cover - defensive; workspace removed mid-provision
+                return
+            if persisted.status != WorkspaceStatus.provisioning.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    persisted,
+                    action="provision",
+                    expected=WorkspaceStatus.provisioning,
+                    reason_code="PROVISIONER_STALE_STATUS",
+                )
+                await session.commit()
                 return
 
             persisted.node_id = self._config.node_id
@@ -241,6 +273,14 @@ class Provisioner:
                     return
                 if ws.status != from_status.value:
                     # Already moved elsewhere (e.g. cancelled). Respect that.
+                    await self._record_stale_action_skip(
+                        repo,
+                        ws,
+                        action="mark_failed",
+                        expected=from_status,
+                        reason_code="PROVISIONER_MARK_FAILED_SKIPPED",
+                    )
+                    await session.commit()
                     return
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
@@ -252,3 +292,60 @@ class Provisioner:
                 await session.commit()
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
+
+    async def _recheck_status(
+        self,
+        workspace_id: str,
+        *,
+        expected: WorkspaceStatus,
+        action: str,
+        reason_code: str,
+    ) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - race with hard deletion
+                _log.warning(
+                    "provisioner.skip_unknown",
+                    workspace_id=workspace_id,
+                    action=action,
+                )
+                return False
+            if ws.status == expected.value:
+                return True
+            await self._record_stale_action_skip(
+                repo,
+                ws,
+                action=action,
+                expected=expected,
+                reason_code=reason_code,
+            )
+            await session.commit()
+            return False
+
+    async def _record_stale_action_skip(
+        self,
+        repo: WorkspaceRepository,
+        ws: Workspace,
+        *,
+        action: str,
+        expected: WorkspaceStatus,
+        reason_code: str,
+    ) -> None:
+        _log.info(
+            "provisioner.skip_stale_status",
+            workspace_id=ws.id,
+            action=action,
+            expected_status=expected.value,
+            status=ws.status,
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.stale_action_skipped",
+            reason_code=reason_code,
+            payload={
+                "action": action,
+                "expected_status": expected.value,
+                "actual_status": ws.status,
+            },
+        )

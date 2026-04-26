@@ -73,6 +73,11 @@ class ControlWorker:
         dispatched_ids: set[str] = set()
 
         requested_ids = await self._list_requested()
+        requested_ids = await self._filter_current_status(
+            requested_ids,
+            expected=WorkspaceStatus.requested,
+            action="provision",
+        )
         if requested_ids:
             await asyncio.gather(
                 *(self._safely_provision(ws_id) for ws_id in requested_ids),
@@ -88,6 +93,11 @@ class ControlWorker:
                     limit=execution_slots,
                     exclude_ids=active_execution_ids,
                 )
+                monitoring_ids = await self._filter_current_status(
+                    monitoring_ids,
+                    expected=WorkspaceStatus.monitoring_pr,
+                    action="resume_pr_monitor",
+                )
                 dispatched_ids.update(
                     self._dispatch_monitor_resumes(monitoring_ids, limit=execution_slots)
                 )
@@ -97,6 +107,11 @@ class ControlWorker:
                 ready_ids = await self._list_ready(
                     limit=execution_slots,
                     exclude_ids=set(self._execution_tasks),
+                )
+                ready_ids = await self._filter_current_status(
+                    ready_ids,
+                    expected=WorkspaceStatus.ready,
+                    action="execute",
                 )
                 dispatched_ids.update(
                     self._dispatch_ready_executions(ready_ids, limit=execution_slots)
@@ -181,6 +196,37 @@ class ControlWorker:
             stmt = stmt.order_by(Workspace.created_at).limit(limit)
             result = await session.execute(stmt)
             return [row[0] for row in result.all()]
+
+    async def _filter_current_status(
+        self,
+        workspace_ids: list[str],
+        *,
+        expected: WorkspaceStatus,
+        action: str,
+    ) -> list[str]:
+        if not workspace_ids:
+            return []
+
+        async with self._session_factory() as session:
+            stmt = select(Workspace.id, Workspace.status).where(Workspace.id.in_(workspace_ids))
+            result = await session.execute(stmt)
+            statuses: dict[str, str] = {row[0]: row[1] for row in result.all()}
+
+        current_ids: list[str] = []
+        for workspace_id in workspace_ids:
+            actual = statuses.get(workspace_id)
+            if actual == expected.value:
+                current_ids.append(workspace_id)
+                continue
+
+            _log.info(
+                "worker.skip_stale_dispatch",
+                workspace_id=workspace_id,
+                action=action,
+                expected_status=expected.value,
+                status=actual,
+            )
+        return current_ids
 
     def _available_execution_slots(self) -> int:
         return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
