@@ -2509,7 +2509,7 @@ function FailureAnalysisPanel({
                    </thead>
                    <tbody>
                      {summary.latest_examples.map((example) => (
-                       <tr key={example.workspace_id} className="border-t border-slate-100 bg-white">
+                       <tr key={`${example.workspace_id}-${example.timestamp}`} className="border-t border-slate-100 bg-white">
                          <Td>
                            <div className="font-medium text-slate-950 truncate max-w-[200px]" title={example.title}>{example.title}</div>
                            <div className="mono text-[11px] text-slate-500 mt-0.5">{compactId(example.workspace_id, 10)}</div>
