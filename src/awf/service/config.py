@@ -11,6 +11,7 @@ from sqlalchemy.engine import make_url
 from awf.common.config import DEFAULT_MIN_FREE_DISK_BYTES, Settings
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
+DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -79,7 +80,7 @@ def resolve_service_settings(
         worker_max_concurrent_executions=settings.worker_max_concurrent_executions,
         agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
         agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
-        node_id=settings.worker_node_id,
+        node_id=_empty_to_none(settings.worker_node_id) or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
         branch_prefix=settings.worker_branch_prefix,
     )
 

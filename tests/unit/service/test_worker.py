@@ -12,9 +12,8 @@ import structlog
 from awf.common.config import Settings
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
-from awf.service.config import resolve_service_settings
 from awf.service import worker as worker_mod
-from awf.service.config import ServiceSettings
+from awf.service.config import ServiceSettings, resolve_service_settings
 
 
 def _settings(
