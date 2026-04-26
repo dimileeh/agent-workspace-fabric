@@ -454,6 +454,8 @@ class WorkspaceRepository:
         repo_url: str | None = None,
         base_branch: str | None = None,
         status: WorkspaceStatus | str | None = None,
+        before_updated_at: datetime | None = None,
+        before_workspace_id: str | None = None,
         limit: int = 50,
     ) -> builtins.list[Workspace]:
         stmt = (
@@ -477,6 +479,16 @@ class WorkspaceRepository:
             stmt = stmt.where(Workspace.branch_base == base_branch)
         if status is not None:
             stmt = stmt.where(Workspace.status == status)
+        if before_updated_at is not None and before_workspace_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Workspace.updated_at < before_updated_at,
+                    and_(
+                        Workspace.updated_at == before_updated_at,
+                        Workspace.id < before_workspace_id,
+                    ),
+                )
+            )
         return list((await self._session.execute(stmt)).scalars())
 
     async def list_schedulable_ids(

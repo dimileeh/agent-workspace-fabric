@@ -190,6 +190,53 @@ class TestMergeQueueList:
         assert [item["workspace_id"] for item in response.json()["items"]] == [expected_id]
 
     @pytest.mark.unit
+    async def test_reports_has_more_and_accepts_next_cursor(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        older_id = await _create_queue_workspace(
+            engine,
+            title="Older monitored PR",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/8",
+            updated_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+        )
+        newer_id = await _create_queue_workspace(
+            engine,
+            title="Newer monitored PR",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/9",
+            updated_at=datetime(2026, 4, 23, 12, 0, tzinfo=UTC),
+        )
+
+        first_response = await client.get("/v1/merge-queue", params={"limit": 1})
+
+        assert first_response.status_code == 200
+        first_body = first_response.json()
+        assert [item["workspace_id"] for item in first_body["items"]] == [newer_id]
+        assert first_body["has_more"] is True
+        assert first_body["next_cursor"] is not None
+
+        second_response = await client.get(
+            "/v1/merge-queue",
+            params={"limit": 1, "cursor": first_body["next_cursor"]},
+        )
+
+        assert second_response.status_code == 200
+        second_body = second_response.json()
+        assert [item["workspace_id"] for item in second_body["items"]] == [older_id]
+        assert second_body["has_more"] is False
+        assert second_body["next_cursor"] is None
+
+    @pytest.mark.unit
+    async def test_rejects_invalid_cursor(self, client: AsyncClient) -> None:
+        response = await client.get("/v1/merge-queue", params={"cursor": "not-a-cursor"})
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "INVALID_CURSOR"
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("limit", [0, 501])
     async def test_validates_limit_bounds(self, client: AsyncClient, limit: int) -> None:
         response = await client.get("/v1/merge-queue", params={"limit": limit})
