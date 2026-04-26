@@ -8,6 +8,7 @@ without trying to encode every possible build-system nuance.
 
 from __future__ import annotations
 
+import re
 from enum import StrEnum
 from typing import Annotated, Literal
 
@@ -176,6 +177,78 @@ class ProfileSecret(BaseModel):
     kind: Literal["mount", "env"] = "mount"
     mode: Literal["ro", "rw"] = "ro"
     required: bool = True
+    provider: str | None = Field(default=None, max_length=128)
+    ref: str | None = Field(default=None, max_length=512)
+
+    @model_validator(mode="after")
+    def _validate_secret(self) -> ProfileSecret:
+        # Broad targets check
+        if self.kind == "mount":
+            target_norm = self.target.rstrip("/")
+            if target_norm in ("", "/", "/tmp", "/var", "/etc", "/root", "/home"):
+                raise ValueError(f"secret target '{self.target}' is too broad")
+        elif self.kind == "env":
+            if self.target in ("PATH", "HOME", "USER", ""):
+                raise ValueError(f"secret target '{self.target}' is too broad or invalid")
+
+        # Missing provider/ref on required secrets check? No, provider/ref is optional.
+        # But if provider is given, maybe ref is required?
+        if self.provider and not self.ref:
+            raise ValueError("secret 'ref' must be provided if 'provider' is specified")
+
+        # Raw looking values
+        def _looks_like_raw_secret(value: str | None) -> bool:
+            if not value:
+                return False
+            # Check for generic high-entropy strings or common token prefixes
+            if value.startswith(("sk-", "xoxb-", "xoxp-", "AIza")):
+                return True
+            # Check length to prevent embedding large JWTs or keys in 'ref'
+            if len(value) > 128 and not bool(re.match(r"^[a-zA-Z0-9_\-./]+$", value)):
+                # Overly long strings not looking like a simple path or ARN
+                return True
+            return False
+
+        if _looks_like_raw_secret(self.ref):
+            raise ValueError("secret 'ref' appears to contain a raw secret value")
+
+        return self
+
+
+class EgressMode(StrEnum):
+    open = "open"
+    allowlist = "allowlist"
+    offline = "offline"
+    mirrored = "mirrored"
+
+
+class ProfileEgress(BaseModel):
+    """Network egress policy for the workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: EgressMode = EgressMode.open
+    allowlist: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_egress(self) -> ProfileEgress:
+        if self.mode != EgressMode.allowlist and self.allowlist:
+            raise ValueError(f"allowlist cannot be populated when egress mode is {self.mode}")
+        if self.mode == EgressMode.allowlist and not self.allowlist:
+            raise ValueError("allowlist must be populated when egress mode is allowlist")
+        if self.mode == EgressMode.allowlist:
+            for item in self.allowlist:
+                if not item or item == "*" or "/" in item:
+                    raise ValueError(f"invalid allowlist entry: '{item}'")
+        return self
+
+
+class ProfileSecurity(BaseModel):
+    """Security and policy declarations for the workspace."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    egress: ProfileEgress = Field(default_factory=ProfileEgress)
 
 
 class WorkspaceProfile(BaseModel):
@@ -195,6 +268,7 @@ class WorkspaceProfile(BaseModel):
     validation: ProfileValidation = Field(default_factory=ProfileValidation)
     monitor: ProfileMonitor = Field(default_factory=ProfileMonitor)
     secrets: list[ProfileSecret] = Field(default_factory=list)
+    security: ProfileSecurity = Field(default_factory=ProfileSecurity)
     ports: dict[str, str] = Field(default_factory=dict)
 
     def with_validation_commands(self, commands: list[str]) -> WorkspaceProfile:
@@ -209,6 +283,11 @@ class WorkspaceProfile(BaseModel):
             deep=True,
             update={"phases": self.phases.model_copy(update={"validate_commands": phase_commands})},
         )
+
+    @model_validator(mode="after")
+    def _validate_profile_consistency(self) -> WorkspaceProfile:
+        # Check inconsistent settings between services / egress etc. if needed
+        return self
 
 
 class ProfileResolution(BaseModel):

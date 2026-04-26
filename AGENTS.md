@@ -108,7 +108,7 @@ uv run --python 3.12 --extra dev pytest --cov=awf --cov-report=term-missing
 
 - Never log tokens or secrets.
 - Prefer declared secret mounts or leases over ad hoc host-home access as that
-  support matures.
+  support matures. Note: Profile-level security, egress policy, and secret declarations define the contract locally; the full cloud secret broker is a future addition.
 - Do not use destructive git operations against user work. If the worktree is
   dirty, inspect before editing and preserve unrelated changes.
 - Cleanup must remove workspace containers, networks, volumes, pressure

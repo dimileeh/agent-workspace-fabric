@@ -96,7 +96,7 @@ Still not complete:
 - Multi-node scheduling.
 - Cloud backend.
 - Full web dashboard.
-- Full secret lease broker.
+- Full secret lease broker (local profiles declare security/egress and secrets metadata, but full cloud enforcement is pending).
 
 See:
 
@@ -1139,5 +1139,8 @@ uv run --python 3.12 --extra dev pytest tests/unit/common/test_github_client.py 
 | DinD | Docker-in-Docker sidecar used for Dockerized projects. |
 
 ## License
+
+Apache-2.0. See [LICENSE](LICENSE).
+# License
 
 Apache-2.0. See [LICENSE](LICENSE).
