@@ -228,6 +228,8 @@ def test_service_git_environment_uses_mounted_host_home(tmp_path: Path) -> None:
     ssh_dir = host_home / ".ssh"
     ssh_dir.mkdir(parents=True)
     (host_home / ".gitconfig").write_text("[user]\n  name = AWF\n")
+    ssh_config = ssh_dir / "config"
+    ssh_config.write_text("Host github.com\n  UseKeychain yes\n")
     known_hosts = ssh_dir / "known_hosts"
     known_hosts.write_text("github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...\n")
 
@@ -235,6 +237,8 @@ def test_service_git_environment_uses_mounted_host_home(tmp_path: Path) -> None:
 
     assert env["HOME"] == str(host_home)
     assert env["GIT_CONFIG_GLOBAL"] == str(host_home / ".gitconfig")
+    assert "IgnoreUnknown=UseKeychain" in env["GIT_SSH_COMMAND"]
+    assert str(ssh_config) in env["GIT_SSH_COMMAND"]
     assert str(known_hosts) in env["GIT_SSH_COMMAND"]
     assert "StrictHostKeyChecking=accept-new" in env["GIT_SSH_COMMAND"]
 
@@ -249,3 +253,4 @@ def test_service_git_environment_forwards_ssh_agent_socket(
     env = worker_mod._service_git_environment(tmp_path / "host-home")
 
     assert env["SSH_AUTH_SOCK"] == "/run/host-services/ssh-auth.sock"
+    assert "IdentityAgent=/run/host-services/ssh-auth.sock" in env["GIT_SSH_COMMAND"]

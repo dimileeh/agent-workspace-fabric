@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import shlex
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -133,16 +134,28 @@ def _service_git_environment(host_home: Path) -> dict[str, str]:
     """Git/SSH environment for service-worker host repository operations."""
 
     env = {"HOME": str(host_home)}
+    ssh_command = ["ssh"]
     if ssh_auth_sock := os.environ.get("SSH_AUTH_SOCK"):
         env["SSH_AUTH_SOCK"] = ssh_auth_sock
+        ssh_command.extend(["-o", f"IdentityAgent={ssh_auth_sock}"])
+    ssh_config = host_home / ".ssh" / "config"
+    if ssh_config.is_file():
+        ssh_command.extend(["-o", "IgnoreUnknown=UseKeychain", "-F", str(ssh_config)])
     gitconfig = host_home / ".gitconfig"
     if gitconfig.is_file():
         env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
     known_hosts = host_home / ".ssh" / "known_hosts"
     if known_hosts.is_file():
-        env["GIT_SSH_COMMAND"] = (
-            f"ssh -o UserKnownHostsFile={known_hosts} -o StrictHostKeyChecking=accept-new"
+        ssh_command.extend(
+            [
+                "-o",
+                f"UserKnownHostsFile={known_hosts}",
+                "-o",
+                "StrictHostKeyChecking=accept-new",
+            ]
         )
+    if len(ssh_command) > 1:
+        env["GIT_SSH_COMMAND"] = " ".join(shlex.quote(part) for part in ssh_command)
     return env
 
 
