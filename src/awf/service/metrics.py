@@ -584,6 +584,7 @@ async def _count_stuck_workspaces(
         .select_from(Workspace)
         .where(
             ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
+            Workspace.status != WorkspaceStatus.destroying.value,
             Workspace.created_at < cutoff,
             Workspace.failure_reason.is_(None),
         )
