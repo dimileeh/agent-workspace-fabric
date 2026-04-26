@@ -298,6 +298,19 @@ def test_auto_detection_prefers_maven_wrapper_over_plain_maven(tmp_path: Path) -
 
 
 @pytest.mark.unit
+def test_auto_detection_prefers_gradle_wrapper_over_plain_maven(tmp_path: Path) -> None:
+    (tmp_path / "gradlew").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "pom.xml").write_text("<project></project>\n", encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "java"
+    assert result.profile.source == "detector:java"
+    assert result.profile.phases.setup[0].command == "./gradlew --no-daemon dependencies"
+    assert [c.command for c in result.profile.phases.validate_commands] == [
+        "./gradlew --no-daemon test"
+    ]
+
+
+@pytest.mark.unit
 def test_auto_detection_detects_cpp(tmp_path: Path) -> None:
     (tmp_path / "CMakeLists.txt").write_text("project(app)\n", encoding="utf-8")
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")

@@ -279,10 +279,10 @@ def _detect_package_manager(worktree_path: Path) -> str:
 def _detect_java_build_tool(worktree_path: Path) -> str | None:
     if (worktree_path / "mvnw").is_file():
         return "maven-wrapper"
-    if (worktree_path / "pom.xml").is_file():
-        return "maven"
     if (worktree_path / "gradlew").is_file():
         return "gradle-wrapper"
+    if (worktree_path / "pom.xml").is_file():
+        return "maven"
     if (worktree_path / "build.gradle").is_file():
         return "gradle"
     return None
