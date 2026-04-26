@@ -110,6 +110,17 @@ class TaskKind(StrEnum):
     branches land on development."""
 
 
+class TaskClass(StrEnum):
+    """PRD task policy class used by future scheduling and lock enforcement."""
+
+    docs_task = "docs_task"
+    test_task = "test_task"
+    refactor_task = "refactor_task"
+    migration_task = "migration_task"
+    dependency_task = "dependency_task"
+    build_config_task = "build_config_task"
+
+
 class AgentRuntime(StrEnum):
     """Which coding CLI should execute the task inside the workspace.
 

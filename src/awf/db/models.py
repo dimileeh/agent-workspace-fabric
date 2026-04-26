@@ -79,6 +79,15 @@ class Workspace(Base):
     task_title: Mapped[str] = mapped_column(String(512), nullable=False)
     task_prompt: Mapped[str] = mapped_column(String(16384), nullable=False)
     task_external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    task_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    """Optional PRD policy class used by later deterministic scheduling work."""
+
+    owned_paths: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    """Caller-declared path globs/strings the task expects to own.
+
+    This slice persists and exposes the contract only; lock scheduling consumes
+    these paths in a later policy-enforcement slice.
+    """
 
     auto_merge: Mapped[bool] = mapped_column(
         Boolean,
