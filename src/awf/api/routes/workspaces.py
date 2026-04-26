@@ -313,9 +313,7 @@ async def list_workspace_stale_reasons(
         if include_resolved
         else await stale_repo.list_active_for_workspace(workspace_id)
     )
-    return StaleReasonListResponse(
-        items=[StaleReasonResponse.model_validate(row) for row in rows]
-    )
+    return StaleReasonListResponse(items=[StaleReasonResponse.model_validate(row) for row in rows])
 
 
 @router.post(

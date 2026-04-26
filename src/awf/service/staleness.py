@@ -199,8 +199,7 @@ def evaluate_staleness(
                     trigger_type=TRIGGER_DEPENDENCY_CHANGED,
                     trigger_ref=path,
                     explanation=(
-                        f"Dependency manifest '{path}' changed on target "
-                        f"branch '{target.branch}'."
+                        f"Dependency manifest '{path}' changed on target branch '{target.branch}'."
                     ),
                 )
             )
@@ -214,8 +213,7 @@ def evaluate_staleness(
                     trigger_type=TRIGGER_BUILD_CONFIG_CHANGED,
                     trigger_ref=path,
                     explanation=(
-                        f"Build config '{path}' changed on target "
-                        f"branch '{target.branch}'."
+                        f"Build config '{path}' changed on target branch '{target.branch}'."
                     ),
                 )
             )
@@ -228,8 +226,7 @@ def evaluate_staleness(
                 trigger_type=TRIGGER_PATH_OVERLAP,
                 trigger_ref=path,
                 explanation=(
-                    f"Owned path '{path}' was changed on target "
-                    f"branch '{target.branch}'."
+                    f"Owned path '{path}' was changed on target branch '{target.branch}'."
                 ),
             )
         )
@@ -313,8 +310,7 @@ class TargetBranchStateProvider(ABC):
         repo_url: str,
         branch: str,
         base_sha: str,
-    ) -> TargetBranchState:
-        ...
+    ) -> TargetBranchState: ...
 
 
 @dataclass(frozen=True)
@@ -471,11 +467,7 @@ class StalenessRefreshError(RuntimeError):
 def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
     workspace: Workspace = candidate.workspace
     attempt: TaskAttempt = candidate.attempt
-    owned = (
-        tuple(workspace.owned_paths)
-        if workspace.owned_paths
-        else tuple(attempt.owned_paths)
-    )
+    owned = tuple(workspace.owned_paths) if workspace.owned_paths else tuple(attempt.owned_paths)
     return CandidateSnapshot(
         owned_paths=owned,
         task_class=workspace.task_class or attempt.task_class,
@@ -483,9 +475,7 @@ def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
     )
 
 
-async def _load_candidate(
-    session: AsyncSession, candidate_id: str
-) -> MergeCandidate | None:
+async def _load_candidate(session: AsyncSession, candidate_id: str) -> MergeCandidate | None:
     from sqlalchemy import select
     from sqlalchemy.orm import selectinload
 

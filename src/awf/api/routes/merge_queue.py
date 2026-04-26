@@ -90,10 +90,7 @@ async def list_merge_queue(
     stale_reasons_by_candidate = await _load_active_stale_reasons(session, page_rows)
 
     return MergeQueueListResponse(
-        items=[
-            _item_from_row(row, stale_reasons_by_candidate)
-            for row in page_rows
-        ],
+        items=[_item_from_row(row, stale_reasons_by_candidate) for row in page_rows],
         next_cursor=_encode_cursor(_row_workspace(page_rows[-1]))
         if has_more and page_rows
         else None,
@@ -105,16 +102,10 @@ async def _load_active_stale_reasons(
     session: AsyncSession,
     rows: list[MergeCandidate | Workspace],
 ) -> dict[str, list[StaleReason]]:
-    candidate_ids = [
-        row.id for row in rows if isinstance(row, MergeCandidate)
-    ]
+    candidate_ids = [row.id for row in rows if isinstance(row, MergeCandidate)]
     if not candidate_ids:
         return {}
-    repo = StaleReasonRepository(session)
-    out: dict[str, list[StaleReason]] = {}
-    for candidate_id in candidate_ids:
-        out[candidate_id] = await repo.list_active_for_candidate(candidate_id)
-    return out
+    return await StaleReasonRepository(session).list_active_for_candidates(candidate_ids)
 
 
 def _item_from_row(

@@ -507,9 +507,7 @@ class StaleReason(Base):
     attempt_id: Mapped[str | None] = mapped_column(
         String(36), ForeignKey("task_attempts.id"), nullable=True
     )
-    task_id: Mapped[str | None] = mapped_column(
-        String(36), ForeignKey("tasks.id"), nullable=True
-    )
+    task_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=True)
 
     trigger_type: Mapped[str] = mapped_column(String(64), nullable=False)
     """Coarse trigger taxonomy: ``target_advanced`` / ``path_overlap`` /
@@ -531,9 +529,7 @@ class StaleReason(Base):
     detected_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
-    resolved_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     workspace: Mapped[Workspace] = relationship()
     candidate: Mapped[MergeCandidate | None] = relationship()

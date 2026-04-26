@@ -355,6 +355,56 @@ class TestEvaluateStaleness:
         assert "STALE_BUILD_CONFIG" in codes
 
     @pytest.mark.unit
+    def test_no_findings_when_candidate_has_no_base_sha(self) -> None:
+        from awf.service.staleness import (
+            DEFAULT_STALE_POLICY,
+            CandidateSnapshot,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        candidate = CandidateSnapshot(
+            owned_paths=(),
+            task_class=None,
+            base_sha=None,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=("README.md",),
+            advanced_commits=2,
+        )
+
+        assert (
+            evaluate_staleness(
+                candidate=candidate,
+                target=target,
+                policy=DEFAULT_STALE_POLICY,
+            )
+            == []
+        )
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("path", "pattern", "expected"),
+        [
+            ("a", "", False),
+            ("src/awf/api/routes/health.py", "src/awf/api/**", True),
+            ("src/awf/api", "src/awf/api/**", True),
+            ("src/awf/api/health.py", "src/awf/api/*", True),
+            ("src/awf/api/routes/health.py", "src/awf/api/*", False),
+            ("docker/Dockerfile", "docker/", True),
+            ("docs/USAGE.md", "docs", True),
+            ("README.md", "READ", False),
+            ("a/b/c.py", "a/?/c.py", True),
+        ],
+    )
+    def test_path_matches_glob_semantics(self, path: str, pattern: str, expected: bool) -> None:
+        from awf.service.staleness import _path_matches
+
+        assert _path_matches(path, pattern) is expected
+
+    @pytest.mark.unit
     def test_unknown_class_with_target_advance_uses_target_advanced_default(self) -> None:
         from awf.service.staleness import (
             DEFAULT_STALE_POLICY,
@@ -534,9 +584,7 @@ class TestStalenessRefreshService:
                 workspace_id=workspace_id,
                 limit=200,
             )
-        stale_events = [
-            evt for evt in events if evt.event_type == "merge_candidate.stale_detected"
-        ]
+        stale_events = [evt for evt in events if evt.event_type == "merge_candidate.stale_detected"]
         assert len(stale_events) >= 1
         first = stale_events[0]
         assert first.reason_code == "STALE_OVERLAP"
@@ -604,6 +652,36 @@ class TestStalenessRefreshService:
         assert {r.reason_code for r in reasons} >= {"STALE_OVERLAP"}
         assert result.stale is True
         assert {f.reason_code for f in result.findings} >= {"STALE_OVERLAP"}
+
+
+class TestStalenessRefreshServiceErrorPaths:
+    @pytest.mark.unit
+    async def test_refresh_unknown_candidate_raises(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from awf.service.staleness import StalenessRefreshError, StalenessRefreshService
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            with pytest.raises(StalenessRefreshError):
+                await service.refresh_candidate("mc_does_not_exist")
+
+    @pytest.mark.unit
+    async def test_refresh_without_target_or_provider_raises(
+        self, factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from awf.service.staleness import StalenessRefreshError, StalenessRefreshService
+
+        _workspace_id, _attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="refactor_task",
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            with pytest.raises(StalenessRefreshError):
+                await service.refresh_candidate(candidate_id)
 
 
 class TestStaleReasonsRoundTrip:

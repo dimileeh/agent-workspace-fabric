@@ -183,9 +183,7 @@ class TaskAttemptRepository:
         await self._lock_attempt_number_sequence(task.id)
         max_attempt_number = (
             await self._session.execute(
-                select(func.max(TaskAttempt.attempt_number)).where(
-                    TaskAttempt.task_id == task.id
-                )
+                select(func.max(TaskAttempt.attempt_number)).where(TaskAttempt.task_id == task.id)
             )
         ).scalar_one()
         attempt_number = (max_attempt_number or 0) + 1
@@ -286,8 +284,7 @@ class TaskAttemptRepository:
                 latest_attempt_numbers,
                 and_(
                     TaskAttempt.task_id == latest_attempt_numbers.c.task_id,
-                    TaskAttempt.attempt_number
-                    == latest_attempt_numbers.c.attempt_number,
+                    TaskAttempt.attempt_number == latest_attempt_numbers.c.attempt_number,
                 ),
             )
             .join(Workspace, TaskAttempt.workspace_id == Workspace.id)
@@ -368,7 +365,7 @@ class MergeCandidateRepository:
                         WorkspaceStatus.destroying.value,
                         WorkspaceStatus.destroyed.value,
                     )
-                )
+                ),
             )
             .options(
                 selectinload(MergeCandidate.attempt),
@@ -584,6 +581,29 @@ class StaleReasonRepository:
     ) -> builtins.list[StaleReason]:
         return await self._list_for_candidate(candidate_id, status=self._ACTIVE)
 
+    async def list_active_for_candidates(
+        self,
+        candidate_ids: Iterable[str],
+    ) -> dict[str, builtins.list[StaleReason]]:
+        unique_ids = tuple(dict.fromkeys(candidate_ids))
+        if not unique_ids:
+            return {}
+        stmt = (
+            select(StaleReason)
+            .where(
+                StaleReason.candidate_id.in_(unique_ids),
+                StaleReason.status == self._ACTIVE,
+            )
+            .order_by(StaleReason.detected_at.asc(), StaleReason.id.asc())
+        )
+        rows = list((await self._session.execute(stmt)).scalars())
+        out: dict[str, builtins.list[StaleReason]] = {cid: [] for cid in unique_ids}
+        for row in rows:
+            if row.candidate_id is None:  # pragma: no cover - filtered by WHERE
+                continue
+            out[row.candidate_id].append(row)
+        return out
+
     async def list_for_candidate(
         self,
         candidate_id: str,
@@ -623,9 +643,7 @@ class StaleReasonRepository:
                 candidate_id,
                 status=self._ACTIVE,
             )
-        finding_keys = {
-            (f.reason_code, f.trigger_type, f.trigger_ref) for f in findings
-        }
+        finding_keys = {(f.reason_code, f.trigger_type, f.trigger_ref) for f in findings}
         now = datetime.now(UTC)
 
         newly_resolved: builtins.list[StaleReason] = []
@@ -816,9 +834,7 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
     ) -> list[OwnedPathConflict]:
-        requested_paths = [
-            path for path in owned_paths if _normalize_owned_path(path) != ""
-        ]
+        requested_paths = [path for path in owned_paths if _normalize_owned_path(path) != ""]
         if not requested_paths:
             return []
 
