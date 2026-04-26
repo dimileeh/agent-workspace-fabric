@@ -167,6 +167,119 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
+class TestCreateWorkspaceV2PolicyMetadata:
+    @pytest.mark.unit
+    async def test_persists_policy_metadata_and_exposes_workspace_responses(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                "task_class": "refactor_task",
+                "owned_paths": ["src/awf/**/*.py", "tests/unit/**"],
+            },
+        }
+
+        create = await client.post("/v2/workspaces", json=payload)
+        assert create.status_code == 202
+
+        ws_id = create.json()["workspace_id"]
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+        listed = await client.get("/v1/workspaces")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["task_class"] == "refactor_task"
+        assert body["owned_paths"] == ["src/awf/**/*.py", "tests/unit/**"]
+        assert listed.status_code == 200
+        assert listed.json()[0]["task_class"] == "refactor_task"
+        assert listed.json()[0]["owned_paths"] == ["src/awf/**/*.py", "tests/unit/**"]
+
+    @pytest.mark.unit
+    async def test_legacy_v1_defaults_policy_metadata(self, client: AsyncClient) -> None:
+        ws_id = await _create_workspace(client)
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["task_class"] is None
+        assert response.json()["owned_paths"] == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "task_class",
+        ["feature_task", "docs", ""],
+    )
+    async def test_rejects_unknown_task_class(
+        self,
+        client: AsyncClient,
+        task_class: str,
+    ) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {**_V2_MINIMAL_BODY["task"], "task_class": task_class},
+        }
+
+        response = await client.post("/v2/workspaces", json=payload)
+
+        assert response.status_code == 422
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "owned_paths",
+        [
+            [""],
+            ["a" * 513],
+            [f"src/module_{idx}.py" for idx in range(129)],
+        ],
+    )
+    async def test_rejects_owned_path_bounds(
+        self,
+        client: AsyncClient,
+        owned_paths: list[str],
+    ) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {**_V2_MINIMAL_BODY["task"], "owned_paths": owned_paths},
+        }
+
+        response = await client.post("/v2/workspaces", json=payload)
+
+        assert response.status_code == 422
+
+    @pytest.mark.unit
+    async def test_idempotency_conflicts_when_policy_metadata_changes(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        headers = {"Idempotency-Key": "policy-metadata-key"}
+        first_payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                "task_class": "docs_task",
+                "owned_paths": ["README.md"],
+            },
+        }
+        replay_payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                "task_class": "test_task",
+                "owned_paths": ["README.md"],
+            },
+        }
+
+        first = await client.post("/v2/workspaces", json=first_payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=replay_payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 409
+        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
 class TestIdempotency:
     @pytest.mark.unit
     async def test_same_key_same_body_returns_same_workspace(self, client: AsyncClient) -> None:

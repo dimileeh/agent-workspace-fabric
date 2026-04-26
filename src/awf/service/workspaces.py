@@ -58,6 +58,8 @@ class WorkspaceService:
                 task_title=req.task_title,
                 task_prompt=req.task_prompt,
                 task_external_id=req.task_external_id,
+                task_class=None,
+                owned_paths=[],
                 agent=req.agent.value,
                 env_profile=req.env_profile,
                 test_commands=req.test_commands,
@@ -241,6 +243,10 @@ async def create_workspace_v2_row(
         task_title=payload.task.title,
         task_prompt=payload.task.prompt,
         task_external_id=payload.task.external_id,
+        task_class=(
+            payload.task.task_class.value if payload.task.task_class is not None else None
+        ),
+        owned_paths=payload.task.owned_paths,
         auto_merge=payload.task.auto_merge,
         initial_review_grace_period_seconds=(
             payload.task.initial_review_grace_period_seconds
