@@ -87,3 +87,43 @@ class TestInProcessMergeCoordinator:
         release_first.set()
         await asyncio.gather(first_task, second_task)
 
+    @pytest.mark.unit
+    def test_reuses_coordinator_across_event_loops_after_contention(self) -> None:
+        coordinator = InProcessMergeCoordinator()
+
+        async def contend_once() -> None:
+            first_entered = asyncio.Event()
+            release_first = asyncio.Event()
+            order: list[str] = []
+
+            async def first() -> None:
+                async with coordinator.serialized_merge(
+                    repo_url=REPO_URL,
+                    base_branch="development",
+                ):
+                    order.append("first-entered")
+                    first_entered.set()
+                    await release_first.wait()
+
+            async def second() -> None:
+                await first_entered.wait()
+                async with coordinator.serialized_merge(
+                    repo_url=REPO_URL,
+                    base_branch="development",
+                ):
+                    order.append("second-entered")
+
+            first_task = asyncio.create_task(first())
+            second_task = asyncio.create_task(second())
+            await first_entered.wait()
+            await asyncio.sleep(0)
+
+            assert order == ["first-entered"]
+
+            release_first.set()
+            await asyncio.gather(first_task, second_task)
+
+            assert order == ["first-entered", "second-entered"]
+
+        asyncio.run(contend_once())
+        asyncio.run(contend_once())

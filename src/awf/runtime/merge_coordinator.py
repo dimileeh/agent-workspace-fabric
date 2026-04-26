@@ -14,6 +14,7 @@ share the same coordination key.
 from __future__ import annotations
 
 import asyncio
+import weakref
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
@@ -46,8 +47,10 @@ class InProcessMergeCoordinator:
     """An asyncio-lock based coordinator scoped to the current process."""
 
     def __init__(self) -> None:
-        self._locks: dict[MergeCoordinationKey, asyncio.Lock] = {}
-        self._locks_guard = asyncio.Lock()
+        self._locks_by_loop: weakref.WeakKeyDictionary[
+            asyncio.AbstractEventLoop,
+            dict[MergeCoordinationKey, asyncio.Lock],
+        ] = weakref.WeakKeyDictionary()
 
     @asynccontextmanager
     async def serialized_merge(
@@ -56,22 +59,24 @@ class InProcessMergeCoordinator:
         repo_url: str,
         base_branch: str,
     ) -> AsyncIterator[None]:
-        lock = await self._lock_for(
+        lock = self._lock_for(
             MergeCoordinationKey.from_values(repo_url=repo_url, base_branch=base_branch)
         )
-        await lock.acquire()
-        try:
+        async with lock:
             yield
-        finally:
-            lock.release()
 
-    async def _lock_for(self, key: MergeCoordinationKey) -> asyncio.Lock:
-        async with self._locks_guard:
-            lock = self._locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._locks[key] = lock
-            return lock
+    def _lock_for(self, key: MergeCoordinationKey) -> asyncio.Lock:
+        loop = asyncio.get_running_loop()
+        loop_locks = self._locks_by_loop.get(loop)
+        if loop_locks is None:
+            loop_locks = {}
+            self._locks_by_loop[loop] = loop_locks
+
+        lock = loop_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            loop_locks[key] = lock
+        return lock
 
 
 DEFAULT_MERGE_COORDINATOR = InProcessMergeCoordinator()
