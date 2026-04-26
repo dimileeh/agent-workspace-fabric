@@ -21,6 +21,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
+from time import monotonic
 from typing import Any, Protocol
 
 from sqlalchemy import select
@@ -50,6 +51,7 @@ class WorkerConfig:
     max_concurrent_provisions: int = 3
     max_concurrent_executions: int = 3
     monitor_claim_lease_seconds: float = 300.0
+    stale_active_execution_scan_interval_seconds: float = 300.0
     node_id: str | None = None
 
 
@@ -89,6 +91,7 @@ class ControlWorker:
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
         self._worker_id = f"control-worker-{uuid.uuid4().hex}"
+        self._next_stale_active_execution_scan_at = 0.0
 
     def request_stop(self) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -104,7 +107,7 @@ class ControlWorker:
         dispatched_ids: set[str] = set()
 
         if self._executor is not None:
-            await self._recover_stale_active_executions()
+            await self._maybe_recover_stale_active_executions()
 
         requested_ids = await self._list_requested()
         requested_ids = await self._filter_current_status(
@@ -268,6 +271,15 @@ class ControlWorker:
                 status=actual,
             )
         return current_ids
+
+    async def _maybe_recover_stale_active_executions(self) -> None:
+        now = monotonic()
+        if now < self._next_stale_active_execution_scan_at:
+            return
+
+        await self._recover_stale_active_executions()
+        interval = max(0.0, self._config.stale_active_execution_scan_interval_seconds)
+        self._next_stale_active_execution_scan_at = monotonic() + interval
 
     async def _recover_stale_active_executions(self) -> None:
         candidates = await self._list_stale_active_execution_candidates(

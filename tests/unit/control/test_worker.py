@@ -1186,7 +1186,11 @@ class TestRunOnceStaleActiveExecutionRecovery:
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=_RecordingExecutor(),
             runtime_inspector=inspector,
-            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
         )
 
         assert await worker.run_once() == 0
@@ -1224,6 +1228,62 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 },
             }
         assert inspector.calls == ["awf_pushing_running", "awf_pushing_running"]
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_scan_is_throttled_between_intervals(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        current_time = 1_000.0
+        monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "throttled-running",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_throttled_running",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_throttled_running": RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="abc123",
+                            image="awf-agent:latest",
+                            state="running",
+                        )
+                    ],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=60.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert await worker.run_once() == 0
+        assert inspector.calls == ["awf_throttled_running"]
+
+        current_time = 1_060.0
+
+        assert await worker.run_once() == 0
+        assert inspector.calls == ["awf_throttled_running", "awf_throttled_running"]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.pushing.value
 
     @pytest.mark.unit
     async def test_current_in_memory_execution_task_is_not_touched(
