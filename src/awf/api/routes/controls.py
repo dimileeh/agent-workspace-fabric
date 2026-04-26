@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
 from awf.api.schemas import WorkspaceControlRequest, WorkspaceControlResponse
 from awf.service.controls import (
     ActiveWorkspaceDestroyError,
+    IdempotencyConflictError,
+    VersionConflictError,
     WorkspaceControlError,
     WorkspaceControlService,
     WorkspaceNotFoundError,
@@ -27,6 +29,8 @@ router = APIRouter(
 async def cancel_workspace(
     workspace_id: str,
     payload: WorkspaceControlRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceControlResponse:
     try:
@@ -34,6 +38,8 @@ async def cancel_workspace(
             workspace_id,
             reason=payload.reason,
             stop_stack=payload.stop_stack,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
         )
     except WorkspaceControlError as exc:
         raise _http_error(exc) from exc
@@ -43,12 +49,16 @@ async def cancel_workspace(
 async def stop_workspace(
     workspace_id: str,
     payload: WorkspaceControlRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceControlResponse:
     try:
         return await _controls(session).stop_workspace(
             workspace_id,
             reason=payload.reason,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
         )
     except WorkspaceControlError as exc:
         raise _http_error(exc) from exc
@@ -60,6 +70,8 @@ async def destroy_workspace(
     force: bool = False,
     remove_volumes: bool = True,
     remove_worktree: bool = True,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceControlResponse:
     try:
@@ -68,6 +80,8 @@ async def destroy_workspace(
             force=force,
             remove_volumes=remove_volumes,
             remove_worktree=remove_worktree,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
         )
     except WorkspaceControlError as exc:
         raise _http_error(exc) from exc
@@ -84,14 +98,53 @@ def _controls(session: AsyncSession) -> WorkspaceControlService:
 def _http_error(exc: WorkspaceControlError) -> HTTPException:
     if isinstance(exc, WorkspaceNotFoundError):
         status_code = status.HTTP_404_NOT_FOUND
-    elif isinstance(exc, ActiveWorkspaceDestroyError):
+    elif isinstance(
+        exc,
+        (ActiveWorkspaceDestroyError, IdempotencyConflictError, VersionConflictError),
+    ):
         status_code = status.HTTP_409_CONFLICT
     else:  # pragma: no cover - future control error subclasses
         status_code = status.HTTP_409_CONFLICT
+    detail: dict[str, object] = {"error_code": exc.error_code, "message": exc.message}
+    if exc.detail is not None:
+        detail["detail"] = exc.detail
     return HTTPException(
         status_code=status_code,
-        detail={"error_code": exc.error_code, "message": exc.message},
+        detail=detail,
     )
+
+
+def _require_idempotency_key(idempotency_key: str | None) -> str:
+    if idempotency_key is None or not idempotency_key.strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_REQUEST",
+                "message": "Idempotency-Key header is required for this endpoint.",
+            },
+        )
+    return idempotency_key.strip()
+
+
+def _parse_if_match(if_match: str | None) -> int | None:
+    if if_match is None:
+        return None
+
+    value = if_match.strip()
+    if value.startswith("W/"):
+        value = value[2:].strip()
+    if len(value) >= 2 and value[0] == '"' and value[-1] == '"':
+        value = value[1:-1].strip()
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_REQUEST",
+                "message": "If-Match must be a workspace version integer.",
+            },
+        ) from exc
 
 
 _stop_project = stop_project_containers

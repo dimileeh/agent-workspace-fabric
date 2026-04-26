@@ -13,7 +13,7 @@ from awf.api.schemas import WorkspaceControlResponse
 from awf.common.config import get_settings
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import Operation, Workspace
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.node.cleanup import WorkspaceCleaner
 from awf.node.compose_manager import ComposeManager
@@ -40,9 +40,16 @@ class WorkspaceCleanerProtocol(Protocol):
 class WorkspaceControlError(Exception):
     """Base error for framework adapters to map into HTTP/MCP errors."""
 
-    def __init__(self, *, error_code: str, message: str) -> None:
+    def __init__(
+        self,
+        *,
+        error_code: str,
+        message: str,
+        detail: dict[str, object] | None = None,
+    ) -> None:
         self.error_code = error_code
         self.message = message
+        self.detail = detail
         super().__init__(message)
 
 
@@ -59,6 +66,26 @@ class ActiveWorkspaceDestroyError(WorkspaceControlError):
         super().__init__(
             error_code="WORKSPACE_ACTIVE",
             message="Active workspaces require force=true before destroy.",
+        )
+
+
+class IdempotencyConflictError(WorkspaceControlError):
+    def __init__(self) -> None:
+        super().__init__(
+            error_code="IDEMPOTENCY_CONFLICT",
+            message="Idempotency-Key previously used with a different action payload.",
+        )
+
+
+class VersionConflictError(WorkspaceControlError):
+    def __init__(self, *, expected_version: int, actual_version: int) -> None:
+        super().__init__(
+            error_code="VERSION_CONFLICT",
+            message="Workspace version does not match If-Match.",
+            detail={
+                "expected_version": expected_version,
+                "actual_version": actual_version,
+            },
         )
 
 
@@ -102,16 +129,34 @@ class WorkspaceControlService:
         *,
         reason: str | None,
         stop_stack: bool,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        workspace = await self._require_workspace(repo, workspace_id)
-        payload = {"reason": reason, "stop_stack": stop_stack}
+        payload: dict[str, object | None] = {"reason": reason, "stop_stack": stop_stack}
+        workspace, replay = await self._prepare_operation(
+            repo,
+            operations,
+            workspace_id=workspace_id,
+            operation_type=OperationType.cancel,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+        )
+        if replay is not None:
+            return _control_response(
+                workspace=workspace,
+                operation=replay,
+                message="workspace cancellation requested",
+            )
+
         operation = await operations.create(
             workspace_id=workspace_id,
             operation_type=OperationType.cancel,
             status=OperationStatus.running,
             payload=payload,
+            idempotency_key=idempotency_key,
         )
         if stop_stack:
             await self._project_stopper(workspace.compose_project_name)
@@ -149,16 +194,34 @@ class WorkspaceControlService:
         workspace_id: str,
         *,
         reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        workspace = await self._require_workspace(repo, workspace_id)
-        payload = {"reason": reason}
+        payload: dict[str, object | None] = {"reason": reason}
+        workspace, replay = await self._prepare_operation(
+            repo,
+            operations,
+            workspace_id=workspace_id,
+            operation_type=OperationType.stop,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+        )
+        if replay is not None:
+            return _control_response(
+                workspace=workspace,
+                operation=replay,
+                message="workspace stack stopped",
+            )
+
         operation = await operations.create(
             workspace_id=workspace_id,
             operation_type=OperationType.stop,
             status=OperationStatus.running,
             payload=payload,
+            idempotency_key=idempotency_key,
         )
         await self._project_stopper(workspace.compose_project_name)
         if _is_active(WorkspaceStatus(workspace.status)) and WorkspaceStateMachine.can_transition(
@@ -194,10 +257,33 @@ class WorkspaceControlService:
         force: bool,
         remove_volumes: bool,
         remove_worktree: bool,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        workspace = await self._require_workspace(repo, workspace_id)
+        payload: dict[str, object | None] = {
+            "force": force,
+            "remove_volumes": remove_volumes,
+            "remove_worktree": remove_worktree,
+        }
+        workspace, replay = await self._prepare_operation(
+            repo,
+            operations,
+            workspace_id=workspace_id,
+            operation_type=OperationType.destroy,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+        )
+        if replay is not None:
+            message = (
+                "workspace already destroyed"
+                if workspace.status == WorkspaceStatus.destroyed.value
+                else "workspace destroy requested"
+            )
+            return _control_response(workspace=workspace, operation=replay, message=message)
+
         current = WorkspaceStatus(workspace.status)
         if _is_active(current) and not force:
             raise ActiveWorkspaceDestroyError()
@@ -206,11 +292,8 @@ class WorkspaceControlService:
             workspace_id=workspace_id,
             operation_type=OperationType.destroy,
             status=OperationStatus.running,
-            payload={
-                "force": force,
-                "remove_volumes": remove_volumes,
-                "remove_worktree": remove_worktree,
-            },
+            payload=payload,
+            idempotency_key=idempotency_key,
         )
         if current == WorkspaceStatus.destroyed:
             await operations.finish(
@@ -298,6 +381,48 @@ class WorkspaceControlService:
             raise WorkspaceNotFoundError(workspace_id)
         return workspace
 
+    async def _require_workspace_for_update(
+        self,
+        repo: WorkspaceRepository,
+        workspace_id: str,
+    ) -> Workspace:
+        workspace = await repo.get_for_update(workspace_id)
+        if workspace is None:
+            raise WorkspaceNotFoundError(workspace_id)
+        return workspace
+
+    async def _prepare_operation(
+        self,
+        repo: WorkspaceRepository,
+        operations: OperationRepository,
+        *,
+        workspace_id: str,
+        operation_type: OperationType,
+        payload: dict[str, object | None],
+        idempotency_key: str | None,
+        expected_version: int | None,
+    ) -> tuple[Workspace, Operation | None]:
+        if idempotency_key is not None:
+            await operations.acquire_idempotency_key_lock(idempotency_key)
+            existing = await operations.get_by_idempotency_key(idempotency_key)
+            if existing is not None:
+                if (
+                    existing.workspace_id != workspace_id
+                    or existing.type != operation_type.value
+                    or existing.payload != payload
+                ):
+                    raise IdempotencyConflictError()
+                workspace = await self._require_workspace(repo, workspace_id)
+                return workspace, existing
+
+        workspace = await self._require_workspace_for_update(repo, workspace_id)
+        if expected_version is not None and workspace.version != expected_version:
+            raise VersionConflictError(
+                expected_version=expected_version,
+                actual_version=workspace.version,
+            )
+        return workspace, None
+
 
 async def stop_project_containers(compose_project_name: str | None) -> None:
     if not compose_project_name:
@@ -371,6 +496,20 @@ def default_cleaner() -> WorkspaceCleaner:
     return WorkspaceCleaner(
         git=GitManager(work_dir / "git"),
         compose=ComposeManager(work_dir=work_dir / "compose", template_path=template),
+    )
+
+
+def _control_response(
+    *,
+    workspace: Workspace,
+    operation: Operation,
+    message: str,
+) -> WorkspaceControlResponse:
+    return WorkspaceControlResponse(
+        workspace_id=workspace.id,
+        operation_id=operation.id,
+        status=WorkspaceStatus(workspace.status),
+        message=message,
     )
 
 
