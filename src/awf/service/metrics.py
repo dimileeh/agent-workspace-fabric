@@ -33,6 +33,7 @@ class WorkspaceReliabilitySummary:
     status_counts: dict[str, int]
     failure_reason_counts: dict[str, int]
     active_count: int
+    destroying_count: int
     completed_count: int
     failed_count: int
     cancelled_count: int
@@ -62,7 +63,11 @@ async def summarize_workspace_reliability_for_session(
     since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
     now: datetime | None = None,
 ) -> WorkspaceReliabilitySummary:
-    """Summarize workspace reliability using an existing request session."""
+    """Summarize workspace reliability using an existing request session.
+
+    Status and failure-reason rollups are windowed by ``updated_at``. Current
+    counters such as ``active_count`` and ``destroying_count`` are not windowed.
+    """
 
     _validate_since_hours(since_hours)
     generated_at = _to_utc(now or datetime.now(UTC))
@@ -71,6 +76,7 @@ async def summarize_workspace_reliability_for_session(
     status_counts = await _count_by_status(session, window_start=window_start)
     failure_reason_counts = await _count_by_failure_reason(session, window_start=window_start)
     active_count = await _count_active_workspaces(session)
+    destroying_count = await _count_workspaces_with_status(session, WorkspaceStatus.destroying)
 
     completed_count = status_counts[WorkspaceStatus.completed.value]
     failed_count = status_counts[WorkspaceStatus.failed.value]
@@ -84,6 +90,7 @@ async def summarize_workspace_reliability_for_session(
         status_counts=status_counts,
         failure_reason_counts=failure_reason_counts,
         active_count=active_count,
+        destroying_count=destroying_count,
         completed_count=completed_count,
         failed_count=failed_count,
         cancelled_count=cancelled_count,
@@ -136,11 +143,15 @@ async def _count_active_workspaces(session: AsyncSession) -> int:
     return int(await session.scalar(stmt) or 0)
 
 
+async def _count_workspaces_with_status(session: AsyncSession, status: WorkspaceStatus) -> int:
+    stmt = select(func.count()).select_from(Workspace).where(Workspace.status == status.value)
+    return int(await session.scalar(stmt) or 0)
+
+
 def _validate_since_hours(since_hours: int) -> None:
     if not MIN_SUMMARY_WINDOW_HOURS <= since_hours <= MAX_SUMMARY_WINDOW_HOURS:
         raise ValueError(
-            "since_hours must be between "
-            f"{MIN_SUMMARY_WINDOW_HOURS} and {MAX_SUMMARY_WINDOW_HOURS}"
+            f"since_hours must be between {MIN_SUMMARY_WINDOW_HOURS} and {MAX_SUMMARY_WINDOW_HOURS}"
         )
 
 

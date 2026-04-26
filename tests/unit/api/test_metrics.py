@@ -56,6 +56,7 @@ async def test_workspace_summary_returns_zero_counts_for_empty_db(
     assert body["status_counts"] == _zero_status_counts()
     assert body["failure_reason_counts"] == {}
     assert body["active_count"] == 0
+    assert body["destroying_count"] == 0
     assert body["completed_count"] == 0
     assert body["failed_count"] == 0
     assert body["cancelled_count"] == 0
@@ -115,6 +116,7 @@ async def test_workspace_summary_rolls_up_mixed_statuses_and_failure_reasons(
         FailureReason.cleanup_failure.value: 1,
     }
     assert body["active_count"] == 4
+    assert body["destroying_count"] == 1
     assert body["completed_count"] == 1
     assert body["failed_count"] == 2
     assert body["cancelled_count"] == 1
@@ -151,6 +153,7 @@ async def test_workspace_summary_filters_by_since_hours(
     assert body["failure_reason_counts"] == {FailureReason.validation_failure.value: 1}
     assert body["completed_count"] == 0
     assert body["failed_count"] == 1
+    assert body["destroying_count"] == 0
 
 
 @pytest.mark.unit

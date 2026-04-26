@@ -61,6 +61,7 @@ async def test_empty_db_returns_zero_workspace_reliability_summary(
     assert summary.status_counts == _zero_status_counts()
     assert summary.failure_reason_counts == {}
     assert summary.active_count == 0
+    assert summary.destroying_count == 0
     assert summary.completed_count == 0
     assert summary.failed_count == 0
     assert summary.cancelled_count == 0
@@ -119,6 +120,7 @@ async def test_mixed_statuses_and_failure_reasons_roll_up_counts(
         FailureReason.cleanup_failure.value: 1,
     }
     assert summary.active_count == 4
+    assert summary.destroying_count == 1
     assert summary.completed_count == 1
     assert summary.failed_count == 2
     assert summary.cancelled_count == 1
@@ -155,10 +157,11 @@ async def test_since_hours_filters_by_workspace_updated_at(
     assert summary.completed_count == 0
     assert summary.failed_count == 1
     assert summary.active_count == 0
+    assert summary.destroying_count == 0
 
 
 @pytest.mark.unit
-async def test_active_count_includes_current_workspaces_outside_updated_at_window(
+async def test_current_counts_include_workspaces_outside_updated_at_window(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     from awf.service.metrics import summarize_workspace_reliability
@@ -171,6 +174,11 @@ async def test_active_count_includes_current_workspaces_outside_updated_at_windo
     )
     await _workspace(
         session_factory,
+        status=WorkspaceStatus.destroying,
+        updated_at=now - timedelta(hours=30),
+    )
+    await _workspace(
+        session_factory,
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=30),
     )
@@ -178,4 +186,5 @@ async def test_active_count_includes_current_workspaces_outside_updated_at_windo
     summary = await summarize_workspace_reliability(session_factory, now=now)
 
     assert summary.status_counts == _zero_status_counts()
-    assert summary.active_count == 1
+    assert summary.active_count == 2
+    assert summary.destroying_count == 1

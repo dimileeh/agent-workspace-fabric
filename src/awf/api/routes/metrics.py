@@ -6,7 +6,7 @@ from datetime import datetime
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session
@@ -28,7 +28,15 @@ class WorkspaceReliabilitySummaryResponse(BaseModel):
     since_hours: int
     status_counts: dict[str, int]
     failure_reason_counts: dict[str, int]
-    active_count: int
+    active_count: int = Field(
+        description=(
+            "Current count of workspaces outside terminal statuses, including "
+            "workspaces in destroying until cleanup finishes."
+        ),
+    )
+    destroying_count: int = Field(
+        description="Current count of workspaces in destroying status.",
+    )
     completed_count: int
     failed_count: int
     cancelled_count: int
