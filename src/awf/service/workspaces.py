@@ -481,7 +481,7 @@ async def retry_workspace_row(
 
     operation_repo = OperationRepository(session)
     operation = await operation_repo.create(
-        workspace_id=source.id,
+        workspace_id=retried.id,
         operation_type=OperationType.retry,
         status=OperationStatus.running,
         payload={"source_workspace_id": source.id},

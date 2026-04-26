@@ -101,7 +101,7 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
         operations = list(
             (
                 await session.execute(
-                    select(Operation).where(Operation.workspace_id == first.id)
+                    select(Operation).where(Operation.workspace_id == retried.id)
                 )
             ).scalars()
         )
@@ -149,6 +149,7 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
     assert {attempt.task_id for attempt in attempts} == {tasks[0].id}
 
     assert len(operations) == 1
+    assert operations[0].workspace_id == retried.id
     assert operations[0].type == "retry"
     assert operations[0].status == "succeeded"
     assert operations[0].payload == {"source_workspace_id": first.id}
