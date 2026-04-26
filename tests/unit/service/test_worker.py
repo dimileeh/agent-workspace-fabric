@@ -9,8 +9,10 @@ from typing import Any
 import pytest
 import structlog
 
+from awf.common.config import Settings
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
+from awf.service.config import resolve_service_settings
 from awf.service import worker as worker_mod
 from awf.service.config import ServiceSettings
 
@@ -321,6 +323,82 @@ def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_f
         created["feature_monitor_kwargs"]["merge_coordinator"],
         _PostgresCoordinator,
     )
+
+
+@pytest.mark.unit
+def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_hostname(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created: dict[str, Any] = {}
+
+    class _Engine:
+        pass
+
+    class _Runner:
+        pass
+
+    class _AnyInit:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    class _Provisioner:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            git: object,
+            stack_launcher: object,
+            config: object,
+        ) -> None:
+            created["provisioner_config"] = config
+
+    class _ControlWorker:
+        def __init__(
+            self,
+            *,
+            session_factory: object,
+            provisioner: object,
+            executor: object,
+            config: object,
+        ) -> None:
+            created["worker_config"] = config
+
+    engine = _Engine()
+    session_factory = object()
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: engine)
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
+    monkeypatch.setattr(worker_mod, "AsyncioSubprocessRunner", _Runner)
+    monkeypatch.setattr(worker_mod, "LogStore", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ValidationRunner", _AnyInit)
+    monkeypatch.setattr(worker_mod, "PullRequestCreator", _AnyInit)
+    monkeypatch.setattr(worker_mod, "GitHubClient", _AnyInit)
+    monkeypatch.setattr(worker_mod, "GitManager", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ComposeManager", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ComposeStackLauncher", _AnyInit)
+    monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
+    monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+    monkeypatch.setattr(worker_mod.socket, "gethostname", lambda: "container-7dbf")
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
+
+    settings = resolve_service_settings(
+        Settings(
+            _env_file=None,
+            work_dir=str(tmp_path / "awf-work"),
+            host_home=str(tmp_path / "host-home"),
+            database_url=f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}",
+        ),
+        environ={"AWF_DATABASE_URL": f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"},
+    )
+
+    worker_mod.build_worker_runtime(settings)
+
+    assert created["provisioner_config"].node_id == "local"
+    assert created["worker_config"].node_id == "local"
 
 
 @pytest.mark.unit
