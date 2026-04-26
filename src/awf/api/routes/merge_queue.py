@@ -186,7 +186,7 @@ def _merge_blocker_reason(candidate: MergeCandidate) -> tuple[MergeBlockerReason
     if candidate.stale:
         reason = candidate.stale_reason or "stale"
         action = "rebase" if "validation" not in reason else "validate"
-        return reason, action
+        return "stale", action
     if candidate.manual_merge_required:
         return "manual_merge_required", None
     if candidate.waiting_for_monitor:

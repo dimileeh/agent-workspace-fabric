@@ -25,7 +25,6 @@ MergeBlockerReason = Literal[
     "failed_or_cancelled",
     "not_canonical",
     "stale",
-    "validation_insufficient_tier",
 ]
 MergeCandidateStatus = Literal["open", "merged", "closed"]
 
