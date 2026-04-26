@@ -328,4 +328,4 @@ class ErrorResponse(BaseModel):
 
     error_code: str
     message: str
-    detail: dict[str, str] | None = None
+    detail: dict[str, Any] | None = None

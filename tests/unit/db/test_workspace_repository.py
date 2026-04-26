@@ -41,6 +41,55 @@ async def session() -> AsyncIterator[AsyncSession]:
     await engine.dispose()
 
 
+async def _create_policy_workspace(
+    session: AsyncSession,
+    repo: WorkspaceRepository,
+    *,
+    repo_url: str = "git@github.com:example/app.git",
+    branch_base: str = "development",
+    owned_paths: list[str] | None = None,
+    status: WorkspaceStatus = WorkspaceStatus.requested,
+) -> Workspace:
+    workspace = await repo.create(
+        repo_url=repo_url,
+        branch_base=branch_base,
+        task_title="policy test",
+        task_prompt="do policy-sensitive work",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        owned_paths=list(owned_paths or []),
+    )
+    workspace.status = status.value
+    await session.flush()
+    return workspace
+
+
+class _FakeDialect:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeBind:
+    def __init__(self, dialect_name: str) -> None:
+        self.dialect = _FakeDialect(dialect_name)
+
+
+class _RecordingSession:
+    def __init__(self, dialect_name: str) -> None:
+        self._bind = _FakeBind(dialect_name)
+        self.executed: list[tuple[str, dict[str, object]]] = []
+
+    def get_bind(self) -> _FakeBind:
+        return self._bind
+
+    async def execute(
+        self,
+        statement: object,
+        parameters: dict[str, object] | None = None,
+    ) -> None:
+        self.executed.append((str(statement), dict(parameters or {})))
+
+
 class TestCreate:
     @pytest.mark.unit
     async def test_create_returns_workspace_in_requested_state(self, session: AsyncSession) -> None:
@@ -400,6 +449,214 @@ class TestListWorkspaces:
         listed = await repo.list(limit=3)
 
         assert [row.id for row in listed] == sorted((row.id for row in rows), reverse=True)
+
+
+class TestOwnedPathConflictLookup:
+    @pytest.mark.unit
+    async def test_postgres_conflict_lookup_lock_uses_transaction_advisory_lock(self) -> None:
+        session = _RecordingSession("postgresql")
+        repo = WorkspaceRepository(session)  # type: ignore[arg-type]
+
+        await repo.acquire_owned_path_conflict_lock(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/awf/api/**"],
+        )
+
+        assert len(session.executed) == 1
+        sql, parameters = session.executed[0]
+        assert "pg_advisory_xact_lock" in sql
+        assert isinstance(parameters["lock_key"], int)
+
+    @pytest.mark.unit
+    async def test_conflict_lookup_lock_is_noop_without_postgres_or_owned_paths(self) -> None:
+        sqlite_session = _RecordingSession("sqlite")
+        sqlite_repo = WorkspaceRepository(sqlite_session)  # type: ignore[arg-type]
+
+        await sqlite_repo.acquire_owned_path_conflict_lock(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/awf/api/**"],
+        )
+
+        postgres_session = _RecordingSession("postgresql")
+        postgres_repo = WorkspaceRepository(postgres_session)  # type: ignore[arg-type]
+
+        await postgres_repo.acquire_owned_path_conflict_lock(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=[" ", "./"],
+        )
+
+        assert sqlite_session.executed == []
+        assert postgres_session.executed == []
+
+    @pytest.mark.unit
+    async def test_empty_requested_owned_paths_do_not_conflict(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        await _create_policy_workspace(session, repo, owned_paths=["src/awf/api/**"])
+
+        conflicts = await repo.find_active_owned_path_conflicts(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=[],
+        )
+
+        assert conflicts == []
+
+    @pytest.mark.unit
+    async def test_non_overlapping_owned_paths_do_not_conflict(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        await _create_policy_workspace(session, repo, owned_paths=["src/awf/api/**"])
+
+        conflicts = await repo.find_active_owned_path_conflicts(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["docs/**"],
+        )
+
+        assert conflicts == []
+
+    @pytest.mark.unit
+    async def test_same_paths_on_different_repo_or_base_branch_do_not_conflict(
+        self, session: AsyncSession
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        await _create_policy_workspace(
+            session,
+            repo,
+            repo_url="git@github.com:example/other.git",
+            branch_base="development",
+            owned_paths=["src/awf/api/**"],
+        )
+        await _create_policy_workspace(
+            session,
+            repo,
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            owned_paths=["src/awf/api/**"],
+        )
+
+        conflicts = await repo.find_active_owned_path_conflicts(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/awf/api/routes/workspaces.py"],
+        )
+
+        assert conflicts == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        [
+            WorkspaceStatus.completed,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+            WorkspaceStatus.destroying,
+            WorkspaceStatus.destroyed,
+        ],
+    )
+    async def test_terminal_and_teardown_statuses_do_not_conflict(
+        self,
+        session: AsyncSession,
+        status: WorkspaceStatus,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["src/awf/api/**"],
+            status=status,
+        )
+
+        conflicts = await repo.find_active_owned_path_conflicts(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/awf/api/routes/workspaces.py"],
+        )
+
+        assert conflicts == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("status", "existing_path", "requested_path"),
+        [
+            (
+                WorkspaceStatus.requested,
+                "src/awf/api/routes/workspaces.py",
+                "src/awf/api/routes/workspaces.py",
+            ),
+            (
+                WorkspaceStatus.provisioning,
+                "src/awf/api",
+                "src/awf/api/routes/workspaces.py",
+            ),
+            (
+                WorkspaceStatus.ready,
+                "src/awf/api/routes/workspaces.py",
+                "src/awf/api",
+            ),
+            (
+                WorkspaceStatus.running,
+                "src/awf/api/**",
+                "src/awf/api/routes/workspaces.py",
+            ),
+            (
+                WorkspaceStatus.validating,
+                "src/awf/api/routes/workspaces.py",
+                "src/awf/api/**",
+            ),
+            (
+                WorkspaceStatus.pushing,
+                "src/awf/api/*.py",
+                "src/awf/api/routes/workspaces.py",
+            ),
+            (
+                WorkspaceStatus.monitoring_pr,
+                "src/awf/api/routes/workspaces.py",
+                "src/awf/api/*.py",
+            ),
+            (
+                WorkspaceStatus.running,
+                "src/awf/api/routes/workspaces.py",
+                "src/awf/api/../api/routes/workspaces.py",
+            ),
+            (
+                WorkspaceStatus.validating,
+                "src/awf/api/**",
+                "src/awf/service/../api/routes/workspaces.py",
+            ),
+        ],
+    )
+    async def test_active_exact_ancestor_and_wildcard_paths_conflict(
+        self,
+        session: AsyncSession,
+        status: WorkspaceStatus,
+        existing_path: str,
+        requested_path: str,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        existing = await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=[existing_path],
+            status=status,
+        )
+
+        conflicts = await repo.find_active_owned_path_conflicts(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=[requested_path],
+        )
+
+        assert len(conflicts) == 1
+        assert conflicts[0].workspace_id == existing.id
+        assert conflicts[0].existing_path == existing_path
+        assert conflicts[0].requested_path == requested_path
 
 
 class TestTransition:
