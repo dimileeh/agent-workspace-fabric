@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import builtins
 import hashlib
+import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -30,6 +31,7 @@ from awf.common.ids import (
     new_operation_id,
     new_task_attempt_id,
     new_task_id,
+    new_validation_run_id,
     new_workspace_id,
 )
 from awf.control.state_machine import WorkspaceStateMachine
@@ -40,6 +42,7 @@ from awf.db.models import (
     Operation,
     Task,
     TaskAttempt,
+    ValidationRun,
     Workspace,
     WorkspaceEvent,
     WorkspaceLogStream,
@@ -68,6 +71,13 @@ class WorkspaceEventCreate:
     event_type: str
     reason_code: str | None = None
     payload: dict[str, Any] | None = None
+
+
+def validation_command_set_hash(commands: list[dict[str, Any]]) -> str:
+    """Stable hash for the configured command metadata in a validation run."""
+
+    payload = json.dumps(commands, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _resolve_session_dialect_name(
@@ -550,6 +560,110 @@ class MergeCandidateRepository:
         return candidate
 
 
+class ValidationRunRepository:
+    """CRUD helpers for durable validation provenance rows."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def start(
+        self,
+        *,
+        workspace_id: str,
+        attempt_id: str | None,
+        tier: int,
+        commands: list[dict[str, Any]],
+        base_commit: str | None,
+        target_branch: str | None,
+        target_head_sha: str | None,
+        log_stream_refs: dict[str, Any],
+        started_at: datetime | None = None,
+    ) -> ValidationRun:
+        now = started_at or datetime.now(UTC)
+        run = ValidationRun(
+            id=new_validation_run_id(),
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            tier=tier,
+            command_set_hash=validation_command_set_hash(commands),
+            commands=commands,
+            base_commit=base_commit,
+            target_branch=target_branch,
+            target_head_sha=target_head_sha,
+            status="running",
+            reason_code=None,
+            started_at=now,
+            finished_at=None,
+            log_stream_refs=log_stream_refs,
+        )
+        self._session.add(run)
+        await self._session.flush()
+        return run
+
+    async def get(self, validation_run_id: str) -> ValidationRun | None:
+        return await self._session.get(ValidationRun, validation_run_id)
+
+    async def finish(
+        self,
+        validation_run_id: str,
+        *,
+        status: str,
+        reason_code: str | None,
+        finished_at: datetime | None = None,
+    ) -> ValidationRun | None:
+        run = await self.get(validation_run_id)
+        if run is None:
+            return None
+        run.status = status
+        run.reason_code = reason_code
+        run.finished_at = finished_at or datetime.now(UTC)
+        await self._session.flush()
+        return run
+
+    async def update_target_head_sha(
+        self,
+        validation_run_id: str,
+        *,
+        target_head_sha: str | None,
+    ) -> ValidationRun | None:
+        run = await self.get(validation_run_id)
+        if run is None:
+            return None
+        run.target_head_sha = target_head_sha
+        await self._session.flush()
+        return run
+
+    async def list_for_workspace(self, workspace_id: str) -> builtins.list[ValidationRun]:
+        stmt = (
+            select(ValidationRun)
+            .where(ValidationRun.workspace_id == workspace_id)
+            .order_by(ValidationRun.started_at, ValidationRun.id)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def latest_by_workspace_ids(
+        self,
+        workspace_ids: Iterable[str],
+    ) -> dict[str, ValidationRun]:
+        unique_workspace_ids = tuple(dict.fromkeys(workspace_ids))
+        if not unique_workspace_ids:
+            return {}
+
+        stmt = (
+            select(ValidationRun)
+            .where(ValidationRun.workspace_id.in_(unique_workspace_ids))
+            .order_by(
+                ValidationRun.workspace_id,
+                ValidationRun.started_at.desc(),
+                ValidationRun.id.desc(),
+            )
+        )
+        latest: dict[str, ValidationRun] = {}
+        for run in (await self._session.execute(stmt)).scalars():
+            latest.setdefault(run.workspace_id, run)
+        return latest
+
+
 class WorkspaceRepository:
     """CRUD + state transitions for workspaces.
 
@@ -978,6 +1092,8 @@ class WorkspaceRepository:
                 task=task,
                 attempt=attempt,
                 workspace=workspace,
+                head_sha=workspace.monitor_last_commit_sha,
+                base_sha=workspace.base_commit,
             )
             return
 

@@ -44,6 +44,7 @@ class ValidationCommandResult:
     stderr_path: Path
     phase: str = "validate"
     reason_code: str = "COMMAND_FAILED"
+    stream_ids: dict[str, str | None] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -216,11 +217,16 @@ class ValidationRunner:
         ]
         started = time.monotonic()
         reason_code = "COMMAND_FAILED"
+        base_stream_id = f"validation.{label}"
+        stream_ids: dict[str, str | None] = {
+            "stdout": f"{base_stream_id}.stdout",
+            "stderr": f"{base_stream_id}.stderr",
+        }
         sinks = None
         if self._log_store is not None:
             sinks = await self._log_store.open_command_streams(
                 workspace_id=artifacts_dir.name,
-                base_stream_id=f"validation.{label}",
+                base_stream_id=base_stream_id,
                 source="validation",
                 name=f"{phase} {label}",
             )
@@ -284,6 +290,7 @@ class ValidationRunner:
             stderr_path=stderr_path,
             phase=phase,
             reason_code=reason_code,
+            stream_ids=stream_ids,
         )
 
 

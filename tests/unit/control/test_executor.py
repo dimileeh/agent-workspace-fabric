@@ -305,7 +305,7 @@ class TestHappyPath:
         ]
         assert run["base_commit"] == "a" * 40
         assert run["target_branch"] == f"awf/{ws_id}"
-        assert run["target_head_sha"] is None
+        assert run["target_head_sha"] == "deadbeef01"
         assert run["status"] == "succeeded"
         assert run["reason_code"] == "VALIDATION_OK"
         assert run["started_at"] is not None

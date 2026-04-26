@@ -27,6 +27,8 @@ MergeBlockerReason = Literal[
     "stale",
 ]
 MergeCandidateStatus = Literal["open", "merged", "closed"]
+ValidationTier = Literal[1, 2, 3]
+ValidationProvenanceStatus = Literal["running", "succeeded", "failed", "unknown"]
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -305,6 +307,23 @@ class WorkspaceOverviewListResponse(BaseModel):
     has_more: bool = False
 
 
+class ValidationRunSummaryResponse(BaseModel):
+    validation_run_id: str
+    attempt_id: str | None = None
+    tier: ValidationTier
+    command_set_hash: str
+    base_commit: str | None = None
+    target_branch: str | None = None
+    target_head_sha: str | None = None
+    current_target_head_sha: str | None = None
+    status: ValidationProvenanceStatus
+    reason_code: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
+    fresh_for_target: bool | None = None
+
+
 class MergeQueueItemResponse(BaseModel):
     candidate_id: str | None = None
     candidate_status: MergeCandidateStatus | None = None
@@ -327,6 +346,7 @@ class MergeQueueItemResponse(BaseModel):
     merge_blocker_reason: MergeBlockerReason
     readiness: MergeCandidateReadinessResponse | None = None
     canonical: bool
+    latest_validation: ValidationRunSummaryResponse | None = None
 
 
 class MergeQueueListResponse(BaseModel):
@@ -406,11 +426,12 @@ class WorkspaceLogReadResponse(BaseModel):
     data: str
 
 
-ValidationProvenanceStatus = Literal["running", "succeeded", "failed", "unknown"]
-
-
 class ValidationProvenanceItemResponse(BaseModel):
+    validation_run_id: str | None = None
     workspace_id: str
+    attempt_id: str | None = None
+    tier: ValidationTier | None = None
+    command_set_hash: str | None = None
     phase: str
     command_index: int
     command: str | None
@@ -422,8 +443,16 @@ class ValidationProvenanceItemResponse(BaseModel):
     opened_at: datetime
     closed_at: datetime | None
     status: ValidationProvenanceStatus
+    reason_code: str | None = None
     base_commit: str | None
     branch_name: str | None
+    target_branch: str | None = None
+    target_head_sha: str | None = None
+    current_target_head_sha: str | None = None
+    started_at: datetime | None = None
+    finished_at: datetime | None = None
+    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
+    fresh_for_target: bool | None = None
 
 
 class ValidationProvenanceListResponse(BaseModel):

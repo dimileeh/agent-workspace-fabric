@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -14,10 +15,16 @@ from awf.api.schemas import (
     ValidationProvenanceItemResponse,
     ValidationProvenanceListResponse,
     ValidationProvenanceStatus,
+    ValidationTier,
 )
+from awf.api.validation_runs import fresh_for_target
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.models import Workspace, WorkspaceLogStream
-from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
+from awf.db.models import ValidationRun, Workspace, WorkspaceLogStream
+from awf.db.repositories import (
+    ValidationRunRepository,
+    WorkspaceLogStreamRepository,
+    WorkspaceRepository,
+)
 from awf.profiles.models import WorkspaceProfile
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/validation", tags=["validation"])
@@ -60,9 +67,18 @@ async def list_validation_provenance(
             detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
         )
 
-    streams = await WorkspaceLogStreamRepository(session).list_validation_for_workspace(
-        workspace_id
-    )
+    stream_repo = WorkspaceLogStreamRepository(session)
+    validation_runs = await ValidationRunRepository(session).list_for_workspace(workspace_id)
+    streams = await stream_repo.list_validation_for_workspace(workspace_id)
+    if validation_runs:
+        return ValidationProvenanceListResponse(
+            items=_build_persisted_validation_items(
+                workspace,
+                validation_runs,
+                streams,
+            )
+        )
+
     return ValidationProvenanceListResponse(items=_build_validation_items(workspace, streams))
 
 
@@ -129,6 +145,134 @@ def _build_validation_items(
         )
         for record in records
     ]
+
+
+def _build_persisted_validation_items(
+    workspace: Workspace,
+    validation_runs: list[ValidationRun],
+    streams: list[WorkspaceLogStream],
+) -> list[ValidationProvenanceItemResponse]:
+    stream_lookup = {stream.stream_id: stream for stream in streams}
+    current_target_head_sha = _current_target_head_sha(workspace)
+    items: list[ValidationProvenanceItemResponse] = []
+    for run in validation_runs:
+        commands = _run_commands(run)
+        if not commands:
+            commands = [
+                {
+                    "phase": "unknown",
+                    "command_index": 0,
+                    "command": None,
+                    "stream_ids": {},
+                }
+            ]
+        for command in commands:
+            stream_ids = _command_stream_ids(command)
+            stdout = stream_lookup.get(stream_ids.get("stdout") or "")
+            stderr = stream_lookup.get(stream_ids.get("stderr") or "")
+            items.append(
+                ValidationProvenanceItemResponse(
+                    validation_run_id=run.id,
+                    workspace_id=workspace.id,
+                    attempt_id=run.attempt_id,
+                    tier=_validation_tier(run.tier),
+                    command_set_hash=run.command_set_hash,
+                    phase=_command_phase(command),
+                    command_index=_command_index(command),
+                    command=_command_text(command),
+                    stream_ids=stream_ids,
+                    stdout_byte_count=stdout.byte_count if stdout else 0,
+                    stdout_line_count=stdout.line_count if stdout else 0,
+                    stderr_byte_count=stderr.byte_count if stderr else 0,
+                    stderr_line_count=stderr.line_count if stderr else 0,
+                    opened_at=_ensure_utc(run.started_at),
+                    closed_at=_ensure_utc(run.finished_at) if run.finished_at else None,
+                    status=_run_status(run.status),
+                    reason_code=run.reason_code,
+                    base_commit=run.base_commit,
+                    branch_name=run.target_branch or workspace.branch_name,
+                    target_branch=run.target_branch,
+                    target_head_sha=run.target_head_sha,
+                    current_target_head_sha=current_target_head_sha,
+                    started_at=_ensure_utc(run.started_at),
+                    finished_at=_ensure_utc(run.finished_at) if run.finished_at else None,
+                    log_stream_refs=_json_dict(run.log_stream_refs),
+                    fresh_for_target=fresh_for_target(
+                        validation_target_head_sha=run.target_head_sha,
+                        current_target_head_sha=current_target_head_sha,
+                    ),
+                )
+            )
+    return items
+
+
+def _current_target_head_sha(workspace: Workspace) -> str | None:
+    candidates = sorted(
+        workspace.merge_candidates,
+        key=lambda candidate: (candidate.updated_at, candidate.id),
+        reverse=True,
+    )
+    for candidate in candidates:
+        if candidate.head_sha:
+            return candidate.head_sha
+    return workspace.monitor_last_commit_sha
+
+
+def _run_commands(run: ValidationRun) -> list[dict[str, Any]]:
+    return list(run.commands)
+
+
+def _command_stream_ids(command: dict[str, Any]) -> dict[str, str | None]:
+    value = command.get("stream_ids")
+    if not isinstance(value, dict):
+        return {"stdout": None, "stderr": None}
+    stdout = value.get("stdout")
+    stderr = value.get("stderr")
+    return {
+        "stdout": stdout if isinstance(stdout, str) else None,
+        "stderr": stderr if isinstance(stderr, str) else None,
+    }
+
+
+def _command_phase(command: dict[str, Any]) -> str:
+    value = command.get("phase")
+    return _normalize_phase(value) if isinstance(value, str) else "unknown"
+
+
+def _command_index(command: dict[str, Any]) -> int:
+    value = command.get("command_index")
+    if isinstance(value, int):
+        return value
+    return 0
+
+
+def _command_text(command: dict[str, Any]) -> str | None:
+    value = command.get("command")
+    return value if isinstance(value, str) else None
+
+
+def _run_status(value: str) -> ValidationProvenanceStatus:
+    if value == "running":
+        return "running"
+    if value == "succeeded":
+        return "succeeded"
+    if value == "failed":
+        return "failed"
+    return "unknown"
+
+
+def _validation_tier(value: int) -> ValidationTier:
+    if value == 2:
+        return 2
+    if value == 3:
+        return 3
+    return 1
+
+
+def _json_dict(value: object) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    return {}
 
 
 def _group_streams(streams: list[WorkspaceLogStream]) -> dict[str, _StreamPair]:

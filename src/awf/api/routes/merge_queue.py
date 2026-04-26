@@ -19,11 +19,17 @@ from awf.api.schemas import (
     MergeCandidateReadinessResponse,
     MergeQueueItemResponse,
     MergeQueueListResponse,
+    ValidationRunSummaryResponse,
     WorkspaceEventResponse,
 )
+from awf.api.validation_runs import validation_run_summary
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import MergeCandidate, Workspace, WorkspaceEvent
-from awf.db.repositories import MergeCandidateRepository, WorkspaceRepository
+from awf.db.models import MergeCandidate, ValidationRun, Workspace, WorkspaceEvent
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    ValidationRunRepository,
+    WorkspaceRepository,
+)
 
 router = APIRouter(prefix="/v1/merge-queue", tags=["merge-queue"])
 
@@ -81,8 +87,17 @@ async def list_merge_queue(
     )
     page_rows = rows[:limit]
     has_more = len(rows) > limit
+    latest_validation_runs = await ValidationRunRepository(session).latest_by_workspace_ids(
+        _row_workspace(row).id for row in page_rows
+    )
     return MergeQueueListResponse(
-        items=[_item_from_row(row) for row in page_rows],
+        items=[
+            _item_from_row(
+                row,
+                latest_validation_runs.get(_row_workspace(row).id),
+            )
+            for row in page_rows
+        ],
         next_cursor=_encode_cursor(_row_workspace(page_rows[-1]))
         if has_more and page_rows
         else None,
@@ -90,13 +105,19 @@ async def list_merge_queue(
     )
 
 
-def _item_from_row(row: MergeCandidate | Workspace) -> MergeQueueItemResponse:
+def _item_from_row(
+    row: MergeCandidate | Workspace,
+    latest_validation_run: ValidationRun | None,
+) -> MergeQueueItemResponse:
     if isinstance(row, MergeCandidate):
-        return _item_from_candidate(row)
-    return _item_from_legacy_workspace(row)
+        return _item_from_candidate(row, latest_validation_run)
+    return _item_from_legacy_workspace(row, latest_validation_run)
 
 
-def _item_from_candidate(candidate: MergeCandidate) -> MergeQueueItemResponse:
+def _item_from_candidate(
+    candidate: MergeCandidate,
+    latest_validation_run: ValidationRun | None,
+) -> MergeQueueItemResponse:
     workspace = candidate.workspace
     latest_event = _latest_event(workspace.events)
     return MergeQueueItemResponse(
@@ -125,10 +146,17 @@ def _item_from_candidate(candidate: MergeCandidate) -> MergeQueueItemResponse:
         merge_blocker_reason=_merge_blocker_reason(candidate),
         readiness=_readiness_from_candidate(candidate),
         canonical=candidate.attempt.is_canonical_for_merge,
+        latest_validation=_latest_validation_summary(
+            latest_validation_run,
+            current_target_head_sha=candidate.head_sha or workspace.monitor_last_commit_sha,
+        ),
     )
 
 
-def _item_from_legacy_workspace(workspace: Workspace) -> MergeQueueItemResponse:
+def _item_from_legacy_workspace(
+    workspace: Workspace,
+    latest_validation_run: ValidationRun | None,
+) -> MergeQueueItemResponse:
     latest_event = _latest_event(workspace.events)
     pr_url = workspace.pr_url
     if pr_url is None:  # pragma: no cover - filtered at repository boundary
@@ -159,6 +187,10 @@ def _item_from_legacy_workspace(workspace: Workspace) -> MergeQueueItemResponse:
         merge_blocker_reason=_merge_blocker_reason_from_workspace(workspace),
         readiness=None,
         canonical=False,
+        latest_validation=_latest_validation_summary(
+            latest_validation_run,
+            current_target_head_sha=workspace.monitor_last_commit_sha,
+        ),
     )
 
 
@@ -215,6 +247,16 @@ def _readiness_from_candidate(candidate: MergeCandidate) -> MergeCandidateReadin
         not_canonical=candidate.not_canonical,
         stale=candidate.stale,
     )
+
+
+def _latest_validation_summary(
+    run: ValidationRun | None,
+    *,
+    current_target_head_sha: str | None,
+) -> ValidationRunSummaryResponse | None:
+    if run is None:
+        return None
+    return validation_run_summary(run, current_target_head_sha=current_target_head_sha)
 
 
 def _encode_cursor(workspace: Workspace) -> str:

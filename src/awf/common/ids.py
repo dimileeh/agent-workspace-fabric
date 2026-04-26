@@ -26,6 +26,10 @@ def new_merge_candidate_id() -> str:
     return f"mc_{uuid4().hex[:24]}"
 
 
+def new_validation_run_id() -> str:
+    return f"vr_{uuid4().hex[:24]}"
+
+
 def new_operation_id() -> str:
     return f"op_{uuid4().hex[:24]}"
 
