@@ -343,3 +343,71 @@ class TestShouldSkipRespawn:
             )
             is True
         )
+
+    def test_newer_corrupt_artifact_poisons_older_notify_human(self, tmp_path: Path) -> None:
+        """A corrupt artifact's PR number is unknowable (the number lives
+        inside the JSON, not in the filename), so it might well be the
+        newest state for THIS PR. Defaulting to an older NotifyHuman in
+        that "latest state uncertain" case silences a respawn the watchdog
+        is supposed to perform — see PR #48 thread PRRT_kwDOSJAM6s59owC_.
+
+        Expected: the older valid NotifyHuman is poisoned by the newer
+        corrupt sibling → fall through to respawn."""
+        artifacts_root = tmp_path / "artifacts"
+        now = time.time()
+        _write_artifact(
+            artifacts_root,
+            workspace_id="ws_old",
+            repo="dimileeh/aira-agent",
+            pr_number=355,
+            terminal_action="NotifyHuman",
+            head_sha="abc1234567890def",
+            mtime=now - 3600,
+        )
+        artifacts_root.mkdir(parents=True, exist_ok=True)
+        corrupt = artifacts_root / "ws_new.defer-signal.json"
+        corrupt.write_text("{not valid json")
+        os.utime(corrupt, (now, now))
+        assert (
+            _should_skip_respawn(
+                owner="dimileeh",
+                repo="aira-agent",
+                pr_number=355,
+                current_head_sha="abc1234567890def",
+                artifacts_root=artifacts_root,
+            )
+            is False
+        )
+
+    def test_older_corrupt_artifact_does_not_poison_newer_notify_human(
+        self, tmp_path: Path
+    ) -> None:
+        """The poisoning rule is asymmetric: only an unreadable artifact
+        NEWER than the latest matching one creates "latest state uncertain".
+        An older corrupt sibling is just noise and must not block a valid
+        recent NotifyHuman from skipping the respawn."""
+        artifacts_root = tmp_path / "artifacts"
+        now = time.time()
+        artifacts_root.mkdir(parents=True, exist_ok=True)
+        corrupt = artifacts_root / "ws_old.defer-signal.json"
+        corrupt.write_text("{not valid json")
+        os.utime(corrupt, (now - 3600, now - 3600))
+        _write_artifact(
+            artifacts_root,
+            workspace_id="ws_new",
+            repo="dimileeh/aira-agent",
+            pr_number=355,
+            terminal_action="NotifyHuman",
+            head_sha="abc1234567890def",
+            mtime=now,
+        )
+        assert (
+            _should_skip_respawn(
+                owner="dimileeh",
+                repo="aira-agent",
+                pr_number=355,
+                current_head_sha="abc1234567890def",
+                artifacts_root=artifacts_root,
+            )
+            is True
+        )

@@ -206,10 +206,16 @@ def _latest_defer_signal_for_pr(
     artifacts_root: Path, *, owner: str, repo: str, pr_number: int
 ) -> dict[str, object] | None:
     """Scan ``artifacts_root`` for the most-recent ``*.defer-signal.json``
-    whose payload matches this owner/repo/pr_number triple. Returns the
-    parsed JSON or None if no match is found. Corrupt files are skipped
-    silently — the watchdog's default behaviour (respawn) covers the
-    fall-through case correctly.
+    whose payload matches this owner/repo/pr_number triple.
+
+    Returns the parsed JSON, or None when no match is found, OR when any
+    unreadable artifact has a newer mtime than the latest matching one.
+    The PR number lives inside the JSON (not in the filename), so a
+    corrupt sibling's PR is unknowable — it might well be a fresher
+    state for THIS PR. Falling back to an older NotifyHuman in that
+    "latest state uncertain" case would silence the very respawn the
+    watchdog exists to perform; returning None instead lets
+    ``_should_skip_respawn`` default to crash recovery.
 
     Multiple workspaces can drive the same PR over its lifetime
     (a workspace exits, the operator re-attaches, etc.); we use file
@@ -218,27 +224,34 @@ def _latest_defer_signal_for_pr(
     if not artifacts_root.is_dir():
         return None
     expected_slug = f"{owner}/{repo}"
-    candidates: list[tuple[float, dict[str, object]]] = []
+    latest_match: tuple[float, dict[str, object]] | None = None
+    latest_unreadable_mtime: float | None = None
     for path in artifacts_root.glob("*.defer-signal.json"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
         try:
             payload = json.loads(path.read_text())
         except (OSError, json.JSONDecodeError):
+            if latest_unreadable_mtime is None or mtime > latest_unreadable_mtime:
+                latest_unreadable_mtime = mtime
             continue
         if not isinstance(payload, dict):
+            if latest_unreadable_mtime is None or mtime > latest_unreadable_mtime:
+                latest_unreadable_mtime = mtime
             continue
         if payload.get("pr_number") != pr_number:
             continue
         if payload.get("repo") != expected_slug:
             continue
-        try:
-            mtime = path.stat().st_mtime
-        except OSError:
-            continue
-        candidates.append((mtime, payload))
-    if not candidates:
+        if latest_match is None or mtime > latest_match[0]:
+            latest_match = (mtime, payload)
+    if latest_match is None:
         return None
-    candidates.sort(key=lambda c: c[0], reverse=True)
-    return candidates[0][1]
+    if latest_unreadable_mtime is not None and latest_unreadable_mtime > latest_match[0]:
+        return None
+    return latest_match[1]
 
 
 def _should_skip_respawn(
