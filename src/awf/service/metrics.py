@@ -65,6 +65,9 @@ class WorkspaceReliabilitySummary:
     cancelled_count: int
     destroyed_count: int
     cleanup_failure_count: int
+    stuck_count: int
+    actionable_reason_count: int
+    unactionable_reason_count: int
 
 
 @dataclass(frozen=True)
@@ -239,6 +242,7 @@ _validate_failure_action_coverage()
 async def summarize_workspace_reliability(
     session_factory: async_sessionmaker[AsyncSession],
     *,
+    settings: Settings,
     since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
     now: datetime | None = None,
 ) -> WorkspaceReliabilitySummary:
@@ -247,6 +251,7 @@ async def summarize_workspace_reliability(
     async with session_factory() as session:
         return await summarize_workspace_reliability_for_session(
             session,
+            settings=settings,
             since_hours=since_hours,
             now=now,
         )
@@ -255,6 +260,7 @@ async def summarize_workspace_reliability(
 async def summarize_workspace_reliability_for_session(
     session: AsyncSession,
     *,
+    settings: Settings,
     since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
     now: datetime | None = None,
 ) -> WorkspaceReliabilitySummary:
@@ -272,6 +278,15 @@ async def summarize_workspace_reliability_for_session(
     failure_reason_counts = await _count_by_failure_reason(session, window_start=window_start)
     active_count = await _count_active_workspaces(session)
     destroying_count = await _count_workspaces_with_status(session, WorkspaceStatus.destroying)
+    stuck_count = await _count_stuck_workspaces(
+        session,
+        sla_seconds=settings.agent_wall_timeout_seconds,
+        now=generated_at,
+    )
+    actionable_count, unactionable_count = await _count_reason_code_coverage(
+        session,
+        window_start=window_start,
+    )
 
     completed_count = status_counts[WorkspaceStatus.completed.value]
     failed_count = status_counts[WorkspaceStatus.failed.value]
@@ -294,6 +309,9 @@ async def summarize_workspace_reliability_for_session(
             FailureReason.cleanup_failure.value,
             0,
         ),
+        stuck_count=stuck_count,
+        actionable_reason_count=actionable_count,
+        unactionable_reason_count=unactionable_count,
     )
 
 
@@ -552,6 +570,56 @@ async def _count_active_workspaces(session: AsyncSession) -> int:
 async def _count_workspaces_with_status(session: AsyncSession, status: WorkspaceStatus) -> int:
     stmt = select(func.count()).select_from(Workspace).where(Workspace.status == status.value)
     return int(await session.scalar(stmt) or 0)
+
+
+async def _count_stuck_workspaces(
+    session: AsyncSession,
+    *,
+    sla_seconds: float,
+    now: datetime,
+) -> int:
+    cutoff = now - timedelta(seconds=2 * sla_seconds)
+    stmt = (
+        select(func.count())
+        .select_from(Workspace)
+        .where(
+            ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
+            Workspace.status != WorkspaceStatus.destroying.value,
+            Workspace.created_at < cutoff,
+            Workspace.failure_reason.is_(None),
+        )
+    )
+    return int(await session.scalar(stmt) or 0)
+
+
+async def _count_reason_code_coverage(
+    session: AsyncSession,
+    *,
+    window_start: datetime,
+) -> tuple[int, int]:
+    stmt = (
+        select(Workspace.failure_reason, func.count())
+        .where(
+            Workspace.status.in_(
+                [
+                    WorkspaceStatus.failed.value,
+                    WorkspaceStatus.cancelled.value,
+                    WorkspaceStatus.destroying.value,
+                ]
+            ),
+            Workspace.updated_at >= window_start,
+        )
+        .group_by(Workspace.failure_reason)
+    )
+    rows = await session.execute(stmt)
+    actionable = 0
+    unactionable = 0
+    for reason, count in rows.all():
+        if _normalize_failure_reason(reason) in _KNOWN_FAILURE_REASONS:
+            actionable += int(count)
+        else:
+            unactionable += int(count)
+    return actionable, unactionable
 
 
 def _failure_reason_groups(reason_counts: dict[str, int]) -> list[FailureReasonGroup]:
