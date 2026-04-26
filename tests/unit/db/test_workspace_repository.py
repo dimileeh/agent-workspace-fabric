@@ -620,6 +620,16 @@ class TestOwnedPathConflictLookup:
                 "src/awf/api/routes/workspaces.py",
                 "src/awf/api/*.py",
             ),
+            (
+                WorkspaceStatus.running,
+                "src/awf/api/routes/workspaces.py",
+                "src/awf/api/../api/routes/workspaces.py",
+            ),
+            (
+                WorkspaceStatus.validating,
+                "src/awf/api/**",
+                "src/awf/service/../api/routes/workspaces.py",
+            ),
         ],
     )
     async def test_active_exact_ancestor_and_wildcard_paths_conflict(

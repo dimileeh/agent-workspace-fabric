@@ -291,14 +291,16 @@ def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -
 
 
 def _normalize_owned_path(path: str) -> str:
-    normalized = path.strip().replace("\\", "/")
-    while "//" in normalized:
-        normalized = normalized.replace("//", "/")
-    while normalized.startswith("./"):
-        normalized = normalized[2:]
-    normalized = normalized.lstrip("/")
-    normalized = normalized.rstrip("/")
-    return "" if normalized == "." else normalized
+    segments: list[str] = []
+    for segment in path.strip().replace("\\", "/").split("/"):
+        if segment in {"", "."}:
+            continue
+        if segment == "..":
+            if segments:
+                segments.pop()
+            continue
+        segments.append(segment)
+    return "/".join(segments)
 
 
 def _literal_paths_overlap(left: str, right: str) -> bool:
