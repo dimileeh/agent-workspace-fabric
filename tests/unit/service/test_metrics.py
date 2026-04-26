@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
@@ -28,21 +29,35 @@ async def _workspace(
     *,
     status: WorkspaceStatus,
     updated_at: datetime,
-    failure_reason: FailureReason | None = None,
-) -> None:
+    failure_reason: FailureReason | str | None = None,
+    created_at: datetime | None = None,
+    repo_url: str = "git@github.com:example/metrics.git",
+    branch_base: str = "main",
+    task_title: str | None = None,
+    agent: str = "codex",
+    failure_message: str | None = None,
+    pr_url: str | None = None,
+) -> str:
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).create(
-            repo_url="git@github.com:example/metrics.git",
-            branch_base="main",
-            task_title=f"{status.value} workspace",
+            repo_url=repo_url,
+            branch_base=branch_base,
+            task_title=task_title or f"{status.value} workspace",
             task_prompt="Collect workspace reliability metrics.",
-            agent="codex",
+            agent=agent,
             test_commands=[],
         )
         workspace.status = status.value
+        if created_at is not None:
+            workspace.created_at = created_at
         workspace.updated_at = updated_at
-        workspace.failure_reason = failure_reason.value if failure_reason is not None else None
+        workspace.failure_reason = (
+            failure_reason.value if isinstance(failure_reason, FailureReason) else failure_reason
+        )
+        workspace.failure_message = failure_message
+        workspace.pr_url = pr_url
         await session.commit()
+        return workspace.id
 
 
 def _zero_status_counts() -> dict[str, int]:
@@ -69,6 +84,13 @@ def _disk_check(
         reason=reason,
         detail=None if ok else "Free disk is below the configured admission threshold.",
     )
+
+
+@pytest.mark.unit
+def test_failure_actions_cover_every_known_failure_reason() -> None:
+    from awf.service import metrics
+
+    assert set(metrics._FAILURE_ACTIONS) == {reason.value for reason in FailureReason}
 
 
 @pytest.mark.unit
@@ -213,6 +235,247 @@ async def test_current_counts_include_workspaces_outside_updated_at_window(
     assert summary.status_counts == _zero_status_counts()
     assert summary.active_count == 2
     assert summary.destroying_count == 1
+
+
+@pytest.mark.unit
+async def test_failure_analysis_groups_failed_workspaces_and_latest_examples(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=25),
+        failure_reason=FailureReason.agent_failure,
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now - timedelta(minutes=4),
+        failure_reason=FailureReason.validation_failure,
+    )
+    missing_reason_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=1),
+        created_at=now - timedelta(minutes=7),
+        task_title="Missing reason failure",
+        failure_message="The executor failed before a reason was recorded.",
+    )
+    raw_unknown_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=2),
+        created_at=now - timedelta(minutes=8),
+        failure_reason="new_failure_reason",
+        task_title="Unknown reason failure",
+    )
+    latest_validation_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=5),
+        created_at=now - timedelta(minutes=12),
+        failure_reason=FailureReason.validation_failure,
+        repo_url="git@github.com:example/api.git",
+        branch_base="development",
+        task_title="Validation broke",
+        agent="claude_code",
+        failure_message="pytest failed",
+        pr_url="https://github.com/example/api/pull/42",
+    )
+    infrastructure_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=10),
+        created_at=now - timedelta(minutes=20),
+        failure_reason=FailureReason.infrastructure_failure,
+    )
+    middle_validation_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=30),
+        failure_reason=FailureReason.validation_failure,
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=45),
+        failure_reason=FailureReason.validation_failure,
+    )
+
+    summary = await summarize_failure_analysis(session_factory, now=now)
+
+    assert summary.generated_at == now
+    assert summary.window_start == now - timedelta(hours=24)
+    assert summary.since_hours == 24
+    assert summary.total_failed_workspaces == 6
+    assert [
+        (
+            group.failure_reason,
+            group.count,
+            group.retryable,
+            group.recommended_action,
+        )
+        for group in summary.failure_groups
+    ] == [
+        (
+            FailureReason.validation_failure.value,
+            3,
+            False,
+            "Review validation output and fix failing checks before retrying.",
+        ),
+        (
+            "unknown",
+            2,
+            False,
+            "Inspect workspace logs and classify the failure_reason before retrying.",
+        ),
+        (
+            FailureReason.infrastructure_failure.value,
+            1,
+            True,
+            "Retry after confirming infrastructure health and worker capacity.",
+        ),
+    ]
+    assert [example.workspace_id for example in summary.latest_examples] == [
+        missing_reason_id,
+        raw_unknown_id,
+        latest_validation_id,
+        infrastructure_id,
+        middle_validation_id,
+    ]
+    latest_validation = summary.latest_examples[2]
+    assert latest_validation.title == "Validation broke"
+    assert latest_validation.repo_url == "git@github.com:example/api.git"
+    assert latest_validation.branch_base == "development"
+    assert latest_validation.agent == "claude_code"
+    assert latest_validation.status == WorkspaceStatus.failed.value
+    assert latest_validation.failure_reason == FailureReason.validation_failure.value
+    assert latest_validation.failure_message == "pytest failed"
+    assert latest_validation.pr_url == "https://github.com/example/api/pull/42"
+    assert latest_validation.created_at == now - timedelta(minutes=12)
+    assert latest_validation.updated_at == now - timedelta(minutes=5)
+
+
+@pytest.mark.unit
+async def test_failure_analysis_latest_examples_do_not_load_workspace_relationships(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=1),
+        failure_reason=FailureReason.validation_failure,
+    )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+    try:
+        await summarize_failure_analysis(session_factory, now=now)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    relationship_tables = (
+        "from operations",
+        "from workspace_events",
+        "from workspace_log_streams",
+        "from task_attempts",
+    )
+    assert not [
+        statement
+        for statement in statements
+        if any(table in statement for table in relationship_tables)
+    ]
+
+
+@pytest.mark.unit
+async def test_failure_analysis_filters_by_since_hours(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=3),
+        failure_reason=FailureReason.validation_failure,
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=30),
+        failure_reason=FailureReason.phase_timeout,
+    )
+
+    summary = await summarize_failure_analysis(session_factory, since_hours=1, now=now)
+
+    assert summary.window_start == now - timedelta(hours=1)
+    assert summary.total_failed_workspaces == 1
+    assert [(group.failure_reason, group.count) for group in summary.failure_groups] == [
+        (FailureReason.phase_timeout.value, 1),
+    ]
+    assert len(summary.latest_examples) == 1
+
+
+@pytest.mark.unit
+async def test_failure_analysis_accepts_example_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    workspace_ids: list[str] = []
+    for index in range(6):
+        workspace_ids.append(
+            await _workspace(
+                session_factory,
+                status=WorkspaceStatus.failed,
+                updated_at=now - timedelta(minutes=index),
+                failure_reason=FailureReason.infrastructure_failure,
+            )
+        )
+
+    summary = await summarize_failure_analysis(
+        session_factory,
+        failure_example_limit=6,
+        now=now,
+    )
+
+    assert [example.workspace_id for example in summary.latest_examples] == workspace_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_example_limit", [0, 26])
+async def test_failure_analysis_validates_example_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+    failure_example_limit: int,
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    with pytest.raises(ValueError, match="failure_example_limit must be between 1 and 25"):
+        await summarize_failure_analysis(
+            session_factory,
+            failure_example_limit=failure_example_limit,
+        )
 
 
 @pytest.mark.unit
