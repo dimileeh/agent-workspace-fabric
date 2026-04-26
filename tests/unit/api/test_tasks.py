@@ -201,3 +201,127 @@ class TestTaskList:
         assert items[0]["workspace_id"] == second_workspace.id
         assert items[0]["title"] == "Second attempt"
         assert items[0]["status"] == WorkspaceStatus.ready.value
+
+    @pytest.mark.unit
+    async def test_tasks_exposes_canonical_attempt_and_candidate_fields(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_v2_workspace(
+            client,
+            external_id="TICKET-CANONICAL",
+            title="Canonical task",
+        )
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            for target in (
+                WorkspaceStatus.provisioning,
+                WorkspaceStatus.ready,
+                WorkspaceStatus.running,
+                WorkspaceStatus.validating,
+                WorkspaceStatus.pushing,
+            ):
+                await repo.transition(workspace, to=target, reason_code="TEST")
+            workspace.branch_name = "awf/canonical-task"
+            workspace.remote_push_branch = "awf/canonical-task"
+            workspace.base_commit = "a" * 40
+            workspace.pr_url = "https://github.com/example/console/pull/41"
+            workspace.pr_number = 41
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.monitoring_pr,
+                reason_code="PR_OPENED",
+            )
+            await session.commit()
+
+        response = await client.get("/v1/tasks")
+
+        assert response.status_code == 200
+        item = next(
+            item
+            for item in response.json()["items"]
+            if item["task_id"] == "TICKET-CANONICAL"
+        )
+        assert item["is_canonical_for_merge"] is True
+        assert item["canonical_attempt_id"] == item["attempt_id"]
+        assert item["candidate_id"].startswith("mc_")
+        assert item["candidate_status"] == "open"
+        assert item["readiness"] == {
+            "ready": True,
+            "manual_merge_required": False,
+            "waiting_for_monitor": False,
+            "failed_or_cancelled": False,
+            "completed": False,
+            "not_canonical": False,
+            "stale": False,
+        }
+
+    @pytest.mark.unit
+    async def test_task_attempts_endpoint_resolves_external_id_and_lists_lineage_newest_first(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        from awf.db.repositories import TaskAttemptRepository, TaskRepository
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            task = await TaskRepository(session).create_or_get(
+                repo_url="git@github.com:example/console.git",
+                base_branch="main",
+                title="Lineage task",
+                prompt="Retry this task.",
+                external_id="TICKET-LINEAGE",
+                idempotency_key=None,
+                task_class="test_task",
+                owned_paths=[],
+            )
+            workspaces = [
+                await WorkspaceRepository(session).create(
+                    repo_url="git@github.com:example/console.git",
+                    branch_base="main",
+                    task_title=f"Attempt {number}",
+                    task_prompt="Retry this task.",
+                    task_external_id="TICKET-LINEAGE",
+                    agent=AgentRuntime.codex.value,
+                    test_commands=[],
+                )
+                for number in (1, 2, 3)
+            ]
+            attempt_repo = TaskAttemptRepository(session)
+            first = await attempt_repo.create_for_workspace(task=task, workspace=workspaces[0])
+            second = await attempt_repo.create_for_workspace(
+                task=task,
+                workspace=workspaces[1],
+                parent_attempt_id=first.id,
+                redispatch_from_attempt_id=first.id,
+            )
+            third = await attempt_repo.create_for_workspace(
+                task=task,
+                workspace=workspaces[2],
+                parent_attempt_id=second.id,
+                redispatch_from_attempt_id=second.id,
+            )
+            await session.commit()
+
+        response = await client.get("/v1/tasks/TICKET-LINEAGE/attempts")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["task_id"] == task.id
+        assert body["task_ref"] == "TICKET-LINEAGE"
+        assert [item["attempt_id"] for item in body["items"]] == [
+            third.id,
+            second.id,
+            first.id,
+        ]
+        assert [item["attempt_number"] for item in body["items"]] == [3, 2, 1]
+        assert body["items"][0]["parent_attempt_id"] == second.id
+        assert body["items"][0]["redispatch_from_attempt_id"] == second.id
+        assert body["items"][1]["parent_attempt_id"] == first.id
+        assert body["items"][2]["parent_attempt_id"] is None

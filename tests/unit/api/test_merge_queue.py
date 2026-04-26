@@ -27,6 +27,8 @@ async def _create_queue_workspace(
     owned_paths: list[str] | None = None,
     updated_at: datetime | None = None,
 ) -> str:
+    from awf.db.repositories import MergeCandidateRepository, TaskAttemptRepository, TaskRepository
+
     factory = make_session_factory(engine)
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -45,8 +47,42 @@ async def _create_queue_workspace(
         workspace.status = status.value
         workspace.branch_name = branch_name
         workspace.pr_url = pr_url
+        workspace.pr_number = (
+            int(pr_url.rstrip("/").split("/")[-1]) if pr_url is not None else None
+        )
         if updated_at is not None:
             workspace.updated_at = updated_at
+        task = await TaskRepository(session).create_or_get(
+            repo_url=repo_url,
+            base_branch=base_branch,
+            title=title,
+            prompt=f"Implement {title}.",
+            external_id=f"QUEUE-{title}",
+            idempotency_key=None,
+            task_class=task_class,
+            owned_paths=["src/awf/api/**"] if owned_paths is None else owned_paths,
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
+        if pr_url is not None:
+            attempt.is_canonical_for_merge = True
+            candidate_repo = MergeCandidateRepository(session)
+            await candidate_repo.create_or_update_open_for_attempt(
+                task=task,
+                attempt=attempt,
+                workspace=workspace,
+                head_sha="head123",
+                base_sha="base123",
+            )
+            if status == WorkspaceStatus.completed:
+                await candidate_repo.mark_workspace_merged(workspace.id)
+            elif status in {WorkspaceStatus.failed, WorkspaceStatus.cancelled}:
+                await candidate_repo.close_open_for_workspace(
+                    workspace.id,
+                    close_reason=f"WORKSPACE_{status.value.upper()}",
+                )
         await repo.add_event(
             workspace,
             event_type="merge_queue.test_marker",
@@ -97,6 +133,11 @@ class TestMergeQueueList:
 
         item = body["items"][0]
         assert set(item) == {
+            "candidate_id",
+            "candidate_status",
+            "close_reason",
+            "attempt_id",
+            "task_id",
             "workspace_id",
             "title",
             "repo_url",
@@ -111,7 +152,13 @@ class TestMergeQueueList:
             "updated_at",
             "last_event",
             "merge_blocker_reason",
+            "readiness",
+            "canonical",
         }
+        assert item["candidate_id"].startswith("mc_")
+        assert item["candidate_status"] == "merged"
+        assert item["attempt_id"].startswith("att_")
+        assert item["task_id"].startswith("task_")
         assert item["title"] == "Newer completed PR"
         assert item["repo_url"] == "git@github.com:example/console.git"
         assert item["base_branch"] == "main"
@@ -123,6 +170,8 @@ class TestMergeQueueList:
         assert item["owned_paths"] == ["src/awf/api/**"]
         assert item["last_event"]["event_type"] == "merge_queue.test_marker"
         assert item["merge_blocker_reason"] == "completed"
+        assert item["canonical"] is True
+        assert item["readiness"]["completed"] is True
 
     @pytest.mark.unit
     async def test_filters_by_repo_base_status_and_limit(
@@ -283,3 +332,41 @@ class TestMergeQueueList:
             for item in response.json()["items"]
         }
         assert actual == expected
+
+    @pytest.mark.unit
+    async def test_returns_candidate_backed_readiness_while_preserving_workspace_fields(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Candidate readiness",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/21",
+            branch_name="awf/candidate-readiness",
+            updated_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item
+            for item in response.json()["items"]
+            if item["workspace_id"] == workspace_id
+        )
+        assert item["workspace_id"] == workspace_id
+        assert item["status"] == WorkspaceStatus.monitoring_pr.value
+        assert item["candidate_status"] == "open"
+        assert item["canonical"] is True
+        assert item["readiness"] == {
+            "ready": True,
+            "manual_merge_required": False,
+            "waiting_for_monitor": False,
+            "failed_or_cancelled": False,
+            "completed": False,
+            "not_canonical": False,
+            "stale": False,
+        }
+        assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
