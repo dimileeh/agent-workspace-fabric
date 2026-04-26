@@ -234,6 +234,8 @@ class ComposeManager:
             (k, self._expand_placeholders(v, postgres_password=password))
             for k, v in spec.agent_environment
         ]
+        if spec.docker_mode == "dind" and "DOCKER_HOST" not in {k for k, _ in agent_env}:
+            agent_env.append(("DOCKER_HOST", "tcp://docker:2375"))
 
         rendered = self._env.get_template(self._template_name).render(
             workspace_id=spec.workspace_id,
