@@ -123,3 +123,54 @@ async def test_list_operations_respects_limit_and_none_for_missing_workspace(
     assert [row.type for row in rows] == ["stop", "validate"]
     assert [row.status for row in rows] == ["pending", "running"]
     assert missing is None
+
+
+@pytest.mark.unit
+async def test_global_operation_helpers_filter_and_get(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    base = datetime(2026, 4, 25, 13, 0, tzinfo=UTC)
+    async with factory() as session:
+        ws_repo = WorkspaceRepository(session)
+        first_workspace = await ws_repo.create(
+            repo_url="git@github.com:example/first.git",
+            branch_base="main",
+            task_title="First operations",
+            task_prompt="List first operations.",
+            agent="codex",
+            test_commands=[],
+        )
+        second_workspace = await ws_repo.create(
+            repo_url="git@github.com:example/second.git",
+            branch_base="main",
+            task_title="Second operations",
+            task_prompt="List second operations.",
+            agent="codex",
+            test_commands=[],
+        )
+        repo = OperationRepository(session)
+        first_operation = await repo.create(
+            workspace_id=first_workspace.id,
+            operation_type=OperationType.create,
+            status=OperationStatus.succeeded,
+        )
+        second_operation = await repo.create(
+            workspace_id=second_workspace.id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.running,
+        )
+        first_operation.created_at = base
+        second_operation.created_at = base + timedelta(seconds=1)
+        await session.commit()
+
+    rows = await service.list_all_operations(status=OperationStatus.running)
+    operation = await service.get_operation(first_operation.id)
+    missing = await service.get_operation("op_missing")
+
+    assert [row.id for row in rows] == [second_operation.id]
+    assert rows[0].workspace_id == second_workspace.id
+    assert operation is not None
+    assert operation.id == first_operation.id
+    assert operation.type == "create"
+    assert missing is None

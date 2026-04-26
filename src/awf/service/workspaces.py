@@ -132,6 +132,32 @@ class WorkspaceService:
             )
             return [OperationResponse.model_validate(row) for row in rows]
 
+    async def list_all_operations(
+        self,
+        *,
+        workspace_id: str | None = None,
+        status: OperationStatus | str | None = None,
+        operation_type: OperationType | str | None = None,
+        limit: int = 50,
+    ) -> builtins.list[OperationResponse]:
+        async with self._factory() as s:
+            rows = await OperationRepository(s).list_all(
+                workspace_id=workspace_id,
+                status=status,
+                operation_type=operation_type,
+                limit=limit,
+            )
+            return [OperationResponse.model_validate(row) for row in rows]
+
+    async def get_operation(self, operation_id: str) -> OperationResponse | None:
+        async with self._factory() as s:
+            operation = await OperationRepository(s).get(operation_id)
+            return (
+                OperationResponse.model_validate(operation)
+                if operation is not None
+                else None
+            )
+
     async def list_events(
         self,
         workspace_id: str,
