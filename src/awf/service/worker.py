@@ -62,7 +62,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runner = AsyncioSubprocessRunner()
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
-    merge_coordinator: MergeCoordinator | None = None
+    merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
     validation = ValidationRunner(
         runner=runner,
         artifacts_dir=work_dir / "artifacts",
@@ -94,10 +94,6 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         profile: WorkspaceProfile,
         workspace: Workspace,
     ) -> Any:
-        nonlocal merge_coordinator
-        if merge_coordinator is None:
-            merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
-
         monitor_builder = (
             build_feature_pr_monitor if workspace.auto_merge else build_release_pr_monitor
         )
