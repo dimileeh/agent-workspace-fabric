@@ -290,6 +290,36 @@ class TestWorkspaceObservability:
         assert mock.call_args.kwargs["params"] == {"limit": 5}
 
     @pytest.mark.unit
+    def test_operations_forwards_status_and_type_filters(self) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={"items": [{"id": "op_1", "type": "validate", "status": "succeeded"}]},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "operations",
+                    "ws_obs",
+                    "--status",
+                    "succeeded",
+                    "--type",
+                    "validate",
+                    "--limit",
+                    "5",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "validate" in result.stdout
+        assert mock.call_args.kwargs["params"] == {
+            "limit": 5,
+            "status": "succeeded",
+            "type": "validate",
+        }
+
+    @pytest.mark.unit
     def test_logs_injects_env_api_token_without_printing_it(
         self,
         monkeypatch: pytest.MonkeyPatch,

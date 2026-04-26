@@ -23,6 +23,7 @@ from typing import Any
 import httpx
 import typer
 
+from awf.db.enums import OperationStatus, OperationType
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 app = typer.Typer(
@@ -338,16 +339,23 @@ def workspace_runtime(
 def workspace_operations(
     workspace_id: str = typer.Argument(...),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
+    status: OperationStatus | None = typer.Option(None, "--status"),
+    operation_type: OperationType | None = typer.Option(None, "--type"),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """List operations for one workspace."""
+    params: dict[str, Any] = {"limit": limit}
+    if status is not None:
+        params["status"] = status.value
+    if operation_type is not None:
+        params["type"] = operation_type.value
     response = _call(
         "GET",
         f"/v1/workspaces/{workspace_id}/operations",
         base_url=_base_url(base_url),
-        params={"limit": limit},
+        params=params,
         headers=_api_token_headers(api_token),
     )
     _handle_response(response, fmt)
