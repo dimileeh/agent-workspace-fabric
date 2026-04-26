@@ -8,6 +8,28 @@ from collections.abc import Mapping
 from awf.node.compose_manager import ComposeService
 from awf.profiles.models import WorkspaceProfile
 
+AGENT_AUTH_ENV_VARS = (
+    # Claude Code portable/API-key auth. Host claude.ai OAuth can live in
+    # macOS Keychain, which is not available inside a Linux container.
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "ANTHROPIC_BASE_URL",
+    "ANTHROPIC_SMALL_FAST_MODEL",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "CLAUDE_CODE_USE_BEDROCK",
+    "CLAUDE_CODE_USE_VERTEX",
+    # Gemini CLI headless auth.
+    "GEMINI_API_KEY",
+    "GEMINI_API_KEY_AUTH_MECHANISM",
+    "GOOGLE_API_KEY",
+    "GOOGLE_GENAI_USE_VERTEXAI",
+    "GOOGLE_GENAI_USE_GCA",
+    "GOOGLE_CLOUD_PROJECT",
+    "GOOGLE_CLOUD_LOCATION",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
+)
+
 
 def profile_services(profile: WorkspaceProfile) -> tuple[ComposeService, ...]:
     return tuple(
@@ -50,3 +72,24 @@ def agent_environment_with_github_token(
             merged.append((name, "${AWF_GITHUB_TOKEN}"))
             existing.add(name)
     return tuple(merged)
+
+
+def agent_environment_with_host_auth(
+    base_environment: tuple[tuple[str, str], ...],
+    *,
+    host_env: Mapping[str, str] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    """Expose selected host auth env vars to the agent via Compose placeholders.
+
+    Values are intentionally rendered as ``${NAME}`` placeholders. The generated
+    per-workspace compose.yml records variable names only; Docker Compose
+    substitutes the actual secret values from the worker environment at launch.
+    """
+    source_env = os.environ if host_env is None else host_env
+    merged: list[tuple[str, str]] = list(base_environment)
+    existing = {key for key, _ in merged}
+    for name in AGENT_AUTH_ENV_VARS:
+        if name not in existing and source_env.get(name):
+            merged.append((name, f"${{{name}}}"))
+            existing.add(name)
+    return agent_environment_with_github_token(tuple(merged), host_env=source_env)

@@ -16,7 +16,7 @@ from awf.node.compose_manager import (
 )
 from awf.node.git_manager import WorktreeLayout
 from awf.profiles.compose import (
-    agent_environment_with_github_token,
+    agent_environment_with_host_auth,
     profile_agent_environment,
     profile_services,
 )
@@ -74,7 +74,7 @@ class ComposeStackLauncher:
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,
             agent_runtime_image=self._agent_runtime_image,
-            agent_environment=agent_environment_with_github_token(
+            agent_environment=agent_environment_with_host_auth(
                 profile_agent_environment(profile)
             ),
             docker_mode=profile.docker.mode.value,
