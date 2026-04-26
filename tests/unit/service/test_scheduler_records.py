@@ -15,6 +15,7 @@ from awf.db.repositories import (
     TaskAttemptRepository,
 )
 from awf.db.session import make_engine, make_session_factory
+from awf.service import workspaces
 from awf.service.workspaces import WorkspaceService
 
 
@@ -128,3 +129,24 @@ async def test_terminal_workspace_control_releases_active_reservation(
 
     assert active is None
     assert reservation.released_at is not None
+
+
+@pytest.mark.unit
+def test_legacy_numeric_memory_without_unit_warns(monkeypatch: pytest.MonkeyPatch) -> None:
+    warnings: list[tuple[str, dict[str, object]]] = []
+
+    class Logger:
+        def warning(self, event: str, **kwargs: object) -> None:
+            warnings.append((event, kwargs))
+
+    monkeypatch.setattr(workspaces, "_log", Logger())
+
+    parsed = workspaces._parse_memory_gb("1024")
+
+    assert parsed == 1024.0
+    assert warnings == [
+        (
+            "workspace.resources.memory_unit_missing",
+            {"raw_value": "1024", "interpreted_unit": "gb"},
+        ),
+    ]

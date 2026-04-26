@@ -25,6 +25,7 @@ from awf.api.schemas import (
     WorkspaceWarningResponse,
 )
 from awf.common.config import Settings, get_settings
+from awf.common.logging import get_logger
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
@@ -89,6 +90,7 @@ TASK_CLASS_BIASES = {
     "test_task": 2,
     "docs_task": 0,
 }
+_log = get_logger(__name__)
 
 
 class WorkspaceRetryError(Exception):
@@ -775,9 +777,15 @@ def _parse_memory_gb(value: str | None) -> float | None:
             except ValueError:
                 return None
     try:
-        return float(normalized)
+        memory_gb = float(normalized)
     except ValueError:
         return None
+    _log.warning(
+        "workspace.resources.memory_unit_missing",
+        raw_value=normalized,
+        interpreted_unit="gb",
+    )
+    return memory_gb
 
 
 def owned_path_overlap_warnings(workspace: Workspace) -> list[WorkspaceWarningResponse]:
