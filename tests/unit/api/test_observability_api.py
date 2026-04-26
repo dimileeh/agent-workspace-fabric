@@ -14,8 +14,8 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.testclient import WebSocketDenialResponse
 
 import awf.api.routes.controls as controls_route
-import awf.api.routes.runtime as runtime_route
 import awf.api.routes.ws as ws_route
+import awf.service.workspaces as workspace_service
 from awf.api.app import configure_database, create_app
 from awf.common.config import get_settings
 from awf.db.base import Base
@@ -149,7 +149,7 @@ class TestConsoleViews:
                     ],
                 )
 
-        monkeypatch.setattr(runtime_route, "RuntimeInspector", FakeRuntimeInspector)
+        monkeypatch.setattr(workspace_service, "RuntimeInspector", FakeRuntimeInspector)
 
         response = await client.get(f"/v1/workspaces/{workspace_id}/runtime")
 
