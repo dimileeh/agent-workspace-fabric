@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.models import ResourceReservation, Workspace
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
@@ -389,7 +389,8 @@ async def summarize_resource_saturation_for_session(
         peak_cpu=settings.workspace_peak_cpu,
         peak_memory_gb=settings.workspace_peak_memory_gb,
     )
-    reserved_resources = _reserved_resources(
+    reserved_resources = await _reserved_resources_for_session(
+        session,
         workspace_counts.active_total,
         resource_defaults=resource_defaults,
     )
@@ -608,18 +609,51 @@ def _workspace_saturation_counts(status_counts: dict[str, int]) -> WorkspaceSatu
     )
 
 
-def _reserved_resources(
+async def _reserved_resources_for_session(
+    session: AsyncSession,
     active_workspace_count: int,
     *,
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
+    persisted = await _active_reservation_totals(session)
+    fallback_count = max(0, active_workspace_count - persisted["workspace_count"])
     return ReservedResources(
         active_workspace_count=active_workspace_count,
-        steady_cpu=active_workspace_count * resource_defaults.steady_cpu,
-        steady_memory_gb=active_workspace_count * resource_defaults.steady_memory_gb,
-        peak_cpu=active_workspace_count * resource_defaults.peak_cpu,
-        peak_memory_gb=active_workspace_count * resource_defaults.peak_memory_gb,
+        steady_cpu=persisted["steady_cpu"] + fallback_count * resource_defaults.steady_cpu,
+        steady_memory_gb=(
+            persisted["steady_memory_gb"]
+            + fallback_count * resource_defaults.steady_memory_gb
+        ),
+        peak_cpu=persisted["peak_cpu"] + fallback_count * resource_defaults.peak_cpu,
+        peak_memory_gb=(
+            persisted["peak_memory_gb"] + fallback_count * resource_defaults.peak_memory_gb
+        ),
     )
+
+
+async def _active_reservation_totals(session: AsyncSession) -> dict[str, float | int]:
+    stmt = (
+        select(
+            func.count(func.distinct(ResourceReservation.workspace_id)),
+            func.coalesce(func.sum(ResourceReservation.steady_cpu), 0.0),
+            func.coalesce(func.sum(ResourceReservation.steady_memory_gb), 0.0),
+            func.coalesce(func.sum(ResourceReservation.peak_cpu), 0.0),
+            func.coalesce(func.sum(ResourceReservation.peak_memory_gb), 0.0),
+        )
+        .join(Workspace, ResourceReservation.workspace_id == Workspace.id)
+        .where(
+            ResourceReservation.released_at.is_(None),
+            ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
+        )
+    )
+    row = (await session.execute(stmt)).one()
+    return {
+        "workspace_count": int(row[0] or 0),
+        "steady_cpu": float(row[1] or 0.0),
+        "steady_memory_gb": float(row[2] or 0.0),
+        "peak_cpu": float(row[3] or 0.0),
+        "peak_memory_gb": float(row[4] or 0.0),
+    }
 
 
 def _resource_concurrency(

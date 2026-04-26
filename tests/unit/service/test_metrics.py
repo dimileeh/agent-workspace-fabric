@@ -12,7 +12,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import (
+    ResourceReservationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
 
@@ -58,6 +63,49 @@ async def _workspace(
         workspace.pr_url = pr_url
         await session.commit()
         return workspace.id
+
+
+async def _reservation_for_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    steady_cpu: float,
+    steady_memory_gb: float,
+    peak_cpu: float,
+    peak_memory_gb: float,
+    disk_mb: int | None = None,
+    released_at: datetime | None = None,
+) -> None:
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        task = await TaskRepository(session).create_or_get(
+            repo_url=workspace.repo_url,
+            base_branch=workspace.branch_base,
+            title=workspace.task_title,
+            prompt=workspace.task_prompt,
+            external_id=None,
+            idempotency_key=f"metrics-reservation:{workspace.id}",
+            task_class=workspace.task_class,
+            owned_paths=list(workspace.owned_paths),
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
+        reservation = await ResourceReservationRepository(session).create(
+            workspace_id=workspace.id,
+            attempt_id=attempt.id,
+            node_id="local",
+            steady_cpu=steady_cpu,
+            steady_memory_gb=steady_memory_gb,
+            peak_cpu=peak_cpu,
+            peak_memory_gb=peak_memory_gb,
+            disk_mb=disk_mb,
+            phase="workspace_lifecycle",
+        )
+        reservation.released_at = released_at
+        await session.commit()
 
 
 def _zero_status_counts() -> dict[str, int]:
@@ -547,6 +595,72 @@ async def test_resource_saturation_reports_active_counts_and_configured_defaults
     assert summary.admission.ok is True
     assert summary.admission.status == "saturated"
     assert summary.admission.reason == "WORKER_EXECUTION_CONCURRENCY_SATURATED"
+
+
+@pytest.mark.unit
+async def test_resource_saturation_prefers_active_reservations_and_falls_back_for_old_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        workspace_steady_cpu=3.0,
+        workspace_steady_memory_gb=10.0,
+        workspace_peak_cpu=6.0,
+        workspace_peak_memory_gb=16.0,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    reserved_workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    legacy_workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.ready,
+        updated_at=now,
+    )
+    released_workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        reserved_workspace_id,
+        steady_cpu=4.0,
+        steady_memory_gb=12.0,
+        peak_cpu=8.0,
+        peak_memory_gb=24.0,
+        disk_mb=4096,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        released_workspace_id,
+        steady_cpu=100.0,
+        steady_memory_gb=100.0,
+        peak_cpu=100.0,
+        peak_memory_gb=100.0,
+        disk_mb=8192,
+        released_at=now,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert legacy_workspace_id
+    assert summary.workspace_counts.active_total == 2
+    assert summary.reserved_resources.active_workspace_count == 2
+    assert summary.reserved_resources.steady_cpu == 7.0
+    assert summary.reserved_resources.steady_memory_gb == 22.0
+    assert summary.reserved_resources.peak_cpu == 14.0
+    assert summary.reserved_resources.peak_memory_gb == 40.0
 
 
 @pytest.mark.unit

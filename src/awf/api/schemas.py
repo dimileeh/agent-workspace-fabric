@@ -80,6 +80,7 @@ class WorkspaceV2Task(BaseModel):
     agent: AgentRuntime = Field(default=AgentRuntime.codex)
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
     task_class: TaskClass | None = None
+    priority: int = Field(default=0, ge=0, le=100)
     owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
     auto_merge: bool = True
     initial_review_grace_period_seconds: float | None = Field(
@@ -108,6 +109,11 @@ class WorkspaceV2Resources(BaseModel):
 
     cpu: float | None = Field(default=None, gt=0)
     memory: Annotated[str | None, Field(default=None, max_length=32)]
+    steady_state_cpu_cores: float | None = Field(default=None, gt=0)
+    steady_state_memory_gb: float | None = Field(default=None, gt=0)
+    peak_cpu_cores: float | None = Field(default=None, gt=0)
+    peak_memory_gb: float | None = Field(default=None, gt=0)
+    disk_mb: int | None = Field(default=None, ge=0)
 
 
 class WorkspaceCreateV2Request(BaseModel):
@@ -124,6 +130,32 @@ class WorkspaceCreateV2Request(BaseModel):
     resources: WorkspaceV2Resources = Field(
         default_factory=lambda: WorkspaceV2Resources(cpu=None, memory=None)
     )
+
+
+class QueueDecisionSummaryResponse(BaseModel):
+    id: str
+    decision: str
+    reason_code: str
+    class_priority: int
+    computed_priority: int
+    age_boost: int
+    retry_bonus: int
+    resource_summary: dict[str, Any]
+    overlap_risk_summary: dict[str, Any]
+    decided_at: datetime
+
+
+class ResourceReservationSummaryResponse(BaseModel):
+    id: str
+    node_id: str
+    steady_cpu: float
+    steady_memory_gb: float
+    peak_cpu: float
+    peak_memory_gb: float
+    disk_mb: int | None
+    phase: str
+    reserved_at: datetime
+    released_at: datetime | None
 
 
 class WorkspaceResponse(BaseModel):
@@ -164,6 +196,9 @@ class WorkspaceResponse(BaseModel):
     pr_url: str | None
     failure_reason: str | None
     failure_message: str | None
+
+    latest_queue_decision: QueueDecisionSummaryResponse | None = None
+    active_resource_reservation: ResourceReservationSummaryResponse | None = None
 
     created_at: datetime
     updated_at: datetime
