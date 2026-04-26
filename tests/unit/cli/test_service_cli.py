@@ -136,6 +136,23 @@ def test_service_logs_follow_streams_without_capturing_subprocess_output(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("returncode", [130, -2])
+def test_service_logs_follow_ignores_subprocess_interrupt_exit_codes(
+    monkeypatch: pytest.MonkeyPatch,
+    returncode: int,
+) -> None:
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=returncode, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--follow"])
+
+    assert result.exit_code == 0, result.output
+    assert _combined_output(result) == ""
+
+
+@pytest.mark.unit
 def test_service_logs_follow_keyboard_interrupt_exits_cleanly(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

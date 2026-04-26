@@ -77,7 +77,7 @@ _log = get_logger(__name__)
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
-Verdict = str  # "fix_committed" | "false_positive" | "defer"
+Verdict = str  # "fix_committed" | "false_positive" | "defer" | "agent_failed"
 
 
 @dataclass(frozen=True)
@@ -658,7 +658,7 @@ class PullRequestMonitorRunner:
                     compose_file=compose_file,
                 )
                 state.mark_addressed(t.thread_id, verdict)
-                if verdict != "defer":
+                if verdict not in {"defer", "agent_failed"}:
                     threads_to_resolve.append(t.thread_id)
             for c in reviews:
                 verdict = await self._address_review_comment(
@@ -744,6 +744,7 @@ class PullRequestMonitorRunner:
         return await self._invoke_cli_for_verdict(
             workspace_id=workspace_id,
             prompt=prompt,
+            commit_message=f"fix: address PR review thread {thread.thread_id}",
             compose_project=compose_project,
             compose_file=compose_file,
         )
@@ -764,13 +765,22 @@ class PullRequestMonitorRunner:
         return await self._invoke_cli_for_verdict(
             workspace_id=workspace_id,
             prompt=prompt,
+            commit_message=f"fix: address PR review comment {comment.comment_id}",
             compose_project=compose_project,
             compose_file=compose_file,
         )
 
     async def _invoke_cli_for_verdict(
-        self, *, workspace_id: str, prompt: str, compose_project: str, compose_file: Path
+        self,
+        *,
+        workspace_id: str,
+        prompt: str,
+        commit_message: str,
+        compose_project: str,
+        compose_file: Path,
     ) -> Verdict:
+        result_stdout = ""
+        cli_failed = False
         try:
             result = await self._deps.adapter.run(
                 compose_project=compose_project,
@@ -778,13 +788,23 @@ class PullRequestMonitorRunner:
                 prompt=prompt,
                 workspace_id=workspace_id,
             )
+            result_stdout = result.stdout
         except AgentRunError as exc:
+            cli_failed = True
+            result_stdout = exc.result.stdout
             _log.warning(
                 "monitor.cli_nonzero_exit",
                 returncode=exc.result.returncode,
             )
-            return "defer"
-        return _parse_verdict(result.stdout)
+        committed_dirty_changes = await self._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message=commit_message,
+        )
+        if committed_dirty_changes:
+            return "fix_committed"
+        if cli_failed:
+            return "agent_failed"
+        return _parse_verdict(result_stdout)
 
     # ── SyncBase ───────────────────────────────────────────────────────────
 
@@ -846,6 +866,10 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     stderr=exc.result.stderr[:400],
                 )
+            await self._commit_dirty_worktree(
+                workspace_id=workspace_id,
+                message=f"fix: resolve PR #{pr_number} base conflicts",
+            )
 
         # Whether or not we hit conflicts, push what we have.
         await self._git_push(worktree_path=worktree_path, remote_branch=remote_branch)
@@ -877,12 +901,69 @@ class PullRequestMonitorRunner:
                 workspace_id=workspace_id,
                 stderr=exc.result.stderr[:400],
             )
+        await self._commit_dirty_worktree(
+            workspace_id=workspace_id,
+            message=f"fix: address PR #{pr_number} CI failure",
+        )
         await self._git_push(
             worktree_path=self._worktrees_root / workspace_id,
             remote_branch=remote_branch,
         )
 
     # ── Git plumbing ───────────────────────────────────────────────────────
+
+    async def _commit_dirty_worktree(self, *, workspace_id: str, message: str) -> bool:
+        """Commit dirty monitor-agent edits so PR feedback is not stranded.
+
+        Coding CLIs can apply a valid fix and still exit non-zero while
+        formatting, testing, or summarising. PR #35 exposed that failure
+        mode: the monitor treated the CLI failure as a bot defer, but the
+        useful fix was left dirty in the service worktree and never pushed.
+        """
+
+        worktree_path = self._worktrees_root / workspace_id
+        if not worktree_path.exists():
+            return False
+        status = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "status", "--porcelain"]
+        )
+        if not status.ok:
+            _log.warning(
+                "monitor.dirty_check_failed",
+                workspace_id=workspace_id,
+                stderr=status.stderr[:400],
+            )
+            return False
+        if not status.stdout.strip():
+            return False
+
+        add = await self._deps.runner.run(["git", "-C", str(worktree_path), "add", "-A"])
+        if not add.ok:
+            _log.warning(
+                "monitor.dirty_add_failed",
+                workspace_id=workspace_id,
+                stderr=add.stderr[:400],
+            )
+            return False
+
+        cached = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "diff", "--cached", "--quiet"]
+        )
+        if cached.returncode == 0:
+            return False
+
+        commit = await self._deps.runner.run(
+            ["git", "-C", str(worktree_path), "commit", "-m", message]
+        )
+        if not commit.ok:
+            _log.warning(
+                "monitor.dirty_commit_failed",
+                workspace_id=workspace_id,
+                stderr=commit.stderr[:400],
+            )
+            return False
+        _log.info("monitor.dirty_worktree_committed", workspace_id=workspace_id)
+        return True
 
     async def _fetch_base(self, *, worktree_path: Path, base_branch: str) -> None:
         """``git fetch origin <base>`` — refreshes the worktree's

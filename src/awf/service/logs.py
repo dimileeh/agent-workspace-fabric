@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import signal
 import subprocess
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -12,6 +13,7 @@ from typing import Literal, Protocol
 LOCAL_SERVICE_COMPOSE_FILE = Path("docker/compose/local-service.yml")
 DEFAULT_LOG_TAIL = 100
 DEFAULT_LOG_SERVICES = ("api", "worker")
+_FOLLOW_INTERRUPT_RETURN_CODES = {128 + signal.SIGINT, -signal.SIGINT}
 
 
 class ServiceLogName(StrEnum):
@@ -114,6 +116,8 @@ def run_service_logs(
 
     stdout = result.stdout or ""
     stderr = result.stderr or ""
+    if follow and result.returncode in _FOLLOW_INTERRUPT_RETURN_CODES:
+        return ServiceLogsResult(stdout="", stderr="")
     if result.returncode != 0:
         raise ServiceLogsError(
             returncode=result.returncode,

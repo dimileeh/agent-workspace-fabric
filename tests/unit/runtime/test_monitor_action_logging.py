@@ -709,3 +709,62 @@ class TestMonitorActionLogging:
             and r.get("fresh_action") == "NotifyHuman"
             for r in captured
         )
+
+
+class TestMonitorDirtyWorktreeSalvage:
+    @pytest.mark.unit
+    async def test_comment_agent_failure_with_dirty_changes_is_committed_and_resolved(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        thread = thread_node(tid="T_dirty", author="gemini-code-assist")
+        worktrees_root = tmp_path / "worktrees"
+        (worktrees_root / ws_id).mkdir(parents=True)
+
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="changed files but failed before summary", returncode=1)
+        cmd.queue_result(returncode=0, stdout=" M src/foo.py\n")  # dirty check
+        cmd.queue_result(returncode=0)  # git add -A
+        cmd.queue_result(returncode=1)  # git diff --cached --quiet
+        cmd.queue_result(returncode=0)  # git commit
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
+        cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve thread
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # clean PR
+        cmd.queue_result(returncode=0)  # gh pr merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge sha
+
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=worktrees_root,
+        )
+        with structlog.testing.capture_logs() as captured:
+            await runner.run(
+                workspace_id=ws_id,
+                compose_project="proj",
+                compose_file=tmp_path / "compose.yml",
+            )
+
+        commit_calls = [
+            call.args
+            for call in cmd.calls
+            if len(call.args) >= 5 and call.args[-3:] == ["commit", "-m", "fix: address PR review thread T_dirty"]
+        ]
+        assert commit_calls
+        assert any(call.args[:3] == ["gh", "api", "graphql"] for call in cmd.calls)
+        actions = [e["action"] for e in _action_entries(captured)]
+        assert actions == ["AddressComments", "Merge"]
+        assert any(r.get("event") == "monitor.dirty_worktree_committed" for r in captured)

@@ -165,7 +165,8 @@ class MonitorState:
 
     iter_count: int = 0
     last_push_sha: str | None = None  # SHA at the time of last push
-    # thread_id → one of: "fix_committed" / "false_positive" / "defer"
+    # thread_id → one of:
+    # "fix_committed" / "false_positive" / "defer" / "agent_failed"
     threads_addressed_ids: dict[str, str] = field(default_factory=dict)
     started_at: float = field(default_factory=time.monotonic)
 
@@ -315,6 +316,19 @@ def _is_bot_author(login: str | None) -> bool:
     return login in BOT_REVIEWER_LOGINS or login.endswith("[bot]")
 
 
+def _needs_comment_attention(verdict: str | None) -> bool:
+    """Return True when an unresolved PR comment still needs the agent.
+
+    ``agent_failed`` is deliberately not treated as addressed. PR #35
+    showed why: Codex exited non-zero while handling a Gemini review
+    thread, left the worktree dirty, and the old decision core then let
+    the PR merge because bot defers do not block. Agent failure is not a
+    reviewer defer; it means AWF still owes the thread another attempt.
+    """
+
+    return verdict is None or verdict == "agent_failed"
+
+
 # ── The decision function ──────────────────────────────────────────────────
 
 
@@ -406,12 +420,13 @@ def decide(status: PRStatus, state: MonitorState, config: MonitorConfig) -> Moni
     new_threads = tuple(
         t
         for t in status.unresolved_inline_threads
-        if t.thread_id not in state.threads_addressed_ids
+        if _needs_comment_attention(state.threads_addressed_ids.get(t.thread_id))
     )
     new_reviews = tuple(
         c
         for c in status.unresolved_review_comments
-        if not c.blocks_merge and c.comment_id not in state.threads_addressed_ids
+        if not c.blocks_merge
+        and _needs_comment_attention(state.threads_addressed_ids.get(c.comment_id))
     )
     if new_threads or new_reviews:
         return AddressComments(threads=new_threads, review_comments=new_reviews)

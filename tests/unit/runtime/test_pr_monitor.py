@@ -31,9 +31,19 @@ from awf.runtime.pr_monitor import (
 # ── Helpers ────────────────────────────────────────────────────────────────
 
 
-def _thread(tid: str = "T1", body: str = "fix this", is_resolved: bool = False) -> ReviewThread:
+def _thread(
+    tid: str = "T1",
+    body: str = "fix this",
+    is_resolved: bool = False,
+    author: str | None = None,
+) -> ReviewThread:
     return ReviewThread(
-        thread_id=tid, path="src/x.py", line=10, body_excerpt=body, is_resolved=is_resolved
+        thread_id=tid,
+        path="src/x.py",
+        line=10,
+        body_excerpt=body,
+        author=author,
+        is_resolved=is_resolved,
     )
 
 
@@ -42,10 +52,12 @@ def _review(
     body: str = "see below",
     is_resolved: bool = False,
     blocks_merge: bool = False,
+    author: str | None = None,
 ) -> ReviewComment:
     return ReviewComment(
         comment_id=cid,
         body_excerpt=body,
+        author=author,
         is_resolved=is_resolved,
         blocks_merge=blocks_merge,
     )
@@ -171,6 +183,22 @@ class TestAddressComments:
         action = decide(_status(inline=(t1, t2)), state, MonitorConfig())
         assert isinstance(action, AddressComments)
         assert action.threads == (t2,)
+
+    @pytest.mark.unit
+    def test_agent_failed_thread_is_retried_not_merged(self) -> None:
+        t = _thread("T_failed", author="gemini-code-assist")
+        state = MonitorState(threads_addressed_ids={"T_failed": "agent_failed"})
+        action = decide(_status(inline=(t,)), state, MonitorConfig(auto_merge=True))
+        assert isinstance(action, AddressComments)
+        assert action.threads == (t,)
+
+    @pytest.mark.unit
+    def test_agent_failed_review_comment_is_retried_not_merged(self) -> None:
+        c = _review("C_failed", author="gemini-code-assist")
+        state = MonitorState(threads_addressed_ids={"C_failed": "agent_failed"})
+        action = decide(_status(reviews=(c,)), state, MonitorConfig(auto_merge=True))
+        assert isinstance(action, AddressComments)
+        assert action.review_comments == (c,)
 
     @pytest.mark.unit
     def test_all_addressed_falls_through_to_next_gate(self) -> None:
