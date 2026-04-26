@@ -322,7 +322,7 @@ class TestGeminiAdapter:
         runner = FakeCommandRunner()
         adapter = GeminiAdapter(
             runner=runner,
-            default_model="gemini-3.1-pro",
+            default_model="gemini-3-pro-preview",
             default_effort="xhigh",
         )
 
@@ -339,7 +339,7 @@ class TestGeminiAdapter:
         assert '"thinkingLevel":"HIGH"' in script
         assert "GEMINI_CLI_TRUST_WORKSPACE" in script
         assert "exec gemini" in script
-        assert "-m" in args and "gemini-3.1-pro" in args
+        assert "-m" in args and "gemini-3-pro-preview" in args
         assert args[-1].endswith(_PROMPT)
 
 
@@ -348,7 +348,7 @@ class TestCentralDefaults:
     def test_defaults_map_uses_requested_models_and_xhigh_effort(self) -> None:
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-7"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.5"
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3.1-pro"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3-pro-preview"
         assert {d.effort for d in DEFAULT_AGENT_DEFAULTS.values()} == {"xhigh"}
 
     @pytest.mark.unit
