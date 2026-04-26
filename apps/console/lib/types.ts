@@ -48,6 +48,31 @@ export interface WorkspaceOverview {
   updated_at: string;
 }
 
+export type MergeBlockerReason =
+  | "ready_to_merge_or_waiting_for_github"
+  | "manual_merge_required"
+  | "waiting_for_monitor"
+  | "workspace_not_terminal"
+  | "completed"
+  | "failed_or_cancelled";
+
+export interface MergeQueueItem {
+  workspace_id: string;
+  title: string;
+  repo_url: string;
+  base_branch: string;
+  branch_name: string | null;
+  pr_url: string;
+  status: WorkspaceStatus;
+  auto_merge: boolean;
+  task_class: string | null;
+  owned_paths: string[];
+  created_at: string;
+  updated_at: string;
+  last_event: WorkspaceEvent | null;
+  merge_blocker_reason: MergeBlockerReason;
+}
+
 export interface Workspace {
   id: string;
   status: WorkspaceStatus;
