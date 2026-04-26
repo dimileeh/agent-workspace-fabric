@@ -415,14 +415,17 @@ class StalenessRefreshService:
         *,
         stale: bool,
     ) -> None:
-        if candidate.stale == stale and candidate.stale_reason is None:
+        from awf.db.repositories import _sync_candidate_readiness
+        from awf.runtime.merge_eligibility import compute_stale_reason
+
+        validation_reason, _ = compute_stale_reason(candidate.workspace)
+        next_stale = stale or validation_reason is not None
+        if candidate.stale == next_stale and candidate.stale_reason == validation_reason:
             return
-        candidate.stale = stale
-        candidate.stale_reason = None
+        candidate.stale = next_stale
+        candidate.stale_reason = validation_reason
         # Re-sync derived readiness flags so the merge-queue blocker reason
         # picks up the new stale state without an out-of-band refresh.
-        from awf.db.repositories import _sync_candidate_readiness
-
         _sync_candidate_readiness(
             candidate,
             workspace=candidate.workspace,
