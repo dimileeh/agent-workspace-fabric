@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.api.schemas import WorkspaceControlResponse
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
@@ -85,6 +86,44 @@ class TestToolRegistration:
             "awf_list_workspace_logs",
             "awf_read_workspace_log",
         } <= names
+        assert {
+            "awf_cancel_workspace",
+            "awf_stop_workspace",
+            "awf_destroy_workspace",
+        } <= names
+
+    @pytest.mark.unit
+    async def test_control_tools_are_described_as_operator_controls(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+        for name in (
+            "awf_cancel_workspace",
+            "awf_stop_workspace",
+            "awf_destroy_workspace",
+        ):
+            description = (tools[name].description or "").lower()
+            assert "operator control" in description
+            assert "not shell access" in description
+
+    @pytest.mark.unit
+    async def test_control_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+        cancel_props = tools["awf_cancel_workspace"].inputSchema["properties"]
+        assert cancel_props["reason"]["default"] is None
+        assert cancel_props["stop_stack"]["default"] is True
+
+        stop_props = tools["awf_stop_workspace"].inputSchema["properties"]
+        assert stop_props["reason"]["default"] is None
+        assert "stop_stack" not in stop_props
+
+        destroy_props = tools["awf_destroy_workspace"].inputSchema["properties"]
+        assert destroy_props["force"]["default"] is False
+        assert destroy_props["remove_volumes"]["default"] is True
+        assert destroy_props["remove_worktree"]["default"] is True
 
     @pytest.mark.unit
     async def test_create_workspace_v2_owned_paths_declares_item_constraints(self, mcp) -> None:  # type: ignore[no-untyped-def]
@@ -119,6 +158,175 @@ class TestCreateWorkspace:
 
         with pytest.raises((McpError, Exception)):
             await _call(mcp, "awf_create_workspace", bad)
+
+
+class _RecordingControlService:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    async def cancel_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        stop_stack: bool,
+    ) -> WorkspaceControlResponse:
+        self.calls.append(
+            (
+                "cancel",
+                {
+                    "workspace_id": workspace_id,
+                    "reason": reason,
+                    "stop_stack": stop_stack,
+                },
+            )
+        )
+        return WorkspaceControlResponse(
+            workspace_id=workspace_id,
+            operation_id="op_cancel",
+            status="cancelled",
+            message="workspace cancellation requested",
+        )
+
+    async def stop_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None,
+    ) -> WorkspaceControlResponse:
+        self.calls.append(
+            ("stop", {"workspace_id": workspace_id, "reason": reason})
+        )
+        return WorkspaceControlResponse(
+            workspace_id=workspace_id,
+            operation_id="op_stop",
+            status="cancelled",
+            message="workspace stack stopped",
+        )
+
+    async def destroy_workspace(
+        self,
+        workspace_id: str,
+        *,
+        force: bool,
+        remove_volumes: bool,
+        remove_worktree: bool,
+    ) -> WorkspaceControlResponse:
+        self.calls.append(
+            (
+                "destroy",
+                {
+                    "workspace_id": workspace_id,
+                    "force": force,
+                    "remove_volumes": remove_volumes,
+                    "remove_worktree": remove_worktree,
+                },
+            )
+        )
+        return WorkspaceControlResponse(
+            workspace_id=workspace_id,
+            operation_id="op_destroy",
+            status="destroyed",
+            message="workspace destroyed",
+        )
+
+
+class TestWorkspaceControls:
+    @pytest.mark.unit
+    async def test_cancel_workspace_calls_service_and_returns_structured_response(
+        self,
+    ) -> None:
+        service = _RecordingControlService()
+        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
+
+        payload = await _call(
+            mcp,
+            "awf_cancel_workspace",
+            {
+                "workspace_id": "ws_control",
+                "reason": "stale task",
+                "stop_stack": False,
+            },
+        )
+
+        assert service.calls == [
+            (
+                "cancel",
+                {
+                    "workspace_id": "ws_control",
+                    "reason": "stale task",
+                    "stop_stack": False,
+                },
+            )
+        ]
+        assert payload == {
+            "workspace_id": "ws_control",
+            "operation_id": "op_cancel",
+            "status": "cancelled",
+            "message": "workspace cancellation requested",
+        }
+
+    @pytest.mark.unit
+    async def test_stop_workspace_calls_service_and_returns_structured_response(
+        self,
+    ) -> None:
+        service = _RecordingControlService()
+        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
+
+        payload = await _call(
+            mcp,
+            "awf_stop_workspace",
+            {
+                "workspace_id": "ws_control",
+                "reason": "free local resources",
+            },
+        )
+
+        assert service.calls == [
+            ("stop", {"workspace_id": "ws_control", "reason": "free local resources"})
+        ]
+        assert payload == {
+            "workspace_id": "ws_control",
+            "operation_id": "op_stop",
+            "status": "cancelled",
+            "message": "workspace stack stopped",
+        }
+
+    @pytest.mark.unit
+    async def test_destroy_workspace_calls_service_and_returns_structured_response(
+        self,
+    ) -> None:
+        service = _RecordingControlService()
+        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
+
+        payload = await _call(
+            mcp,
+            "awf_destroy_workspace",
+            {
+                "workspace_id": "ws_control",
+                "force": True,
+                "remove_volumes": False,
+                "remove_worktree": False,
+            },
+        )
+
+        assert service.calls == [
+            (
+                "destroy",
+                {
+                    "workspace_id": "ws_control",
+                    "force": True,
+                    "remove_volumes": False,
+                    "remove_worktree": False,
+                },
+            )
+        ]
+        assert payload == {
+            "workspace_id": "ws_control",
+            "operation_id": "op_destroy",
+            "status": "destroyed",
+            "message": "workspace destroyed",
+        }
 
 
 class TestCreateWorkspaceV2:
