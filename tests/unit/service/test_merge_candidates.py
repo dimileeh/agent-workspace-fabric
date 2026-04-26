@@ -28,6 +28,8 @@ async def _seed_attempted_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,
     auto_merge: bool = True,
+    task_class: str | None = None,
+    owned_paths: list[str] | None = None,
 ) -> tuple[str, str]:
     from awf.db.repositories import TaskAttemptRepository, TaskRepository
 
@@ -39,6 +41,8 @@ async def _seed_attempted_workspace(
             task_title="Candidate lifecycle",
             task_prompt="Open a PR and monitor it.",
             task_external_id="TICKET-CANDIDATE",
+            task_class=task_class,
+            owned_paths=list(owned_paths or []),
             auto_merge=auto_merge,
             agent=AgentRuntime.codex.value,
             test_commands=[],
@@ -50,8 +54,8 @@ async def _seed_attempted_workspace(
             prompt=workspace.task_prompt,
             external_id=workspace.task_external_id,
             idempotency_key=None,
-            task_class=None,
-            owned_paths=[],
+            task_class=task_class,
+            owned_paths=list(owned_paths or []),
         )
         attempt = await TaskAttemptRepository(session).create_for_workspace(
             task=task,
@@ -106,6 +110,97 @@ async def test_pr_opened_monitoring_transition_creates_open_canonical_candidate(
     assert candidate.ready is True
     assert candidate.manual_merge_required is False
     assert candidate.waiting_for_monitor is False
+
+
+@pytest.mark.unit
+async def test_docs_task_non_docs_owned_path_uses_scope_stale_reason(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.db.repositories import MergeCandidateRepository, TaskAttemptRepository
+
+    workspace_id, attempt_id = await _seed_attempted_workspace(
+        factory,
+        task_class="docs_task",
+        owned_paths=["docs/**", "src/config.py"],
+    )
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="PR_OPENED",
+        )
+        await session.commit()
+
+    async with factory() as session:
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+        candidate = await MergeCandidateRepository(session).get_by_attempt_id(attempt_id)
+
+    assert attempt is not None
+    assert attempt.is_canonical_for_merge is True
+    assert candidate is not None
+    assert candidate.ready is False
+    assert candidate.stale is True
+    assert candidate.stale_reason == "docs_task_scope_violation"
+
+
+@pytest.mark.unit
+async def test_docs_task_scope_staleness_clears_when_owned_paths_return_to_docs_only(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.db.repositories import (
+        MergeCandidateRepository,
+        TaskAttemptRepository,
+        TaskRepository,
+    )
+
+    workspace_id, attempt_id = await _seed_attempted_workspace(
+        factory,
+        task_class="docs_task",
+        owned_paths=["docs/**", "src/config.py"],
+    )
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="PR_OPENED",
+        )
+        await session.commit()
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+        assert workspace is not None
+        assert attempt is not None
+        task = await TaskRepository(session).get(attempt.task_id)
+        assert task is not None
+
+        workspace.owned_paths = ["docs/**"]
+        attempt.owned_paths = ["docs/**"]
+        task.owned_paths = ["docs/**"]
+        candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
+            task=task,
+            attempt=attempt,
+            workspace=workspace,
+            head_sha="b" * 40,
+            base_sha="a" * 40,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        candidate = await MergeCandidateRepository(session).get_by_attempt_id(attempt_id)
+
+    assert candidate is not None
+    assert candidate.stale is False
+    assert candidate.stale_reason is None
+    assert candidate.ready is True
 
 
 @pytest.mark.unit

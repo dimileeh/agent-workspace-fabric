@@ -427,6 +427,8 @@ def _payloads_match_v2(existing: Workspace, payload: WorkspaceCreateV2Request) -
         and existing.task_external_id == payload.task.external_id
         and existing.task_class == task_class
         and list(existing.owned_paths) == list(payload.task.owned_paths)
+        and _stored_task_out_of_scope_policy(existing)
+        == _requested_task_out_of_scope_policy(payload)
         and existing.auto_merge == payload.task.auto_merge
         and (
             existing.initial_review_grace_period_seconds
@@ -453,3 +455,16 @@ def _resolved_profile_requested_tier(existing: Workspace) -> int | None:
         return None
     tier = validation.get("requested_tier")
     return tier if isinstance(tier, int) else None
+
+
+def _requested_task_out_of_scope_policy(
+    payload: WorkspaceCreateV2Request,
+) -> dict[str, object] | None:
+    if payload.task.out_of_scope_changes is None:
+        return None
+    return payload.task.out_of_scope_changes.model_dump(mode="json")
+
+
+def _stored_task_out_of_scope_policy(existing: Workspace) -> dict[str, object] | None:
+    out_of_scope = existing.task_policy.get("out_of_scope_changes")
+    return out_of_scope if isinstance(out_of_scope, dict) else None

@@ -539,6 +539,37 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert replay.status_code == 409
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
+    @pytest.mark.unit
+    async def test_accepts_task_out_of_scope_change_policy_metadata(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                "owned_paths": ["src/owned/**"],
+                "out_of_scope_changes": {
+                    "mode": "block",
+                    "allowlist_patterns": ["docs/generated/**"],
+                },
+            },
+        }
+
+        create_response = await client.post("/v2/workspaces", json=payload)
+        assert create_response.status_code == 202
+
+        detail_response = await client.get(
+            f"/v1/workspaces/{create_response.json()['workspace_id']}"
+        )
+
+        assert detail_response.status_code == 200
+        task_policy = detail_response.json()["task_policy"]
+        assert task_policy["out_of_scope_changes"] == {
+            "mode": "block",
+            "allowlist_patterns": ["docs/generated/**"],
+        }
+
 
 class TestCreateWorkspaceV2OwnedPathPolicy:
     @pytest.mark.unit

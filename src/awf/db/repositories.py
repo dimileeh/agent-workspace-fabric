@@ -29,6 +29,7 @@ from awf.common.ids import (
     new_log_stream_id,
     new_merge_candidate_id,
     new_operation_id,
+    new_policy_finding_id,
     new_queue_decision_id,
     new_resource_reservation_id,
     new_stale_reason_id,
@@ -39,10 +40,11 @@ from awf.common.ids import (
 )
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import (
     MergeCandidate,
     Operation,
+    PolicyFinding,
     QueueDecision,
     ResourceReservation,
     StaleReason,
@@ -53,6 +55,7 @@ from awf.db.models import (
     WorkspaceEvent,
     WorkspaceLogStream,
 )
+from awf.runtime.merge_eligibility import DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
 
 ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.requested.value,
@@ -618,7 +621,7 @@ class MergeCandidateRepository:
             candidate.closed_at = None
             candidate.merged_at = None
 
-        _sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
+        sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
         await self._session.flush()
         return candidate
 
@@ -658,7 +661,7 @@ class MergeCandidateRepository:
         candidate.status = "closed"
         candidate.close_reason = close_reason
         candidate.closed_at = datetime.now(UTC)
-        _sync_candidate_readiness(
+        sync_candidate_readiness(
             candidate,
             workspace=candidate.workspace,
             attempt=candidate.attempt,
@@ -689,7 +692,7 @@ class MergeCandidateRepository:
             candidate.status = "closed"
             candidate.close_reason = close_reason
             candidate.closed_at = now
-            _sync_candidate_readiness(
+            sync_candidate_readiness(
                 candidate,
                 workspace=candidate.workspace,
                 attempt=candidate.attempt,
@@ -719,7 +722,7 @@ class MergeCandidateRepository:
         candidate.close_reason = None
         candidate.closed_at = None
         candidate.merged_at = now
-        _sync_candidate_readiness(
+        sync_candidate_readiness(
             candidate,
             workspace=candidate.workspace,
             attempt=candidate.attempt,
@@ -1011,6 +1014,192 @@ class StaleReasonRepository:
         return list((await self._session.execute(stmt)).scalars())
 
 
+@dataclass(frozen=True)
+class PolicyFindingCreate:
+    """Per-finding payload for ``PolicyFindingRepository.replace_active_findings``."""
+
+    reason_code: str
+    severity: str
+    subject_path: str | None
+    explanation: str
+    details: dict[str, Any]
+
+
+class PolicyFindingRepository:
+    """CRUD helpers for durable workspace policy findings."""
+
+    _ACTIVE = "active"
+    _RESOLVED = "resolved"
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_active_for_workspace(
+        self,
+        workspace_id: str,
+    ) -> builtins.list[PolicyFinding]:
+        return await self._list_for_workspace(workspace_id, status=self._ACTIVE)
+
+    async def list_for_workspace(
+        self,
+        workspace_id: str,
+    ) -> builtins.list[PolicyFinding]:
+        return await self._list_for_workspace(workspace_id, status=None)
+
+    async def list_active_for_candidate(
+        self,
+        candidate_id: str,
+    ) -> builtins.list[PolicyFinding]:
+        return await self._list_for_candidate(candidate_id, status=self._ACTIVE)
+
+    async def list_active_for_candidates(
+        self,
+        candidate_ids: Iterable[str],
+    ) -> dict[str, builtins.list[PolicyFinding]]:
+        unique_ids = tuple(dict.fromkeys(candidate_ids))
+        if not unique_ids:
+            return {}
+        stmt = (
+            select(PolicyFinding)
+            .where(
+                PolicyFinding.candidate_id.in_(unique_ids),
+                PolicyFinding.status == self._ACTIVE,
+            )
+            .order_by(PolicyFinding.detected_at.asc(), PolicyFinding.id.asc())
+        )
+        rows = list((await self._session.execute(stmt)).scalars())
+        out: dict[str, builtins.list[PolicyFinding]] = {cid: [] for cid in unique_ids}
+        for row in rows:
+            if row.candidate_id is None:  # pragma: no cover - filtered by WHERE
+                continue
+            out[row.candidate_id].append(row)
+        return out
+
+    async def replace_active_findings(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str | None,
+        attempt_id: str | None,
+        task_id: str | None,
+        reason_code: str,
+        findings: builtins.list[PolicyFindingCreate],
+    ) -> tuple[builtins.list[PolicyFinding], builtins.list[PolicyFinding]]:
+        """Make active findings for ``reason_code`` exactly match ``findings``.
+
+        Historical rows are resolved rather than deleted so operator timelines
+        can show when a policy issue appeared and when it cleared.
+        """
+        existing_active = await self._list_for_subject(
+            workspace_id=workspace_id,
+            candidate_id=candidate_id,
+            reason_code=reason_code,
+            status=self._ACTIVE,
+        )
+        finding_keys = {
+            (
+                f.reason_code,
+                f.severity,
+                f.subject_path,
+                json.dumps(f.details, sort_keys=True, separators=(",", ":")),
+            )
+            for f in findings
+        }
+        now = datetime.now(UTC)
+
+        newly_resolved: builtins.list[PolicyFinding] = []
+        kept_keys: set[tuple[str, str, str | None, str]] = set()
+        for row in existing_active:
+            key = (
+                row.reason_code,
+                row.severity,
+                row.subject_path,
+                json.dumps(row.details, sort_keys=True, separators=(",", ":")),
+            )
+            if key in finding_keys:
+                kept_keys.add(key)
+                continue
+            row.status = self._RESOLVED
+            row.resolved_at = now
+            newly_resolved.append(row)
+
+        newly_added: builtins.list[PolicyFinding] = []
+        for finding in findings:
+            key = (
+                finding.reason_code,
+                finding.severity,
+                finding.subject_path,
+                json.dumps(finding.details, sort_keys=True, separators=(",", ":")),
+            )
+            if key in kept_keys:
+                continue
+            row = PolicyFinding(
+                id=new_policy_finding_id(),
+                workspace_id=workspace_id,
+                candidate_id=candidate_id,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                reason_code=finding.reason_code,
+                severity=finding.severity,
+                subject_path=finding.subject_path,
+                explanation=finding.explanation,
+                details=finding.details,
+                status=self._ACTIVE,
+                detected_at=now,
+                resolved_at=None,
+            )
+            self._session.add(row)
+            newly_added.append(row)
+
+        await self._session.flush()
+        return newly_added, newly_resolved
+
+    async def _list_for_candidate(
+        self,
+        candidate_id: str,
+        *,
+        status: str | None,
+    ) -> builtins.list[PolicyFinding]:
+        stmt = select(PolicyFinding).where(PolicyFinding.candidate_id == candidate_id)
+        if status is not None:
+            stmt = stmt.where(PolicyFinding.status == status)
+        stmt = stmt.order_by(PolicyFinding.detected_at.asc(), PolicyFinding.id.asc())
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def _list_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        status: str | None,
+    ) -> builtins.list[PolicyFinding]:
+        stmt = select(PolicyFinding).where(PolicyFinding.workspace_id == workspace_id)
+        if status is not None:
+            stmt = stmt.where(PolicyFinding.status == status)
+        stmt = stmt.order_by(PolicyFinding.detected_at.asc(), PolicyFinding.id.asc())
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def _list_for_subject(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str | None,
+        reason_code: str,
+        status: str | None,
+    ) -> builtins.list[PolicyFinding]:
+        stmt = select(PolicyFinding).where(
+            PolicyFinding.workspace_id == workspace_id,
+            PolicyFinding.reason_code == reason_code,
+        )
+        if candidate_id is None:
+            stmt = stmt.where(PolicyFinding.candidate_id.is_(None))
+        else:
+            stmt = stmt.where(PolicyFinding.candidate_id == candidate_id)
+        if status is not None:
+            stmt = stmt.where(PolicyFinding.status == status)
+        stmt = stmt.order_by(PolicyFinding.detected_at.asc(), PolicyFinding.id.asc())
+        return list((await self._session.execute(stmt)).scalars())
+
+
 class WorkspaceRepository:
     """CRUD + state transitions for workspaces.
 
@@ -1035,6 +1224,7 @@ class WorkspaceRepository:
         task_external_id: str | None = None,
         task_class: str | None = None,
         owned_paths: list[str] | None = None,
+        task_policy: dict[str, Any] | None = None,
         auto_merge: bool = True,
         initial_review_grace_period_seconds: float | None = None,
         env_profile: str | None = None,
@@ -1062,6 +1252,7 @@ class WorkspaceRepository:
             task_class=task_class,
             task_kind=task_kind,
             owned_paths=list(owned_paths or []),
+            task_policy=dict(task_policy or {}),
             auto_merge=auto_merge,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
             agent=agent,
@@ -1663,7 +1854,7 @@ def _releases_resource_reservation(status: WorkspaceStatus) -> bool:
     }
 
 
-def _sync_candidate_readiness(
+def sync_candidate_readiness(
     candidate: MergeCandidate,
     *,
     workspace: Workspace,
@@ -1671,7 +1862,10 @@ def _sync_candidate_readiness(
     sync_validation_staleness: bool = True,
     recompute_stale: bool | None = None,
 ) -> None:
-    from awf.runtime.merge_eligibility import compute_stale_reason
+    from awf.runtime.merge_eligibility import (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        compute_stale_reason,
+    )
 
     if recompute_stale is not None:
         sync_validation_staleness = recompute_stale
@@ -1687,12 +1881,19 @@ def _sync_candidate_readiness(
     not_canonical = not is_canonical
 
     if sync_validation_staleness:
+        scope_stale_reason = _initial_scope_stale_reason(workspace)
         stale_reason, _ = compute_stale_reason(workspace)
         # If there's an active stale reason, update it. If the reason clears, clear it.
-        if stale_reason is not None:
+        if scope_stale_reason is not None:
+            candidate.stale = True
+            candidate.stale_reason = scope_stale_reason
+        elif stale_reason is not None:
             candidate.stale = True
             candidate.stale_reason = stale_reason
-        elif stale_reason is None and candidate.stale_reason in ("validation_insufficient_tier",):
+        elif candidate.stale_reason in (
+            VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+            DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
+        ):
             candidate.stale = False
             candidate.stale_reason = None
 
@@ -1705,6 +1906,7 @@ def _sync_candidate_readiness(
         and workspace_status == WorkspaceStatus.monitoring_pr
         and not workspace.auto_merge
         and is_canonical
+        and not candidate.policy_blocked
         and not candidate.stale
     )
     candidate.ready = (
@@ -1712,6 +1914,7 @@ def _sync_candidate_readiness(
         and workspace_status == WorkspaceStatus.monitoring_pr
         and workspace.auto_merge
         and is_canonical
+        and not candidate.policy_blocked
         and not candidate.stale
     )
     if not is_open:
@@ -1723,6 +1926,29 @@ def _sync_candidate_readiness(
         candidate.waiting_for_monitor = False
         candidate.manual_merge_required = False
         candidate.failed_or_cancelled = False
+
+
+def _initial_scope_stale_reason(workspace: Workspace) -> str | None:
+    if workspace.task_class != TaskClass.docs_task.value:
+        return None
+    if not _claims_non_docs_path(workspace.owned_paths):
+        return None
+    return DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
+
+
+def _claims_non_docs_path(owned_paths: list[str] | tuple[str, ...]) -> bool:
+    for path in owned_paths:
+        normalized = path.strip().replace("\\", "/")
+        if not normalized:
+            continue
+        if normalized.startswith("docs/"):
+            continue
+        if normalized in {"README.md", "CHANGELOG.md", "CONTRIBUTING.md"}:
+            continue
+        if normalized.endswith((".md", ".mdx", ".rst")):
+            continue
+        return True
+    return False
 
 
 def _schedulable_workspace_ids_stmt(

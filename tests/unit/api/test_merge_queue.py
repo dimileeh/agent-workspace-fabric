@@ -27,6 +27,7 @@ async def _create_queue_workspace(
     auto_merge: bool = True,
     task_class: str | None = "test_task",
     owned_paths: list[str] | None = None,
+    resolved_profile: dict | None = None,
     updated_at: datetime | None = None,
     candidate_created_at: datetime | None = None,
 ) -> str:
@@ -45,6 +46,7 @@ async def _create_queue_workspace(
             owned_paths=["src/awf/api/**"] if owned_paths is None else owned_paths,
             auto_merge=auto_merge,
             agent=AgentRuntime.codex.value,
+            resolved_profile=resolved_profile,
             test_commands=["pytest -q"],
         )
         workspace.status = status.value
@@ -95,6 +97,31 @@ async def _create_queue_workspace(
         )
         await session.commit()
         return workspace.id
+
+
+async def _refresh_scope_policy(
+    engine: AsyncEngine,
+    *,
+    workspace_id: str,
+    changed_paths: tuple[str, ...],
+) -> None:
+    from sqlalchemy import select
+
+    from awf.db.models import MergeCandidate
+    from awf.service.scope_policy import ScopePolicyRefreshService
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        candidate_id = (
+            await session.execute(
+                select(MergeCandidate.id).where(MergeCandidate.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        await ScopePolicyRefreshService(session).refresh_candidate(
+            candidate_id,
+            changed_paths=changed_paths,
+        )
+        await session.commit()
 
 
 async def _attempt_id_for_workspace(engine: AsyncEngine, workspace_id: str) -> str:
@@ -275,8 +302,10 @@ class TestMergeQueueList:
             "queue_blockers",
             "latest_validation",
             "stale_reasons",
+            "policy_findings",
         }
         assert item["stale_reasons"] == []
+        assert item["policy_findings"] == []
         assert item["candidate_id"].startswith("mc_")
         assert item["candidate_status"] == "open"
         assert item["attempt_id"].startswith("att_")
@@ -371,6 +400,33 @@ class TestMergeQueueList:
 
         assert response.status_code == 200
         assert [item["workspace_id"] for item in response.json()["items"]] == [expected_id]
+
+    @pytest.mark.unit
+    async def test_docs_task_scope_violation_exposes_scope_resolution_action(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Docs task with code scope",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/27",
+            task_class="docs_task",
+            owned_paths=["docs/**", "src/config.py"],
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "resolve_task_scope"
+        assert item["readiness"]["ready"] is False
+        assert item["readiness"]["stale"] is True
+        assert item["readiness"]["stale_reason"] == "docs_task_scope_violation"
 
     @pytest.mark.unit
     async def test_reports_has_more_and_accepts_next_cursor(
@@ -507,6 +563,83 @@ class TestMergeQueueList:
             "stale_reason": None,
         }
         assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+
+    @pytest.mark.unit
+    async def test_blocking_out_of_scope_findings_block_merge_queue_readiness(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Blocking policy finding",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/23",
+            owned_paths=["src/owned/**"],
+            resolved_profile={
+                "quality": {"out_of_scope_changes": {"mode": "block"}},
+            },
+            updated_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        )
+        await _refresh_scope_policy(
+            engine,
+            workspace_id=workspace_id,
+            changed_paths=("src/unowned.py",),
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["readiness"]["ready"] is False
+        assert item["merge_blocker_reason"] == "policy_blocked"
+        assert item["required_next_action"] == "resolve_policy_findings"
+        assert item["policy_findings"][0]["reason_code"] == "OUT_OF_SCOPE_CHANGE"
+        assert item["policy_findings"][0]["severity"] == "blocking"
+        assert item["policy_findings"][0]["subject_path"] == "src/unowned.py"
+
+    @pytest.mark.unit
+    async def test_warning_out_of_scope_findings_are_visible_but_do_not_block(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Warning policy finding",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/24",
+            owned_paths=["src/owned/**"],
+            updated_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        )
+        await _refresh_scope_policy(
+            engine,
+            workspace_id=workspace_id,
+            changed_paths=("docs/extra.md",),
+        )
+
+        queue_response = await client.get("/v1/merge-queue")
+        detail_response = await client.get(f"/v1/workspaces/{workspace_id}")
+
+        assert queue_response.status_code == 200
+        item = next(
+            item
+            for item in queue_response.json()["items"]
+            if item["workspace_id"] == workspace_id
+        )
+        assert item["readiness"]["ready"] is True
+        assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+        assert item["required_next_action"] is None
+        assert item["policy_findings"][0]["severity"] == "warning"
+        assert item["policy_findings"][0]["subject_path"] == "docs/extra.md"
+
+        assert detail_response.status_code == 200
+        detail = detail_response.json()
+        assert detail["policy_findings"][0]["reason_code"] == "OUT_OF_SCOPE_CHANGE"
+        assert detail["policy_findings"][0]["severity"] == "warning"
+        assert detail["policy_findings"][0]["subject_path"] == "docs/extra.md"
 
     @pytest.mark.unit
     async def test_exposes_older_candidate_blocker_details(

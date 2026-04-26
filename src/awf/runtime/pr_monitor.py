@@ -162,6 +162,7 @@ class PRStatus:
 
     ci_failures: tuple[CheckFailure, ...] = ()
     checks: tuple[CheckTiming, ...] = ()
+    changed_paths: tuple[str, ...] = ()
     closed: bool = False
     merged: bool = False
 

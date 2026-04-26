@@ -1,7 +1,7 @@
 """Add retry_count to validation_runs
 
 Revision ID: ec041f62c7fc
-Revises: a8b9c0d1e2f3
+Revises: b9c0d1e2f3a4
 Create Date: 2026-04-26 19:59:24.126532+00:00
 
 """
@@ -15,7 +15,7 @@ from alembic import op
 
 
 revision: str = 'ec041f62c7fc'
-down_revision: str | Sequence[str] | None = 'a8b9c0d1e2f3'
+down_revision: str | Sequence[str] | None = 'b9c0d1e2f3a4'
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 
