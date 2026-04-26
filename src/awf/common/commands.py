@@ -212,6 +212,8 @@ class AsyncioSubprocessRunner:
         try:
             await asyncio.gather(*tasks)
         finally:
+            if proc.returncode is None:
+                await _terminate_process(proc, wait_task)
             for task in tasks:
                 if not task.done():
                     task.cancel()
@@ -308,18 +310,25 @@ async def _terminate_process(
     proc: asyncio.subprocess.Process,
     wait_task: asyncio.Task[int],
 ) -> None:
-    if proc.returncode is not None or wait_task.done():
+    if proc.returncode is not None:
         return
+
+    wait_for_exit = wait_task
+    if wait_task.done():
+        wait_for_exit = asyncio.create_task(proc.wait())
 
     with suppress(ProcessLookupError):
         proc.terminate()
     try:
-        await asyncio.wait_for(asyncio.shield(wait_task), timeout=_TERMINATE_GRACE_SECONDS)
+        await asyncio.wait_for(
+            asyncio.shield(wait_for_exit),
+            timeout=_TERMINATE_GRACE_SECONDS,
+        )
     except TimeoutError:
         if proc.returncode is None:
             with suppress(ProcessLookupError):
                 proc.kill()
-        await asyncio.shield(wait_task)
+        await asyncio.shield(wait_for_exit)
 
 
 def _timeout_diagnostic(
