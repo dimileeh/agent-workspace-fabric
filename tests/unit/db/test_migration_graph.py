@@ -20,7 +20,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["a8b9c0d1e2f3"]
+    assert script.get_heads() == ["b9c0d1e2f3a4"]
 
 
 @pytest.mark.unit
@@ -56,8 +56,17 @@ def test_alembic_upgrade_head_creates_scheduler_record_tables(
         reservation_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(resource_reservations)")
         }
+        policy_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(policy_findings)")
+        }
+        merge_candidate_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(merge_candidates)")
+        }
+        workspace_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(workspaces)")
+        }
 
-    assert {"queue_decisions", "resource_reservations"} <= tables
+    assert {"queue_decisions", "resource_reservations", "policy_findings"} <= tables
     assert {
         "id",
         "workspace_id",
@@ -85,3 +94,15 @@ def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "reserved_at",
         "released_at",
     } <= reservation_columns
+    assert {
+        "id",
+        "workspace_id",
+        "candidate_id",
+        "reason_code",
+        "severity",
+        "subject_path",
+        "status",
+        "detected_at",
+    } <= policy_columns
+    assert "policy_blocked" in merge_candidate_columns
+    assert "task_policy" in workspace_columns

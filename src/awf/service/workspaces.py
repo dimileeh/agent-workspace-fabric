@@ -447,6 +447,7 @@ async def create_workspace_v2_row(
             payload.task.task_class.value if payload.task.task_class is not None else None
         ),
         owned_paths=payload.task.owned_paths,
+        task_policy=v2_task_policy_snapshot(payload),
         auto_merge=payload.task.auto_merge,
         initial_review_grace_period_seconds=(
             payload.task.initial_review_grace_period_seconds
@@ -536,6 +537,7 @@ async def retry_workspace_row(
         task_external_id=source.task_external_id,
         task_class=source.task_class,
         owned_paths=list(source.owned_paths),
+        task_policy=deepcopy(source.task_policy),
         auto_merge=source.auto_merge,
         initial_review_grace_period_seconds=(
             source.initial_review_grace_period_seconds
@@ -865,6 +867,16 @@ def v2_profile_snapshots(
         )
         resolved_profile = profile.model_dump(mode="json", by_alias=True)
     return requested_profile, resolved_profile
+
+
+def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]:
+    if payload.task.out_of_scope_changes is None:
+        return {}
+    return {
+        "out_of_scope_changes": payload.task.out_of_scope_changes.model_dump(
+            mode="json"
+        )
+    }
 
 
 def profile_with_requested_tier(

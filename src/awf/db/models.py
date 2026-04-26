@@ -98,6 +98,11 @@ class Workspace(Base):
     admission by themselves.
     """
 
+    task_policy: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
+    """Task-scoped policy metadata supplied by the planner/request."""
+
     auto_merge: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -256,6 +261,12 @@ class Workspace(Base):
         lazy="selectin",
         order_by="MergeCandidate.updated_at",
     )
+    policy_findings: Mapped[list[PolicyFinding]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="PolicyFinding.detected_at",
+    )
     validation_runs: Mapped[list[ValidationRun]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
@@ -285,6 +296,12 @@ class Workspace(Base):
             return None
         latest = max(active, key=lambda item: (item.reserved_at, item.id))
         return _resource_reservation_summary(latest)
+
+    @property
+    def active_policy_findings(self) -> list[PolicyFinding]:
+        if "policy_findings" in sa_inspect(self).unloaded:
+            return []
+        return [finding for finding in self.policy_findings if finding.status == "active"]
 
 
 class Task(Base):
@@ -546,6 +563,12 @@ class MergeCandidate(Base):
     failed_or_cancelled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     not_canonical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    policy_blocked: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
     stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     stale_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
@@ -561,6 +584,12 @@ class MergeCandidate(Base):
     task: Mapped[Task] = relationship(back_populates="merge_candidates")
     attempt: Mapped[TaskAttempt] = relationship(back_populates="merge_candidate")
     workspace: Mapped[Workspace] = relationship(back_populates="merge_candidates")
+    policy_findings: Mapped[list[PolicyFinding]] = relationship(
+        back_populates="candidate",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="PolicyFinding.detected_at",
+    )
 
 
 class ValidationRun(Base):
@@ -741,6 +770,47 @@ class StaleReason(Base):
 
     workspace: Mapped[Workspace] = relationship()
     candidate: Mapped[MergeCandidate | None] = relationship()
+
+
+class PolicyFinding(Base):
+    """One structured policy finding against a workspace or merge candidate."""
+
+    __tablename__ = "policy_findings"
+    __table_args__ = (
+        Index("ix_policy_findings_workspace", "workspace_id"),
+        Index("ix_policy_findings_candidate", "candidate_id"),
+        Index("ix_policy_findings_status", "status"),
+        Index("ix_policy_findings_severity", "severity"),
+        Index("ix_policy_findings_detected_at", "detected_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    candidate_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("merge_candidates.id"), nullable=True
+    )
+    attempt_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=True
+    )
+    task_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=True)
+
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    severity: Mapped[str] = mapped_column(String(16), nullable=False)
+    subject_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    explanation: Mapped[str] = mapped_column(String(2048), nullable=False)
+    details: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    workspace: Mapped[Workspace] = relationship(back_populates="policy_findings")
+    candidate: Mapped[MergeCandidate | None] = relationship(back_populates="policy_findings")
 
 
 class WorkspaceLogStream(Base):

@@ -600,6 +600,31 @@ class PullRequestMonitorRunner:
                         await s.commit()
                 return True
 
+            policy_blocked = await self._refresh_scope_policy_for_merge(
+                workspace_id=workspace_id,
+                changed_paths=status.changed_paths,
+            )
+            if policy_blocked:
+                return await self._execute(
+                    action=NotifyHuman(
+                        message=(
+                            "OUT_OF_SCOPE_CHANGE: changed files outside declared "
+                            "owned_paths require an operator scope decision."
+                        )
+                    ),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                )
+
             grace_wait_seconds = _initial_review_grace_wait_seconds(
                 state,
                 pr_number=pr_number,
@@ -777,6 +802,22 @@ class PullRequestMonitorRunner:
         # If we got here the MonitorAction union gained a variant without
         # a dispatch arm — fail loudly so tests catch it.
         raise RuntimeError(f"unhandled monitor action: {action!r}")  # pragma: no cover
+
+    async def _refresh_scope_policy_for_merge(
+        self,
+        *,
+        workspace_id: str,
+        changed_paths: tuple[str, ...],
+    ) -> bool:
+        from awf.service.scope_policy import ScopePolicyRefreshService
+
+        async with self._deps.session_factory() as s:
+            result = await ScopePolicyRefreshService(s).refresh_workspace_open_candidate(
+                workspace_id,
+                changed_paths=changed_paths,
+            )
+            await s.commit()
+        return bool(result and result.policy_blocked)
 
     async def _record_merge_coordination_event(
         self,

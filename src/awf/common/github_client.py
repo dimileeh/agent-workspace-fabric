@@ -131,6 +131,10 @@ query($owner: String!, $repo: String!, $number: Int!) {
           author { login }
         }
       }
+      files(first: 100) {
+        nodes { path }
+        pageInfo { hasNextPage }
+      }
     }
   }
 }
@@ -297,6 +301,22 @@ class GitHubClient:
                 )
             )
 
+        changed_path_items: list[str] = []
+        for node in _dig(pr, "files", "nodes") or []:
+            if not isinstance(node, dict):
+                continue
+            path = _clean_optional_str(node.get("path"))
+            if path is not None:
+                changed_path_items.append(path)
+        changed_paths = tuple(changed_path_items)
+        if _dig(pr, "files", "pageInfo", "hasNextPage") is True:
+            _log.warning(
+                "github.pr_files_truncated",
+                repo=repo.slug(),
+                pr_number=pr_number,
+                fetched_files_limit=100,
+            )
+
         return PRStatus(
             number=pr["number"],
             head_sha=pr["headRefOid"],
@@ -308,6 +328,7 @@ class GitHubClient:
             merge_state_status=merge_state_status,
             ci_failures=(),  # populated by fetch_failing_check_logs if needed
             checks=checks,
+            changed_paths=changed_paths,
             closed=bool(pr.get("closed")),
             merged=bool(pr.get("merged")),
         )

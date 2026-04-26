@@ -116,6 +116,30 @@ class ProfileCoverage(BaseModel):
     enforce: bool = True
 
 
+class OutOfScopeChangeMode(StrEnum):
+    warn = "warn"
+    block = "block"
+
+
+class OutOfScopeChangePolicy(BaseModel):
+    """Policy for changed files outside declared task scope."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: OutOfScopeChangeMode = OutOfScopeChangeMode.warn
+    allowlist_patterns: list[str] = Field(default_factory=list, max_length=128)
+
+
+class ProfileQuality(BaseModel):
+    """Quality-control policies supplied by the workspace profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    out_of_scope_changes: OutOfScopeChangePolicy = Field(
+        default_factory=OutOfScopeChangePolicy
+    )
+
+
 class ProfileValidation(BaseModel):
     """Validation policy details beyond phase commands."""
 
@@ -268,6 +292,7 @@ class WorkspaceProfile(BaseModel):
     services: list[ProfileService] = Field(default_factory=list)
     phases: ProfilePhaseSet = Field(default_factory=ProfilePhaseSet)
     validation: ProfileValidation = Field(default_factory=ProfileValidation)
+    quality: ProfileQuality = Field(default_factory=ProfileQuality)
     monitor: ProfileMonitor = Field(default_factory=ProfileMonitor)
     secrets: list[ProfileSecret] = Field(default_factory=list)
     security: ProfileSecurity = Field(default_factory=ProfileSecurity)

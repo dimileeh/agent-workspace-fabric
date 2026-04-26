@@ -52,6 +52,26 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_accepts_out_of_scope_change_policy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "awf-self",
+            "quality": {
+                "out_of_scope_changes": {
+                    "mode": "block",
+                    "allowlist_patterns": ["docs/generated/**"],
+                }
+            },
+        }
+    )
+
+    assert profile.quality.out_of_scope_changes.mode == "block"
+    assert profile.quality.out_of_scope_changes.allowlist_patterns == [
+        "docs/generated/**"
+    ]
+
+
+@pytest.mark.unit
 def test_profile_schema_rejects_service_without_image_or_build() -> None:
     with pytest.raises(ValidationError):
         WorkspaceProfile.model_validate(

@@ -19,15 +19,24 @@ from awf.api.schemas import (
     MergeCandidateReadinessResponse,
     MergeQueueItemResponse,
     MergeQueueListResponse,
+    PolicyFindingResponse,
     StaleReasonResponse,
     ValidationRunSummaryResponse,
     WorkspaceEventResponse,
 )
 from awf.api.validation_runs import validation_run_summary
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import MergeCandidate, StaleReason, ValidationRun, Workspace, WorkspaceEvent
+from awf.db.models import (
+    MergeCandidate,
+    PolicyFinding,
+    StaleReason,
+    ValidationRun,
+    Workspace,
+    WorkspaceEvent,
+)
 from awf.db.repositories import (
     MergeCandidateRepository,
+    PolicyFindingRepository,
     StaleReasonRepository,
     ValidationRunRepository,
     WorkspaceRepository,
@@ -94,6 +103,7 @@ async def list_merge_queue(
     )
 
     stale_reasons_by_candidate = await _load_active_stale_reasons(session, page_rows)
+    policy_findings_by_candidate = await _load_active_policy_findings(session, page_rows)
 
     return MergeQueueListResponse(
         items=[
@@ -101,6 +111,7 @@ async def list_merge_queue(
                 row,
                 latest_validation_runs.get(_row_workspace(row).id),
                 stale_reasons_by_candidate,
+                policy_findings_by_candidate,
             )
             for row in page_rows
         ],
@@ -121,16 +132,28 @@ async def _load_active_stale_reasons(
     return await StaleReasonRepository(session).list_active_for_candidates(candidate_ids)
 
 
+async def _load_active_policy_findings(
+    session: AsyncSession,
+    rows: list[MergeCandidate | Workspace],
+) -> dict[str, list[PolicyFinding]]:
+    candidate_ids = [row.id for row in rows if isinstance(row, MergeCandidate)]
+    if not candidate_ids:
+        return {}
+    return await PolicyFindingRepository(session).list_active_for_candidates(candidate_ids)
+
+
 def _item_from_row(
     row: MergeCandidate | Workspace,
     latest_validation_run: ValidationRun | None,
     stale_reasons_by_candidate: dict[str, list[StaleReason]],
+    policy_findings_by_candidate: dict[str, list[PolicyFinding]],
 ) -> MergeQueueItemResponse:
     if isinstance(row, MergeCandidate):
         return _item_from_candidate(
             row,
             latest_validation_run,
             stale_reasons=stale_reasons_by_candidate.get(row.id, []),
+            policy_findings=policy_findings_by_candidate.get(row.id, []),
         )
     return _item_from_legacy_workspace(row, latest_validation_run)
 
@@ -140,10 +163,11 @@ def _item_from_candidate(
     latest_validation_run: ValidationRun | None,
     *,
     stale_reasons: list[StaleReason],
+    policy_findings: list[PolicyFinding],
 ) -> MergeQueueItemResponse:
     workspace = candidate.workspace
     latest_event = _latest_event(workspace.events)
-    reason, action = _merge_blocker_reason(candidate)
+    reason, action = _merge_blocker_reason(candidate, policy_findings=policy_findings)
     return MergeQueueItemResponse(
         candidate_id=candidate.id,
         candidate_status=candidate.status,
@@ -169,13 +193,16 @@ def _item_from_candidate(
         ),
         merge_blocker_reason=reason,
         required_next_action=action,
-        readiness=_readiness_from_candidate(candidate),
+        readiness=_readiness_from_candidate(candidate, policy_findings=policy_findings),
         canonical=candidate.attempt.is_canonical_for_merge,
         latest_validation=_latest_validation_summary(
             latest_validation_run,
             current_target_head_sha=candidate.head_sha or workspace.monitor_last_commit_sha,
         ),
         stale_reasons=[StaleReasonResponse.model_validate(r) for r in stale_reasons],
+        policy_findings=[
+            PolicyFindingResponse.model_validate(finding) for finding in policy_findings
+        ],
     )
 
 
@@ -220,6 +247,7 @@ def _item_from_legacy_workspace(
             current_target_head_sha=workspace.monitor_last_commit_sha,
         ),
         stale_reasons=[],
+        policy_findings=[],
     )
 
 
@@ -233,13 +261,19 @@ def _latest_event(events: list[WorkspaceEvent]) -> WorkspaceEvent | None:
     return events[-1] if events else None
 
 
-def _merge_blocker_reason(candidate: MergeCandidate) -> tuple[MergeBlockerReason, str | None]:
+def _merge_blocker_reason(
+    candidate: MergeCandidate,
+    *,
+    policy_findings: list[PolicyFinding],
+) -> tuple[MergeBlockerReason, str | None]:
     if candidate.completed:
         return "completed", None
     if candidate.failed_or_cancelled:
         return "failed_or_cancelled", None
     if candidate.not_canonical:
         return "not_canonical", None
+    if candidate.policy_blocked or _has_blocking_policy_finding(policy_findings):
+        return "policy_blocked", "resolve_policy_findings"
     if candidate.stale:
         reason = candidate.stale_reason or "stale"
         action = "validate" if reason == "validation_insufficient_tier" else "rebase"
@@ -268,9 +302,14 @@ def _merge_blocker_reason_from_workspace(workspace: Workspace) -> tuple[MergeBlo
     return "workspace_not_terminal", None
 
 
-def _readiness_from_candidate(candidate: MergeCandidate) -> MergeCandidateReadinessResponse:
+def _readiness_from_candidate(
+    candidate: MergeCandidate,
+    *,
+    policy_findings: list[PolicyFinding],
+) -> MergeCandidateReadinessResponse:
+    policy_blocked = candidate.policy_blocked or _has_blocking_policy_finding(policy_findings)
     return MergeCandidateReadinessResponse(
-        ready=candidate.ready,
+        ready=candidate.ready and not policy_blocked,
         manual_merge_required=candidate.manual_merge_required,
         waiting_for_monitor=candidate.waiting_for_monitor,
         failed_or_cancelled=candidate.failed_or_cancelled,
@@ -279,6 +318,10 @@ def _readiness_from_candidate(candidate: MergeCandidate) -> MergeCandidateReadin
         stale=candidate.stale,
         stale_reason=candidate.stale_reason,
     )
+
+
+def _has_blocking_policy_finding(policy_findings: list[PolicyFinding]) -> bool:
+    return any(finding.severity == "blocking" for finding in policy_findings)
 
 
 def _latest_validation_summary(

@@ -13,7 +13,7 @@ from typing import Annotated, Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
 OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
 MergeBlockerReason = Literal[
@@ -24,6 +24,7 @@ MergeBlockerReason = Literal[
     "completed",
     "failed_or_cancelled",
     "not_canonical",
+    "policy_blocked",
     "stale",
 ]
 MergeCandidateStatus = Literal["open", "merged", "closed"]
@@ -82,6 +83,7 @@ class WorkspaceV2Task(BaseModel):
     task_class: TaskClass | None = None
     priority: int = Field(default=0, ge=0, le=100)
     owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
+    out_of_scope_changes: OutOfScopeChangePolicy | None = None
     auto_merge: bool = True
     initial_review_grace_period_seconds: float | None = Field(
         default=None,
@@ -158,6 +160,31 @@ class ResourceReservationSummaryResponse(BaseModel):
     released_at: datetime | None
 
 
+PolicyFindingSeverity = Literal["warning", "blocking"]
+PolicyFindingStatus = Literal["active", "resolved"]
+PolicyFindingReasonCode = Literal["OUT_OF_SCOPE_CHANGE"]
+
+
+class PolicyFindingResponse(BaseModel):
+    """Public projection of a structured workspace policy finding."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    candidate_id: str | None
+    attempt_id: str | None
+    task_id: str | None
+    reason_code: PolicyFindingReasonCode
+    severity: PolicyFindingSeverity
+    subject_path: str | None
+    explanation: str
+    details: dict[str, Any] = Field(default_factory=dict)
+    status: PolicyFindingStatus
+    detected_at: datetime
+    resolved_at: datetime | None
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -177,6 +204,7 @@ class WorkspaceResponse(BaseModel):
     task_external_id: str | None
     task_class: TaskClass | None
     owned_paths: list[str]
+    task_policy: dict[str, Any] = Field(default_factory=dict)
     auto_merge: bool
     initial_review_grace_period_seconds: float | None
 
@@ -199,6 +227,10 @@ class WorkspaceResponse(BaseModel):
 
     latest_queue_decision: QueueDecisionSummaryResponse | None = None
     active_resource_reservation: ResourceReservationSummaryResponse | None = None
+    policy_findings: list[PolicyFindingResponse] = Field(
+        default_factory=list,
+        validation_alias="active_policy_findings",
+    )
 
     created_at: datetime
     updated_at: datetime
@@ -447,6 +479,7 @@ class MergeQueueItemResponse(BaseModel):
     canonical: bool
     latest_validation: ValidationRunSummaryResponse | None = None
     stale_reasons: list[StaleReasonResponse] = Field(default_factory=list)
+    policy_findings: list[PolicyFindingResponse] = Field(default_factory=list)
 
 
 class MergeQueueListResponse(BaseModel):
