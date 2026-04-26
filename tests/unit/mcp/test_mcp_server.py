@@ -328,6 +328,64 @@ class TestWorkspaceControls:
             "message": "workspace destroyed",
         }
 
+    @pytest.mark.unit
+    async def test_cancel_workspace_records_operation_through_real_service(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
+        workspace_id = str(created["id"])  # type: ignore[index]
+
+        payload = await _call(
+            mcp,
+            "awf_cancel_workspace",
+            {
+                "workspace_id": workspace_id,
+                "reason": "no longer needed",
+                "stop_stack": False,
+            },
+        )
+        operations = await _call(
+            mcp,
+            "awf_list_workspace_operations",
+            {"workspace_id": workspace_id},
+        )
+
+        assert payload["workspace_id"] == workspace_id  # type: ignore[index]
+        assert payload["status"] == "cancelled"  # type: ignore[index]
+        assert payload["message"] == "workspace cancellation requested"  # type: ignore[index]
+        assert isinstance(operations, list)
+        assert operations[0]["type"] == "cancel"
+        assert operations[0]["status"] == "succeeded"
+        assert operations[0]["payload"] == {
+            "reason": "no longer needed",
+            "stop_stack": False,
+        }
+        assert operations[0]["result"] == {"status": "cancelled"}
+
+    @pytest.mark.unit
+    async def test_destroy_workspace_requires_force_for_active_workspace(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        from mcp.types import CallToolResult
+
+        created = await _call(mcp, "awf_create_workspace", _CREATE_ARGS)
+        workspace_id = str(created["id"])  # type: ignore[index]
+
+        result = await mcp.call_tool(
+            "awf_destroy_workspace",
+            {"workspace_id": workspace_id},
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "WORKSPACE_ACTIVE",
+            "message": "Active workspaces require force=true before destroy.",
+            "detail": None,
+        }
+
 
 class TestCreateWorkspaceV2:
     @pytest.mark.unit

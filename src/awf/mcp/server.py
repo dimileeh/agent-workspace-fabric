@@ -1,7 +1,7 @@
 """MCP server surface for AWF.
 
-Builds a ``FastMCP`` instance with create, read, wait, and observability
-tools that mirror the REST API.
+Builds a ``FastMCP`` instance with create, read, wait, observability, and
+operator-control tools that mirror the REST API.
 Because both the MCP tools and the REST handlers want the same underlying
 logic (create workspace in DB, fetch by id, etc.) we expose a small
 ``WorkspaceService`` façade that both can call.
@@ -26,6 +26,7 @@ from awf.api.schemas import (
 )
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.profiles.resolver import ProfileResolutionError
+from awf.service.controls import WorkspaceControlError
 from awf.service.workspaces import WorkspaceService
 
 # ── MCP tool registration ─────────────────────────────────────────────────
@@ -49,7 +50,9 @@ def build_mcp_server(
             instructions
             or "AWF: isolated Docker execution substrate for coding agents. "
             "Create a workspace to run one coding task end-to-end "
-            "(checkout → agent CLI → tests → PR). Poll via awf_get_workspace."
+            "(checkout → agent CLI → tests → PR). Poll via awf_get_workspace. "
+            "Operator controls cancel, stop, or destroy AWF-managed workspaces; "
+            "they are not shell access to workspace containers."
         ),
     )
 
@@ -234,6 +237,72 @@ def build_mcp_server(
                 return ws.model_dump(mode="json")
             await asyncio.sleep(poll_interval_seconds)
 
+    @mcp.tool(name="awf_cancel_workspace")
+    async def awf_cancel_workspace(
+        workspace_id: str = Field(..., description="Workspace ID to cancel."),
+        reason: str | None = Field(
+            default=None,
+            description="Optional operator reason to record with the cancellation request.",
+        ),
+        stop_stack: bool = Field(
+            default=True,
+            description="Also stop the workspace compose stack after requesting cancellation.",
+        ),
+    ) -> dict[str, Any]:
+        """Operator control: cancel a workspace; this is not shell access."""
+        try:
+            result = await service.cancel_workspace(
+                workspace_id,
+                reason=reason,
+                stop_stack=stop_stack,
+            )
+        except WorkspaceControlError as exc:
+            return _tool_error(exc)
+        return result.model_dump(mode="json")
+
+    @mcp.tool(name="awf_stop_workspace")
+    async def awf_stop_workspace(
+        workspace_id: str = Field(..., description="Workspace ID whose stack should stop."),
+        reason: str | None = Field(
+            default=None,
+            description="Optional operator reason to record with the stop request.",
+        ),
+    ) -> dict[str, Any]:
+        """Operator control: stop a workspace stack; this is not shell access."""
+        try:
+            result = await service.stop_workspace(workspace_id, reason=reason)
+        except WorkspaceControlError as exc:
+            return _tool_error(exc)
+        return result.model_dump(mode="json")
+
+    @mcp.tool(name="awf_destroy_workspace")
+    async def awf_destroy_workspace(
+        workspace_id: str = Field(..., description="Workspace ID to destroy."),
+        force: bool = Field(
+            default=False,
+            description="Required when the workspace is still active.",
+        ),
+        remove_volumes: bool = Field(
+            default=True,
+            description="Reserve REST-compatible intent to remove workspace volumes.",
+        ),
+        remove_worktree: bool = Field(
+            default=True,
+            description="Reserve REST-compatible intent to remove the workspace worktree.",
+        ),
+    ) -> dict[str, Any]:
+        """Operator control: destroy workspace resources; this is not shell access."""
+        try:
+            result = await service.destroy_workspace(
+                workspace_id,
+                force=force,
+                remove_volumes=remove_volumes,
+                remove_worktree=remove_worktree,
+            )
+        except WorkspaceControlError as exc:
+            return _tool_error(exc)
+        return result.model_dump(mode="json")
+
     @mcp.tool(name="awf_list_workspace_events")
     async def awf_list_workspace_events(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
@@ -294,3 +363,15 @@ def build_mcp_server(
         )
 
     return mcp
+
+
+def _tool_error(exc: WorkspaceControlError) -> dict[str, Any]:
+    error = ErrorResponse(error_code=exc.error_code, message=exc.message)
+    return cast(
+        dict[str, Any],
+        CallToolResult(
+            content=[TextContent(type="text", text=error.model_dump_json())],
+            structuredContent=error.model_dump(mode="json"),
+            isError=True,
+        ),
+    )
