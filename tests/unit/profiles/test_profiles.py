@@ -112,6 +112,12 @@ def test_language_profiles_can_be_selected_from_registry(
     ("marker", "contents", "setup_command", "validate_command"),
     [
         (
+            "mvnw",
+            "#!/bin/sh\n",
+            "./mvnw -B -DskipTests dependency:go-offline",
+            "./mvnw -B test",
+        ),
+        (
             "build.gradle",
             "plugins { id 'java' }\n",
             "gradle --no-daemon dependencies",
@@ -178,7 +184,7 @@ def test_auto_detection_keeps_nextjs_ahead_of_language_profiles(tmp_path: Path) 
         json.dumps({"dependencies": {"next": "latest"}}),
         encoding="utf-8",
     )
-    (tmp_path / "Cargo.toml").write_text("[package]\nname = \"app\"\n", encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "app"\n', encoding="utf-8")
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
     assert result.profile.name == "nextjs"
 
@@ -196,7 +202,7 @@ def test_auto_detection_keeps_node_ahead_of_language_profiles(tmp_path: Path) ->
 
 @pytest.mark.unit
 def test_auto_detection_keeps_python_ahead_of_language_profiles(tmp_path: Path) -> None:
-    (tmp_path / "pyproject.toml").write_text("[project]\nname = \"app\"\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "app"\n', encoding="utf-8")
     (tmp_path / "CMakeLists.txt").write_text("project(app)\n", encoding="utf-8")
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
     assert result.profile.name == "python"
@@ -205,10 +211,10 @@ def test_auto_detection_keeps_python_ahead_of_language_profiles(tmp_path: Path) 
 @pytest.mark.unit
 def test_auto_detection_keeps_aira_ahead_of_language_profiles(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text(
-        "[project]\nname = \"aira-agent\"\n",
+        '[project]\nname = "aira-agent"\n',
         encoding="utf-8",
     )
-    (tmp_path / "Cargo.toml").write_text("[package]\nname = \"app\"\n", encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "app"\n', encoding="utf-8")
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
     assert result.profile.name == "aira"
 
@@ -225,7 +231,7 @@ def test_auto_detection_detects_go(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_auto_detection_detects_rust(tmp_path: Path) -> None:
-    (tmp_path / "Cargo.toml").write_text("[package]\nname = \"app\"\n", encoding="utf-8")
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "app"\n', encoding="utf-8")
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
     assert result.profile.name == "rust"
     assert result.profile.source == "detector:rust"
@@ -239,6 +245,12 @@ def test_auto_detection_detects_rust(tmp_path: Path) -> None:
 @pytest.mark.parametrize(
     ("marker", "contents", "setup_command", "validate_command"),
     [
+        (
+            "mvnw",
+            "#!/bin/sh\n",
+            "./mvnw -B -DskipTests dependency:go-offline",
+            "./mvnw -B test",
+        ),
         (
             "pom.xml",
             "<project></project>\n",
@@ -272,6 +284,17 @@ def test_auto_detection_detects_java(
     assert result.profile.source == "detector:java"
     assert result.profile.phases.setup[0].command == setup_command
     assert [c.command for c in result.profile.phases.validate_commands] == [validate_command]
+
+
+@pytest.mark.unit
+def test_auto_detection_prefers_maven_wrapper_over_plain_maven(tmp_path: Path) -> None:
+    (tmp_path / "mvnw").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "pom.xml").write_text("<project></project>\n", encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "java"
+    assert result.profile.source == "detector:java"
+    assert result.profile.phases.setup[0].command == "./mvnw -B -DskipTests dependency:go-offline"
+    assert [c.command for c in result.profile.phases.validate_commands] == ["./mvnw -B test"]
 
 
 @pytest.mark.unit

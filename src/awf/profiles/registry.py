@@ -113,7 +113,11 @@ def nextjs_profile(
 
 
 def java_profile(*, build_tool: str = "maven", source: str = "builtin:java") -> WorkspaceProfile:
-    if build_tool == "gradle-wrapper":
+    if build_tool == "maven-wrapper":
+        setup = "./mvnw -B -DskipTests dependency:go-offline"
+        validate = "./mvnw -B test"
+        description = "Generic Java project profile using the Maven wrapper."
+    elif build_tool == "gradle-wrapper":
         setup = "./gradlew --no-daemon dependencies"
         validate = "./gradlew --no-daemon test"
         description = "Generic Java project profile using the Gradle wrapper."
@@ -213,9 +217,7 @@ BUILTIN_PROFILES: dict[str, WorkspaceProfile] = {
 }
 
 
-def get_builtin_profile(
-    name: str, *, worktree_path: Path | None = None
-) -> WorkspaceProfile | None:
+def get_builtin_profile(name: str, *, worktree_path: Path | None = None) -> WorkspaceProfile | None:
     if name == "java" and worktree_path is not None:
         java_build_tool = _detect_java_build_tool(worktree_path)
         if java_build_tool is not None:
@@ -275,6 +277,8 @@ def _detect_package_manager(worktree_path: Path) -> str:
 
 
 def _detect_java_build_tool(worktree_path: Path) -> str | None:
+    if (worktree_path / "mvnw").is_file():
+        return "maven-wrapper"
     if (worktree_path / "pom.xml").is_file():
         return "maven"
     if (worktree_path / "gradlew").is_file():
