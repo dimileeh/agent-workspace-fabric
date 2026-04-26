@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import (
     create_async_engine,
 )
 
+from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.runtime.events import ensure_workspace_event_broadcasting
 
 
@@ -36,7 +37,12 @@ def make_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSession
     important for API handlers that return ORM objects after a write.
     """
     ensure_workspace_event_broadcasting()
-    return async_sessionmaker(engine, expire_on_commit=False, class_=AsyncSession)
+    return async_sessionmaker(
+        engine,
+        expire_on_commit=False,
+        class_=AsyncSession,
+        info={SESSION_DIALECT_NAME_KEY: engine.dialect.name},
+    )
 
 
 @asynccontextmanager

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import Select
@@ -30,6 +30,7 @@ from awf.common.ids import (
     new_workspace_id,
 )
 from awf.control.state_machine import WorkspaceStateMachine
+from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import (
     Operation,
@@ -56,6 +57,25 @@ class OwnedPathConflict:
     workspace_id: str
     existing_path: str
     requested_path: str
+
+
+def _resolve_session_dialect_name(
+    session: AsyncSession,
+    dialect_name: str | None,
+) -> str | None:
+    if dialect_name is not None:
+        return dialect_name
+
+    info_value = session.info.get(SESSION_DIALECT_NAME_KEY)
+    if isinstance(info_value, str):
+        return info_value
+
+    bind = getattr(session, "bind", None)
+    if bind is None:
+        return None
+    dialect = getattr(bind, "dialect", None)
+    name = getattr(dialect, "name", None)
+    return name if isinstance(name, str) else None
 
 
 class TaskRepository:
@@ -128,8 +148,9 @@ class TaskRepository:
 class TaskAttemptRepository:
     """CRUD helpers for task-attempt rows."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
     async def create_for_workspace(
         self,
@@ -164,8 +185,7 @@ class TaskAttemptRepository:
         return attempt
 
     async def _lock_attempt_number_sequence(self, task_id: str) -> None:
-        bind = self._session.get_bind()
-        if bind.dialect.name != "postgresql":
+        if self._dialect_name != "postgresql":
             return
 
         await self._session.execute(self._attempt_number_sequence_lock_stmt(task_id))
@@ -228,8 +248,9 @@ class WorkspaceRepository:
     of work. Do not reuse across request boundaries.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
     async def create(
         self,
@@ -298,6 +319,13 @@ class WorkspaceRepository:
     async def get(self, workspace_id: str) -> Workspace | None:
         return await self._session.get(Workspace, workspace_id)
 
+    async def get_for_update(self, workspace_id: str) -> Workspace | None:
+        """Load one workspace with a row lock when the database supports it."""
+        stmt = select(Workspace).where(Workspace.id == workspace_id)
+        if self._dialect_name == "postgresql":
+            stmt = stmt.with_for_update(of=Workspace)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def exists(self, workspace_id: str) -> bool:
         stmt = select(Workspace.id).where(Workspace.id == workspace_id).limit(1)
         return (await self._session.execute(stmt)).scalar_one_or_none() is not None
@@ -317,8 +345,7 @@ class WorkspaceRepository:
         if not any(_normalize_owned_path(path) != "" for path in owned_paths):
             return
 
-        bind = self._session.get_bind()
-        if bind.dialect.name != "postgresql":
+        if self._dialect_name != "postgresql":
             return
 
         lock_key = _owned_path_conflict_advisory_lock_key(
@@ -409,6 +436,34 @@ class WorkspaceRepository:
         stmt = stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
+    async def list_schedulable_ids(
+        self,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+    ) -> builtins.list[str]:
+        """Return candidate workspace IDs for one worker poll.
+
+        Postgres uses row-level locks with ``SKIP LOCKED`` to reduce duplicate
+        candidates while poll transactions overlap. For provisioning and ready
+        execution, the durable claim happens through ``transition_if_current()``.
+        For monitor recovery, active claim leases are filtered out before
+        limiting so claimed rows do not block later unclaimed rows.
+        """
+        if limit <= 0:
+            return []
+
+        stmt = _schedulable_workspace_ids_stmt(
+            status=status,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            skip_locked=self._dialect_name == "postgresql",
+            claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def transition(
         self,
         workspace: Workspace,
@@ -427,7 +482,10 @@ class WorkspaceRepository:
         old_state = workspace.status
         workspace.status = to.value
         workspace.version += 1
-        attempt = await TaskAttemptRepository(self._session).get_by_workspace_id(workspace.id)
+        attempt = await TaskAttemptRepository(
+            self._session,
+            dialect_name=self._dialect_name,
+        ).get_by_workspace_id(workspace.id)
         if attempt is not None:
             attempt.status = to.value
         if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
@@ -443,6 +501,134 @@ class WorkspaceRepository:
             )
         )
         return workspace
+
+    async def transition_if_current(
+        self,
+        workspace_id: str,
+        *,
+        from_status: WorkspaceStatus,
+        to: WorkspaceStatus,
+        reason_code: str,
+    ) -> Workspace | None:
+        """Atomically transition a row only if it is still in ``from_status``."""
+        WorkspaceStateMachine.assert_transition(from_status, to)
+
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == from_status.value,
+            )
+            .values(
+                status=to.value,
+                version=Workspace.version + 1,
+                updated_at=now,
+            )
+            .returning(Workspace.id)
+        )
+        if result.scalar_one_or_none() is None:
+            return None
+
+        workspace = await self.get(workspace_id)
+        if workspace is None:  # pragma: no cover - row was just updated in this txn
+            return None
+
+        attempt = await TaskAttemptRepository(
+            self._session,
+            dialect_name=self._dialect_name,
+        ).get_by_workspace_id(workspace.id)
+        if attempt is not None:
+            attempt.status = to.value
+        if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
+            workspace.monitor_started_at = now
+
+        workspace.events.append(
+            WorkspaceEvent(
+                id=new_event_id(),
+                event_type="workspace.state_changed",
+                old_state=from_status.value,
+                new_state=to.value,
+                reason_code=reason_code,
+            )
+        )
+        await self._session.flush()
+        return workspace
+
+    async def claim_monitoring_pr(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+        now: datetime | None = None,
+    ) -> bool:
+        """Claim a monitor-recovery workspace unless another lease is active."""
+        cutoff = now or datetime.now(UTC)
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == WorkspaceStatus.monitoring_pr.value,
+                or_(
+                    Workspace.monitor_claim_expires_at.is_(None),
+                    Workspace.monitor_claim_expires_at <= cutoff,
+                    Workspace.monitor_claimed_by == owner_id,
+                ),
+            )
+            .values(
+                monitor_claimed_by=owner_id,
+                monitor_claim_expires_at=lease_expires_at,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def refresh_monitoring_pr_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        """Extend this worker's active monitor-recovery lease."""
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == WorkspaceStatus.monitoring_pr.value,
+                Workspace.monitor_claimed_by == owner_id,
+            )
+            .values(
+                monitor_claim_expires_at=lease_expires_at,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def release_monitoring_pr_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> bool:
+        """Release this worker's monitor-recovery lease, if it still owns it."""
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.monitor_claimed_by == owner_id,
+            )
+            .values(
+                monitor_claimed_by=None,
+                monitor_claim_expires_at=None,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+        )
+        return result.scalar_one_or_none() is not None
 
     async def add_event(
         self,
@@ -464,6 +650,30 @@ class WorkspaceRepository:
         workspace.events.append(event)
         await self._session.flush()
         return event
+
+
+def _schedulable_workspace_ids_stmt(
+    *,
+    status: WorkspaceStatus,
+    limit: int,
+    exclude_ids: set[str] | None = None,
+    skip_locked: bool,
+    claim_cutoff: datetime | None = None,
+) -> Select[tuple[str]]:
+    stmt = select(Workspace.id).where(Workspace.status == status.value)
+    if status == WorkspaceStatus.monitoring_pr and claim_cutoff is not None:
+        stmt = stmt.where(
+            or_(
+                Workspace.monitor_claim_expires_at.is_(None),
+                Workspace.monitor_claim_expires_at <= claim_cutoff,
+            )
+        )
+    if exclude_ids:
+        stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
+    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc()).limit(limit)
+    if skip_locked:
+        stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
+    return stmt
 
 
 def _owned_paths_overlap(left: str, right: str) -> bool:

@@ -17,10 +17,12 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.base import Base
+from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
@@ -64,23 +66,10 @@ async def _create_policy_workspace(
     return workspace
 
 
-class _FakeDialect:
-    def __init__(self, name: str) -> None:
-        self.name = name
-
-
-class _FakeBind:
-    def __init__(self, dialect_name: str) -> None:
-        self.dialect = _FakeDialect(dialect_name)
-
-
 class _RecordingSession:
     def __init__(self, dialect_name: str) -> None:
-        self._bind = _FakeBind(dialect_name)
+        del dialect_name
         self.executed: list[tuple[str, dict[str, object]]] = []
-
-    def get_bind(self) -> _FakeBind:
-        return self._bind
 
     async def execute(
         self,
@@ -88,6 +77,37 @@ class _RecordingSession:
         parameters: dict[str, object] | None = None,
     ) -> None:
         self.executed.append((str(statement), dict(parameters or {})))
+
+
+class _FakeScalarResult:
+    def __init__(self, values: list[str]) -> None:
+        self._values = values
+
+    def scalars(self) -> _FakeScalarResult:
+        return self
+
+    def all(self) -> list[str]:
+        return self._values
+
+    def scalar_one_or_none(self) -> str | None:
+        return self._values[0] if self._values else None
+
+
+class _RecordingSchedulerSession:
+    def __init__(self, dialect_name: str, values: list[str] | None = None) -> None:
+        del dialect_name
+        self.info: dict[str, object] = {}
+        self.values = list(values or [])
+        self.executed: list[object] = []
+
+    async def execute(
+        self,
+        statement: object,
+        parameters: dict[str, object] | None = None,
+    ) -> _FakeScalarResult:
+        del parameters
+        self.executed.append(statement)
+        return _FakeScalarResult(self.values)
 
 
 class TestCreate:
@@ -453,9 +473,120 @@ class TestListWorkspaces:
 
 class TestOwnedPathConflictLookup:
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        [
+            WorkspaceStatus.requested,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.monitoring_pr,
+        ],
+    )
+    async def test_postgres_scheduler_lists_skip_locked_rows(
+        self,
+        status: WorkspaceStatus,
+    ) -> None:
+        session = _RecordingSchedulerSession("postgresql", values=["ws_claimed"])
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_ids(
+            status=status,
+            limit=1,
+            exclude_ids={"ws_active"},
+        )
+
+        assert listed == ["ws_claimed"]
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" in sql
+        assert "SKIP LOCKED" in sql
+        assert f"workspaces.status = '{status.value}'" in sql
+        assert "workspaces.id NOT IN ('ws_active')" in sql
+
+    @pytest.mark.unit
+    async def test_sqlite_scheduler_lists_use_portable_select(self) -> None:
+        session = _RecordingSchedulerSession("sqlite", values=["ws_claimed"])
+        repo = WorkspaceRepository(session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=1,
+        )
+
+        assert listed == ["ws_claimed"]
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" not in sql
+        assert "SKIP LOCKED" not in sql
+
+    @pytest.mark.unit
+    async def test_postgres_get_for_update_locks_workspace_row(self) -> None:
+        session = _RecordingSchedulerSession("postgresql", values=["ws_locked"])
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        locked = await repo.get_for_update("ws_locked")
+
+        assert locked == "ws_locked"
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" in sql
+        assert "workspaces.id = 'ws_locked'" in sql
+
+    @pytest.mark.unit
+    async def test_sqlite_get_for_update_uses_portable_select(self) -> None:
+        session = _RecordingSchedulerSession("sqlite", values=["ws_locked"])
+        repo = WorkspaceRepository(session, dialect_name="sqlite")  # type: ignore[arg-type]
+
+        locked = await repo.get_for_update("ws_locked")
+
+        assert locked == "ws_locked"
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" not in sql
+
+    @pytest.mark.unit
+    async def test_session_info_dialect_drives_scheduler_locking(self) -> None:
+        session = _RecordingSchedulerSession("postgresql", values=["ws_claimed"])
+        session.info[SESSION_DIALECT_NAME_KEY] = "postgresql"
+        repo = WorkspaceRepository(session)  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=1,
+        )
+
+        assert listed == ["ws_claimed"]
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "SKIP LOCKED" in sql
+
+    @pytest.mark.unit
     async def test_postgres_conflict_lookup_lock_uses_transaction_advisory_lock(self) -> None:
         session = _RecordingSession("postgresql")
-        repo = WorkspaceRepository(session)  # type: ignore[arg-type]
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
 
         await repo.acquire_owned_path_conflict_lock(
             repo_url="git@github.com:example/app.git",
@@ -471,7 +602,7 @@ class TestOwnedPathConflictLookup:
     @pytest.mark.unit
     async def test_conflict_lookup_lock_is_noop_without_postgres_or_owned_paths(self) -> None:
         sqlite_session = _RecordingSession("sqlite")
-        sqlite_repo = WorkspaceRepository(sqlite_session)  # type: ignore[arg-type]
+        sqlite_repo = WorkspaceRepository(sqlite_session, dialect_name="sqlite")  # type: ignore[arg-type]
 
         await sqlite_repo.acquire_owned_path_conflict_lock(
             repo_url="git@github.com:example/app.git",
@@ -480,7 +611,10 @@ class TestOwnedPathConflictLookup:
         )
 
         postgres_session = _RecordingSession("postgresql")
-        postgres_repo = WorkspaceRepository(postgres_session)  # type: ignore[arg-type]
+        postgres_repo = WorkspaceRepository(
+            postgres_session,
+            dialect_name="postgresql",
+        )  # type: ignore[arg-type]
 
         await postgres_repo.acquire_owned_path_conflict_lock(
             repo_url="git@github.com:example/app.git",
