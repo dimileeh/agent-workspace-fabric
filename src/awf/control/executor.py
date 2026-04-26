@@ -791,11 +791,6 @@ class WorkspaceExecutor:
                 title=pr_title,
                 body=pr_body,
             )
-            if successful_validation_run_id is not None and pr.head_sha:
-                await self._set_validation_run_target_head_sha(
-                    validation_run_id=successful_validation_run_id,
-                    target_head_sha=pr.head_sha,
-                )
         except PullRequestError as exc:
             _log.error(
                 "executor.pr_failed",
@@ -870,6 +865,20 @@ class WorkspaceExecutor:
                     persisted, to=WorkspaceStatus.completed, reason_code="PR_OPENED"
                 )
                 await session.commit()
+
+        if successful_validation_run_id is not None and pr.head_sha:
+            try:
+                await self._set_validation_run_target_head_sha(
+                    validation_run_id=successful_validation_run_id,
+                    target_head_sha=pr.head_sha,
+                )
+            except Exception:
+                _log.exception(
+                    "executor.validation_run_target_head_sha_update_failed",
+                    workspace_id=workspace_id,
+                    validation_run_id=successful_validation_run_id,
+                    target_head_sha=pr.head_sha,
+                )
 
         if monitor is not None:
             _log.info(

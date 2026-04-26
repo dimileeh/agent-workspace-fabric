@@ -343,9 +343,7 @@ class TestUnexpectedErrorDuringAgentRun:
 
 class TestOperatorControlRaces:
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed]
-    )
+    @pytest.mark.parametrize("final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed])
     async def test_execute_rechecks_after_claim_before_setup(
         self,
         final_status: WorkspaceStatus,
@@ -382,9 +380,7 @@ class TestOperatorControlRaces:
             assert ws.failure_reason is None
 
     @pytest.mark.unit
-    @pytest.mark.parametrize(
-        "final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed]
-    )
+    @pytest.mark.parametrize("final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed])
     async def test_resume_pr_monitor_rechecks_after_load_before_compose(
         self,
         final_status: WorkspaceStatus,
@@ -816,6 +812,52 @@ class TestPullRequestUnexpectedError:
             assert ws.failure_reason == "infrastructure_failure"
             assert "unexpected error during PR creation" in (ws.failure_message or "")
             assert "FileNotFoundError" in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    async def test_validation_target_sha_update_failure_keeps_open_pr(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        async def _fail_target_sha_update(
+            *,
+            validation_run_id: str,
+            target_head_sha: str,
+        ) -> None:
+            raise RuntimeError("metadata database temporarily unavailable")
+
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="tests ok")
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0, stdout="abc1234 commit\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/7\n")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        executor._set_validation_run_target_head_sha = _fail_target_sha_update  # type: ignore[method-assign]
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url == "https://github.com/x/y/pull/7"
+            assert ws.pr_number == 7
+            assert ws.monitor_last_commit_sha == "deadbeef01"
+
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert len(runs) == 1
+            assert runs[0].status == "succeeded"
+            assert runs[0].target_head_sha is None
 
 
 class TestPrMonitorFactoryPath:
