@@ -65,8 +65,9 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["github_runner"] = runner
 
     class _GitManager:
-        def __init__(self, work_dir: Path) -> None:
+        def __init__(self, work_dir: Path, *, env: object | None = None) -> None:
             created["git_work_dir"] = work_dir
+            created["git_env"] = env
 
     class _ComposeManager:
         def __init__(self, *, work_dir: Path, template_path: Path) -> None:
@@ -174,6 +175,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["validation_runner"] is created["executor_runner"]
     assert created["pr_creator_runner"] is created["executor_runner"]
     assert created["github_runner"] is created["executor_runner"]
+    assert created["git_env"] == {"HOME": str(Path(settings.host_home).resolve())}
     assert created["executor_compose"] is created["stack_compose"]
     assert created["executor_log_store"] is created["validation_log_store"]
     assert created["log_root"] == work_dir / "logs"
@@ -217,3 +219,20 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["release_monitor_kwargs"]["initial_review_grace_period_seconds"] == 12.5
     assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
+
+
+@pytest.mark.unit
+def test_service_git_environment_uses_mounted_host_home(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    ssh_dir = host_home / ".ssh"
+    ssh_dir.mkdir(parents=True)
+    (host_home / ".gitconfig").write_text("[user]\n  name = AWF\n")
+    known_hosts = ssh_dir / "known_hosts"
+    known_hosts.write_text("github.com ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAA...\n")
+
+    env = worker_mod._service_git_environment(host_home)
+
+    assert env["HOME"] == str(host_home)
+    assert env["GIT_CONFIG_GLOBAL"] == str(host_home / ".gitconfig")
+    assert str(known_hosts) in env["GIT_SSH_COMMAND"]
+    assert "StrictHostKeyChecking=accept-new" in env["GIT_SSH_COMMAND"]

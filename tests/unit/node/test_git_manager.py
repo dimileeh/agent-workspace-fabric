@@ -220,3 +220,18 @@ class TestHeadSha:
             check=True,
         ).stdout.strip()
         assert sha == expected
+
+
+class TestGitEnvironment:
+    @pytest.mark.unit
+    async def test_run_uses_configured_environment(self, tmp_path: Path) -> None:
+        home = tmp_path / "home"
+        home.mkdir()
+        manager = GitManager(tmp_path / "work", env={"HOME": str(home), "AWF_TEST_ENV": "ok"})
+
+        result = await manager._run(  # noqa: SLF001 - narrow regression for subprocess env.
+            ["sh", "-c", "printf '%s:%s' \"$HOME\" \"$AWF_TEST_ENV\""],
+            operation="env",
+        )
+
+        assert result.stdout == f"{home}:ok"

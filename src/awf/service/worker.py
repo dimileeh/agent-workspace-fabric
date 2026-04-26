@@ -42,8 +42,9 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     work_dir = Path(settings.work_dir).expanduser().resolve()
+    host_home = Path(settings.host_home).expanduser().resolve()
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
-    git = GitManager(work_dir / "git")
+    git = GitManager(work_dir / "git", env=_service_git_environment(host_home))
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runner = AsyncioSubprocessRunner()
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
@@ -55,7 +56,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     pr_creator = PullRequestCreator(runner)
     gh = GitHubClient(runner)
     auth_mount_resolver = ServiceAuthMountResolver(
-        host_home=Path(settings.host_home).expanduser().resolve(),
+        host_home=host_home,
         work_dir=work_dir,
     )
     stack_launcher = ComposeStackLauncher(
@@ -125,6 +126,21 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         ),
     )
     return WorkerRuntime(engine=engine, worker=worker)
+
+
+def _service_git_environment(host_home: Path) -> dict[str, str]:
+    """Git/SSH environment for service-worker host repository operations."""
+
+    env = {"HOME": str(host_home)}
+    gitconfig = host_home / ".gitconfig"
+    if gitconfig.is_file():
+        env["GIT_CONFIG_GLOBAL"] = str(gitconfig)
+    known_hosts = host_home / ".ssh" / "known_hosts"
+    if known_hosts.is_file():
+        env["GIT_SSH_COMMAND"] = (
+            f"ssh -o UserKnownHostsFile={known_hosts} -o StrictHostKeyChecking=accept-new"
+        )
+    return env
 
 
 async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:

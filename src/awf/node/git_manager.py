@@ -20,8 +20,10 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import os
 import re
 import weakref
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -99,10 +101,11 @@ class GitManager:
         weakref.WeakKeyDictionary()
     )
 
-    def __init__(self, work_dir: Path) -> None:
+    def __init__(self, work_dir: Path, *, env: Mapping[str, str] | None = None) -> None:
         self._work_dir = work_dir
         self._mirrors_dir = work_dir / "mirrors"
         self._worktrees_dir = work_dir / "worktrees"
+        self._env = {**os.environ, **env} if env is not None else None
 
     @classmethod
     def _lock_for_mirror(cls, mirror_path: Path) -> asyncio.Lock:
@@ -385,6 +388,7 @@ class GitManager:
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            env=self._env,
         )
         stdout_bytes, stderr_bytes = await proc.communicate()
         stdout = stdout_bytes.decode("utf-8", errors="replace")
