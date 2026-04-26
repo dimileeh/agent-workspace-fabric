@@ -1493,13 +1493,10 @@ def _sync_candidate_readiness(
 
     if recompute_stale:
         stale_reason, _ = compute_stale_reason(workspace)
-        # If there's an active stale reason, update it. If the reason clears, clear it.
-        if stale_reason is not None:
-            candidate.stale = True
+        computed_stale = stale_reason is not None
+        if candidate.stale != computed_stale or candidate.stale_reason != stale_reason:
+            candidate.stale = computed_stale
             candidate.stale_reason = stale_reason
-        elif stale_reason is None and candidate.stale_reason in ("validation_insufficient_tier",):
-            candidate.stale = False
-            candidate.stale_reason = None
 
     candidate.completed = is_completed
     candidate.failed_or_cancelled = failed_or_cancelled
