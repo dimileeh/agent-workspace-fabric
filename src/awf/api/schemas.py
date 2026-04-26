@@ -380,6 +380,10 @@ class ValidationRunSummaryResponse(BaseModel):
     finished_at: datetime | None = None
     log_stream_refs: dict[str, Any] = Field(default_factory=dict)
     fresh_for_target: bool | None = None
+    coverage_percent: float | None = None
+    coverage_minimum_percent: float | None = None
+    coverage_status: str | None = None
+    coverage_reason_code: str | None = None
 
 
 StaleReasonStatus = Literal["active", "resolved"]

@@ -38,6 +38,7 @@ def validation_run_summary(
             validation_target_head_sha=run.target_head_sha,
             current_target_head_sha=current_target_head_sha,
         ),
+        **validation_coverage_fields(run),
     )
 
 
