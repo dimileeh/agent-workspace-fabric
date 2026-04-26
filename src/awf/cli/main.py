@@ -90,9 +90,14 @@ def _emit(payload: object, fmt: OutputFormat) -> None:
     typer.echo(str(payload))
 
 
-def _emit_pretty_dict(d: dict[str, Any]) -> None:
+def _emit_pretty_dict(d: dict[str, Any], *, prefix: str = "") -> None:
     for key in sorted(d.keys()):
-        typer.echo(f"  {key}: {d[key]}")
+        pretty_key = f"{prefix}.{key}" if prefix else key
+        value = d[key]
+        if isinstance(value, dict):
+            _emit_pretty_dict(value, prefix=pretty_key)
+            continue
+        typer.echo(f"  {pretty_key}: {value}")
 
 
 def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Response:

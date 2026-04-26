@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 
 from sqlalchemy.engine import make_url
 
-from awf.common.config import Settings
+from awf.common.config import DEFAULT_MIN_FREE_DISK_BYTES, Settings
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 
@@ -34,6 +34,7 @@ class ServiceSettings:
     host_home: str = "~"
     node_id: str | None = None
     branch_prefix: str = "awf"
+    min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES
 
 
 def resolve_service_settings(
@@ -69,6 +70,7 @@ def resolve_service_settings(
         docker_host=settings.docker_host,
         agent_runtime_image=settings.agent_runtime_image,
         work_dir=settings.work_dir,
+        min_free_disk_bytes=settings.min_free_disk_bytes,
         host_home=settings.host_home or "~",
         api_token=_empty_to_none(settings.api_token),
         github_token=_empty_to_none(settings.github_token),
