@@ -7,13 +7,19 @@ true integration + E2E tests live under tests/integration/ and tests/e2e/.
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+from typing import Any
+
 import pytest
-from httpx import AsyncClient
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from awf.api.app import configure_database, create_app
+from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service.disk import DiskCheck
 
 _MINIMAL_BODY = {
     "repo_url": "git@github.com:dimileeh/aira-agent.git",
@@ -93,6 +99,35 @@ async def _create_v2_workspace(
     return str(response.json()["workspace_id"])
 
 
+def _disk_check(
+    *,
+    free_bytes: int,
+    threshold_bytes: int,
+    ok: bool,
+) -> DiskCheck:
+    return DiskCheck(
+        path="/workspace/.awf",
+        checked_path="/workspace",
+        total_bytes=1000,
+        used_bytes=1000 - free_bytes,
+        free_bytes=free_bytes,
+        percent_free=free_bytes / 10,
+        threshold_bytes=threshold_bytes,
+        ok=ok,
+        status="ok" if ok else "fail",
+        reason="SUFFICIENT_DISK" if ok else "INSUFFICIENT_DISK",
+        detail=None if ok else "Free disk is below AWF_MIN_FREE_DISK_BYTES.",
+    )
+
+
+@pytest.fixture
+async def disk_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[Any, AsyncClient]]:
+    app = create_app(use_lifespan=False)
+    configure_database(app, make_session_factory(engine))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield app, c
+
+
 async def _transition_workspace(
     engine: AsyncEngine,
     workspace_id: str,
@@ -153,6 +188,106 @@ class TestCreateWorkspace:
         bad = {**_MINIMAL_BODY, "hax0r_field": "value"}
         response = await client.post("/v1/workspaces", json=bad)
         assert response.status_code == 422
+
+
+class TestCreateWorkspaceV2DiskPressure:
+    @pytest.mark.unit
+    async def test_rejects_low_disk_without_creating_row(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.state.workspace_admission_disk_check = lambda _settings: _disk_check(
+            free_bytes=300,
+            threshold_bytes=400,
+            ok=False,
+        )
+
+        response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        listed = await client.get("/v1/workspaces")
+
+        assert response.status_code == 503
+        body = response.json()
+        assert body["error_code"] == "INSUFFICIENT_DISK"
+        assert body["detail"]["disk"]["free_bytes"] == 300
+        assert body["detail"]["disk"]["threshold_bytes"] == 400
+        assert listed.status_code == 200
+        assert listed.json() == []
+
+    @pytest.mark.unit
+    async def test_idempotent_replay_returns_existing_row_under_low_disk(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        headers = {"Idempotency-Key": "disk-pressure-replay"}
+        app.state.workspace_admission_disk_check = lambda _settings: _disk_check(
+            free_bytes=700,
+            threshold_bytes=400,
+            ok=True,
+        )
+        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+
+        app.state.workspace_admission_disk_check = lambda _settings: _disk_check(
+            free_bytes=300,
+            threshold_bytes=400,
+            ok=False,
+        )
+        replay = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        listed = await client.get("/v1/workspaces")
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert len(listed.json()) == 1
+
+    @pytest.mark.unit
+    async def test_create_succeeds_when_disk_is_above_threshold(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        app.state.workspace_admission_disk_check = lambda _settings: _disk_check(
+            free_bytes=700,
+            threshold_bytes=400,
+            ok=True,
+        )
+
+        response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        listed = await client.get("/v1/workspaces")
+
+        assert response.status_code == 202
+        assert len(listed.json()) == 1
+        assert listed.json()[0]["id"] == response.json()["workspace_id"]
+
+    @pytest.mark.unit
+    async def test_disk_admission_uses_dependency_overridden_settings(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        settings = Settings(
+            _env_file=None,
+            work_dir="/tmp/awf-test-workspaces",
+            min_free_disk_bytes=123,
+        )
+        seen: dict[str, Settings] = {}
+
+        def admission_check(provider_settings: Settings) -> DiskCheck:
+            seen["settings"] = provider_settings
+            return _disk_check(
+                free_bytes=124,
+                threshold_bytes=provider_settings.min_free_disk_bytes,
+                ok=True,
+            )
+
+        app.dependency_overrides[get_settings] = lambda: settings
+        app.state.workspace_admission_disk_check = admission_check
+
+        response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+
+        assert response.status_code == 202
+        assert seen["settings"] is settings
 
 
 class TestCreateWorkspaceV2MonitorPolicy:
