@@ -20,6 +20,7 @@ MergeBlockerReason = Literal[
     "ready_to_merge_or_waiting_for_github",
     "manual_merge_required",
     "waiting_for_monitor",
+    "waiting_for_older_candidate",
     "workspace_not_terminal",
     "completed",
     "failed_or_cancelled",
@@ -27,6 +28,7 @@ MergeBlockerReason = Literal[
     "stale",
 ]
 MergeCandidateStatus = Literal["open", "merged", "closed"]
+MergeQueueBlockerState = Literal["merge_eligible", "monitor_owned_recovery"]
 ValidationTier = Literal[1, 2, 3]
 ValidationProvenanceStatus = Literal["running", "succeeded", "failed", "unknown"]
 
@@ -426,6 +428,19 @@ class StaleReasonListResponse(BaseModel):
     items: list[StaleReasonResponse]
 
 
+class MergeQueueBlockerResponse(BaseModel):
+    candidate_id: str
+    workspace_id: str
+    attempt_id: str
+    task_id: str
+    title: str
+    pr_url: str
+    pr_number: int | None
+    status: WorkspaceStatus
+    blocker_state: MergeQueueBlockerState
+    reason_code: str
+
+
 class MergeQueueItemResponse(BaseModel):
     candidate_id: str | None = None
     candidate_status: MergeCandidateStatus | None = None
@@ -449,6 +464,7 @@ class MergeQueueItemResponse(BaseModel):
     required_next_action: str | None = None
     readiness: MergeCandidateReadinessResponse | None = None
     canonical: bool
+    queue_blockers: list[MergeQueueBlockerResponse] = Field(default_factory=list)
     latest_validation: ValidationRunSummaryResponse | None = None
     stale_reasons: list[StaleReasonResponse] = Field(default_factory=list)
 
