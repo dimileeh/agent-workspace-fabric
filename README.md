@@ -192,6 +192,10 @@ Built-in profile directions include:
 | `python` | Detects `pyproject.toml` or `requirements.txt`; installs dev deps and runs `pytest -q`. |
 | `node` | Detects `package.json`; chooses npm, pnpm, yarn, or bun from lockfiles. |
 | `nextjs` | Node profile plus Next.js lint/test defaults when `next` is present. |
+| `go` | Detects `go.mod`; downloads modules and runs `go test ./...`. |
+| `rust` | Detects `Cargo.toml`; fetches crates and runs `cargo test --all-targets`. |
+| `java` | Detects `mvnw`, `pom.xml`, `build.gradle`, or `gradlew`; uses Maven or Gradle test defaults. |
+| `cpp` | Detects `CMakeLists.txt`; configures with CMake, builds, then runs CTest. |
 | `docker-compose` | Enables per-workspace DinD and runs project Compose inside it. |
 | `aira` | Compatibility profile for Aira's Postgres/pgvector/Alembic expectations. |
 
