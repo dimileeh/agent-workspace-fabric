@@ -131,10 +131,101 @@ export interface Operation {
   finished_at: string | null;
 }
 
+export interface WorkspaceRetryResponse {
+  source_workspace_id: string;
+  new_workspace_id: string;
+  operation_id: string;
+  status: WorkspaceStatus;
+  attempt_number: number;
+  status_url: string;
+  events_url: string;
+}
+
 export interface ListEnvelope<T> {
   items: T[];
   next_cursor: string | null;
   has_more: boolean;
+}
+
+export interface WorkspaceSaturationCounts {
+  by_status: Record<string, number>;
+  active_total: number;
+  requested: number;
+  provisioning: number;
+  ready: number;
+  running: number;
+  validating: number;
+  pushing: number;
+  monitoring_pr: number;
+  destroying: number;
+  completed: number;
+  failed: number;
+  cancelled: number;
+  destroyed: number;
+}
+
+export interface WorkerConcurrencySettings {
+  max_concurrent_provisions: number;
+  max_concurrent_executions: number;
+}
+
+export interface WorkspaceResourceDefaults {
+  steady_cpu: number;
+  steady_memory_gb: number;
+  peak_cpu: number;
+  peak_memory_gb: number;
+}
+
+export interface ReservedResources {
+  active_workspace_count: number;
+  steady_cpu: number;
+  steady_memory_gb: number;
+  peak_cpu: number;
+  peak_memory_gb: number;
+}
+
+export interface ConcurrencyLane {
+  limit: number;
+  in_use: number;
+  queued: number;
+  available: number;
+}
+
+export interface ResourceConcurrency {
+  provision: ConcurrencyLane;
+  execution: ConcurrencyLane;
+}
+
+export interface DiskCheck {
+  path: string;
+  checked_path: string;
+  total_bytes: number;
+  used_bytes: number;
+  free_bytes: number;
+  percent_free: number;
+  threshold_bytes: number;
+  ok: boolean;
+  status: string;
+  reason: string;
+  detail: string | null;
+}
+
+export interface AdmissionSummary {
+  ok: boolean;
+  status: string;
+  reason: string;
+  detail: string | null;
+}
+
+export interface ResourceSaturationSummary {
+  generated_at: string;
+  workspace_counts: WorkspaceSaturationCounts;
+  worker: WorkerConcurrencySettings;
+  resource_defaults: WorkspaceResourceDefaults;
+  reserved_resources: ReservedResources;
+  concurrency: ResourceConcurrency;
+  disk: DiskCheck;
+  admission: AdmissionSummary;
 }
 
 export type AwfStreamFrame =
