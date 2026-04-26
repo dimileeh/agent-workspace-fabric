@@ -51,9 +51,12 @@ class ComposeStackLauncher:
     async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths:
         layout = request.layout
         profile = request.profile
+        # Linked git worktrees store writable refs/objects in the common mirror.
+        # Agents need that metadata writable when they make local commits.
         mirror_mount = AuthMount(
             source=str(layout.mirror_path),
             target=str(layout.mirror_path),
+            mode="rw",
         )
         auth_mounts = [mirror_mount]
         if self._auth_mount_resolver is not None:

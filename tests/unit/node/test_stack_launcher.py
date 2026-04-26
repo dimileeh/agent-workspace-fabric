@@ -101,7 +101,7 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     assert [service.name for service in spec.services] == ["postgres"]
     assert spec.auth_mounts[0].source == str(layout.mirror_path)
     assert spec.auth_mounts[0].target == str(layout.mirror_path)
-    assert spec.auth_mounts[0].mode == "ro"
+    assert spec.auth_mounts[0].mode == "rw"
 
 
 @pytest.mark.unit
@@ -130,7 +130,7 @@ async def test_compose_stack_launcher_appends_service_auth_mounts() -> None:
     assert auth_mount_resolver.workspace_ids == ["ws_launcher"]
     spec = compose.specs[0]
     assert spec.auth_mounts == (
-        AuthMount(source=str(layout.mirror_path), target=str(layout.mirror_path), mode="ro"),
+        AuthMount(source=str(layout.mirror_path), target=str(layout.mirror_path), mode="rw"),
         AuthMount(
             source="/host/home/.config/gh",
             target="/home/agent/.config/gh",
