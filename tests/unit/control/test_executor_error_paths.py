@@ -30,7 +30,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor, _call_pr_monitor_factory
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
@@ -110,6 +110,22 @@ class _RecordingValidation:
         **_kwargs: Any,
     ) -> SimpleNamespace:
         self.calls.append(phase_names)
+        return SimpleNamespace(all_passed=True, first_failure=None)
+
+
+class _ExplodingValidation:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...],
+        **_kwargs: Any,
+    ) -> SimpleNamespace:
+        self.calls.append(phase_names)
+        if phase_names == ("post_agent", "validate"):
+            raise RuntimeError("docker compose validation failed")
         return SimpleNamespace(all_passed=True, first_failure=None)
 
 
@@ -715,6 +731,44 @@ class TestCommitStepRuntimeError:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert "commit step failed" in (ws.failure_message or "")
+
+
+class TestValidationInfrastructureError:
+    @pytest.mark.unit
+    async def test_validation_runner_exception_finishes_validation_run(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _ExplodingValidation()
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="a.py\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+
+        executor = _make_executor(fake, factory, tmp_path, validation=validation)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "unexpected error during validation run" in (ws.failure_message or "")
+
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert len(runs) == 1
+            run = runs[0]
+            assert run.status == "failed"
+            assert run.reason_code == "VALIDATION_INFRASTRUCTURE_ERROR"
+            assert run.finished_at is not None
+
+        assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
 
 
 class TestPullRequestUnexpectedError:

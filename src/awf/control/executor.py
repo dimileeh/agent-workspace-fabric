@@ -608,14 +608,34 @@ class WorkspaceExecutor:
                 target_branch=expected_branch,
                 target_head_sha=None,
             )
-            val_result = await self._validation.run_profile_phases(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-                phase_names=("post_agent", "validate"),
-                run_healthchecks=True,
-            )
+            try:
+                val_result = await self._validation.run_profile_phases(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    profile=profile,
+                    phase_names=("post_agent", "validate"),
+                    run_healthchecks=True,
+                )
+            except Exception as exc:
+                _log.exception(
+                    "executor.validation_run_unexpected_failed",
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                )
+                await self._finish_validation_run(
+                    validation_run_id,
+                    status="failed",
+                    reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=f"unexpected error during validation run: {exc!r}"[:2000],
+                    reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                )
+                return
             await self._finish_validation_run(
                 validation_run_id,
                 status="succeeded" if val_result.all_passed else "failed",
