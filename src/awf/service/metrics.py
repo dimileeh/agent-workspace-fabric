@@ -70,16 +70,12 @@ async def summarize_workspace_reliability_for_session(
 
     status_counts = await _count_by_status(session, window_start=window_start)
     failure_reason_counts = await _count_by_failure_reason(session, window_start=window_start)
+    active_count = await _count_active_workspaces(session)
 
     completed_count = status_counts[WorkspaceStatus.completed.value]
     failed_count = status_counts[WorkspaceStatus.failed.value]
     cancelled_count = status_counts[WorkspaceStatus.cancelled.value]
     destroyed_count = status_counts[WorkspaceStatus.destroyed.value]
-    active_count = sum(
-        count
-        for status, count in status_counts.items()
-        if status not in TERMINAL_WORKSPACE_STATUSES
-    )
 
     return WorkspaceReliabilitySummary(
         generated_at=generated_at,
@@ -129,6 +125,15 @@ async def _count_by_failure_reason(
     )
     rows = await session.execute(stmt)
     return {str(reason): int(count) for reason, count in rows.all()}
+
+
+async def _count_active_workspaces(session: AsyncSession) -> int:
+    stmt = (
+        select(func.count())
+        .select_from(Workspace)
+        .where(~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES))
+    )
+    return int(await session.scalar(stmt) or 0)
 
 
 def _validate_since_hours(since_hours: int) -> None:

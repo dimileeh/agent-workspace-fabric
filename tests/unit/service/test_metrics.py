@@ -154,3 +154,28 @@ async def test_since_hours_filters_by_workspace_updated_at(
     assert summary.failure_reason_counts == {FailureReason.validation_failure.value: 1}
     assert summary.completed_count == 0
     assert summary.failed_count == 1
+    assert summary.active_count == 0
+
+
+@pytest.mark.unit
+async def test_active_count_includes_current_workspaces_outside_updated_at_window(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_workspace_reliability
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now - timedelta(hours=30),
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=30),
+    )
+
+    summary = await summarize_workspace_reliability(session_factory, now=now)
+
+    assert summary.status_counts == _zero_status_counts()
+    assert summary.active_count == 1
