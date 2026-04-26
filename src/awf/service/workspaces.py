@@ -23,7 +23,7 @@ from awf.api.schemas import (
     WorkspaceRuntimeResponse,
 )
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Task, Workspace
+from awf.db.models import Operation, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     OperationRepository,
     OwnedPathConflict,
@@ -484,10 +484,14 @@ async def retry_workspace_row(
         remote_push_branch=source.remote_push_branch,
     )
 
-    task = await _retry_task_for_source(session, source)
-    attempt = await TaskAttemptRepository(session).create_for_workspace(
+    attempt_repo = TaskAttemptRepository(session)
+    source_attempt = await attempt_repo.get_by_workspace_id(source.id)
+    task = await _retry_task_for_source(session, source, source_attempt=source_attempt)
+    attempt = await attempt_repo.create_for_workspace(
         task=task,
         workspace=retried,
+        parent_attempt_id=source_attempt.id if source_attempt is not None else None,
+        redispatch_from_attempt_id=source_attempt.id if source_attempt is not None else None,
     )
 
     operation_repo = OperationRepository(session)
@@ -532,10 +536,16 @@ async def retry_workspace_row(
     )
 
 
-async def _retry_task_for_source(session: AsyncSession, source: Workspace) -> Task:
-    attempt = await TaskAttemptRepository(session).get_by_workspace_id(source.id)
-    if attempt is not None:
-        task = await TaskRepository(session).get(attempt.task_id)
+async def _retry_task_for_source(
+    session: AsyncSession,
+    source: Workspace,
+    *,
+    source_attempt: TaskAttempt | None = None,
+) -> Task:
+    if source_attempt is None:
+        source_attempt = await TaskAttemptRepository(session).get_by_workspace_id(source.id)
+    if source_attempt is not None:
+        task = await TaskRepository(session).get(source_attempt.task_id)
         if task is not None:
             return task
 

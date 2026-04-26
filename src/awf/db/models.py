@@ -31,6 +31,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    false,
     text,
     true,
 )
@@ -233,6 +234,12 @@ class Workspace(Base):
         lazy="selectin",
         uselist=False,
     )
+    merge_candidates: Mapped[list[MergeCandidate]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="MergeCandidate.updated_at",
+    )
 
 
 class Task(Base):
@@ -272,6 +279,12 @@ class Task(Base):
         lazy="selectin",
         order_by="TaskAttempt.attempt_number",
     )
+    merge_candidates: Mapped[list[MergeCandidate]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="MergeCandidate.updated_at",
+    )
 
 
 class TaskAttempt(Base):
@@ -281,6 +294,13 @@ class TaskAttempt(Base):
     __table_args__ = (
         UniqueConstraint("workspace_id", name="uq_task_attempts_workspace_id"),
         UniqueConstraint("task_id", "attempt_number", name="uq_task_attempts_task_number"),
+        Index(
+            "uq_task_attempts_one_canonical_per_task",
+            "task_id",
+            unique=True,
+            sqlite_where=text("is_canonical_for_merge = 1"),
+            postgresql_where=text("is_canonical_for_merge = true"),
+        ),
         Index("ix_task_attempts_task", "task_id"),
         Index("ix_task_attempts_status", "status"),
         Index("ix_task_attempts_created_at", "created_at"),
@@ -292,6 +312,21 @@ class TaskAttempt(Base):
         String(36), ForeignKey("workspaces.id"), nullable=False
     )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_attempt_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=True
+    )
+    redispatch_from_attempt_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=True
+    )
+    superseded_by_attempt_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=True
+    )
+    is_canonical_for_merge: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+        server_default=false(),
+    )
 
     agent: Mapped[str] = mapped_column(String(32), nullable=False)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
@@ -313,6 +348,70 @@ class TaskAttempt(Base):
 
     task: Mapped[Task] = relationship(back_populates="attempts")
     workspace: Mapped[Workspace] = relationship(back_populates="task_attempt")
+    merge_candidate: Mapped[MergeCandidate | None] = relationship(
+        back_populates="attempt",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        uselist=False,
+    )
+
+
+class MergeCandidate(Base):
+    """Explicit PR-backed merge queue entry for a task attempt."""
+
+    __tablename__ = "merge_candidates"
+    __table_args__ = (
+        UniqueConstraint("attempt_id", name="uq_merge_candidates_attempt_id"),
+        Index("ix_merge_candidates_task", "task_id"),
+        Index("ix_merge_candidates_workspace", "workspace_id"),
+        Index("ix_merge_candidates_status_updated", "status", "updated_at"),
+        Index("ix_merge_candidates_repo_base", "repo_url", "base_branch"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=False)
+    attempt_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=False
+    )
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+
+    pr_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    repo_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    base_branch: Mapped[str] = mapped_column(String(256), nullable=False)
+    branch_name: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="open")
+    close_reason: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    ready: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    manual_merge_required: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=False,
+    )
+    waiting_for_monitor: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    failed_or_cancelled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    not_canonical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    merged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    task: Mapped[Task] = relationship(back_populates="merge_candidates")
+    attempt: Mapped[TaskAttempt] = relationship(back_populates="merge_candidate")
+    workspace: Mapped[Workspace] = relationship(back_populates="merge_candidates")
 
 
 class Operation(Base):

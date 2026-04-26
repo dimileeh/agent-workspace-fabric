@@ -25,6 +25,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from awf.common.ids import (
     new_event_id,
     new_log_stream_id,
+    new_merge_candidate_id,
     new_operation_id,
     new_task_attempt_id,
     new_task_id,
@@ -34,6 +35,7 @@ from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import (
+    MergeCandidate,
     Operation,
     Task,
     TaskAttempt,
@@ -134,6 +136,13 @@ class TaskRepository:
     async def get(self, task_id: str) -> Task | None:
         return await self._session.get(Task, task_id)
 
+    async def get_by_ref(self, task_ref: str) -> Task | None:
+        task = await self.get(task_ref)
+        if task is not None:
+            return task
+        stmt = select(Task).where(Task.external_id == task_ref)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def _find_reusable(
         self,
         *,
@@ -165,6 +174,8 @@ class TaskAttemptRepository:
         *,
         task: Task,
         workspace: Workspace,
+        parent_attempt_id: str | None = None,
+        redispatch_from_attempt_id: str | None = None,
     ) -> TaskAttempt:
         await self._lock_attempt_number_sequence(task.id)
         max_attempt_number = (
@@ -180,6 +191,8 @@ class TaskAttemptRepository:
             task_id=task.id,
             workspace_id=workspace.id,
             attempt_number=attempt_number,
+            parent_attempt_id=parent_attempt_id,
+            redispatch_from_attempt_id=redispatch_from_attempt_id,
             agent=workspace.agent,
             status=workspace.status,
             repo_url=workspace.repo_url,
@@ -205,6 +218,36 @@ class TaskAttemptRepository:
     async def get_by_workspace_id(self, workspace_id: str) -> TaskAttempt | None:
         stmt = select(TaskAttempt).where(TaskAttempt.workspace_id == workspace_id)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def get_canonical_for_task(self, task_id: str) -> TaskAttempt | None:
+        stmt = select(TaskAttempt).where(
+            TaskAttempt.task_id == task_id,
+            TaskAttempt.is_canonical_for_merge.is_(True),
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def mark_canonical_for_merge(self, attempt: TaskAttempt) -> TaskAttempt:
+        current = await self.get_canonical_for_task(attempt.task_id)
+        if current is not None and current.id != attempt.id:
+            current.is_canonical_for_merge = False
+            current.superseded_by_attempt_id = attempt.id
+            await self._session.flush([current])
+        attempt.is_canonical_for_merge = True
+        await self._session.flush()
+        return attempt
+
+    async def list_for_task(self, task_id: str, *, limit: int = 100) -> list[TaskAttempt]:
+        stmt = (
+            select(TaskAttempt)
+            .where(TaskAttempt.task_id == task_id)
+            .options(
+                selectinload(TaskAttempt.workspace),
+                selectinload(TaskAttempt.merge_candidate),
+            )
+            .order_by(TaskAttempt.attempt_number.desc(), TaskAttempt.id.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars())
 
     async def list_latest(
         self,
@@ -236,6 +279,7 @@ class TaskAttemptRepository:
             .options(
                 selectinload(TaskAttempt.task),
                 selectinload(TaskAttempt.workspace),
+                selectinload(TaskAttempt.merge_candidate),
             )
         )
         if status is not None:
@@ -247,6 +291,250 @@ class TaskAttemptRepository:
 
         stmt = stmt.order_by(TaskAttempt.created_at.desc(), TaskAttempt.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+
+class MergeCandidateRepository:
+    """CRUD helpers for explicit PR-backed merge candidates."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def get_by_attempt_id(self, attempt_id: str) -> MergeCandidate | None:
+        stmt = (
+            select(MergeCandidate)
+            .where(MergeCandidate.attempt_id == attempt_id)
+            .options(
+                selectinload(MergeCandidate.attempt),
+                selectinload(MergeCandidate.workspace),
+                selectinload(MergeCandidate.task),
+            )
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_for_task(
+        self,
+        task_id: str,
+        *,
+        limit: int = 100,
+    ) -> builtins.list[MergeCandidate]:
+        stmt = (
+            select(MergeCandidate)
+            .where(MergeCandidate.task_id == task_id)
+            .options(
+                selectinload(MergeCandidate.attempt),
+                selectinload(MergeCandidate.workspace).selectinload(Workspace.events),
+                selectinload(MergeCandidate.task),
+            )
+            .order_by(
+                MergeCandidate.updated_at.desc(),
+                MergeCandidate.id.desc(),
+            )
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def list_queue(
+        self,
+        *,
+        repo_url: str | None = None,
+        base_branch: str | None = None,
+        status: WorkspaceStatus | str | None = None,
+        before_updated_at: datetime | None = None,
+        before_workspace_id: str | None = None,
+        limit: int = 50,
+    ) -> builtins.list[MergeCandidate]:
+        stmt = (
+            select(MergeCandidate)
+            .join(Workspace, MergeCandidate.workspace_id == Workspace.id)
+            .where(
+                ~Workspace.status.in_(
+                    (
+                        WorkspaceStatus.destroying.value,
+                        WorkspaceStatus.destroyed.value,
+                    )
+                )
+            )
+            .options(
+                selectinload(MergeCandidate.attempt),
+                selectinload(MergeCandidate.workspace).selectinload(Workspace.events),
+                selectinload(MergeCandidate.task),
+            )
+            .order_by(Workspace.updated_at.desc(), Workspace.id.desc())
+        )
+        if repo_url is not None:
+            stmt = stmt.where(MergeCandidate.repo_url == repo_url)
+        if base_branch is not None:
+            stmt = stmt.where(MergeCandidate.base_branch == base_branch)
+        if status is not None:
+            stmt = stmt.where(Workspace.status == status)
+        if before_updated_at is not None and before_workspace_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Workspace.updated_at < before_updated_at,
+                    and_(
+                        Workspace.updated_at == before_updated_at,
+                        Workspace.id < before_workspace_id,
+                    ),
+                )
+            )
+        stmt = stmt.limit(limit)
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def create_or_update_open_for_attempt(
+        self,
+        *,
+        task: Task,
+        attempt: TaskAttempt,
+        workspace: Workspace,
+        head_sha: str | None = None,
+        base_sha: str | None = None,
+    ) -> MergeCandidate:
+        if not workspace.pr_url:
+            raise ValueError("merge candidates require a workspace PR URL")
+
+        candidate = await self.get_by_attempt_id(attempt.id)
+        if candidate is None:
+            candidate = MergeCandidate(
+                id=new_merge_candidate_id(),
+                task_id=task.id,
+                attempt_id=attempt.id,
+                workspace_id=workspace.id,
+                pr_url=workspace.pr_url,
+                pr_number=workspace.pr_number,
+                repo_url=workspace.repo_url,
+                base_branch=workspace.branch_base,
+                branch_name=workspace.branch_name,
+                head_sha=head_sha,
+                base_sha=base_sha,
+                status="open",
+            )
+            self._session.add(candidate)
+        else:
+            candidate.task_id = task.id
+            candidate.workspace_id = workspace.id
+            candidate.pr_url = workspace.pr_url
+            candidate.pr_number = workspace.pr_number
+            candidate.repo_url = workspace.repo_url
+            candidate.base_branch = workspace.branch_base
+            candidate.branch_name = workspace.branch_name
+            if head_sha is not None:
+                candidate.head_sha = head_sha
+            if base_sha is not None:
+                candidate.base_sha = base_sha
+            candidate.status = "open"
+            candidate.close_reason = None
+            candidate.closed_at = None
+            candidate.merged_at = None
+
+        _sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
+        await self._session.flush()
+        return candidate
+
+    async def make_attempt_canonical_and_create_candidate(
+        self,
+        *,
+        task: Task,
+        attempt: TaskAttempt,
+        workspace: Workspace,
+        head_sha: str | None = None,
+        base_sha: str | None = None,
+    ) -> MergeCandidate:
+        attempt_repo = TaskAttemptRepository(self._session)
+        previous = await attempt_repo.get_canonical_for_task(attempt.task_id)
+        await attempt_repo.mark_canonical_for_merge(attempt)
+        if previous is not None and previous.id != attempt.id:
+            await self.close_open_for_attempt(
+                previous.id,
+                close_reason="CANONICAL_CHANGED",
+            )
+        return await self.create_or_update_open_for_attempt(
+            task=task,
+            attempt=attempt,
+            workspace=workspace,
+            head_sha=head_sha,
+            base_sha=base_sha,
+        )
+
+    async def close_open_for_attempt(
+        self,
+        attempt_id: str,
+        *,
+        close_reason: str,
+    ) -> MergeCandidate | None:
+        candidate = await self.get_by_attempt_id(attempt_id)
+        if candidate is None or candidate.status != "open":
+            return candidate
+        candidate.status = "closed"
+        candidate.close_reason = close_reason
+        candidate.closed_at = datetime.now(UTC)
+        _sync_candidate_readiness(
+            candidate,
+            workspace=candidate.workspace,
+            attempt=candidate.attempt,
+        )
+        await self._session.flush()
+        return candidate
+
+    async def close_open_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        close_reason: str,
+    ) -> builtins.list[MergeCandidate]:
+        stmt = (
+            select(MergeCandidate)
+            .where(
+                MergeCandidate.workspace_id == workspace_id,
+                MergeCandidate.status == "open",
+            )
+            .options(
+                selectinload(MergeCandidate.workspace),
+                selectinload(MergeCandidate.attempt),
+            )
+        )
+        candidates = list((await self._session.execute(stmt)).scalars())
+        now = datetime.now(UTC)
+        for candidate in candidates:
+            candidate.status = "closed"
+            candidate.close_reason = close_reason
+            candidate.closed_at = now
+            _sync_candidate_readiness(
+                candidate,
+                workspace=candidate.workspace,
+                attempt=candidate.attempt,
+            )
+        await self._session.flush()
+        return candidates
+
+    async def mark_workspace_merged(self, workspace_id: str) -> MergeCandidate | None:
+        stmt = (
+            select(MergeCandidate)
+            .where(
+                MergeCandidate.workspace_id == workspace_id,
+                MergeCandidate.status == "open",
+            )
+            .options(
+                selectinload(MergeCandidate.workspace),
+                selectinload(MergeCandidate.attempt),
+            )
+            .order_by(MergeCandidate.updated_at.desc(), MergeCandidate.id.desc())
+            .limit(1)
+        )
+        candidate = (await self._session.execute(stmt)).scalar_one_or_none()
+        if candidate is None:
+            return None
+        now = datetime.now(UTC)
+        candidate.status = "merged"
+        candidate.close_reason = None
+        candidate.closed_at = now
+        candidate.merged_at = now
+        _sync_candidate_readiness(
+            candidate,
+            workspace=candidate.workspace,
+            attempt=candidate.attempt,
+        )
+        await self._session.flush()
+        return candidate
 
 
 class WorkspaceRepository:
@@ -491,6 +779,51 @@ class WorkspaceRepository:
         stmt = stmt.limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
+    async def list_merge_queue_without_candidates(
+        self,
+        *,
+        repo_url: str | None = None,
+        base_branch: str | None = None,
+        status: WorkspaceStatus | str | None = None,
+        before_updated_at: datetime | None = None,
+        before_workspace_id: str | None = None,
+        limit: int = 50,
+    ) -> builtins.list[Workspace]:
+        stmt = (
+            select(Workspace)
+            .outerjoin(MergeCandidate, MergeCandidate.workspace_id == Workspace.id)
+            .where(
+                MergeCandidate.id.is_(None),
+                Workspace.pr_url.is_not(None),
+                Workspace.pr_url != "",
+                ~Workspace.status.in_(
+                    (
+                        WorkspaceStatus.destroying.value,
+                        WorkspaceStatus.destroyed.value,
+                    )
+                ),
+            )
+            .order_by(Workspace.updated_at.desc(), Workspace.id.desc())
+        )
+        if repo_url is not None:
+            stmt = stmt.where(Workspace.repo_url == repo_url)
+        if base_branch is not None:
+            stmt = stmt.where(Workspace.branch_base == base_branch)
+        if status is not None:
+            stmt = stmt.where(Workspace.status == status)
+        if before_updated_at is not None and before_workspace_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Workspace.updated_at < before_updated_at,
+                    and_(
+                        Workspace.updated_at == before_updated_at,
+                        Workspace.id < before_workspace_id,
+                    ),
+                )
+            )
+        stmt = stmt.limit(limit)
+        return list((await self._session.execute(stmt)).scalars())
+
     async def list_schedulable_ids(
         self,
         *,
@@ -545,6 +878,7 @@ class WorkspaceRepository:
             attempt.status = to.value
         if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
             workspace.monitor_started_at = datetime.now(UTC)
+        await self._sync_merge_candidate_lifecycle(workspace, attempt=attempt, to=to)
 
         workspace.events.append(
             WorkspaceEvent(
@@ -599,6 +933,7 @@ class WorkspaceRepository:
             attempt.status = to.value
         if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
             workspace.monitor_started_at = now
+        await self._sync_merge_candidate_lifecycle(workspace, attempt=attempt, to=to)
 
         workspace.events.append(
             WorkspaceEvent(
@@ -611,6 +946,37 @@ class WorkspaceRepository:
         )
         await self._session.flush()
         return workspace
+
+    async def _sync_merge_candidate_lifecycle(
+        self,
+        workspace: Workspace,
+        *,
+        attempt: TaskAttempt | None,
+        to: WorkspaceStatus,
+    ) -> None:
+        candidate_repo = MergeCandidateRepository(self._session)
+        if to == WorkspaceStatus.monitoring_pr:
+            if attempt is None or not workspace.pr_url:
+                return
+            task = await TaskRepository(self._session).get(attempt.task_id)
+            if task is None:  # pragma: no cover - FK invariant
+                return
+            await candidate_repo.make_attempt_canonical_and_create_candidate(
+                task=task,
+                attempt=attempt,
+                workspace=workspace,
+            )
+            return
+
+        if to == WorkspaceStatus.completed:
+            await candidate_repo.mark_workspace_merged(workspace.id)
+            return
+
+        if to in {WorkspaceStatus.failed, WorkspaceStatus.cancelled}:
+            await candidate_repo.close_open_for_workspace(
+                workspace.id,
+                close_reason=_candidate_terminal_close_reason(to),
+            )
 
     async def claim_monitoring_pr(
         self,
@@ -772,6 +1138,59 @@ class WorkspaceRepository:
         workspace.events.extend(created)
         await self._session.flush()
         return created
+
+
+def _candidate_terminal_close_reason(status: WorkspaceStatus) -> str:
+    if status == WorkspaceStatus.failed:
+        return "WORKSPACE_FAILED"
+    if status == WorkspaceStatus.cancelled:
+        return "WORKSPACE_CANCELLED"
+    return f"WORKSPACE_{status.value.upper()}"
+
+
+def _sync_candidate_readiness(
+    candidate: MergeCandidate,
+    *,
+    workspace: Workspace,
+    attempt: TaskAttempt,
+) -> None:
+    workspace_status = WorkspaceStatus(workspace.status)
+    is_open = candidate.status == "open"
+    is_canonical = attempt.is_canonical_for_merge
+    is_completed = candidate.status == "merged" or workspace_status == WorkspaceStatus.completed
+    failed_or_cancelled = workspace_status in {
+        WorkspaceStatus.failed,
+        WorkspaceStatus.cancelled,
+    }
+    not_canonical = not is_canonical
+
+    candidate.completed = is_completed
+    candidate.failed_or_cancelled = failed_or_cancelled
+    candidate.not_canonical = not_canonical
+    candidate.waiting_for_monitor = is_open and workspace_status == WorkspaceStatus.pushing
+    candidate.manual_merge_required = (
+        is_open
+        and workspace_status == WorkspaceStatus.monitoring_pr
+        and not workspace.auto_merge
+        and is_canonical
+        and not candidate.stale
+    )
+    candidate.ready = (
+        is_open
+        and workspace_status == WorkspaceStatus.monitoring_pr
+        and workspace.auto_merge
+        and is_canonical
+        and not candidate.stale
+    )
+    if not is_open:
+        candidate.ready = False
+        candidate.waiting_for_monitor = False
+        candidate.manual_merge_required = False
+    if is_completed:
+        candidate.ready = False
+        candidate.waiting_for_monitor = False
+        candidate.manual_merge_required = False
+        candidate.failed_or_cancelled = False
 
 
 def _schedulable_workspace_ids_stmt(

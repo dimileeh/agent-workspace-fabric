@@ -16,13 +16,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.deps import get_db_session
 from awf.api.schemas import (
     MergeBlockerReason,
+    MergeCandidateReadinessResponse,
     MergeQueueItemResponse,
     MergeQueueListResponse,
     WorkspaceEventResponse,
 )
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import Workspace, WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.models import MergeCandidate, Workspace, WorkspaceEvent
+from awf.db.repositories import MergeCandidateRepository, WorkspaceRepository
 
 router = APIRouter(prefix="/v1/merge-queue", tags=["merge-queue"])
 
@@ -56,7 +57,7 @@ async def list_merge_queue(
                 "message": "Invalid merge queue cursor.",
             },
         ) from exc
-    rows = await WorkspaceRepository(session).list_merge_queue(
+    candidate_rows = await MergeCandidateRepository(session).list_queue(
         repo_url=repo_url,
         base_branch=base_branch,
         status=workspace_status,
@@ -64,21 +65,80 @@ async def list_merge_queue(
         before_workspace_id=decoded_cursor.workspace_id if decoded_cursor is not None else None,
         limit=limit + 1,
     )
+    legacy_rows = await WorkspaceRepository(session).list_merge_queue_without_candidates(
+        repo_url=repo_url,
+        base_branch=base_branch,
+        status=workspace_status,
+        before_updated_at=decoded_cursor.updated_at if decoded_cursor is not None else None,
+        before_workspace_id=decoded_cursor.workspace_id if decoded_cursor is not None else None,
+        limit=limit + 1,
+    )
+    queue_rows: list[MergeCandidate | Workspace] = [*candidate_rows, *legacy_rows]
+    rows = sorted(
+        queue_rows,
+        key=lambda row: (_row_workspace(row).updated_at, _row_workspace(row).id),
+        reverse=True,
+    )
     page_rows = rows[:limit]
     has_more = len(rows) > limit
     return MergeQueueListResponse(
-        items=[_item_from_workspace(row) for row in page_rows],
-        next_cursor=_encode_cursor(page_rows[-1]) if has_more and page_rows else None,
+        items=[_item_from_row(row) for row in page_rows],
+        next_cursor=_encode_cursor(_row_workspace(page_rows[-1]))
+        if has_more and page_rows
+        else None,
         has_more=has_more,
     )
 
 
-def _item_from_workspace(workspace: Workspace) -> MergeQueueItemResponse:
+def _item_from_row(row: MergeCandidate | Workspace) -> MergeQueueItemResponse:
+    if isinstance(row, MergeCandidate):
+        return _item_from_candidate(row)
+    return _item_from_legacy_workspace(row)
+
+
+def _item_from_candidate(candidate: MergeCandidate) -> MergeQueueItemResponse:
+    workspace = candidate.workspace
+    latest_event = _latest_event(workspace.events)
+    return MergeQueueItemResponse(
+        candidate_id=candidate.id,
+        candidate_status=candidate.status,
+        close_reason=candidate.close_reason,
+        attempt_id=candidate.attempt_id,
+        task_id=candidate.task_id,
+        workspace_id=workspace.id,
+        title=workspace.task_title,
+        repo_url=workspace.repo_url,
+        base_branch=workspace.branch_base,
+        branch_name=workspace.branch_name,
+        pr_url=candidate.pr_url,
+        status=WorkspaceStatus(workspace.status),
+        auto_merge=workspace.auto_merge,
+        task_class=workspace.task_class,
+        owned_paths=list(workspace.owned_paths),
+        created_at=workspace.created_at,
+        updated_at=workspace.updated_at,
+        last_event=(
+            WorkspaceEventResponse.model_validate(latest_event)
+            if latest_event is not None
+            else None
+        ),
+        merge_blocker_reason=_merge_blocker_reason(candidate),
+        readiness=_readiness_from_candidate(candidate),
+        canonical=candidate.attempt.is_canonical_for_merge,
+    )
+
+
+def _item_from_legacy_workspace(workspace: Workspace) -> MergeQueueItemResponse:
     latest_event = _latest_event(workspace.events)
     pr_url = workspace.pr_url
     if pr_url is None:  # pragma: no cover - filtered at repository boundary
-        raise ValueError("merge queue rows must have a PR URL")
+        raise ValueError("legacy merge queue rows must have a PR URL")
     return MergeQueueItemResponse(
+        candidate_id=None,
+        candidate_status=None,
+        close_reason=None,
+        attempt_id=None,
+        task_id=workspace.task_external_id or workspace.id,
         workspace_id=workspace.id,
         title=workspace.task_title,
         repo_url=workspace.repo_url,
@@ -96,15 +156,47 @@ def _item_from_workspace(workspace: Workspace) -> MergeQueueItemResponse:
             if latest_event is not None
             else None
         ),
-        merge_blocker_reason=_merge_blocker_reason(workspace),
+        merge_blocker_reason=_merge_blocker_reason_from_workspace(workspace),
+        readiness=None,
+        canonical=False,
     )
+
+
+def _row_workspace(row: MergeCandidate | Workspace) -> Workspace:
+    if isinstance(row, MergeCandidate):
+        return row.workspace
+    return row
 
 
 def _latest_event(events: list[WorkspaceEvent]) -> WorkspaceEvent | None:
     return events[-1] if events else None
 
 
-def _merge_blocker_reason(workspace: Workspace) -> MergeBlockerReason:
+def _merge_blocker_reason(candidate: MergeCandidate) -> MergeBlockerReason:
+    if candidate.completed:
+        return "completed"
+    if candidate.failed_or_cancelled:
+        return "failed_or_cancelled"
+    if candidate.not_canonical:
+        return "not_canonical"
+    if candidate.stale:
+        return "stale"
+    if candidate.manual_merge_required:
+        return "manual_merge_required"
+    if candidate.waiting_for_monitor:
+        return "waiting_for_monitor"
+    if candidate.ready:
+        return "ready_to_merge_or_waiting_for_github"
+    workspace = candidate.workspace
+    workspace_status = WorkspaceStatus(workspace.status)
+    if workspace_status == WorkspaceStatus.completed:
+        return "completed"
+    if workspace_status in {WorkspaceStatus.failed, WorkspaceStatus.cancelled}:
+        return "failed_or_cancelled"
+    return "workspace_not_terminal"
+
+
+def _merge_blocker_reason_from_workspace(workspace: Workspace) -> MergeBlockerReason:
     workspace_status = WorkspaceStatus(workspace.status)
     if workspace_status == WorkspaceStatus.monitoring_pr:
         if workspace.auto_merge:
@@ -117,6 +209,18 @@ def _merge_blocker_reason(workspace: Workspace) -> MergeBlockerReason:
     if workspace_status in {WorkspaceStatus.failed, WorkspaceStatus.cancelled}:
         return "failed_or_cancelled"
     return "workspace_not_terminal"
+
+
+def _readiness_from_candidate(candidate: MergeCandidate) -> MergeCandidateReadinessResponse:
+    return MergeCandidateReadinessResponse(
+        ready=candidate.ready,
+        manual_merge_required=candidate.manual_merge_required,
+        waiting_for_monitor=candidate.waiting_for_monitor,
+        failed_or_cancelled=candidate.failed_or_cancelled,
+        completed=candidate.completed,
+        not_canonical=candidate.not_canonical,
+        stale=candidate.stale,
+    )
 
 
 def _encode_cursor(workspace: Workspace) -> str:

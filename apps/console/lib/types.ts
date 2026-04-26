@@ -54,9 +54,28 @@ export type MergeBlockerReason =
   | "waiting_for_monitor"
   | "workspace_not_terminal"
   | "completed"
-  | "failed_or_cancelled";
+  | "failed_or_cancelled"
+  | "not_canonical"
+  | "stale";
+
+export type MergeCandidateStatus = "open" | "merged" | "closed";
+
+export interface MergeCandidateReadiness {
+  ready: boolean;
+  manual_merge_required: boolean;
+  waiting_for_monitor: boolean;
+  failed_or_cancelled: boolean;
+  completed: boolean;
+  not_canonical: boolean;
+  stale: boolean;
+}
 
 export interface MergeQueueItem {
+  candidate_id: string | null;
+  candidate_status: MergeCandidateStatus | null;
+  close_reason: string | null;
+  attempt_id: string | null;
+  task_id: string;
   workspace_id: string;
   title: string;
   repo_url: string;
@@ -71,6 +90,8 @@ export interface MergeQueueItem {
   updated_at: string;
   last_event: WorkspaceEvent | null;
   merge_blocker_reason: MergeBlockerReason;
+  readiness: MergeCandidateReadiness | null;
+  canonical: boolean;
 }
 
 export interface Workspace {
@@ -293,4 +314,3 @@ export interface FailureSummaryResponse {
   taxonomy: FailureTaxonomyCount[];
   latest_examples: FailureExample[];
 }
-

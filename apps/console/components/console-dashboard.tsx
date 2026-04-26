@@ -1219,7 +1219,7 @@ function MergeQueuePanel({
           ) : null}
           <div className="grid max-h-[460px] gap-2 overflow-auto pr-1">
             {items.map((item, index) => (
-              <MergeQueueRow key={item.workspace_id} item={item} position={index + 1} />
+              <MergeQueueRow key={item.candidate_id ?? item.workspace_id} item={item} position={index + 1} />
             ))}
           </div>
         </div>
@@ -1246,9 +1246,13 @@ function MergeQueueRow({ item, position }: { item: MergeQueueItem; position: num
           <SmallExternalAnchor href={item.pr_url} label="PR" />
         </div>
       </div>
-      <div className="grid gap-1 sm:grid-cols-2">
+      <div className="grid gap-1 sm:grid-cols-3">
+        <QueueDatum label="Candidate" value={item.candidate_id ? compactId(item.candidate_id, 10) : "legacy"} mono />
+        <QueueDatum label="Attempt" value={item.attempt_id ? compactId(item.attempt_id, 10) : "none"} mono />
+        <QueueDatum label="Canonical" value={item.canonical ? "canonical" : "superseded"} tone={item.canonical ? statusTone("completed") : statusTone("failed")} />
+        <QueueDatum label="Candidate status" value={item.candidate_status ?? "unknown"} mono />
+        <QueueDatum label="Readiness" value={readinessSummary(item)} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
         <QueueDatum label="Mode" value={item.auto_merge ? "auto-merge" : "manual"} />
-        <QueueDatum label="Task class" value={item.task_class ?? "unclassified"} />
         <QueueDatum label="Last event" value={lastEventReason(item.last_event)} mono />
         <QueueDatum label="Blocker" value={item.merge_blocker_reason} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
       </div>
@@ -1295,14 +1299,45 @@ function mergeBlockerTone(reason: MergeQueueItem["merge_blocker_reason"]): Retur
       return "good";
     case "manual_merge_required":
     case "waiting_for_monitor":
+    case "stale":
       return "warn";
     case "failed_or_cancelled":
+    case "not_canonical":
       return "bad";
     case "workspace_not_terminal":
       return "info";
     default:
       return "info";
   }
+}
+
+function readinessSummary(item: MergeQueueItem): string {
+  const readiness = item.readiness;
+  if (!readiness) {
+    return "legacy";
+  }
+  if (readiness.ready) {
+    return "ready";
+  }
+  if (readiness.completed) {
+    return "completed";
+  }
+  if (readiness.manual_merge_required) {
+    return "manual";
+  }
+  if (readiness.waiting_for_monitor) {
+    return "waiting";
+  }
+  if (readiness.failed_or_cancelled) {
+    return "failed_or_cancelled";
+  }
+  if (readiness.not_canonical) {
+    return "not_canonical";
+  }
+  if (readiness.stale) {
+    return "stale";
+  }
+  return "blocked";
 }
 
 function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
