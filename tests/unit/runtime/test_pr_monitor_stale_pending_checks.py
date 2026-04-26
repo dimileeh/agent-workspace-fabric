@@ -15,6 +15,8 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.runtime.pr_monitor import CheckTiming
+from awf.runtime.pr_monitor_runner import _is_pending_check
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -79,6 +81,18 @@ async def _pending_check_events(
 
 
 class TestStalePendingCheckWarnings:
+    @pytest.mark.unit
+    def test_unknown_nonterminal_status_is_pending(self) -> None:
+        check = CheckTiming(name="Future CI", status="AWAITING_RUN", conclusion=None)
+
+        assert _is_pending_check(check)
+
+    @pytest.mark.unit
+    def test_terminal_conclusion_overrides_unknown_status(self) -> None:
+        check = CheckTiming(name="Future CI", status="AWAITING_RUN", conclusion="SUCCESS")
+
+        assert not _is_pending_check(check)
+
     @pytest.mark.unit
     async def test_no_event_before_threshold(
         self,

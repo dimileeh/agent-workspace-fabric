@@ -1635,7 +1635,10 @@ def _is_pending_check(check: CheckTiming) -> bool:
         return False
     if conclusion in _TERMINAL_CHECK_CONCLUSIONS:
         return False
-    return False
+    # Preserve stale-check observability for future GitHub/provider states:
+    # unknown populated values are non-terminal until an explicit terminal
+    # status or conclusion says otherwise.
+    return bool(status or conclusion)
 
 
 def _normalized_check_value(value: str | None) -> str:
