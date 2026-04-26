@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass, field
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 
@@ -125,6 +126,18 @@ class CheckFailure:
 
 
 @dataclass(frozen=True)
+class CheckTiming:
+    """Timing and link metadata for an individual GitHub check/status context."""
+
+    name: str
+    status: str | None = None
+    conclusion: str | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    details_url: str | None = None
+
+
+@dataclass(frozen=True)
 class PRStatus:
     """Snapshot of a single PR's state as seen by the runner.
 
@@ -148,6 +161,7 @@ class PRStatus:
     shipped PR #335 / #336 as "ready to merge" when they were BEHIND)."""
 
     ci_failures: tuple[CheckFailure, ...] = ()
+    checks: tuple[CheckTiming, ...] = ()
     closed: bool = False
     merged: bool = False
 
@@ -200,6 +214,11 @@ class MonitorConfig:
     """Final quiet-period wait before an auto-merge. Review apps often
     post comments shortly after checks first turn green; merging on the
     first green snapshot can race those reviewers."""
+
+    stale_pending_check_warning_seconds: float = 900.0
+    """Warn operators when an individual pending/in-progress check has
+    exceeded this age. This is observability only; pending checks still
+    block merge through the ordinary WaitForCI path."""
 
 
 # ── Actions — the vocabulary decide() returns to the runner ────────────────

@@ -60,6 +60,13 @@ class OwnedPathConflict:
     requested_path: str
 
 
+@dataclass(frozen=True)
+class WorkspaceEventCreate:
+    event_type: str
+    reason_code: str | None = None
+    payload: dict[str, Any] | None = None
+
+
 def _resolve_session_dialect_name(
     session: AsyncSession,
     dialect_name: str | None,
@@ -685,18 +692,39 @@ class WorkspaceRepository:
         reason_code: str | None = None,
         payload: dict[str, Any] | None = None,
     ) -> WorkspaceEvent:
-        event = WorkspaceEvent(
-            id=new_event_id(),
-            workspace_id=workspace.id,
-            event_type=event_type,
-            old_state=workspace.status,
-            new_state=workspace.status,
-            reason_code=reason_code,
-            payload=payload,
+        events = await self.add_events(
+            workspace,
+            events=[
+                WorkspaceEventCreate(
+                    event_type=event_type,
+                    reason_code=reason_code,
+                    payload=payload,
+                )
+            ],
         )
-        workspace.events.append(event)
+        return events[0]
+
+    async def add_events(
+        self,
+        workspace: Workspace,
+        *,
+        events: builtins.list[WorkspaceEventCreate],
+    ) -> builtins.list[WorkspaceEvent]:
+        created = [
+            WorkspaceEvent(
+                id=new_event_id(),
+                workspace_id=workspace.id,
+                event_type=event.event_type,
+                old_state=workspace.status,
+                new_state=workspace.status,
+                reason_code=event.reason_code,
+                payload=event.payload,
+            )
+            for event in events
+        ]
+        workspace.events.extend(created)
         await self._session.flush()
-        return event
+        return created
 
 
 def _schedulable_workspace_ids_stmt(
