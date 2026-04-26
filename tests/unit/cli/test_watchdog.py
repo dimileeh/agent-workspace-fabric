@@ -27,13 +27,19 @@ from pathlib import Path
 from awf.cli.watchdog import WatchdogConfig, run_one_scan
 
 
-def _canned_gh_output(*, repo: str, prs: list[tuple[int, str]]) -> str:
-    """Shape mirrors ``gh pr list --json number,headRefName,baseRefName``."""
+def _canned_gh_output(
+    *,
+    repo: str,
+    prs: list[tuple[int, str]],
+    head_oid: str = "abc1234567890def",
+) -> str:
+    """Shape mirrors ``gh pr list --json number,headRefName,baseRefName,headRefOid``."""
     return json.dumps(
         [
             {
                 "number": pr[0],
                 "headRefName": pr[1],
+                "headRefOid": head_oid,
                 "baseRefName": "development",
                 "repository": {"nameWithOwner": repo},
             }
@@ -268,3 +274,112 @@ class TestWatchdogConfig:
             "dimileeh/aira-web",
             "dimileeh/aira-agent-workspace-fabric",
         ]
+
+
+class TestWatchdogSkipNotifyHuman:
+    """Integration: ``run_one_scan`` must consult the defer-signal
+    artifact and skip respawn when the previous monitor exited via
+    ``NotifyHuman`` and no new commits have arrived. Without this, the
+    watchdog re-spawns the same monitor every poll for a release PR
+    that's intentionally awaiting human merge."""
+
+    def test_main_loop_skips_notify_human_pr_with_same_sha(
+        self, tmp_path: Path
+    ) -> None:
+        head = "deadbeefcafe1234"
+        gh = _FakeGhLister(
+            per_repo={
+                "dimileeh/aira-agent": _canned_gh_output(
+                    repo="dimileeh/aira-agent",
+                    prs=[(355, "awf/release-foo")],
+                    head_oid=head,
+                ),
+            }
+        )
+        spawn = _FakeSpawn()
+        # Drop a NotifyHuman artifact for PR 355 with matching head_sha.
+        artifacts_root = tmp_path / "artifacts"
+        artifacts_root.mkdir()
+        (artifacts_root / "ws_abc.defer-signal.json").write_text(
+            json.dumps(
+                {
+                    "workspace_id": "ws_abc",
+                    "repo": "dimileeh/aira-agent",
+                    "pr_number": 355,
+                    "terminal_action": "NotifyHuman",
+                    "head_sha": head,
+                    "merged": False,
+                    "deferred_bot_items": [],
+                    "deferred_human_items": [],
+                }
+            )
+        )
+        run_one_scan(
+            config=_cfg(["dimileeh/aira-agent"], tmp_path),
+            gh_lister=gh,
+            process_lister=lambda: "",
+            spawn_attach=spawn,
+        )
+        # The whole point: no respawn for an intentionally-deferred PR.
+        assert spawn.calls == []
+
+    def test_main_loop_respawns_notify_human_pr_when_sha_advanced(
+        self, tmp_path: Path
+    ) -> None:
+        """Same artifact, but the PR has new commits → must re-engage."""
+        gh = _FakeGhLister(
+            per_repo={
+                "dimileeh/aira-agent": _canned_gh_output(
+                    repo="dimileeh/aira-agent",
+                    prs=[(355, "awf/release-foo")],
+                    head_oid="newsha2222222222",
+                ),
+            }
+        )
+        spawn = _FakeSpawn()
+        artifacts_root = tmp_path / "artifacts"
+        artifacts_root.mkdir()
+        (artifacts_root / "ws_abc.defer-signal.json").write_text(
+            json.dumps(
+                {
+                    "workspace_id": "ws_abc",
+                    "repo": "dimileeh/aira-agent",
+                    "pr_number": 355,
+                    "terminal_action": "NotifyHuman",
+                    "head_sha": "oldsha0000000000",
+                    "merged": False,
+                    "deferred_bot_items": [],
+                    "deferred_human_items": [],
+                }
+            )
+        )
+        run_one_scan(
+            config=_cfg(["dimileeh/aira-agent"], tmp_path),
+            gh_lister=gh,
+            process_lister=lambda: "",
+            spawn_attach=spawn,
+        )
+        assert len(spawn.calls) == 1
+        assert spawn.calls[0]["pr_number"] == 355
+
+    def test_main_loop_respawns_when_no_artifact_exists(
+        self, tmp_path: Path
+    ) -> None:
+        """Crash recovery — if no artifact was ever written for this PR,
+        respawn (the watchdog's primary purpose)."""
+        gh = _FakeGhLister(
+            per_repo={
+                "dimileeh/aira-agent": _canned_gh_output(
+                    repo="dimileeh/aira-agent",
+                    prs=[(355, "awf/release-foo")],
+                ),
+            }
+        )
+        spawn = _FakeSpawn()
+        run_one_scan(
+            config=_cfg(["dimileeh/aira-agent"], tmp_path),
+            gh_lister=gh,
+            process_lister=lambda: "",
+            spawn_attach=spawn,
+        )
+        assert len(spawn.calls) == 1
