@@ -26,6 +26,7 @@ from awf.api.routes import (
     events,
     health,
     logs,
+    metrics,
     operations,
     runtime,
     tasks,
@@ -111,6 +112,7 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     app.include_router(runtime.router)
     app.include_router(artifacts.router)
     app.include_router(logs.router)
+    app.include_router(metrics.router)
     app.include_router(operations.router)
     app.include_router(controls.router)
     app.include_router(ws.router)

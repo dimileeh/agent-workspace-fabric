@@ -249,7 +249,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
 
 
 @pytest.mark.unit
-def test_build_worker_runtime_uses_postgres_advisory_merge_coordinator_for_postgres(
+def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_for_postgres(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
@@ -308,13 +308,14 @@ def test_build_worker_runtime_uses_postgres_advisory_merge_coordinator_for_postg
     )
 
     worker_mod.build_worker_runtime(settings)
+    assert created["coordinator_engine"] is engine
+
     created["pr_monitor_factory"](
         object(),
         WorkspaceProfile(name="default"),
         SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
     )
 
-    assert created["coordinator_engine"] is engine
     assert isinstance(
         created["feature_monitor_kwargs"]["merge_coordinator"],
         _PostgresCoordinator,
