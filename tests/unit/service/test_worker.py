@@ -154,6 +154,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _WorkspaceExecutor)
     monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
     monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(
+        worker_mod,
+        "_apply_service_git_environment",
+        lambda env: created.setdefault("applied_git_env", env),
+    )
 
     def _build_feature_monitor(**kwargs: object) -> object:
         created["feature_monitor_kwargs"] = kwargs
@@ -177,6 +182,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["pr_creator_runner"] is created["executor_runner"]
     assert created["github_runner"] is created["executor_runner"]
     assert created["git_env"] == {"HOME": str(Path(settings.host_home).resolve())}
+    assert created["applied_git_env"] == created["git_env"]
     assert created["executor_compose"] is created["stack_compose"]
     assert created["executor_log_store"] is created["validation_log_store"]
     assert created["log_root"] == work_dir / "logs"

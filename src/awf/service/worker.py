@@ -46,7 +46,9 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     work_dir = Path(settings.work_dir).expanduser().resolve()
     host_home = Path(settings.host_home).expanduser().resolve()
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
-    git = GitManager(work_dir / "git", env=_service_git_environment(host_home))
+    git_env = _service_git_environment(host_home)
+    _apply_service_git_environment(git_env)
+    git = GitManager(work_dir / "git", env=git_env)
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runner = AsyncioSubprocessRunner()
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
@@ -157,6 +159,12 @@ def _service_git_environment(host_home: Path) -> dict[str, str]:
     if len(ssh_command) > 1:
         env["GIT_SSH_COMMAND"] = " ".join(shlex.quote(part) for part in ssh_command)
     return env
+
+
+def _apply_service_git_environment(env: dict[str, str]) -> None:
+    """Apply host git/SSH settings to subprocesses launched by the worker."""
+
+    os.environ.update(env)
 
 
 async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:
