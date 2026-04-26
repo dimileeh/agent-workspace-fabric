@@ -235,6 +235,7 @@ class AbortReason(StrEnum):
     pr_closed_externally = "pr_closed_externally"
     no_progress_on_comments = "no_progress_on_comments"
     merge_conflict_unresolvable = "merge_conflict_unresolvable"
+    stale = "stale"
     """GitHub reports mergeStateStatus == DIRTY after every other gate is
     clean — git can't auto-resolve and the CLI already had its chance."""
 
@@ -284,6 +285,7 @@ class NotifyHuman:
     merged, closed, or fails; human-attention comments are just status
     notifications while the workspace remains alive.
     """
+    message: str | None = None
 
 
 @dataclass(frozen=True)

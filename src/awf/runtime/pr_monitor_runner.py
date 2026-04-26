@@ -536,6 +536,58 @@ class PullRequestMonitorRunner:
             return False
 
         if isinstance(action, Merge):
+            from awf.runtime.merge_eligibility import compute_stale_reason
+
+            ws = await self._load_workspace(workspace_id)
+            stale_reason, req_action = compute_stale_reason(ws)
+
+            if stale_reason is not None:
+                if not ws.auto_merge:
+                    return await self._execute(
+                        action=Abort(AbortReason.stale),
+                        workspace_id=workspace_id,
+                        repo_url=repo_url,
+                        repo=repo,
+                        pr_number=pr_number,
+                        status=status,
+                        state=state,
+                        base_branch=base_branch,
+                        remote_branch=remote_branch,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        monitor_log=monitor_log,
+                    )
+                else:
+                    has_failed_rebase = any(op.type == "rebase" and op.status == "failed" for op in ws.operations)
+                    if req_action == "rebase" and has_failed_rebase:
+                        return await self._execute(
+                            action=NotifyHuman(message=f"Agent could not resolve {stale_reason}. Rebase conflicted. Manual intervention required."),
+                            workspace_id=workspace_id,
+                            repo_url=repo_url,
+                            repo=repo,
+                            pr_number=pr_number,
+                            status=status,
+                            state=state,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            monitor_log=monitor_log,
+                        )
+                    else:
+                        async with self._deps.session_factory() as s:
+                            from awf.db.repositories import OperationRepository, WorkspaceRepository
+                            _ws = await WorkspaceRepository(s).get(workspace_id)
+                            if _ws is not None:
+                                await OperationRepository(s).create(
+                                    workspace_id=workspace_id,
+                                    operation_type=req_action or "validate",
+                                    payload={"reason": stale_reason},
+                                )
+                                await WorkspaceRepository(s).transition(_ws, to=WorkspaceStatus.ready, reason_code="RECOVERY_DISPATCH")
+                                await s.commit()
+                        return True
+
             grace_wait_seconds = _initial_review_grace_wait_seconds(
                 state,
                 pr_number=pr_number,
@@ -705,6 +757,7 @@ class PullRequestMonitorRunner:
                 pr_number=pr_number,
                 status=status,
                 state=state,
+                blocker_reason=action.message,
             )
             await self._deps.sleep(self._config.poll_interval_seconds)
             return False

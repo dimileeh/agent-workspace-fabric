@@ -241,6 +241,12 @@ class Workspace(Base):
         lazy="selectin",
         order_by="MergeCandidate.updated_at",
     )
+    validation_runs: Mapped[list[ValidationRun]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="raise",
+        order_by="ValidationRun.started_at",
+    )
 
 
 class Task(Base):
@@ -355,6 +361,11 @@ class TaskAttempt(Base):
         lazy="selectin",
         uselist=False,
     )
+    validation_runs: Mapped[list[ValidationRun]] = relationship(
+        back_populates="attempt",
+        lazy="raise",
+        order_by="ValidationRun.started_at",
+    )
 
 
 class MergeCandidate(Base):
@@ -400,6 +411,7 @@ class MergeCandidate(Base):
     completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     not_canonical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stale_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
@@ -413,6 +425,64 @@ class MergeCandidate(Base):
     task: Mapped[Task] = relationship(back_populates="merge_candidates")
     attempt: Mapped[TaskAttempt] = relationship(back_populates="merge_candidate")
     workspace: Mapped[Workspace] = relationship(back_populates="merge_candidates")
+
+
+class ValidationRun(Base):
+    """Durable validation provenance for one configured command execution pass."""
+
+    __tablename__ = "validation_runs"
+    __table_args__ = (
+        Index("ix_validation_runs_workspace_started", "workspace_id", "started_at"),
+        Index("ix_validation_runs_workspace_finished", "workspace_id", "finished_at"),
+        Index("ix_validation_runs_attempt", "attempt_id"),
+        Index("ix_validation_runs_status", "status"),
+        Index("ix_validation_runs_tier", "tier"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    attempt_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=True
+    )
+
+    tier: Mapped[int] = mapped_column(Integer, nullable=False)
+    command_set_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    commands: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSON, nullable=False, default=list, server_default=text("'[]'")
+    )
+
+    base_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    target_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    target_head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    started_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    log_stream_refs: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_now,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        default=_now,
+        onupdate=_now,
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="validation_runs")
+    attempt: Mapped[TaskAttempt | None] = relationship(back_populates="validation_runs")
 
 
 class Operation(Base):
