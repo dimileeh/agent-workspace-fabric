@@ -135,6 +135,26 @@ async def test_plan_excludes_active_and_destroying_workspaces(
 
 
 @pytest.mark.unit
+async def test_plan_reports_requested_statuses_when_no_statuses_are_eligible(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        include_statuses=[WorkspaceStatus.running],
+        exclude_statuses=[WorkspaceStatus.completed],
+        now=now,
+    )
+
+    assert plan.candidates == []
+    assert plan.to_dict()["include_statuses"] == [WorkspaceStatus.running.value]
+    assert plan.to_dict()["exclude_statuses"] == [WorkspaceStatus.completed.value]
+
+
+@pytest.mark.unit
 async def test_plan_applies_min_age_filter_and_limit_oldest_first(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

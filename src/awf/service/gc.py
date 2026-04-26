@@ -223,13 +223,16 @@ async def plan_terminal_workspace_gc(
     )
     eligible_statuses -= excluded_statuses
     eligible_statuses -= set(PROTECTED_WORKSPACE_GC_STATUSES)
+    plan_include_statuses = (
+        requested_statuses if requested_statuses is not None else eligible_statuses
+    )
 
     if not eligible_statuses:
         return WorkspaceGCPlan(
             work_dir=normalized_work_dir,
             min_age_hours=min_age_hours,
             cutoff_at=cutoff_at,
-            include_statuses=(),
+            include_statuses=tuple(sorted(plan_include_statuses)),
             exclude_statuses=tuple(sorted(excluded_statuses)),
             candidates=[],
         )
@@ -257,7 +260,7 @@ async def plan_terminal_workspace_gc(
         work_dir=normalized_work_dir,
         min_age_hours=min_age_hours,
         cutoff_at=cutoff_at,
-        include_statuses=tuple(sorted(eligible_statuses)),
+        include_statuses=tuple(sorted(plan_include_statuses)),
         exclude_statuses=tuple(sorted(excluded_statuses)),
         candidates=candidates,
     )
