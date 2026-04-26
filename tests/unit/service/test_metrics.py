@@ -154,7 +154,7 @@ async def test_empty_db_returns_zero_workspace_reliability_summary(
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
 
-    summary = await summarize_workspace_reliability(session_factory, now=now)
+    summary = await summarize_workspace_reliability(session_factory, settings=Settings(), now=now)
 
     assert summary.generated_at == now
     assert summary.window_start == now - timedelta(hours=24)
@@ -199,7 +199,7 @@ async def test_mixed_statuses_and_failure_reasons_roll_up_counts(
         failure_reason=FailureReason.cleanup_failure,
     )
 
-    summary = await summarize_workspace_reliability(session_factory, now=now)
+    summary = await summarize_workspace_reliability(session_factory, settings=Settings(), now=now)
 
     expected_status_counts = _zero_status_counts()
     expected_status_counts.update(
@@ -247,7 +247,7 @@ async def test_since_hours_filters_by_workspace_updated_at(
         failure_reason=FailureReason.validation_failure,
     )
 
-    summary = await summarize_workspace_reliability(session_factory, since_hours=6, now=now)
+    summary = await summarize_workspace_reliability(session_factory, settings=Settings(), since_hours=6, now=now)
 
     expected_status_counts = _zero_status_counts()
     expected_status_counts[WorkspaceStatus.failed.value] = 1
@@ -283,7 +283,7 @@ async def test_current_counts_include_workspaces_outside_updated_at_window(
         updated_at=now - timedelta(hours=30),
     )
 
-    summary = await summarize_workspace_reliability(session_factory, now=now)
+    summary = await summarize_workspace_reliability(session_factory, settings=Settings(), now=now)
 
     assert summary.status_counts == _zero_status_counts()
     assert summary.active_count == 2
@@ -837,3 +837,99 @@ async def test_resource_saturation_runs_fallback_disk_check_in_thread(
     assert args == (settings.work_dir,)
     assert kwargs["min_free_bytes"] == settings.min_free_disk_bytes
     assert kwargs["disk_usage"] is fake_disk_usage
+
+
+@pytest.mark.unit
+async def test_workspace_reliability_reports_stuck_count(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_workspace_reliability
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    settings = Settings(_env_file=None, agent_wall_timeout_seconds=7200)
+
+    # 1. Active, fresh -> Not stuck
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        created_at=now - timedelta(hours=1),
+    )
+    # 2. Active, older than 2x SLA (4 hours), no reason -> Stuck
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        updated_at=now - timedelta(hours=5),
+        created_at=now - timedelta(hours=5),
+    )
+    # 3. Active, older than 2x SLA, has reason -> Not stuck (already classified)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.pushing,
+        updated_at=now - timedelta(hours=5),
+        created_at=now - timedelta(hours=5),
+        failure_reason="network_hiccup",
+    )
+    # 4. Terminal, older than 2x SLA -> Not active, so not stuck
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=5),
+        created_at=now - timedelta(hours=5),
+    )
+
+    summary = await summarize_workspace_reliability(session_factory, settings=settings, now=now)
+
+    assert summary.stuck_count == 1
+    assert summary.active_count == 3
+
+
+@pytest.mark.unit
+async def test_workspace_reliability_reports_cleanup_failure_reason_code_coverage(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_workspace_reliability
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    settings = Settings(_env_file=None)
+
+    # 1. Failed with actionable reason in window
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        failure_reason=FailureReason.agent_failure,
+    )
+    # 2. Destroying with actionable reason in window
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.destroying,
+        updated_at=now,
+        failure_reason=FailureReason.cleanup_failure,
+    )
+    # 3. Failed with unknown reason in window
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        failure_reason="unknown_error_code",
+    )
+    # 4. Cancelled with NO reason in window
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.cancelled,
+        updated_at=now,
+    )
+    # 5. Failed outside window -> should not be counted
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=48),
+        failure_reason=FailureReason.agent_failure,
+    )
+
+    summary = await summarize_workspace_reliability(session_factory, settings=settings, now=now)
+
+    assert summary.actionable_reason_count == 2
+    assert summary.unactionable_reason_count == 2
+

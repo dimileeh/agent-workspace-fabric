@@ -62,6 +62,9 @@ async def test_workspace_summary_returns_zero_counts_for_empty_db(
     assert body["cancelled_count"] == 0
     assert body["destroyed_count"] == 0
     assert body["cleanup_failure_count"] == 0
+    assert body["stuck_count"] == 0
+    assert body["actionable_reason_count"] == 0
+    assert body["unactionable_reason_count"] == 0
 
 
 @pytest.mark.unit
@@ -122,6 +125,9 @@ async def test_workspace_summary_rolls_up_mixed_statuses_and_failure_reasons(
     assert body["cancelled_count"] == 1
     assert body["destroyed_count"] == 1
     assert body["cleanup_failure_count"] == 1
+    assert body["stuck_count"] == 0
+    assert body["actionable_reason_count"] == 2
+    assert body["unactionable_reason_count"] == 2
 
 
 @pytest.mark.unit

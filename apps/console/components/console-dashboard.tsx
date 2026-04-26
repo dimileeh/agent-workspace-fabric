@@ -55,6 +55,7 @@ import type {
   WorkspaceRuntime,
   WorkspaceRetryResponse,
   WorkspaceStatus,
+  WorkspaceReliabilitySummary,
 } from "@/lib/types";
 
 const pollMs = Number(process.env.NEXT_PUBLIC_AWF_CONSOLE_POLL_MS || "5000");
@@ -126,6 +127,8 @@ export function ConsoleDashboard() {
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [resourceSaturation, setResourceSaturation] = useState<ResourceSaturationSummary | null>(null);
   const [resourceError, setResourceError] = useState<string | null>(null);
+  const [workspaceSummary, setWorkspaceSummary] = useState<WorkspaceReliabilitySummary | null>(null);
+  const [workspaceSummaryError, setWorkspaceSummaryError] = useState<string | null>(null);
   const [mergeQueue, setMergeQueue] = useState<MergeQueueItem[]>([]);
   const [mergeQueueHasMore, setMergeQueueHasMore] = useState(false);
   const [mergeQueueStatus, setMergeQueueStatus] = useState<MergeQueueStatus>("loading");
@@ -182,6 +185,16 @@ export function ConsoleDashboard() {
     }
     setResourceError(null);
     setResourceSaturation(result.data);
+  }, []);
+
+  const loadWorkspaceSummary = useCallback(async () => {
+    const result = await apiGet<WorkspaceReliabilitySummary>("/api/awf/metrics/workspaces/summary");
+    if (!result.ok) {
+      setWorkspaceSummaryError(result.message);
+      return;
+    }
+    setWorkspaceSummaryError(null);
+    setWorkspaceSummary(result.data);
   }, []);
 
   const loadMergeQueue = useCallback(async () => {
@@ -268,8 +281,8 @@ export function ConsoleDashboard() {
       newWorkspaceId: result.data.new_workspace_id,
       operationId: result.data.operation_id,
     });
-    await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary()]);
-  }, [loadMergeQueue, loadOverview, loadResourceSaturation, loadFailureSummary, selectedId]);
+    await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
+  }, [loadMergeQueue, loadOverview, loadResourceSaturation, loadFailureSummary, loadWorkspaceSummary, selectedId]);
 
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream) => {
@@ -343,6 +356,12 @@ export function ConsoleDashboard() {
     const interval = window.setInterval(() => void loadResourceSaturation(), pollMs);
     return () => window.clearInterval(interval);
   }, [loadResourceSaturation]);
+
+  useEffect(() => {
+    void loadWorkspaceSummary();
+    const interval = window.setInterval(() => void loadWorkspaceSummary(), pollMs);
+    return () => window.clearInterval(interval);
+  }, [loadWorkspaceSummary]);
 
   useEffect(() => {
     void loadMergeQueue();
@@ -557,6 +576,7 @@ export function ConsoleDashboard() {
             void loadOverview();
             void loadResourceSaturation();
             void loadMergeQueue();
+            void loadWorkspaceSummary();
           })
         }
         isPending={isPending}
@@ -600,7 +620,12 @@ export function ConsoleDashboard() {
         <section className="min-w-0">
           {error ? <ErrorBanner message={error} /> : null}
           <div className="grid gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
-            <ResourceCapacityPanel saturation={resourceSaturation} error={resourceError} />
+            <ResourceCapacityPanel 
+              saturation={resourceSaturation} 
+              error={resourceError} 
+              workspaceSummary={workspaceSummary}
+              workspaceSummaryError={workspaceSummaryError}
+            />
             <MergeQueuePanel
               items={mergeQueue}
               hasMore={mergeQueueHasMore}
@@ -1092,10 +1117,17 @@ function WorkspaceSummary({
 function ResourceCapacityPanel({
   saturation,
   error,
+  workspaceSummary,
+  workspaceSummaryError,
 }: {
   saturation: ResourceSaturationSummary | null;
   error: string | null;
+  workspaceSummary: WorkspaceReliabilitySummary | null;
+  workspaceSummaryError: string | null;
 }) {
+  const totalReason = workspaceSummary ? workspaceSummary.actionable_reason_count + workspaceSummary.unactionable_reason_count : 0;
+  const coverage = totalReason > 0 ? Math.round((workspaceSummary!.actionable_reason_count / totalReason) * 100) : 0;
+
   return (
     <Panel title="Resource / Capacity" icon={<Server size={16} aria-hidden />}>
       {!saturation ? (
@@ -1107,8 +1139,21 @@ function ResourceCapacityPanel({
               Showing last capacity snapshot. Refresh failed: {error}
             </div>
           ) : null}
+          {workspaceSummaryError ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Unable to load workspace reliability metrics: {workspaceSummaryError}
+            </div>
+          ) : null}
           <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
             <Fact label="Active" value={`${saturation.workspace_counts.active_total} workspaces`} />
+            <Fact 
+              label="Stuck" 
+              value={workspaceSummary ? `${workspaceSummary.stuck_count} workspaces` : "—"} 
+            />
+            <Fact 
+              label="Reason Coverage" 
+              value={workspaceSummary ? `${coverage}% (${totalReason} tracked)` : "—"} 
+            />
             <Fact
               label="Reserved CPU"
               value={`${formatScalar(saturation.reserved_resources.steady_cpu)} steady / ${formatScalar(
