@@ -204,7 +204,7 @@ def _extract_owner_name(repo: str) -> tuple[str, str]:
 
 def _latest_defer_signal_for_pr(
     artifacts_root: Path, *, owner: str, repo: str, pr_number: int
-) -> dict | None:
+) -> dict[str, object] | None:
     """Scan ``artifacts_root`` for the most-recent ``*.defer-signal.json``
     whose payload matches this owner/repo/pr_number triple. Returns the
     parsed JSON or None if no match is found. Corrupt files are skipped
@@ -218,7 +218,7 @@ def _latest_defer_signal_for_pr(
     if not artifacts_root.is_dir():
         return None
     expected_slug = f"{owner}/{repo}"
-    candidates: list[tuple[float, dict]] = []
+    candidates: list[tuple[float, dict[str, object]]] = []
     for path in artifacts_root.glob("*.defer-signal.json"):
         try:
             payload = json.loads(path.read_text())
