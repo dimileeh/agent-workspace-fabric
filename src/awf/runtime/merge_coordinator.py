@@ -1,24 +1,23 @@
 """Merge-attempt coordination for PR monitors.
 
-The current implementation is intentionally process-local: it serializes
-auto-merge attempts by ``repo_url + base_branch`` for monitors running in
-the same worker process. That is enough to prevent the local service
-worker from firing simultaneous final rechecks and merge attempts at the
-same repository branch.
-
-Next hardening step: replace this abstraction with a Postgres advisory
-lock so independently spawned monitor processes and multiple workers can
-share the same coordination key.
+The in-process coordinator is kept for tests, SQLite, and compatibility
+paths. Service deployments backed by Postgres can use advisory locks so
+independently spawned monitor processes and multiple workers share the
+same coordination key.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import weakref
 from collections.abc import AsyncIterator
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
 from typing import Protocol
+
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 class MergeCoordinator(Protocol):
@@ -96,6 +95,42 @@ class InProcessMergeCoordinator:
         entry.ref_count -= 1
         if entry.ref_count == 0 and not entry.lock.locked() and loop_locks.get(key) is entry:
             del loop_locks[key]
+
+
+def postgres_advisory_lock_key(*, repo_url: str, base_branch: str) -> int:
+    """Return a stable signed 64-bit Postgres advisory lock key."""
+
+    key = MergeCoordinationKey.from_values(repo_url=repo_url, base_branch=base_branch)
+    payload = f"{key.repo_url}\0{key.base_branch}".encode()
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big", signed=True)
+
+
+class PostgresAdvisoryMergeCoordinator:
+    """A coordinator backed by Postgres session-level advisory locks."""
+
+    def __init__(self, engine: AsyncEngine) -> None:
+        self._engine = engine
+
+    @asynccontextmanager
+    async def serialized_merge(
+        self,
+        *,
+        repo_url: str,
+        base_branch: str,
+    ) -> AsyncIterator[None]:
+        lock_key = postgres_advisory_lock_key(repo_url=repo_url, base_branch=base_branch)
+        async with self._engine.connect() as connection:
+            await connection.execute(
+                text("SELECT pg_advisory_lock(:lock_key)"),
+                {"lock_key": lock_key},
+            )
+            try:
+                yield
+            finally:
+                await connection.execute(
+                    text("SELECT pg_advisory_unlock(:lock_key)"),
+                    {"lock_key": lock_key},
+                )
 
 
 DEFAULT_MERGE_COORDINATOR = InProcessMergeCoordinator()

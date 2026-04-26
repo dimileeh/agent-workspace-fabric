@@ -250,7 +250,7 @@ class _FakeAdvisoryEngine:
     def __init__(self, calls: list[object]) -> None:
         self._calls = calls
 
-    def connect(self) -> "_FakeAdvisoryConnectionContext":
+    def connect(self) -> _FakeAdvisoryConnectionContext:
         return _FakeAdvisoryConnectionContext(self._calls)
 
 
@@ -259,7 +259,7 @@ class _FakeAdvisoryConnectionContext:
         self._calls = calls
         self._connection = _FakeAdvisoryConnection(calls)
 
-    async def __aenter__(self) -> "_FakeAdvisoryConnection":
+    async def __aenter__(self) -> _FakeAdvisoryConnection:
         self._calls.append("connect-enter")
         return self._connection
 
