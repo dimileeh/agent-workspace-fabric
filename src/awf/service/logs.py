@@ -117,7 +117,7 @@ def run_service_logs(
     if result.returncode != 0:
         raise ServiceLogsError(
             returncode=result.returncode,
-            detail=_failure_detail(stdout=stdout, stderr=stderr),
+            detail=_failure_detail(stdout=stdout, stderr=stderr, follow=follow),
         )
     if follow:
         return ServiceLogsResult(stdout="", stderr="")
@@ -134,8 +134,13 @@ def _run_subprocess(
     return subprocess.run(args, check=check, capture_output=capture_output, text=text)
 
 
-def _failure_detail(*, stdout: str, stderr: str) -> str:
+def _failure_detail(*, stdout: str, stderr: str, follow: bool = False) -> str:
     detail = (stderr or stdout).strip()
     if detail:
         return detail
+    if follow:
+        return (
+            "docker compose logs --follow exited with a non-zero status; "
+            "docker output was already written directly to the terminal"
+        )
     return "docker compose returned a non-zero exit status"
