@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
 import subprocess
@@ -127,20 +128,27 @@ async def collect_service_status(
         _await_workspace_view()
     )
 
-    api_check, db_check, docker_check, image_check, disk_check = await asyncio.gather(
-        _check_api(settings, resolved_api_get),
-        resolved_db_probe(settings.database_url),
-        asyncio.to_thread(_check_docker, settings, resolved_run, resolved_socket_exists),
-        asyncio.to_thread(_check_agent_runtime_image, settings, resolved_run),
-        asyncio.to_thread(
-            check_disk_space,
-            settings.work_dir,
-            min_free_bytes=settings.min_free_disk_bytes,
-            disk_usage=disk_usage,
-        ),
-    )
-    ps_result = await ps_task
-    workspace_view = await workspace_lookup_task
+    try:
+        api_check, db_check, docker_check, image_check, disk_check = await asyncio.gather(
+            _check_api(settings, resolved_api_get),
+            resolved_db_probe(settings.database_url),
+            asyncio.to_thread(_check_docker, settings, resolved_run, resolved_socket_exists),
+            asyncio.to_thread(_check_agent_runtime_image, settings, resolved_run),
+            asyncio.to_thread(
+                check_disk_space,
+                settings.work_dir,
+                min_free_bytes=settings.min_free_disk_bytes,
+                disk_usage=disk_usage,
+            ),
+        )
+        ps_result = await ps_task
+        workspace_view = await workspace_lookup_task
+    finally:
+        for pending in (ps_task, workspace_lookup_task):
+            if not pending.done():
+                pending.cancel()
+            with contextlib.suppress(BaseException):
+                await pending
     orphan_check = _build_orphan_check(ps_result, workspace_view=workspace_view)
     checks = {
         "api": api_check,
