@@ -1141,6 +1141,3 @@ uv run --python 3.12 --extra dev pytest tests/unit/common/test_github_client.py 
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).
-# License
-
-Apache-2.0. See [LICENSE](LICENSE).
