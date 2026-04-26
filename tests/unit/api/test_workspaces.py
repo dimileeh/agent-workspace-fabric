@@ -447,6 +447,17 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert reservation["released_at"] is None
 
     @pytest.mark.unit
+    async def test_rejects_zero_disk_reservation(self, client: AsyncClient) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "resources": {"disk_mb": 0},
+        }
+
+        response = await client.post("/v2/workspaces", json=payload)
+
+        assert response.status_code == 422
+
+    @pytest.mark.unit
     async def test_legacy_v1_defaults_policy_metadata(self, client: AsyncClient) -> None:
         ws_id = await _create_workspace(client)
 

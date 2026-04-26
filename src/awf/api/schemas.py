@@ -113,7 +113,7 @@ class WorkspaceV2Resources(BaseModel):
     steady_state_memory_gb: float | None = Field(default=None, gt=0)
     peak_cpu_cores: float | None = Field(default=None, gt=0)
     peak_memory_gb: float | None = Field(default=None, gt=0)
-    disk_mb: int | None = Field(default=None, ge=0)
+    disk_mb: int | None = Field(default=None, gt=0)
 
 
 class WorkspaceCreateV2Request(BaseModel):
