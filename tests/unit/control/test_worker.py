@@ -472,6 +472,14 @@ class TestRunOnceMonitorRecovery:
                 self.resume_calls.append(workspace_id)
                 monitor_started.set()
                 await release_monitor.wait()
+                async with session_factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    await repo.transition(
+                        ws, to=WorkspaceStatus.completed, reason_code="TEST_MONITOR_DONE"
+                    )
+                    await s.commit()
 
         executor = _BlockingExecutor()
         worker = ControlWorker(

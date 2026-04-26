@@ -38,6 +38,7 @@ class WorkerConfig:
 
 class WorkspaceExecutorProtocol(Protocol):
     async def execute(self, workspace_id: str) -> None: ...
+    async def resume_pr_monitor(self, workspace_id: str) -> None: ...
 
 
 class ControlWorker:
@@ -63,7 +64,7 @@ class ControlWorker:
         self._stopped.set()
 
     async def run_once(self) -> int:
-        """Claim + dispatch requested provisioning and ready execution workspaces.
+        """Claim + dispatch requested provisioning and workspace runtime tasks.
 
         Returns the number of workspaces dispatched. A zero return is a signal
         for ``run_forever`` to sleep; non-zero means we may be throughput-bound
@@ -81,13 +82,25 @@ class ControlWorker:
 
         if self._executor is not None:
             execution_slots = self._available_execution_slots()
-            ready_ids = await self._list_ready(limit=execution_slots)
-            dispatched_ids.update(self._dispatch_ready_executions(ready_ids))
+            if execution_slots > 0:
+                monitoring_ids = await self._list_monitoring_pr(
+                    limit=self._config.max_concurrent_executions
+                )
+                dispatched_ids.update(
+                    self._dispatch_monitor_resumes(monitoring_ids, limit=execution_slots)
+                )
+
+            execution_slots = self._available_execution_slots()
+            if execution_slots > 0:
+                ready_ids = await self._list_ready(limit=self._config.max_concurrent_executions)
+                dispatched_ids.update(
+                    self._dispatch_ready_executions(ready_ids, limit=execution_slots)
+                )
 
         return len(dispatched_ids)
 
     async def wait_for_execution_tasks(self) -> None:
-        """Wait for ready-workspace execution tasks started by this worker."""
+        """Wait for ready execution or monitor-resume tasks started by this worker."""
         while self._execution_tasks:
             await asyncio.gather(*tuple(self._execution_tasks.values()))
 
@@ -123,6 +136,11 @@ class ControlWorker:
         row_limit = self._config.max_concurrent_executions if limit is None else limit
         return await self._list_by_status(WorkspaceStatus.ready, limit=row_limit)
 
+    async def _list_monitoring_pr(self, *, limit: int | None = None) -> list[str]:
+        """Return up to ``max_concurrent_executions`` IDs in ``monitoring_pr``."""
+        row_limit = self._config.max_concurrent_executions if limit is None else limit
+        return await self._list_by_status(WorkspaceStatus.monitoring_pr, limit=row_limit)
+
     async def _list_by_status(self, status: WorkspaceStatus, *, limit: int) -> list[str]:
         if limit <= 0:
             return []
@@ -140,15 +158,34 @@ class ControlWorker:
     def _available_execution_slots(self) -> int:
         return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
 
-    def _dispatch_ready_executions(self, workspace_ids: list[str]) -> set[str]:
+    def _dispatch_ready_executions(self, workspace_ids: list[str], *, limit: int) -> set[str]:
         dispatched: set[str] = set()
         for workspace_id in workspace_ids:
+            if len(dispatched) >= limit:
+                break
             if workspace_id in self._execution_tasks:
                 continue
 
             task = asyncio.create_task(
                 self._safely_execute(workspace_id),
                 name=f"awf-execute-{workspace_id}",
+            )
+            self._execution_tasks[workspace_id] = task
+            task.add_done_callback(partial(self._forget_execution_task, workspace_id))
+            dispatched.add(workspace_id)
+        return dispatched
+
+    def _dispatch_monitor_resumes(self, workspace_ids: list[str], *, limit: int) -> set[str]:
+        dispatched: set[str] = set()
+        for workspace_id in workspace_ids:
+            if len(dispatched) >= limit:
+                break
+            if workspace_id in self._execution_tasks:
+                continue
+
+            task = asyncio.create_task(
+                self._safely_resume_pr_monitor(workspace_id),
+                name=f"awf-monitor-{workspace_id}",
             )
             self._execution_tasks[workspace_id] = task
             task.add_done_callback(partial(self._forget_execution_task, workspace_id))
@@ -176,3 +213,14 @@ class ControlWorker:
             # skip-if-no-longer-ready semantics. The worker must keep polling
             # even if one execution path crashes before it can mark a failure.
             _log.exception("worker.execute_failed", workspace_id=workspace_id)
+
+    async def _safely_resume_pr_monitor(self, workspace_id: str) -> None:
+        if self._executor is None:
+            return
+        try:
+            await self._executor.resume_pr_monitor(workspace_id)
+        except Exception:
+            # The monitor runner owns normal terminal transitions. Recovery
+            # dispatch still must not take the service worker down if a single
+            # workspace hits an unexpected runtime error.
+            _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
