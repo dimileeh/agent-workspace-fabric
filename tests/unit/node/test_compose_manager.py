@@ -286,6 +286,35 @@ class TestRender:
         assert parsed["volumes"]["dind_data"]["name"] == "awf-ws_test123-dind_data"
 
     @pytest.mark.unit
+    def test_dind_mode_sets_default_agent_docker_host(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(_spec(tmp_path, docker_mode="dind")).compose_file.read_text()
+        )
+
+        assert parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://docker:2375"
+
+    @pytest.mark.unit
+    def test_explicit_agent_docker_host_is_preserved(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    docker_mode="dind",
+                    agent_environment=(("DOCKER_HOST", "tcp://custom-docker:2375"),),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert (
+            parsed["services"]["agent"]["environment"]["DOCKER_HOST"]
+            == "tcp://custom-docker:2375"
+        )
+
+    @pytest.mark.unit
     def test_strict_undefined_catches_missing_vars(self) -> None:
         # Guard: if the template starts referencing a new variable without the
         # WorkspaceComposeSpec supplying it, rendering must fail loudly rather
