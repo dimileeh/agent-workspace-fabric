@@ -2,7 +2,7 @@ import pytest
 
 from awf.db.enums import TaskClass, WorkspaceStatus
 from awf.db.models import MergeCandidate, TaskAttempt, Workspace
-from awf.db.repositories import _sync_candidate_readiness
+from awf.db.repositories import sync_candidate_readiness
 
 
 @pytest.mark.asyncio
@@ -28,9 +28,9 @@ async def test_merge_candidate_requires_sufficient_validation_tier() -> None:
     )
 
     # In refactor_task, require tier 2. If no validation provenance exists, should be stale.
-    # We will pass them to _sync_candidate_readiness, maybe it queries validation history?
+    # We will pass them to sync_candidate_readiness, maybe it queries validation history?
     # Or maybe a new component computes it. Let's just assert candidate is NOT ready.
-    _sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
+    sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
 
     assert candidate.ready is False
     assert candidate.stale is True
@@ -61,7 +61,7 @@ async def test_merge_candidate_clears_validation_stale_state_when_reason_clears(
         stale_reason="validation_insufficient_tier",
     )
 
-    _sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
+    sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
 
     assert candidate.ready is True
     assert candidate.stale is False

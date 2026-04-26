@@ -23,8 +23,8 @@ from awf.db.repositories import (
     PolicyFindingRepository,
     WorkspaceEventCreate,
     WorkspaceRepository,
-    _sync_candidate_readiness,
     owned_paths_overlap,
+    sync_candidate_readiness,
 )
 from awf.profiles.models import OutOfScopeChangePolicy
 
@@ -177,7 +177,7 @@ class ScopePolicyRefreshService:
         policy_blocked = any(f.severity == "blocking" for f in findings)
         if candidate.policy_blocked != policy_blocked:
             candidate.policy_blocked = policy_blocked
-        _sync_candidate_readiness(
+        sync_candidate_readiness(
             candidate,
             workspace=candidate.workspace,
             attempt=candidate.attempt,

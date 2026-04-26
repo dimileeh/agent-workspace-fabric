@@ -620,7 +620,7 @@ class MergeCandidateRepository:
             candidate.closed_at = None
             candidate.merged_at = None
 
-        _sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
+        sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
         _seed_initial_scope_validation_staleness(candidate, workspace=workspace)
         await self._session.flush()
         return candidate
@@ -661,7 +661,7 @@ class MergeCandidateRepository:
         candidate.status = "closed"
         candidate.close_reason = close_reason
         candidate.closed_at = datetime.now(UTC)
-        _sync_candidate_readiness(
+        sync_candidate_readiness(
             candidate,
             workspace=candidate.workspace,
             attempt=candidate.attempt,
@@ -692,7 +692,7 @@ class MergeCandidateRepository:
             candidate.status = "closed"
             candidate.close_reason = close_reason
             candidate.closed_at = now
-            _sync_candidate_readiness(
+            sync_candidate_readiness(
                 candidate,
                 workspace=candidate.workspace,
                 attempt=candidate.attempt,
@@ -722,7 +722,7 @@ class MergeCandidateRepository:
         candidate.close_reason = None
         candidate.closed_at = None
         candidate.merged_at = now
-        _sync_candidate_readiness(
+        sync_candidate_readiness(
             candidate,
             workspace=candidate.workspace,
             attempt=candidate.attempt,
@@ -1854,7 +1854,7 @@ def _releases_resource_reservation(status: WorkspaceStatus) -> bool:
     }
 
 
-def _sync_candidate_readiness(
+def sync_candidate_readiness(
     candidate: MergeCandidate,
     *,
     workspace: Workspace,
