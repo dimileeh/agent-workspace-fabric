@@ -25,6 +25,16 @@ def _combined_output(result: Any) -> str:
     return f"{result.stdout}{getattr(result, 'stderr', '')}"
 
 
+class _FakeDiskUsage:
+    total = 20 * 1024 * 1024 * 1024
+    used = 1 * 1024 * 1024 * 1024
+    free = 19 * 1024 * 1024 * 1024
+
+
+def _ok_disk_usage(_path: Path) -> _FakeDiskUsage:
+    return _FakeDiskUsage()
+
+
 def _write_gc_file(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
@@ -469,6 +479,7 @@ def test_service_status_uses_mocked_api_db_docker_and_image_checks(tmp_path: Pat
             db_probe=_db_probe,
             run_subprocess=_run_subprocess,
             socket_exists=lambda _path: True,
+            disk_usage=_ok_disk_usage,
         )
     )
 
@@ -562,6 +573,7 @@ def test_service_status_runs_dependency_checks_concurrently(tmp_path: Path) -> N
             db_probe=_db_probe,
             run_subprocess=_run_subprocess,
             socket_exists=lambda _path: True,
+            disk_usage=_ok_disk_usage,
         )
     )
 
@@ -612,6 +624,7 @@ def test_service_status_reports_failures_from_mocked_checks(tmp_path: Path) -> N
             db_probe=_db_probe,
             run_subprocess=_run_subprocess,
             socket_exists=lambda _path: False,
+            disk_usage=_ok_disk_usage,
         )
     )
 
@@ -620,6 +633,41 @@ def test_service_status_reports_failures_from_mocked_checks(tmp_path: Path) -> N
     assert status["checks"]["db"]["reason"] == "DB_CONNECTION_FAILED"
     assert status["checks"]["docker"]["reason"] == "DOCKER_SOCKET_UNREACHABLE"
     assert status["checks"]["agent_runtime_image"]["reason"] == "AGENT_RUNTIME_IMAGE_MISSING"
+
+
+@pytest.mark.unit
+def test_service_status_pretty_output_includes_disk_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import status as status_mod
+
+    settings = object()
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+
+    async def _collect(received: object) -> dict[str, object]:
+        assert received is settings
+        return {
+            "service": "awf",
+            "status": "ok",
+            "checks": {
+                "disk": {
+                    "ok": True,
+                    "status": "ok",
+                    "reason": "SUFFICIENT_DISK",
+                    "free_bytes": 300,
+                    "threshold_bytes": 200,
+                }
+            },
+        }
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(app, ["service", "status", "--format", "pretty"])
+
+    assert result.exit_code == 0, result.output
+    assert "checks.disk.free_bytes: 300" in result.stdout
+    assert "checks.disk.threshold_bytes: 200" in result.stdout
 
 
 @pytest.mark.unit

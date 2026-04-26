@@ -18,6 +18,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 RuntimeEnv = Literal["local", "ci", "staging", "prod"]
+DEFAULT_MIN_FREE_DISK_BYTES = 10 * 1024 * 1024 * 1024
 
 
 class Settings(BaseSettings):
@@ -73,6 +74,14 @@ class Settings(BaseSettings):
     work_dir: str = Field(
         default=".awf",
         description="Local AWF state root. Log streams live under <work_dir>/logs.",
+    )
+    min_free_disk_bytes: int = Field(
+        default=DEFAULT_MIN_FREE_DISK_BYTES,
+        ge=0,
+        description=(
+            "Minimum free bytes required on the AWF work directory filesystem before "
+            "admitting new local workspaces."
+        ),
     )
     host_home: str = Field(
         default="~",
