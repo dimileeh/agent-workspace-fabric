@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.db.enums import FailureReason, WorkspaceStatus
@@ -158,6 +160,83 @@ async def _mark_workspace_validation_failed(
         await session.commit()
 
 
+async def _insert_validation_run(
+    engine: AsyncEngine,
+    *,
+    run_id: str,
+    workspace_id: str,
+    attempt_id: str | None = None,
+    tier: int = 1,
+    command_set_hash: str = "0" * 64,
+    commands: list[dict] | None = None,
+    base_commit: str | None = "base-persisted",
+    target_branch: str | None = "awf/persisted-validation",
+    target_head_sha: str | None = "target-persisted",
+    status: str = "succeeded",
+    reason_code: str | None = "VALIDATION_OK",
+    started_at: datetime = datetime(2026, 4, 26, 13, 0, tzinfo=UTC),
+    finished_at: datetime | None = datetime(2026, 4, 26, 13, 2, tzinfo=UTC),
+    log_stream_refs: dict | None = None,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO validation_runs (
+                    id,
+                    workspace_id,
+                    attempt_id,
+                    tier,
+                    command_set_hash,
+                    commands,
+                    base_commit,
+                    target_branch,
+                    target_head_sha,
+                    status,
+                    reason_code,
+                    started_at,
+                    finished_at,
+                    log_stream_refs
+                )
+                VALUES (
+                    :id,
+                    :workspace_id,
+                    :attempt_id,
+                    :tier,
+                    :command_set_hash,
+                    :commands,
+                    :base_commit,
+                    :target_branch,
+                    :target_head_sha,
+                    :status,
+                    :reason_code,
+                    :started_at,
+                    :finished_at,
+                    :log_stream_refs
+                )
+                """
+            ),
+            {
+                "id": run_id,
+                "workspace_id": workspace_id,
+                "attempt_id": attempt_id,
+                "tier": tier,
+                "command_set_hash": command_set_hash,
+                "commands": json.dumps(commands or []),
+                "base_commit": base_commit,
+                "target_branch": target_branch,
+                "target_head_sha": target_head_sha,
+                "status": status,
+                "reason_code": reason_code,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "log_stream_refs": json.dumps(log_stream_refs or {}),
+            },
+        )
+        await session.commit()
+
+
 @pytest.mark.unit
 async def test_validation_provenance_groups_streams_and_resolves_profile_commands(
     client: AsyncClient,
@@ -222,6 +301,100 @@ async def test_validation_provenance_groups_streams_and_resolves_profile_command
     assert first["status"] == "succeeded"
     assert first["base_commit"] == "abc123def456"
     assert first["branch_name"] == "codex/validation-provenance"
+
+
+@pytest.mark.unit
+async def test_validation_provenance_prefers_persisted_validation_runs(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _mark_workspace_completed(engine, workspace_id)
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.cmd_01",
+        phase="validate",
+        stdout_bytes=999,
+        stdout_lines=99,
+        stderr_bytes=0,
+        stderr_lines=0,
+    )
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.run_01",
+        phase="validate",
+        stdout_bytes=42,
+        stdout_lines=3,
+        stderr_bytes=7,
+        stderr_lines=1,
+    )
+    await _insert_validation_run(
+        engine,
+        run_id="vr_111111111111111111111111",
+        workspace_id=workspace_id,
+        tier=2,
+        command_set_hash="a" * 64,
+        commands=[
+            {
+                "phase": "validate",
+                "command_index": 1,
+                "command": "npm test",
+                "stream_ids": {
+                    "stdout": "validation.run_01.stdout",
+                    "stderr": "validation.run_01.stderr",
+                },
+            }
+        ],
+        log_stream_refs={
+            "commands": [
+                {
+                    "stdout": "validation.run_01.stdout",
+                    "stderr": "validation.run_01.stderr",
+                }
+            ]
+        },
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) == 1
+    item = body["items"][0]
+    assert item["validation_run_id"] == "vr_111111111111111111111111"
+    assert item["tier"] == 2
+    assert item["command_set_hash"] == "a" * 64
+    assert item["phase"] == "validate"
+    assert item["command_index"] == 1
+    assert item["command"] == "npm test"
+    assert item["stream_ids"] == {
+        "stdout": "validation.run_01.stdout",
+        "stderr": "validation.run_01.stderr",
+    }
+    assert item["stdout_byte_count"] == 42
+    assert item["stdout_line_count"] == 3
+    assert item["stderr_byte_count"] == 7
+    assert item["stderr_line_count"] == 1
+    assert item["status"] == "succeeded"
+    assert item["reason_code"] == "VALIDATION_OK"
+    assert item["base_commit"] == "base-persisted"
+    assert item["branch_name"] == "awf/persisted-validation"
+    assert item["target_branch"] == "awf/persisted-validation"
+    assert item["target_head_sha"] == "target-persisted"
+    assert item["current_target_head_sha"] is None
+    assert item["fresh_for_target"] is None
+    assert item["started_at"] == "2026-04-26T13:00:00Z"
+    assert item["finished_at"] == "2026-04-26T13:02:00Z"
+    assert item["log_stream_refs"] == {
+        "commands": [
+            {
+                "stdout": "validation.run_01.stdout",
+                "stderr": "validation.run_01.stderr",
+            }
+        ]
+    }
 
 
 @pytest.mark.unit

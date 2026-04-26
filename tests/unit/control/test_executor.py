@@ -7,11 +7,13 @@ since each call is distinguishable by its argv.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
@@ -220,6 +222,106 @@ class TestHappyPath:
             assert ("running", "validating") in transitions
             assert ("validating", "pushing") in transitions
             assert ("pushing", "completed") in transitions
+
+    @pytest.mark.unit
+    async def test_records_tier1_validation_run_provenance(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            test_commands=["ruff check .", "pytest -q"],
+        )
+        fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        fake.queue_result(returncode=0, stdout="ruff ok")  # validation cmd 1
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd 2
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)  # push
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            rows = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT
+                            workspace_id,
+                            attempt_id,
+                            tier,
+                            command_set_hash,
+                            commands,
+                            base_commit,
+                            target_branch,
+                            target_head_sha,
+                            status,
+                            reason_code,
+                            started_at,
+                            finished_at,
+                            log_stream_refs
+                        FROM validation_runs
+                        WHERE workspace_id = :workspace_id
+                        """
+                    ),
+                    {"workspace_id": ws_id},
+                )
+            ).mappings().all()
+
+        assert len(rows) == 1
+        run = rows[0]
+        assert run["workspace_id"] == ws_id
+        assert run["attempt_id"] is None
+        assert run["tier"] == 1
+        assert isinstance(run["command_set_hash"], str)
+        assert len(run["command_set_hash"]) == 64
+        assert json.loads(run["commands"]) == [
+            {
+                "phase": "validate",
+                "command_index": 1,
+                "command": "ruff check .",
+                "stream_ids": {
+                    "stdout": "validation.01_validate.stdout",
+                    "stderr": "validation.01_validate.stderr",
+                },
+            },
+            {
+                "phase": "validate",
+                "command_index": 2,
+                "command": "pytest -q",
+                "stream_ids": {
+                    "stdout": "validation.02_validate.stdout",
+                    "stderr": "validation.02_validate.stderr",
+                },
+            },
+        ]
+        assert run["base_commit"] == "a" * 40
+        assert run["target_branch"] == f"awf/{ws_id}"
+        assert run["target_head_sha"] is None
+        assert run["status"] == "succeeded"
+        assert run["reason_code"] == "VALIDATION_OK"
+        assert run["started_at"] is not None
+        assert run["finished_at"] is not None
+        assert json.loads(run["log_stream_refs"]) == {
+            "commands": [
+                {
+                    "stdout": "validation.01_validate.stdout",
+                    "stderr": "validation.01_validate.stderr",
+                },
+                {
+                    "stdout": "validation.02_validate.stdout",
+                    "stderr": "validation.02_validate.stderr",
+                },
+            ]
+        }
 
 
 class TestFailurePaths:
