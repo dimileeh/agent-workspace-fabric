@@ -634,9 +634,13 @@ Example `awf_create_workspace_v2` arguments:
 
 Example runtime and operation observability calls:
 
+`awf_get_workspace_runtime` arguments:
+
 ```json
 {"workspace_id": "ws_abc123"}
 ```
+
+`awf_list_workspace_operations` arguments:
 
 ```json
 {"workspace_id": "ws_abc123", "limit": 25}
