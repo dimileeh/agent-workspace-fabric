@@ -463,6 +463,53 @@ class TestCommitStepRuntimeError:
             assert "commit step failed" in (ws.failure_message or "")
 
 
+class TestPullRequestUnexpectedError:
+    @pytest.mark.unit
+    async def test_unexpected_pr_creation_error_marks_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _ExplodingPrCreator:
+            async def push_and_open(self, **kwargs: object) -> object:
+                raise FileNotFoundError("gh")
+
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # drift-check: on expected branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="")  # cached diff empty; agent committed
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+
+        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=compose,
+            validation=validation,
+            pr_creator=_ExplodingPrCreator(),  # type: ignore[arg-type]
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                default_models={AgentRuntime.codex: "gpt-5"},
+            ),
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "unexpected error during PR creation" in (ws.failure_message or "")
+            assert "FileNotFoundError" in (ws.failure_message or "")
+
+
 class TestPrMonitorFactoryPath:
     @pytest.mark.unit
     def test_monitor_factory_supports_one_two_and_three_argument_forms(self) -> None:

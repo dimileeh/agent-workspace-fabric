@@ -689,6 +689,15 @@ class WorkspaceExecutor:
                 message=str(exc)[:2000],
             )
             return
+        except Exception as exc:
+            _log.exception("executor.pr_unexpected_failed", workspace_id=workspace_id)
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.pushing,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"unexpected error during PR creation: {exc!r}"[:2000],
+            )
+            return
 
         # ── Step 4: persist PR URL + (optionally) hand off to monitor ──────
         async with self._session_factory() as session:
