@@ -253,6 +253,7 @@ class TestMergeQueueList:
             "required_next_action",
             "readiness",
             "canonical",
+            "queue_blockers",
             "latest_validation",
             "stale_reasons",
         }
@@ -272,6 +273,7 @@ class TestMergeQueueList:
         assert item["owned_paths"] == ["src/awf/api/**"]
         assert item["last_event"]["event_type"] == "merge_queue.test_marker"
         assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+        assert item["queue_blockers"] == []
         assert item["canonical"] is True
         assert item["readiness"] == {
             "ready": True,
@@ -486,6 +488,53 @@ class TestMergeQueueList:
             "stale_reason": None,
         }
         assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+
+    @pytest.mark.unit
+    async def test_exposes_older_candidate_blocker_details(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        older_id = await _create_queue_workspace(
+            engine,
+            title="Older queue candidate",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/61",
+            updated_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        )
+        later_id = await _create_queue_workspace(
+            engine,
+            title="Later queue candidate",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/62",
+            branch_name="codex/later-queue",
+            updated_at=datetime(2026, 4, 21, 12, 0, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue", params={"limit": 20})
+
+        assert response.status_code == 200
+        items = {item["workspace_id"]: item for item in response.json()["items"]}
+        later = items[later_id]
+        older = items[older_id]
+        assert older["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+        assert older["queue_blockers"] == []
+        assert later["merge_blocker_reason"] == "waiting_for_older_candidate"
+        assert later["required_next_action"] == "wait_for_queue"
+        assert later["queue_blockers"] == [
+            {
+                "candidate_id": older["candidate_id"],
+                "workspace_id": older_id,
+                "attempt_id": older["attempt_id"],
+                "task_id": older["task_id"],
+                "title": "Older queue candidate",
+                "pr_url": "https://github.com/example/console/pull/61",
+                "pr_number": 61,
+                "status": WorkspaceStatus.monitoring_pr.value,
+                "blocker_state": "merge_eligible",
+                "reason_code": "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
+            }
+        ]
 
     @pytest.mark.unit
     async def test_exposes_latest_validation_provenance_and_freshness(

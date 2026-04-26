@@ -1,0 +1,279 @@
+"""PR monitor merge-queue ordering tests."""
+
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from awf.common.commands import FakeCommandRunner
+from awf.common.github_client import RepoRef
+from awf.db.base import Base
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    OperationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
+from awf.db.session import make_engine, make_session_factory
+from awf.runtime.pr_monitor import Merge, MonitorState
+from tests.unit.runtime._monitor_runner_fixtures import FakeAdapter, RecordedSleep, make_runner
+from tests.unit.runtime.test_pr_monitor import _status
+
+REPO_URL = "git@github.com:dimileeh/aira-web.git"
+
+
+@pytest.fixture
+async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield make_session_factory(engine)
+    finally:
+        await engine.dispose()
+
+
+@pytest.fixture
+def cmd() -> FakeCommandRunner:
+    return FakeCommandRunner()
+
+
+@pytest.fixture
+def adapter() -> FakeAdapter:
+    return FakeAdapter()
+
+
+@pytest.fixture
+def sleep_fn() -> RecordedSleep:
+    return RecordedSleep()
+
+
+async def _seed_monitoring_candidate(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    title: str,
+    pr_number: int,
+    created_at: datetime,
+    status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
+) -> tuple[str, str, str]:
+    async with factory() as session:
+        workspace_repo = WorkspaceRepository(session)
+        workspace = await workspace_repo.create(
+            repo_url=REPO_URL,
+            branch_base="development",
+            task_title=title,
+            task_prompt=f"Implement {title}.",
+            task_external_id=f"RUNTIME-QUEUE-{pr_number}",
+            auto_merge=True,
+            agent=AgentRuntime.claude_code.value,
+            test_commands=["pytest -q"],
+        )
+        workspace.status = status.value
+        workspace.branch_name = f"awf/{workspace.id}"
+        workspace.remote_push_branch = workspace.branch_name
+        workspace.base_commit = "a" * 40
+        workspace.compose_project_name = f"awf_{workspace.id}"
+        workspace.compose_file_path = "/tmp/compose.yml"
+        workspace.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
+        workspace.pr_number = pr_number
+        workspace.monitor_started_at = created_at
+
+        task = await TaskRepository(session).create_or_get(
+            repo_url=workspace.repo_url,
+            base_branch=workspace.branch_base,
+            title=workspace.task_title,
+            prompt=workspace.task_prompt,
+            external_id=workspace.task_external_id,
+            idempotency_key=None,
+            task_class=None,
+            owned_paths=[],
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
+        attempt.is_canonical_for_merge = True
+        candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
+            task=task,
+            attempt=attempt,
+            workspace=workspace,
+            head_sha=f"head-{pr_number}",
+            base_sha="base",
+        )
+        candidate.created_at = created_at
+        candidate.updated_at = created_at
+        await session.commit()
+        return workspace.id, attempt.id, candidate.id
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("older_status", "recovery_operation"),
+    [
+        (WorkspaceStatus.monitoring_pr, False),
+        (WorkspaceStatus.ready, True),
+    ],
+)
+async def test_monitor_waits_for_older_candidate_without_notify_human(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+    older_status: WorkspaceStatus,
+    recovery_operation: bool,
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    older_workspace_id, _older_attempt_id, older_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Older candidate",
+        pr_number=101,
+        created_at=now,
+        status=older_status,
+    )
+    later_workspace_id, _later_attempt_id, _later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later candidate",
+        pr_number=102,
+        created_at=now + timedelta(minutes=5),
+    )
+    if recovery_operation:
+        async with factory() as session:
+            await OperationRepository(session).create(
+                workspace_id=older_workspace_id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.pending,
+                payload={"source": "pr_monitor", "reason": "validation_insufficient_tier"},
+            )
+            await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=later_workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=102,
+        status=_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{later_workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(later_workspace_id)
+        assert workspace is not None
+        queue_wait_events = [
+            event
+            for event in workspace.events
+            if event.reason_code == "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE"
+        ]
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+    assert len(queue_wait_events) == 1
+    assert queue_wait_events[0].event_type == "workspace.merge_queue_waiting"
+    assert queue_wait_events[0].payload == {
+        "reason_code": "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
+        "repo_url": REPO_URL,
+        "base_branch": "development",
+        "blocked_candidate_id": older_candidate_id,
+        "blocked_workspace_id": older_workspace_id,
+        "blocked_pr_url": "https://github.com/dimileeh/aira-web/pull/101",
+        "blocked_pr_number": 101,
+        "blocked_title": "Older candidate",
+        "blocked_status": older_status.value,
+        "blocked_state": "monitor_owned_recovery"
+        if recovery_operation
+        else "merge_eligible",
+    }
+
+
+@pytest.mark.unit
+async def test_monitor_merges_once_older_candidate_is_closed(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Older candidate",
+        pr_number=201,
+        created_at=now,
+    )
+    later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later candidate",
+        pr_number=202,
+        created_at=now + timedelta(minutes=5),
+    )
+    async with factory() as session:
+        await MergeCandidateRepository(session).close_open_for_workspace(
+            older_workspace_id,
+            close_reason="TEST_CLOSED",
+        )
+        await session.commit()
+
+    cmd.queue_result(returncode=0)  # gh pr merge
+    cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge SHA lookup
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=later_workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=202,
+        status=_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{later_workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+            _later_attempt_id,
+        )
+        workspace = await WorkspaceRepository(session).get(later_workspace_id)
+
+    assert terminal is True
+    assert any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    assert sleep_fn.calls == []
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.completed.value
+    assert candidate is not None
+    assert candidate.id == later_candidate_id
+    assert candidate.status == "merged"

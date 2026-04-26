@@ -546,6 +546,15 @@ class TestStalenessRefreshService:
                 attempt_id,
             )
             assert candidate is not None
+            candidate.stale = True
+            candidate.stale_reason = "validation_insufficient_tier"
+            await session.commit()
+
+        async with factory() as session:
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+            assert candidate is not None
             assert candidate.stale is True
             assert candidate.stale_reason == "validation_insufficient_tier"
 
