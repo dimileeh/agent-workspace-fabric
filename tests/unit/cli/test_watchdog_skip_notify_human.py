@@ -23,6 +23,8 @@ import os
 import time
 from pathlib import Path
 
+from structlog.testing import capture_logs
+
 from awf.cli.watchdog import _should_skip_respawn
 
 
@@ -85,9 +87,18 @@ class TestShouldSkipRespawn:
             is False
         )
 
-    def test_notify_human_terminal_with_same_sha_skips(self, tmp_path: Path, capsys) -> None:
+    def test_notify_human_terminal_with_same_sha_skips(self, tmp_path: Path) -> None:
         """The whole point of the fix: PR has a NotifyHuman artifact AND
-        the head_sha hasn't moved → don't respawn."""
+        the head_sha hasn't moved → don't respawn.
+
+        We use ``structlog.testing.capture_logs`` instead of ``capsys`` /
+        ``caplog`` because the project's structlog config can route events
+        either via the default ``PrintLogger`` (no ``configure_logging``
+        call yet) or via ``structlog.stdlib.LoggerFactory`` (after one of
+        the logging tests has run earlier in the suite, binding a stdout
+        handler to the original ``sys.stdout``). Neither capsys nor caplog
+        catches both cases. ``capture_logs`` intercepts events at the
+        bound-logger boundary, so it works regardless of factory."""
         artifacts_root = tmp_path / "artifacts"
         head = "deadbeefcafe1234"
         _write_artifact(
@@ -98,19 +109,20 @@ class TestShouldSkipRespawn:
             terminal_action="NotifyHuman",
             head_sha=head,
         )
-        result = _should_skip_respawn(
-            owner="dimileeh",
-            repo="aira-agent",
-            pr_number=355,
-            current_head_sha=head,
-            artifacts_root=artifacts_root,
-        )
+        with capture_logs() as cap_logs:
+            result = _should_skip_respawn(
+                owner="dimileeh",
+                repo="aira-agent",
+                pr_number=355,
+                current_head_sha=head,
+                artifacts_root=artifacts_root,
+            )
         assert result is True
-        # Operator should be able to grep stdout for this exact event.
-        captured = capsys.readouterr()
-        assert "watchdog.skipped_notify_human_terminal" in (captured.out + captured.err), (
-            "expected watchdog.skipped_notify_human_terminal log line"
-        )
+        # Operator should be able to grep logs for this exact event.
+        assert any(
+            entry.get("event") == "watchdog.skipped_notify_human_terminal"
+            for entry in cap_logs
+        ), f"expected watchdog.skipped_notify_human_terminal log line, got {cap_logs!r}"
 
     def test_notify_human_terminal_with_different_sha_respawns(self, tmp_path: Path) -> None:
         """New commits arrived since the NotifyHuman → re-engage."""
