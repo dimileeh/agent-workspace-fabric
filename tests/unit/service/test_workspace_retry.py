@@ -14,7 +14,7 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.service.workspaces import WorkspaceService
+from awf.service.workspaces import WorkspaceRetryNotFoundError, WorkspaceService
 
 
 @pytest.fixture
@@ -46,6 +46,14 @@ def _request(*, task_kind: str = "feature_branch_pr") -> WorkspaceCreateV2Reques
         validation={"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
         resources={},
     )
+
+
+@pytest.mark.unit
+def test_retry_not_found_error_has_instance_detail() -> None:
+    error = WorkspaceRetryNotFoundError("ws_missing")
+
+    assert error.detail is None
+    assert error.__dict__["detail"] is None
 
 
 async def _mark_failed(

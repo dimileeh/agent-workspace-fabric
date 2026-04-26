@@ -69,29 +69,40 @@ class WorkspaceOwnedPathConflictError(Exception):
 class WorkspaceRetryError(Exception):
     error_code = "WORKSPACE_RETRY_ERROR"
     message = "Workspace retry failed."
-    detail: dict[str, Any] | None = None
+    detail: dict[str, Any] | None
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        if message is not None:
+            self.message = message
+        self.detail = detail
+        super().__init__(self.message)
 
 
 class WorkspaceRetryNotFoundError(WorkspaceRetryError):
     error_code = "WORKSPACE_NOT_FOUND"
 
     def __init__(self, workspace_id: str) -> None:
-        self.message = f"No workspace with id {workspace_id}"
-        super().__init__(self.message)
+        super().__init__(f"No workspace with id {workspace_id}")
 
 
 class WorkspaceRetryNotAllowedError(WorkspaceRetryError):
     error_code = "WORKSPACE_NOT_RETRYABLE"
 
     def __init__(self, workspace: Workspace) -> None:
-        self.message = "Only failed or cancelled workspaces can be retried."
-        self.detail = {
-            "status": workspace.status,
-            "retryable_statuses": [
-                status.value for status in RETRYABLE_WORKSPACE_STATUSES
-            ],
-        }
-        super().__init__(self.message)
+        super().__init__(
+            "Only failed or cancelled workspaces can be retried.",
+            detail={
+                "status": workspace.status,
+                "retryable_statuses": [
+                    status.value for status in RETRYABLE_WORKSPACE_STATUSES
+                ],
+            },
+        )
 
 
 @dataclass(frozen=True)
