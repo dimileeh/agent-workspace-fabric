@@ -135,7 +135,7 @@ services:
 @pytest.mark.slow
 @pytest.mark.timeout(180)
 async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Path) -> None:
-    workspace_id = f"test_dind_{os.getpid()}"
+    workspace_id = f"test_dind_{tmp_path.name}"
     local_project = tmp_path / "local-project"
     _write_tiny_project(local_project)
     agent_image = _build_agent_image(
