@@ -540,7 +540,7 @@ class MergeCandidateRepository:
         now = datetime.now(UTC)
         candidate.status = "merged"
         candidate.close_reason = None
-        candidate.closed_at = now
+        candidate.closed_at = None
         candidate.merged_at = now
         _sync_candidate_readiness(
             candidate,

@@ -141,6 +141,8 @@ async def test_completed_pr_monitor_marks_candidate_merged(
     assert workspace.status == WorkspaceStatus.completed.value
     assert candidate is not None
     assert candidate.status == "merged"
+    assert candidate.closed_at is None
+    assert candidate.merged_at is not None
     assert candidate.completed is True
     assert candidate.ready is False
 
