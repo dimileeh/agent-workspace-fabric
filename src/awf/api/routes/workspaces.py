@@ -30,6 +30,7 @@ from awf.api.schemas import (
     WorkspaceOverviewListResponse,
     WorkspaceOverviewResponse,
     WorkspaceResponse,
+    WorkspaceRetryResponse,
 )
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
@@ -37,7 +38,15 @@ from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.disk import DiskCheck, check_disk_space
-from awf.service.workspaces import WorkspaceOwnedPathConflictError, create_workspace_v2_row
+from awf.service.workspaces import (
+    WorkspaceOwnedPathConflictError,
+    WorkspaceRetryError,
+    WorkspaceRetryNotAllowedError,
+    WorkspaceRetryNotFoundError,
+    create_workspace_v2_row,
+    retry_workspace_row,
+    workspace_retry_response,
+)
 
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
 router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
@@ -179,6 +188,23 @@ def _insufficient_disk_response(disk_check: DiskCheck) -> JSONResponse:
     )
 
 
+def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
+    if isinstance(exc, WorkspaceRetryNotFoundError):
+        status_code = status.HTTP_404_NOT_FOUND
+    elif isinstance(exc, WorkspaceRetryNotAllowedError):
+        status_code = status.HTTP_409_CONFLICT
+    else:  # pragma: no cover - future retry error subclasses
+        status_code = status.HTTP_409_CONFLICT
+    return JSONResponse(
+        status_code=status_code,
+        content=ErrorResponse(
+            error_code=exc.error_code,
+            message=exc.message,
+            detail=exc.detail,
+        ).model_dump(),
+    )
+
+
 @router.get("/overview", response_model=WorkspaceOverviewListResponse)
 async def list_workspace_overview(
     workspace_status: Annotated[WorkspaceStatus | None, Query(alias="status")] = None,
@@ -257,6 +283,36 @@ async def list_workspace_events(
     return WorkspaceEventListResponse(
         items=[WorkspaceEventResponse.model_validate(row) for row in rows]
     )
+
+
+@router.post(
+    "/{workspace_id}/retry",
+    response_model=WorkspaceRetryResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        404: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
+    },
+)
+async def retry_workspace(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceRetryResponse | JSONResponse:
+    try:
+        result = await retry_workspace_row(session, workspace_id)
+    except WorkspaceOwnedPathConflictError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ErrorResponse(
+                error_code=exc.error_code,
+                message=exc.message,
+                detail=exc.detail,
+            ).model_dump(),
+        )
+    except WorkspaceRetryError as exc:
+        return _retry_error_response(exc)
+
+    return workspace_retry_response(result)
 
 
 @router.get("/{workspace_id}", response_model=WorkspaceResponse)

@@ -366,6 +366,23 @@ def workspace_show(
     _handle_response(response, fmt)
 
 
+@workspace_app.command("retry")
+def workspace_retry(
+    workspace_id: str = typer.Argument(...),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Retry a failed or cancelled workspace as a fresh attempt."""
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/retry",
+        base_url=_base_url(base_url),
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
 @workspace_app.command("list")
 def workspace_list(
     limit: int = typer.Option(50, "--limit"),

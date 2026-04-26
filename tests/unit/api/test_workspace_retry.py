@@ -10,7 +10,6 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 
-
 _V2_RETRY_BODY = {
     "repo": {
         "url": "git@github.com:example/retry-api.git",
@@ -46,6 +45,31 @@ async def _create_failed_workspace(client: AsyncClient, engine: AsyncEngine) -> 
         workspace.failure_reason = "validation_failure"
         workspace.failure_message = "pytest failed"
         await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+        await session.commit()
+    return workspace_id
+
+
+async def _create_cancelled_workspace(client: AsyncClient, engine: AsyncEngine) -> str:
+    created = await client.post(
+        "/v2/workspaces",
+        json={
+            **_V2_RETRY_BODY,
+            "task": {
+                **_V2_RETRY_BODY["task"],
+                "external_id": "TICKET-API-RETRY-CANCELLED",
+                "owned_paths": ["src/awf/api/retry-cancelled.py"],
+            },
+        },
+    )
+    assert created.status_code == 202
+    workspace_id = str(created.json()["workspace_id"])
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCEL")
         await session.commit()
     return workspace_id
 
@@ -87,6 +111,21 @@ async def test_retry_endpoint_creates_new_requested_workspace(
 
 
 @pytest.mark.unit
+async def test_retry_endpoint_accepts_cancelled_workspace(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    original_id = await _create_cancelled_workspace(client, engine)
+
+    response = await client.post(f"/v1/workspaces/{original_id}/retry")
+
+    assert response.status_code == 202
+    assert response.json()["source_workspace_id"] == original_id
+    assert response.json()["status"] == "requested"
+    assert response.json()["attempt_number"] == 2
+
+
+@pytest.mark.unit
 async def test_retry_endpoint_rejects_missing_workspace(client: AsyncClient) -> None:
     response = await client.post("/v1/workspaces/ws_missing_retry/retry")
 
@@ -107,4 +146,3 @@ async def test_retry_endpoint_rejects_non_terminal_workspace(client: AsyncClient
     assert body["error_code"] == "WORKSPACE_NOT_RETRYABLE"
     assert body["detail"]["status"] == "requested"
     assert body["detail"]["retryable_statuses"] == ["failed", "cancelled"]
-

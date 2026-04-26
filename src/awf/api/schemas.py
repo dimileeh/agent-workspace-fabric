@@ -160,6 +160,18 @@ class WorkspaceAcceptedResponse(BaseModel):
     accepted_at: datetime
 
 
+class WorkspaceRetryResponse(BaseModel):
+    """202 Accepted payload for retrying a terminal workspace."""
+
+    source_workspace_id: str
+    new_workspace_id: str
+    operation_id: str
+    status: WorkspaceStatus
+    attempt_number: int
+    status_url: str
+    events_url: str
+
+
 class WorkspaceEventResponse(BaseModel):
     """Representation of an immutable workspace event."""
 
