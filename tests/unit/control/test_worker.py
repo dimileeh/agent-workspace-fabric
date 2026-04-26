@@ -25,6 +25,7 @@ from awf.db.session import make_engine, make_session_factory
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.service.controls import WorkspaceControlService
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -295,6 +296,19 @@ class _RecordingRuntimeInspector:
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
         self.calls.append(compose_project_name)
         return self._snapshots[compose_project_name]
+
+
+async def _noop_project_stop(_compose_project_name: str | None) -> None:
+    return None
+
+
+class _UnexpectedCleaner:
+    async def cleanup(self, **_kwargs: object) -> list[str]:
+        raise AssertionError("remonitor must not run workspace cleanup")
+
+
+def _unexpected_cleaner_factory() -> _UnexpectedCleaner:
+    return _UnexpectedCleaner()
 
 
 class TestRunOnce:
@@ -864,6 +878,54 @@ class TestRunOnceMonitorRecovery:
         await worker.wait_for_execution_tasks()
 
         assert executor.calls == []
+        assert executor.resume_calls == [monitor_id]
+
+    @pytest.mark.unit
+    async def test_operator_remonitor_clears_active_claim_so_worker_resumes(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory, origin_repo, "claimed-monitor"
+        )
+        async with session_factory() as s:
+            workspace = await WorkspaceRepository(s).get(monitor_id)
+            assert workspace is not None
+            future = datetime.now(UTC) + timedelta(hours=1)
+            workspace.monitor_claimed_by = "dead-monitor-worker"
+            workspace.monitor_claim_expires_at = future
+            workspace.execution_claimed_by = "dead-execution-worker"
+            workspace.execution_claim_expires_at = future
+            await s.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=3),
+        )
+
+        assert await worker.run_once() == 0
+        assert executor.resume_calls == []
+
+        async with session_factory() as s:
+            result = await WorkspaceControlService(
+                s,
+                project_stopper=_noop_project_stop,
+                cleaner_factory=_unexpected_cleaner_factory,
+            ).remonitor_workspace(
+                monitor_id,
+                reason="operator recovery",
+                idempotency_key="remonitor-worker-resume",
+            )
+            await s.commit()
+
+        assert result.status == WorkspaceStatus.monitoring_pr
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
         assert executor.resume_calls == [monitor_id]
 
     @pytest.mark.unit
