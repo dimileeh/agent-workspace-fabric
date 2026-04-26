@@ -267,6 +267,47 @@ class TestFailureHandling:
             assert reloaded.failure_reason == "infrastructure_failure"
             assert reloaded.failure_message is not None
 
+    @pytest.mark.unit
+    async def test_unexpected_provisioning_failure_marks_workspace_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _ExplodingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                raise RuntimeError("template workspace.base.yml.j2 was not found")
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_ExplodingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(RuntimeError, match="workspace.base.yml.j2"):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "infrastructure_failure"
+            assert reloaded.failure_message is not None
+            assert "unexpected provisioning failure" in reloaded.failure_message
+            assert "workspace.base.yml.j2" in reloaded.failure_message
+
 
 class TestIdempotency:
     @pytest.mark.unit

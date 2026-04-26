@@ -147,6 +147,19 @@ class Provisioner:
                 from_status=WorkspaceStatus.provisioning,
             )
             raise
+        except Exception as exc:
+            _log.exception(
+                "provisioner.unexpected_failed",
+                workspace_id=workspace_id,
+                error=str(exc),
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"unexpected provisioning failure: {exc}"[:2000],
+                from_status=WorkspaceStatus.provisioning,
+            )
+            raise
 
         # 3. Commit success: write placement metadata and transition to ready.
         async with self._session_factory() as session:
