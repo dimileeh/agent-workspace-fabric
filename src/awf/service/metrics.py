@@ -17,6 +17,10 @@ from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
 MIN_SUMMARY_WINDOW_HOURS = 1
 MAX_SUMMARY_WINDOW_HOURS = 168
+DEFAULT_FAILURE_EXAMPLE_LIMIT = 5
+MIN_FAILURE_EXAMPLE_LIMIT = 1
+MAX_FAILURE_EXAMPLE_LIMIT = 25
+UNKNOWN_FAILURE_REASON = "unknown"
 
 TERMINAL_WORKSPACE_STATUSES = frozenset(
     {
@@ -61,6 +65,45 @@ class WorkspaceReliabilitySummary:
     cancelled_count: int
     destroyed_count: int
     cleanup_failure_count: int
+
+
+@dataclass(frozen=True)
+class FailureAction:
+    retryable: bool
+    recommended_action: str
+
+
+@dataclass(frozen=True)
+class FailureReasonGroup:
+    failure_reason: str
+    count: int
+    retryable: bool
+    recommended_action: str
+
+
+@dataclass(frozen=True)
+class FailedWorkspaceExample:
+    workspace_id: str
+    title: str
+    repo_url: str
+    branch_base: str
+    agent: str
+    status: str
+    failure_reason: str
+    failure_message: str | None
+    pr_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+@dataclass(frozen=True)
+class FailureAnalysisSummary:
+    generated_at: datetime
+    window_start: datetime
+    since_hours: int
+    total_failed_workspaces: int
+    failure_groups: list[FailureReasonGroup]
+    latest_examples: list[FailedWorkspaceExample]
 
 
 @dataclass(frozen=True)
@@ -138,6 +181,61 @@ class ResourceSaturationSummary:
     admission: AdmissionSummary
 
 
+_UNKNOWN_FAILURE_ACTION = FailureAction(
+    retryable=False,
+    recommended_action="Inspect workspace logs and classify the failure_reason before retrying.",
+)
+_FAILURE_ACTIONS: dict[str, FailureAction] = {
+    FailureReason.agent_failure.value: FailureAction(
+        retryable=True,
+        recommended_action="Retry the workspace; inspect agent logs if it fails again.",
+    ),
+    FailureReason.validation_failure.value: FailureAction(
+        retryable=False,
+        recommended_action="Review validation output and fix failing checks before retrying.",
+    ),
+    FailureReason.infrastructure_failure.value: FailureAction(
+        retryable=True,
+        recommended_action="Retry after confirming infrastructure health and worker capacity.",
+    ),
+    FailureReason.policy_failure.value: FailureAction(
+        retryable=False,
+        recommended_action="Update the request or policy inputs before retrying.",
+    ),
+    FailureReason.cleanup_failure.value: FailureAction(
+        retryable=True,
+        recommended_action="Retry cleanup or inspect node resources before creating replacements.",
+    ),
+    FailureReason.profile_resolution_failure.value: FailureAction(
+        retryable=False,
+        recommended_action="Fix the workspace profile configuration before retrying.",
+    ),
+    FailureReason.service_startup_failure.value: FailureAction(
+        retryable=True,
+        recommended_action="Retry after inspecting service startup logs and dependencies.",
+    ),
+    FailureReason.phase_timeout.value: FailureAction(
+        retryable=True,
+        recommended_action="Retry with attention to phase duration and worker capacity.",
+    ),
+    FailureReason.health_check_failure.value: FailureAction(
+        retryable=True,
+        recommended_action="Retry after checking service health probes and runtime logs.",
+    ),
+}
+_KNOWN_FAILURE_REASONS = frozenset(reason.value for reason in FailureReason)
+
+
+def _validate_failure_action_coverage() -> None:
+    missing_actions = _KNOWN_FAILURE_REASONS.difference(_FAILURE_ACTIONS)
+    if missing_actions:
+        missing = ", ".join(sorted(missing_actions))
+        raise RuntimeError(f"Missing failure analysis actions for FailureReason values: {missing}")
+
+
+_validate_failure_action_coverage()
+
+
 async def summarize_workspace_reliability(
     session_factory: async_sessionmaker[AsyncSession],
     *,
@@ -196,6 +294,55 @@ async def summarize_workspace_reliability_for_session(
             FailureReason.cleanup_failure.value,
             0,
         ),
+    )
+
+
+async def summarize_failure_analysis(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
+    failure_example_limit: int = DEFAULT_FAILURE_EXAMPLE_LIMIT,
+    now: datetime | None = None,
+) -> FailureAnalysisSummary:
+    """Summarize failed workspaces by deterministic failure class and latest examples."""
+
+    async with session_factory() as session:
+        return await summarize_failure_analysis_for_session(
+            session,
+            since_hours=since_hours,
+            failure_example_limit=failure_example_limit,
+            now=now,
+        )
+
+
+async def summarize_failure_analysis_for_session(
+    session: AsyncSession,
+    *,
+    since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
+    failure_example_limit: int = DEFAULT_FAILURE_EXAMPLE_LIMIT,
+    now: datetime | None = None,
+) -> FailureAnalysisSummary:
+    """Build a console-oriented failure analysis summary from workspace rows."""
+
+    _validate_since_hours(since_hours)
+    _validate_failure_example_limit(failure_example_limit)
+    generated_at = _to_utc(now or datetime.now(UTC))
+    window_start = generated_at - timedelta(hours=since_hours)
+
+    reason_counts = await _count_failed_by_failure_reason(session, window_start=window_start)
+    latest_examples = await _latest_failed_workspace_examples(
+        session,
+        window_start=window_start,
+        limit=failure_example_limit,
+    )
+
+    return FailureAnalysisSummary(
+        generated_at=generated_at,
+        window_start=window_start,
+        since_hours=since_hours,
+        total_failed_workspaces=sum(reason_counts.values()),
+        failure_groups=_failure_reason_groups(reason_counts),
+        latest_examples=latest_examples,
     )
 
 
@@ -313,6 +460,85 @@ async def _count_by_failure_reason(
     return {str(reason): int(count) for reason, count in rows.all()}
 
 
+async def _count_failed_by_failure_reason(
+    session: AsyncSession,
+    *,
+    window_start: datetime,
+) -> dict[str, int]:
+    stmt = (
+        select(Workspace.failure_reason, func.count())
+        .where(Workspace.status == WorkspaceStatus.failed.value)
+        .where(Workspace.updated_at >= window_start)
+        .group_by(Workspace.failure_reason)
+    )
+    rows = await session.execute(stmt)
+    counts: dict[str, int] = {}
+    for reason, count in rows.all():
+        normalized_reason = _normalize_failure_reason(reason)
+        counts[normalized_reason] = counts.get(normalized_reason, 0) + int(count)
+    return counts
+
+
+async def _latest_failed_workspace_examples(
+    session: AsyncSession,
+    *,
+    window_start: datetime,
+    limit: int,
+) -> list[FailedWorkspaceExample]:
+    stmt = (
+        select(
+            Workspace.id,
+            Workspace.task_title,
+            Workspace.repo_url,
+            Workspace.branch_base,
+            Workspace.agent,
+            Workspace.status,
+            Workspace.failure_reason,
+            Workspace.failure_message,
+            Workspace.pr_url,
+            Workspace.created_at,
+            Workspace.updated_at,
+        )
+        .where(Workspace.status == WorkspaceStatus.failed.value)
+        .where(Workspace.updated_at >= window_start)
+        .order_by(
+            Workspace.updated_at.desc(),
+            Workspace.created_at.desc(),
+            Workspace.id.desc(),
+        )
+        .limit(limit)
+    )
+    rows = await session.execute(stmt)
+    return [
+        FailedWorkspaceExample(
+            workspace_id=workspace_id,
+            title=title,
+            repo_url=repo_url,
+            branch_base=branch_base,
+            agent=agent,
+            status=status,
+            failure_reason=_normalize_failure_reason(failure_reason),
+            failure_message=failure_message,
+            pr_url=pr_url,
+            created_at=_to_utc(created_at),
+            updated_at=_to_utc(updated_at),
+        )
+        for (
+            workspace_id,
+            title,
+            repo_url,
+            branch_base,
+            agent,
+            status,
+            failure_reason,
+            failure_message,
+            pr_url,
+            created_at,
+            updated_at,
+        ) in rows.all()
+    ]
+
+
 async def _count_active_workspaces(session: AsyncSession) -> int:
     stmt = (
         select(func.count())
@@ -325,6 +551,37 @@ async def _count_active_workspaces(session: AsyncSession) -> int:
 async def _count_workspaces_with_status(session: AsyncSession, status: WorkspaceStatus) -> int:
     stmt = select(func.count()).select_from(Workspace).where(Workspace.status == status.value)
     return int(await session.scalar(stmt) or 0)
+
+
+def _failure_reason_groups(reason_counts: dict[str, int]) -> list[FailureReasonGroup]:
+    groups: list[FailureReasonGroup] = []
+    for reason, count in sorted(reason_counts.items(), key=lambda item: (-item[1], item[0])):
+        action = _failure_action(reason)
+        groups.append(
+            FailureReasonGroup(
+                failure_reason=reason,
+                count=count,
+                retryable=action.retryable,
+                recommended_action=action.recommended_action,
+            )
+        )
+    return groups
+
+
+def _failure_action(failure_reason: str) -> FailureAction:
+    if failure_reason in _KNOWN_FAILURE_REASONS:
+        return _FAILURE_ACTIONS[failure_reason]
+    return _UNKNOWN_FAILURE_ACTION
+
+
+def _normalize_failure_reason(reason: object) -> str:
+    if not isinstance(reason, str):
+        return UNKNOWN_FAILURE_REASON
+
+    normalized = reason.strip()
+    if normalized in _KNOWN_FAILURE_REASONS:
+        return normalized
+    return UNKNOWN_FAILURE_REASON
 
 
 def _workspace_saturation_counts(status_counts: dict[str, int]) -> WorkspaceSaturationCounts:
@@ -455,6 +712,14 @@ def _validate_since_hours(since_hours: int) -> None:
     if not MIN_SUMMARY_WINDOW_HOURS <= since_hours <= MAX_SUMMARY_WINDOW_HOURS:
         raise ValueError(
             f"since_hours must be between {MIN_SUMMARY_WINDOW_HOURS} and {MAX_SUMMARY_WINDOW_HOURS}"
+        )
+
+
+def _validate_failure_example_limit(failure_example_limit: int) -> None:
+    if not MIN_FAILURE_EXAMPLE_LIMIT <= failure_example_limit <= MAX_FAILURE_EXAMPLE_LIMIT:
+        raise ValueError(
+            "failure_example_limit must be between "
+            f"{MIN_FAILURE_EXAMPLE_LIMIT} and {MAX_FAILURE_EXAMPLE_LIMIT}"
         )
 
 
