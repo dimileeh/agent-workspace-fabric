@@ -172,6 +172,14 @@ class OwnedPathOverlapResponse(BaseModel):
     requested_path: str
 
 
+class WorkspaceLockOverlapRiskResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    overlapping_workspace_id: str
+    overlapping_owned_path: str
+    owned_path: str
+
+
 class WorkspaceWarningResponse(BaseModel):
     warning_code: str
     message: str
@@ -401,7 +409,7 @@ class WorkspaceLockResponse(BaseModel):
     branch_base: str
     task_class: TaskClass | None
     owned_paths: list[str]
-    overlap_risks: list[OwnedPathOverlapResponse] = Field(default_factory=list)
+    overlap_risks: list[WorkspaceLockOverlapRiskResponse] = Field(default_factory=list)
     pr_url: str | None
     created_at: datetime
     updated_at: datetime

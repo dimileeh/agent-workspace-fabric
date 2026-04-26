@@ -236,15 +236,15 @@ async def test_get_locks_exposes_owned_path_overlap_risks(
     items = {item["workspace_id"]: item for item in response.json()["items"]}
     assert items[overlapping_id]["overlap_risks"] == [
         {
-            "workspace_id": existing_id,
-            "existing_path": "src/awf/api/**",
-            "requested_path": "src/awf/api/routes/workspaces.py",
+            "overlapping_workspace_id": existing_id,
+            "overlapping_owned_path": "src/awf/api/**",
+            "owned_path": "src/awf/api/routes/workspaces.py",
         }
     ]
     assert items[existing_id]["overlap_risks"] == [
         {
-            "workspace_id": overlapping_id,
-            "existing_path": "src/awf/api/routes/workspaces.py",
-            "requested_path": "src/awf/api/**",
+            "overlapping_workspace_id": overlapping_id,
+            "overlapping_owned_path": "src/awf/api/routes/workspaces.py",
+            "owned_path": "src/awf/api/**",
         }
     ]

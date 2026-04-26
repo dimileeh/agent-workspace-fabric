@@ -21,6 +21,13 @@ from awf.db.repositories import (
 
 
 @dataclass(frozen=True)
+class WorkspaceLockOverlapRisk:
+    overlapping_workspace_id: str
+    overlapping_owned_path: str
+    owned_path: str
+
+
+@dataclass(frozen=True)
 class WorkspaceLock:
     workspace_id: str
     title: str
@@ -33,7 +40,10 @@ class WorkspaceLock:
     pr_url: str | None
     created_at: datetime
     updated_at: datetime
-    overlap_risks: tuple[dict[str, str], ...] = field(default_factory=tuple, hash=False)
+    overlap_risks: tuple[WorkspaceLockOverlapRisk, ...] = field(
+        default_factory=tuple,
+        hash=False,
+    )
 
 
 @dataclass(frozen=True)
@@ -209,7 +219,7 @@ async def _active_overlap_candidates(
 def _workspace_lock(
     workspace: Workspace,
     *,
-    overlap_risks: tuple[dict[str, str], ...],
+    overlap_risks: tuple[WorkspaceLockOverlapRisk, ...],
 ) -> WorkspaceLock:
     return WorkspaceLock(
         workspace_id=workspace.id,
@@ -231,7 +241,7 @@ async def _workspace_overlap_risks_for_page(
     page_rows: list[Workspace],
     *,
     overlap_candidates: list[Workspace],
-) -> dict[str, tuple[dict[str, str], ...]]:
+) -> dict[str, tuple[WorkspaceLockOverlapRisk, ...]]:
     if not page_rows or not overlap_candidates:
         return {}
     return await asyncio.to_thread(
@@ -253,29 +263,29 @@ def _overlap_workspace(workspace: Workspace) -> _OverlapWorkspace:
 def _workspace_overlap_risks_by_id(
     workspaces: tuple[_OverlapWorkspace, ...],
     overlap_candidates: tuple[_OverlapWorkspace, ...],
-) -> dict[str, tuple[dict[str, str], ...]]:
+) -> dict[str, tuple[WorkspaceLockOverlapRisk, ...]]:
     candidates_by_repo_base: dict[tuple[str, str], list[_OverlapWorkspace]] = {}
     for candidate in overlap_candidates:
         key = (candidate.repo_url, candidate.branch_base)
         candidates_by_repo_base.setdefault(key, []).append(candidate)
 
-    risks_by_workspace: dict[str, tuple[dict[str, str], ...]] = {}
+    risks_by_workspace: dict[str, tuple[WorkspaceLockOverlapRisk, ...]] = {}
     for workspace in workspaces:
-        risks: list[dict[str, str]] = []
-        requested_paths = workspace.owned_paths
+        risks: list[WorkspaceLockOverlapRisk] = []
+        owned_paths = workspace.owned_paths
         key = (workspace.repo_url, workspace.branch_base)
         for other in candidates_by_repo_base.get(key, ()):
             if other.workspace_id == workspace.workspace_id:
                 continue
-            for existing_path in other.owned_paths:
-                for requested_path in requested_paths:
-                    if owned_paths_overlap(existing_path, requested_path):
+            for overlapping_owned_path in other.owned_paths:
+                for owned_path in owned_paths:
+                    if owned_paths_overlap(overlapping_owned_path, owned_path):
                         risks.append(
-                            {
-                                "workspace_id": other.workspace_id,
-                                "existing_path": existing_path,
-                                "requested_path": requested_path,
-                            }
+                            WorkspaceLockOverlapRisk(
+                                overlapping_workspace_id=other.workspace_id,
+                                overlapping_owned_path=overlapping_owned_path,
+                                owned_path=owned_path,
+                            )
                         )
         if risks:
             risks_by_workspace[workspace.workspace_id] = tuple(risks)
