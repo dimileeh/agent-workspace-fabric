@@ -13,6 +13,7 @@ import pytest
 import yaml
 
 from awf.node.compose_manager import ComposeManager, WorkspaceComposeSpec
+from awf.profiles.registry import docker_compose_profile
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -264,14 +265,20 @@ class TestRender:
 
     @pytest.mark.unit
     def test_dind_profile_adds_docker_daemon(self, manager: ComposeManager, tmp_path: Path) -> None:
+        profile = docker_compose_profile()
         spec = _spec(
             tmp_path,
-            docker_mode="dind",
-            agent_environment=(("DOCKER_HOST", "tcp://docker:2375"),),
+            docker_mode=profile.docker.mode.value,
+            agent_environment=tuple(profile.runtime.environment.items()),
         )
         parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
         assert parsed["services"]["docker"]["image"] == "docker:27-dind"
         assert parsed["services"]["docker"]["privileged"] is True
+        assert parsed["services"]["docker"]["environment"]["DOCKER_TLS_CERTDIR"] == ""
+        assert parsed["services"]["docker"]["healthcheck"]["test"] == [
+            "CMD-SHELL",
+            "docker info >/dev/null 2>&1",
+        ]
         assert parsed["services"]["agent"]["environment"]["DOCKER_HOST"] == "tcp://docker:2375"
         assert parsed["services"]["agent"]["depends_on"] == {
             "docker": {"condition": "service_healthy"}
