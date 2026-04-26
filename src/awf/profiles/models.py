@@ -105,15 +105,26 @@ class ProfileHealthCheck(BaseModel):
 class ProfileCoverage(BaseModel):
     """Repository coverage policy expected from validation.
 
-    The phase commands still decide how coverage is measured. This profile
-    field records the required threshold so schedulers, prompts, and future
-    merge policy can treat coverage as an explicit contract instead of prose.
+    The phase commands still decide the baseline validation surface. Coverage
+    collection is explicit: when ``command`` is set, AWF runs it and parses the
+    provider's output instead of inventing a number from test success.
     """
 
     model_config = ConfigDict(extra="forbid")
 
     minimum_percent: float = Field(default=0.0, ge=0.0, le=100.0)
     enforce: bool = True
+    provider: Annotated[str, Field(min_length=1, max_length=64)] = "python"
+    command: ProfileCommand | None = None
+
+    @field_validator("command", mode="before")
+    @classmethod
+    def _coerce_command(cls, value: object) -> object:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return ProfileCommand.from_shell(value)
+        return value
 
 
 class ProfileValidation(BaseModel):
