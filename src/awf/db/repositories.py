@@ -1161,14 +1161,14 @@ def _candidate_terminal_close_reason(status: WorkspaceStatus) -> str:
     return f"WORKSPACE_{status.value.upper()}"
 
 
-from awf.runtime.merge_eligibility import compute_stale_reason
-
 def _sync_candidate_readiness(
     candidate: MergeCandidate,
     *,
     workspace: Workspace,
     attempt: TaskAttempt,
 ) -> None:
+    from awf.runtime.merge_eligibility import compute_stale_reason
+
     workspace_status = WorkspaceStatus(workspace.status)
     is_open = candidate.status == "open"
     is_canonical = attempt.is_canonical_for_merge
