@@ -692,6 +692,10 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         async def wait_for_execution_tasks(self) -> None:
             created["wait_for_execution_tasks"] = True
 
+    class _PostgresCoordinator:
+        def __init__(self, engine: object) -> None:
+            created["merge_coordinator_engine"] = engine
+
     engine = _Engine()
     session_factory = object()
 
@@ -713,6 +717,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     monkeypatch.setattr(worker_mod, "ComposeManager", _ComposeManager, raising=False)
     monkeypatch.setattr(worker_mod, "ComposeStackLauncher", _ComposeStackLauncher, raising=False)
     monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
+    monkeypatch.setattr(worker_mod, "PostgresAdvisoryMergeCoordinator", _PostgresCoordinator)
     monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
 
     host_work_dir = (tmp_path / "awf-work").resolve()
@@ -737,6 +742,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
 
     assert created["db_url"] == settings.database_url
     assert created["session_engine"] is engine
+    assert created["merge_coordinator_engine"] is engine
     assert created["git_work_dir"] == host_work_dir / "git"
     assert created["git_env"]["HOME"] == str((tmp_path / "host-home").resolve())
     assert created["compose_work_dir"] == host_work_dir
