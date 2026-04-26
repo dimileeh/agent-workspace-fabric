@@ -1,24 +1,23 @@
 """Merge-attempt coordination for PR monitors.
 
-The current implementation is intentionally process-local: it serializes
-auto-merge attempts by ``repo_url + base_branch`` for monitors running in
-the same worker process. That is enough to prevent the local service
-worker from firing simultaneous final rechecks and merge attempts at the
-same repository branch.
-
-Next hardening step: replace this abstraction with a Postgres advisory
-lock so independently spawned monitor processes and multiple workers can
-share the same coordination key.
+The in-process coordinator is kept for tests, SQLite, and compatibility
+paths. Service deployments backed by Postgres can use advisory locks so
+independently spawned monitor processes and multiple workers share the
+same coordination key.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import weakref
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import AbstractAsyncContextManager, asynccontextmanager
 from dataclasses import dataclass
-from typing import Protocol
+from typing import Protocol, cast
+
+import asyncpg  # type: ignore[import-untyped]
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 
 class MergeCoordinator(Protocol):
@@ -31,6 +30,17 @@ class MergeCoordinator(Protocol):
         base_branch: str,
     ) -> AbstractAsyncContextManager[None]:
         """Return an async context manager for one repo/base merge lane."""
+
+
+class _AdvisoryConnection(Protocol):
+    async def fetchval(self, query: str, *args: object) -> object: ...
+
+    async def execute(self, query: str, *args: object) -> object: ...
+
+    async def close(self) -> None: ...
+
+
+_AdvisoryConnect = Callable[[str], Awaitable[_AdvisoryConnection]]
 
 
 @dataclass(frozen=True)
@@ -96,6 +106,82 @@ class InProcessMergeCoordinator:
         entry.ref_count -= 1
         if entry.ref_count == 0 and not entry.lock.locked() and loop_locks.get(key) is entry:
             del loop_locks[key]
+
+
+def postgres_advisory_lock_key(*, repo_url: str, base_branch: str) -> int:
+    """Return a stable signed 64-bit Postgres advisory lock key."""
+
+    key = MergeCoordinationKey.from_values(repo_url=repo_url, base_branch=base_branch)
+    payload = f"{key.repo_url}\0{key.base_branch}".encode()
+    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big", signed=True)
+
+
+class PostgresAdvisoryMergeCoordinator:
+    """A coordinator backed by Postgres session-level advisory locks.
+
+    Session-level advisory locks must stay tied to an open Postgres session for
+    the whole merge body. Use a dedicated asyncpg connection, not the
+    SQLAlchemy application pool, and make contenders poll with try-lock calls so
+    failed attempts return their connection immediately.
+    """
+
+    def __init__(
+        self,
+        engine: AsyncEngine,
+        *,
+        poll_interval_seconds: float = 0.5,
+        connect: _AdvisoryConnect | None = None,
+    ) -> None:
+        self._dsn = _asyncpg_dsn_from_engine(engine)
+        self._poll_interval_seconds = poll_interval_seconds
+        self._connect = connect or _connect_asyncpg
+        self._local = InProcessMergeCoordinator()
+
+    @asynccontextmanager
+    async def serialized_merge(
+        self,
+        *,
+        repo_url: str,
+        base_branch: str,
+    ) -> AsyncIterator[None]:
+        lock_key = postgres_advisory_lock_key(repo_url=repo_url, base_branch=base_branch)
+        async with self._local.serialized_merge(repo_url=repo_url, base_branch=base_branch):
+            connection = await self._acquire_lock_connection(lock_key)
+            try:
+                yield
+            finally:
+                try:
+                    await connection.execute("SELECT pg_advisory_unlock($1)", lock_key)
+                finally:
+                    await connection.close()
+
+    async def _acquire_lock_connection(self, lock_key: int) -> _AdvisoryConnection:
+        while True:
+            connection = await self._connect(self._dsn)
+            try:
+                acquired = bool(
+                    await connection.fetchval("SELECT pg_try_advisory_lock($1)", lock_key)
+                )
+            except BaseException:
+                await connection.close()
+                raise
+
+            if acquired:
+                return connection
+
+            await connection.close()
+            await asyncio.sleep(self._poll_interval_seconds)
+
+
+async def _connect_asyncpg(dsn: str) -> _AdvisoryConnection:
+    return cast(_AdvisoryConnection, await asyncpg.connect(dsn=dsn))
+
+
+def _asyncpg_dsn_from_engine(engine: AsyncEngine) -> str:
+    url = engine.url
+    if "+" in url.drivername:
+        url = url.set(drivername=url.drivername.split("+", 1)[0])
+    return url.render_as_string(hide_password=False)
 
 
 DEFAULT_MERGE_COORDINATOR = InProcessMergeCoordinator()

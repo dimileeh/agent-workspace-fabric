@@ -1,17 +1,21 @@
-"""Unit tests for the in-process merge coordinator.
+"""Unit tests for merge coordinators.
 
-The coordinator is deliberately tiny today: it serializes merge attempts
-inside one worker process by ``repo_url + base_branch``. The tests keep
-that contract explicit so a future Postgres advisory-lock implementation
-can replace it without changing monitor-runner behavior.
+The in-process coordinator serializes merge attempts inside one worker process
+by ``repo_url + base_branch``. The Postgres coordinator uses the same keying
+contract to serialize independently spawned service workers.
 """
 
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
+from typing import cast
 
 import pytest
+from sqlalchemy.engine import make_url
+from sqlalchemy.ext.asyncio import AsyncEngine
 
+from awf.runtime import merge_coordinator as merge_coordinator_mod
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
 
 REPO_URL = "git@github.com:dimileeh/aira-web.git"
@@ -177,3 +181,140 @@ class TestInProcessMergeCoordinator:
 
         asyncio.run(contend_once())
         asyncio.run(contend_once())
+
+
+class TestPostgresAdvisoryMergeCoordinator:
+    @pytest.mark.unit
+    def test_advisory_lock_key_is_deterministic_and_normalized(self) -> None:
+        key = merge_coordinator_mod.postgres_advisory_lock_key(
+            repo_url=REPO_URL,
+            base_branch="development",
+        )
+
+        assert key == -4806809152263605362
+        assert key == merge_coordinator_mod.postgres_advisory_lock_key(
+            repo_url=f" {REPO_URL} ",
+            base_branch=" development ",
+        )
+        assert key != merge_coordinator_mod.postgres_advisory_lock_key(
+            repo_url=REPO_URL,
+            base_branch="main",
+        )
+        assert -(2**63) <= key <= 2**63 - 1
+
+    @pytest.mark.unit
+    async def test_context_manager_acquires_before_body_and_releases_after_body(self) -> None:
+        calls: list[object] = []
+        coordinator = merge_coordinator_mod.PostgresAdvisoryMergeCoordinator(
+            _fake_engine(),
+            connect=_FakeAdvisoryConnector(calls).connect,
+        )
+
+        async with coordinator.serialized_merge(
+            repo_url=REPO_URL,
+            base_branch="development",
+        ):
+            calls.append("body")
+
+        expected_key = -4806809152263605362
+        assert calls == [
+            ("connect", "postgresql://awf:secret@db:5432/awf"),
+            ("try-lock", expected_key),
+            "body",
+            ("unlock", expected_key),
+            "close",
+        ]
+
+    @pytest.mark.unit
+    async def test_context_manager_releases_lock_when_body_raises(self) -> None:
+        calls: list[object] = []
+        coordinator = merge_coordinator_mod.PostgresAdvisoryMergeCoordinator(
+            _fake_engine(),
+            connect=_FakeAdvisoryConnector(calls).connect,
+        )
+
+        with pytest.raises(RuntimeError, match="merge failed"):
+            async with coordinator.serialized_merge(
+                repo_url=REPO_URL,
+                base_branch="development",
+            ):
+                calls.append("body")
+                raise RuntimeError("merge failed")
+
+        expected_key = -4806809152263605362
+        assert calls == [
+            ("connect", "postgresql://awf:secret@db:5432/awf"),
+            ("try-lock", expected_key),
+            "body",
+            ("unlock", expected_key),
+            "close",
+        ]
+
+    @pytest.mark.unit
+    async def test_contenders_close_connections_between_try_lock_polls(self) -> None:
+        calls: list[object] = []
+        coordinator = merge_coordinator_mod.PostgresAdvisoryMergeCoordinator(
+            _fake_engine(),
+            poll_interval_seconds=0,
+            connect=_FakeAdvisoryConnector(calls, try_lock_results=[False, True]).connect,
+        )
+
+        async with coordinator.serialized_merge(
+            repo_url=REPO_URL,
+            base_branch="development",
+        ):
+            calls.append("body")
+
+        expected_key = -4806809152263605362
+        assert calls == [
+            ("connect", "postgresql://awf:secret@db:5432/awf"),
+            ("try-lock", expected_key),
+            "close",
+            ("connect", "postgresql://awf:secret@db:5432/awf"),
+            ("try-lock", expected_key),
+            "body",
+            ("unlock", expected_key),
+            "close",
+        ]
+
+
+def _fake_engine() -> AsyncEngine:
+    return cast(
+        AsyncEngine,
+        SimpleNamespace(url=make_url("postgresql+asyncpg://awf:secret@db:5432/awf")),
+    )
+
+
+class _FakeAdvisoryConnector:
+    def __init__(
+        self,
+        calls: list[object],
+        *,
+        try_lock_results: list[bool] | None = None,
+    ) -> None:
+        self._calls = calls
+        self._try_lock_results = try_lock_results or [True]
+
+    async def connect(self, dsn: str) -> _FakeAdvisoryConnection:
+        self._calls.append(("connect", dsn))
+        return _FakeAdvisoryConnection(self._calls, self._try_lock_results)
+
+
+class _FakeAdvisoryConnection:
+    def __init__(self, calls: list[object], try_lock_results: list[bool]) -> None:
+        self._calls = calls
+        self._try_lock_results = try_lock_results
+
+    async def fetchval(self, query: str, *args: object) -> bool:
+        if query != "SELECT pg_try_advisory_lock($1)":
+            raise AssertionError(f"unexpected query: {query}")
+        self._calls.append(("try-lock", args[0]))
+        return self._try_lock_results.pop(0)
+
+    async def execute(self, query: str, *args: object) -> None:
+        if query != "SELECT pg_advisory_unlock($1)":
+            raise AssertionError(f"unexpected query: {query}")
+        self._calls.append(("unlock", args[0]))
+
+    async def close(self) -> None:
+        self._calls.append("close")
