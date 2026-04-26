@@ -167,6 +167,39 @@ class TestCreateWorkspaceV2:
         assert ws.initial_review_grace_period_seconds == 12.5
 
     @pytest.mark.unit
+    async def test_policy_metadata_round_trips_through_create_get_and_list(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        created = await _call(
+            mcp,
+            "awf_create_workspace_v2",
+            {
+                "repo_url": "git@github.com:example/docs.git",
+                "base_branch": "main",
+                "task_title": "Document policy metadata",
+                "task_prompt": "Update the docs.",
+                "task_kind": "feature_branch_pr",
+                "task_class": "docs_task",
+                "owned_paths": ["README.md", "docs/**"],
+            },
+        )
+
+        assert isinstance(created, dict)
+        ws_id = created["id"]
+        fetched = await _call(mcp, "awf_get_workspace", {"workspace_id": ws_id})
+        listed = await _call(mcp, "awf_list_workspaces", {"limit": 10})
+
+        assert created["task_class"] == "docs_task"
+        assert created["owned_paths"] == ["README.md", "docs/**"]
+        assert fetched is not None
+        assert fetched["task_class"] == "docs_task"  # type: ignore[index]
+        assert fetched["owned_paths"] == ["README.md", "docs/**"]  # type: ignore[index]
+        assert isinstance(listed, list)
+        assert listed[0]["task_class"] == "docs_task"
+        assert listed[0]["owned_paths"] == ["README.md", "docs/**"]
+
+    @pytest.mark.unit
     async def test_unknown_profile_ref_returns_structured_invalid_profile_error(
         self,
         mcp,
