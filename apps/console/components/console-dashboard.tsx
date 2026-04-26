@@ -1219,6 +1219,8 @@ function mergeBlockerTone(reason: MergeQueueItem["merge_blocker_reason"]): Retur
       return "warn";
     case "failed_or_cancelled":
       return "bad";
+    case "workspace_not_terminal":
+      return "info";
     default:
       return "info";
   }
