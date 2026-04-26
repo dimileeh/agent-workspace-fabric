@@ -53,7 +53,7 @@ def _base_url(override: str | None) -> str:
 
 
 def _api_token_headers(override: str | None) -> dict[str, str]:
-    token = override or os.environ.get("AWF_API_TOKEN")
+    token = override if override is not None else os.environ.get("AWF_API_TOKEN")
     if not token:
         return {}
     return {"Authorization": f"Bearer {token}"}

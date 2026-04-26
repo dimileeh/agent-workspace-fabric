@@ -348,6 +348,32 @@ class TestWorkspaceObservability:
         assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer cli-secret"}
 
     @pytest.mark.unit
+    def test_empty_cli_token_suppresses_env_api_token(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=200,
+            payload={"stream_id": "agent.stdout", "offset": 0, "data": "tail"},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "log",
+                    "ws_obs",
+                    "agent.stdout",
+                    "--api-token",
+                    "",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args.kwargs["headers"] == {}
+
+    @pytest.mark.unit
     def test_log_encodes_stream_id_path_segment(self) -> None:
         response = _mock_response(
             status_code=200,
