@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
@@ -349,6 +350,53 @@ async def test_failure_analysis_groups_failed_workspaces_and_latest_examples(
     assert latest_validation.pr_url == "https://github.com/example/api/pull/42"
     assert latest_validation.created_at == now - timedelta(minutes=12)
     assert latest_validation.updated_at == now - timedelta(minutes=5)
+
+
+@pytest.mark.unit
+async def test_failure_analysis_latest_examples_do_not_load_workspace_relationships(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=1),
+        failure_reason=FailureReason.validation_failure,
+    )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+    try:
+        await summarize_failure_analysis(session_factory, now=now)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    relationship_tables = (
+        "from operations",
+        "from workspace_events",
+        "from workspace_log_streams",
+        "from task_attempts",
+    )
+    assert not [
+        statement
+        for statement in statements
+        if any(table in statement for table in relationship_tables)
+    ]
 
 
 @pytest.mark.unit

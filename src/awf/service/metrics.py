@@ -470,7 +470,19 @@ async def _latest_failed_workspace_examples(
     limit: int,
 ) -> list[FailedWorkspaceExample]:
     stmt = (
-        select(Workspace)
+        select(
+            Workspace.id,
+            Workspace.task_title,
+            Workspace.repo_url,
+            Workspace.branch_base,
+            Workspace.agent,
+            Workspace.status,
+            Workspace.failure_reason,
+            Workspace.failure_message,
+            Workspace.pr_url,
+            Workspace.created_at,
+            Workspace.updated_at,
+        )
         .where(Workspace.status == WorkspaceStatus.failed.value)
         .where(Workspace.updated_at >= window_start)
         .order_by(
@@ -481,7 +493,34 @@ async def _latest_failed_workspace_examples(
         .limit(limit)
     )
     rows = await session.execute(stmt)
-    return [_failed_workspace_example(workspace) for workspace in rows.scalars()]
+    return [
+        FailedWorkspaceExample(
+            workspace_id=workspace_id,
+            title=title,
+            repo_url=repo_url,
+            branch_base=branch_base,
+            agent=agent,
+            status=status,
+            failure_reason=_normalize_failure_reason(failure_reason),
+            failure_message=failure_message,
+            pr_url=pr_url,
+            created_at=_to_utc(created_at),
+            updated_at=_to_utc(updated_at),
+        )
+        for (
+            workspace_id,
+            title,
+            repo_url,
+            branch_base,
+            agent,
+            status,
+            failure_reason,
+            failure_message,
+            pr_url,
+            created_at,
+            updated_at,
+        ) in rows.all()
+    ]
 
 
 async def _count_active_workspaces(session: AsyncSession) -> int:
@@ -511,22 +550,6 @@ def _failure_reason_groups(reason_counts: dict[str, int]) -> list[FailureReasonG
             )
         )
     return groups
-
-
-def _failed_workspace_example(workspace: Workspace) -> FailedWorkspaceExample:
-    return FailedWorkspaceExample(
-        workspace_id=workspace.id,
-        title=workspace.task_title,
-        repo_url=workspace.repo_url,
-        branch_base=workspace.branch_base,
-        agent=workspace.agent,
-        status=workspace.status,
-        failure_reason=_normalize_failure_reason(workspace.failure_reason),
-        failure_message=workspace.failure_message,
-        pr_url=workspace.pr_url,
-        created_at=_to_utc(workspace.created_at),
-        updated_at=_to_utc(workspace.updated_at),
-    )
 
 
 def _failure_action(failure_reason: str) -> FailureAction:
