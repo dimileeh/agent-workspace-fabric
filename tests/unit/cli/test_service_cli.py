@@ -456,6 +456,12 @@ def test_service_status_uses_mocked_api_db_docker_and_image_checks(tmp_path: Pat
                 (),
                 {"returncode": 0, "stdout": "sha256:deadbeef\n", "stderr": ""},
             )()
+        if args[:3] == ["docker", "ps", "-a"]:
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "", "stderr": ""},
+            )()
         raise AssertionError(f"unexpected subprocess call: {args}")
 
     settings = ServiceSettings(
@@ -549,6 +555,12 @@ def test_service_status_runs_dependency_checks_concurrently(tmp_path: Path) -> N
                 "Completed",
                 (),
                 {"returncode": 0, "stdout": "sha256:deadbeef\n", "stderr": ""},
+            )()
+        if args[:3] == ["docker", "ps", "-a"]:
+            return type(
+                "Completed",
+                (),
+                {"returncode": 0, "stdout": "", "stderr": ""},
             )()
         raise AssertionError(f"unexpected subprocess call: {args}")
 
