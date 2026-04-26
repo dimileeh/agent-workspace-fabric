@@ -60,7 +60,11 @@ from awf.node.compose_manager import (
     WorkspaceComposeSpec,
 )
 from awf.node.git_manager import GitManager
-from awf.profiles.compose import profile_agent_environment, profile_services
+from awf.profiles.compose import (
+    agent_environment_with_github_token,
+    profile_agent_environment,
+    profile_services,
+)
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.registry import aira_profile
 from awf.profiles.resolver import resolve_workspace_profile
@@ -371,7 +375,7 @@ def _agent_environment_with_host_auth(
         if name not in existing and source_env.get(name):
             merged.append((name, f"${{{name}}}"))
             existing.add(name)
-    return tuple(merged)
+    return agent_environment_with_github_token(tuple(merged), host_env=source_env)
 
 
 def _profile_agent_environment(profile: WorkspaceProfile) -> tuple[tuple[str, str], ...]:

@@ -1261,13 +1261,18 @@ class TestAgentEnvironmentWithHostAuth:
             host_env={
                 "ANTHROPIC_API_KEY": "secret-anthropic",
                 "GEMINI_API_KEY": "secret-gemini",
+                "AWF_GITHUB_TOKEN": "ghp_raw_secret",
             },
         )
 
         assert ("PYTHONUNBUFFERED", "1") in env
         assert ("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}") in env
         assert ("GEMINI_API_KEY", "${GEMINI_API_KEY}") in env
+        assert ("GH_TOKEN", "${AWF_GITHUB_TOKEN}") in env
+        assert ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}") in env
         assert ("ANTHROPIC_API_KEY", "secret-anthropic") not in env
+        assert ("GH_TOKEN", "ghp_raw_secret") not in env
+        assert ("GITHUB_TOKEN", "ghp_raw_secret") not in env
 
     @pytest.mark.unit
     def test_profile_env_wins_over_host_passthrough(self) -> None:
