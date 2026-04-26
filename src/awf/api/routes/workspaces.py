@@ -10,6 +10,7 @@ returns 409 ``IDEMPOTENCY_CONFLICT`` per docs/PLAN_MVP.md § Error code taxonomy
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import Callable
 from datetime import datetime
 from typing import Annotated, cast
@@ -121,7 +122,7 @@ async def create_workspace_v2(
                 )
             return _accepted(existing.id, existing.status, existing.version, existing.created_at)
 
-    disk_check = _workspace_admission_disk_check(request)
+    disk_check = await _workspace_admission_disk_check(request)
     if not disk_check.ok:
         return _insufficient_disk_response(disk_check)
 
@@ -152,15 +153,16 @@ async def create_workspace_v2(
     return _accepted(ws.id, ws.status, ws.version, ws.created_at)
 
 
-def _workspace_admission_disk_check(request: Request) -> DiskCheck:
+async def _workspace_admission_disk_check(request: Request) -> DiskCheck:
     settings = get_settings()
     provider = cast(
         DiskCheckProvider | None,
         getattr(request.app.state, "workspace_admission_disk_check", None),
     )
     if provider is not None:
-        return provider(settings)
-    return check_disk_space(
+        return await asyncio.to_thread(provider, settings)
+    return await asyncio.to_thread(
+        check_disk_space,
         settings.work_dir,
         min_free_bytes=settings.min_free_disk_bytes,
     )
