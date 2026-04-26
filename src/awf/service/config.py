@@ -74,7 +74,7 @@ def resolve_service_settings(
         min_free_disk_bytes=settings.min_free_disk_bytes,
         host_home=settings.host_home or "~",
         api_token=_empty_to_none(settings.api_token),
-        github_token=_empty_to_none(settings.github_token),
+        github_token=_resolve_github_token(settings.github_token, env),
         worker_poll_interval_seconds=settings.worker_poll_interval_seconds,
         worker_max_concurrent_provisions=settings.worker_max_concurrent_provisions,
         worker_max_concurrent_executions=settings.worker_max_concurrent_executions,
@@ -103,6 +103,22 @@ def _has_env_key(environ: Mapping[str, str], key: str) -> bool:
 
 def _empty_to_none(value: str | None) -> str | None:
     return value or None
+
+
+def _resolve_github_token(settings_value: str | None, environ: Mapping[str, str]) -> str | None:
+    """Resolve the GitHub token accepted by local service mode.
+
+    ``AWF_GITHUB_TOKEN`` is the documented setting, but local shells and CI often
+    already expose ``GH_TOKEN`` or ``GITHUB_TOKEN``. Accepting those fallbacks
+    keeps the service worker authenticated after restarts without requiring a
+    separate token export.
+    """
+
+    return (
+        _empty_to_none(settings_value)
+        or _empty_to_none(environ.get("GH_TOKEN"))
+        or _empty_to_none(environ.get("GITHUB_TOKEN"))
+    )
 
 
 def _redact_database_url(value: str) -> str:

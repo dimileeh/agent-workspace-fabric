@@ -81,6 +81,29 @@ def test_explicit_worker_node_id_is_preserved_for_non_local_multi_node_deploymen
 
 
 @pytest.mark.unit
+def test_local_service_accepts_standard_gh_token_fallback() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None),
+        environ={"GH_TOKEN": "ghp_service_token"},
+    )
+
+    assert settings.github_token == "ghp_service_token"
+
+
+@pytest.mark.unit
+def test_awf_github_token_precedes_standard_gh_token_fallback() -> None:
+    settings = resolve_service_settings(
+        Settings(_env_file=None, github_token="ghp_awf_token"),
+        environ={
+            "AWF_GITHUB_TOKEN": "ghp_awf_token",
+            "GH_TOKEN": "ghp_standard_token",
+        },
+    )
+
+    assert settings.github_token == "ghp_awf_token"
+
+
+@pytest.mark.unit
 def test_local_service_compose_sets_stable_worker_node_id_for_control_plane_services() -> None:
     compose_path = Path(__file__).resolve().parents[3] / "docker" / "compose" / "local-service.yml"
     compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
@@ -88,3 +111,6 @@ def test_local_service_compose_sets_stable_worker_node_id_for_control_plane_serv
     for service_name in ("api", "worker", "migrate"):
         service = compose["services"][service_name]
         assert service["environment"]["AWF_WORKER_NODE_ID"] == "local"
+        assert service["environment"]["AWF_GITHUB_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
+        assert service["environment"]["GH_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
+        assert service["environment"]["GITHUB_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
