@@ -59,6 +59,25 @@ def _docker_ps_payload(*containers: dict[str, str]) -> str:
     return "".join(json.dumps(container) + "\n" for container in containers)
 
 
+def _container(
+    *,
+    id: str,
+    name: str,
+    state: str,
+    status: str,
+    project: str,
+    service: str,
+) -> dict[str, str]:
+    return {
+        "id": id,
+        "name": name,
+        "state": state,
+        "status": status,
+        "project": project,
+        "service": service,
+    }
+
+
 def _make_run_subprocess(
     *,
     ps_payload: str = "",
@@ -169,24 +188,22 @@ def test_orphan_check_reports_no_orphans_when_no_awf_containers(tmp_path: Path) 
 @pytest.mark.unit
 def test_orphan_check_treats_active_workspace_containers_as_expected(tmp_path: Path) -> None:
     payload = _docker_ps_payload(
-        {
-            "ID": "abc",
-            "Names": "awf_ws_alive-agent-1",
-            "State": "running",
-            "Status": "Up 3 minutes",
-            "Labels": (
-                "com.docker.compose.project=awf_ws_alive,com.docker.compose.service=agent"
-            ),
-        },
-        {
-            "ID": "def",
-            "Names": "awf_ws_alive-postgres-1",
-            "State": "running",
-            "Status": "Up 3 minutes (healthy)",
-            "Labels": (
-                "com.docker.compose.project=awf_ws_alive,com.docker.compose.service=postgres"
-            ),
-        },
+        _container(
+            id="abc",
+            name="awf_ws_alive-agent-1",
+            state="running",
+            status="Up 3 minutes",
+            project="awf_ws_alive",
+            service="agent",
+        ),
+        _container(
+            id="def",
+            name="awf_ws_alive-postgres-1",
+            state="running",
+            status="Up 3 minutes (healthy)",
+            project="awf_ws_alive",
+            service="postgres",
+        ),
     )
 
     async def _ws_lookup(_url: str) -> WorkspaceIdView:
@@ -218,15 +235,14 @@ def test_orphan_check_treats_active_workspace_containers_as_expected(tmp_path: P
 @pytest.mark.unit
 def test_orphan_check_flags_terminal_workspace_with_running_container(tmp_path: Path) -> None:
     payload = _docker_ps_payload(
-        {
-            "ID": "abc",
-            "Names": "awf_ws_dead-agent-1",
-            "State": "running",
-            "Status": "Up 1 day",
-            "Labels": (
-                "com.docker.compose.project=awf_ws_dead,com.docker.compose.service=agent"
-            ),
-        }
+        _container(
+            id="abc",
+            name="awf_ws_dead-agent-1",
+            state="running",
+            status="Up 1 day",
+            project="awf_ws_dead",
+            service="agent",
+        )
     )
 
     async def _ws_lookup(_url: str) -> WorkspaceIdView:
@@ -270,15 +286,14 @@ def test_orphan_check_flags_terminal_workspace_with_running_container(tmp_path: 
 @pytest.mark.unit
 def test_orphan_check_flags_workspace_missing_from_db(tmp_path: Path) -> None:
     payload = _docker_ps_payload(
-        {
-            "ID": "ghost",
-            "Names": "awf-ws_ghost-agent-1",
-            "State": "exited",
-            "Status": "Exited (0) 5 minutes ago",
-            "Labels": (
-                "com.docker.compose.project=awf-ws_ghost,com.docker.compose.service=agent"
-            ),
-        }
+        _container(
+            id="ghost",
+            name="awf-ws_ghost-agent-1",
+            state="exited",
+            status="Exited (0) 5 minutes ago",
+            project="awf-ws_ghost",
+            service="agent",
+        )
     )
 
     async def _ws_lookup(_url: str) -> WorkspaceIdView:
@@ -313,13 +328,14 @@ def test_orphan_check_flags_workspace_missing_from_db(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_orphan_check_skips_non_awf_compose_projects(tmp_path: Path) -> None:
     payload = _docker_ps_payload(
-        {
-            "ID": "x",
-            "Names": "myapp-db-1",
-            "State": "running",
-            "Status": "Up",
-            "Labels": "com.docker.compose.project=myapp,com.docker.compose.service=db",
-        }
+        _container(
+            id="x",
+            name="myapp-db-1",
+            state="running",
+            status="Up",
+            project="myapp",
+            service="db",
+        )
     )
 
     status = asyncio.run(
@@ -343,15 +359,14 @@ def test_orphan_check_skips_non_awf_compose_projects(tmp_path: Path) -> None:
 @pytest.mark.unit
 def test_orphan_check_marks_unknown_when_db_unavailable(tmp_path: Path) -> None:
     payload = _docker_ps_payload(
-        {
-            "ID": "abc",
-            "Names": "awf_ws_solo-agent-1",
-            "State": "running",
-            "Status": "Up 2 minutes",
-            "Labels": (
-                "com.docker.compose.project=awf_ws_solo,com.docker.compose.service=agent"
-            ),
-        }
+        _container(
+            id="abc",
+            name="awf_ws_solo-agent-1",
+            state="running",
+            status="Up 2 minutes",
+            project="awf_ws_solo",
+            service="agent",
+        )
     )
 
     async def _ws_lookup(_url: str) -> WorkspaceIdView:
@@ -425,6 +440,76 @@ def test_orphan_check_unavailable_when_docker_ps_fails(tmp_path: Path) -> None:
     assert orphans["reason"] == "DOCKER_UNAVAILABLE"
     assert "Cannot connect" in str(orphans.get("detail", ""))
     assert orphans["orphan_count"] == 0
+
+
+@pytest.mark.unit
+def test_orphan_check_extracts_labels_via_docker_template(tmp_path: Path) -> None:
+    captured_args: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> Any:
+        captured_args.append(list(args))
+        if args[:2] == ["docker", "info"]:
+            return type("Completed", (), {"returncode": 0, "stdout": "27\n", "stderr": ""})()
+        if args[:3] == ["docker", "image", "inspect"]:
+            return type("Completed", (), {"returncode": 0, "stdout": "sha\n", "stderr": ""})()
+        if args[:3] == ["docker", "ps", "-a"]:
+            return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        raise AssertionError(f"unexpected subprocess call: {args}")
+
+    asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_run,
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+        )
+    )
+
+    ps_args = next(args for args in captured_args if args[:3] == ["docker", "ps", "-a"])
+    fmt_index = ps_args.index("--format")
+    fmt = ps_args[fmt_index + 1]
+    assert '.Label "com.docker.compose.project"' in fmt
+    assert '.Label "com.docker.compose.service"' in fmt
+
+
+@pytest.mark.unit
+def test_orphan_check_handles_label_value_with_comma(tmp_path: Path) -> None:
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_alive-agent-1",
+            state="running",
+            status="Up 3 minutes, restarting",
+            project="awf_ws_alive",
+            service="agent",
+        )
+    )
+
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset({"ws_alive"}),
+            terminal_ids=frozenset(),
+            available=True,
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+        )
+    )
+
+    orphans = status["checks"]["orphan_workspaces"]
+    assert orphans["reason"] == "NO_ORPHANS"
+    assert orphans["active_count"] == 1
 
 
 @pytest.mark.unit

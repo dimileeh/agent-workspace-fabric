@@ -250,7 +250,12 @@ def _run_workspace_ps(
             "--filter",
             "label=com.docker.compose.project",
             "--format",
-            "{{json .}}",
+            (
+                '{"id":{{json .ID}},"name":{{json .Names}},'
+                '"state":{{json .State}},"status":{{json .Status}},'
+                '"project":{{json (.Label "com.docker.compose.project")}},'
+                '"service":{{json (.Label "com.docker.compose.service")}}}'
+            ),
         ],
         settings=settings,
         run_subprocess=run_subprocess,
@@ -375,8 +380,7 @@ def _parse_workspace_projects(stdout: str) -> list[_WorkspaceProject]:
             continue
         if not isinstance(row, dict):
             continue
-        labels = _parse_labels(str(row.get("Labels") or ""))
-        project = labels.get("com.docker.compose.project")
+        project = str(row.get("project") or "")
         if not project:
             continue
         ws_id = _workspace_id_from_project(project)
@@ -384,11 +388,11 @@ def _parse_workspace_projects(stdout: str) -> list[_WorkspaceProject]:
             continue
         grouped.setdefault(project, []).append(
             {
-                "id": str(row.get("ID") or ""),
-                "name": str(row.get("Names") or ""),
-                "service": labels.get("com.docker.compose.service", ""),
-                "state": str(row.get("State") or ""),
-                "status": str(row.get("Status") or ""),
+                "id": str(row.get("id") or ""),
+                "name": str(row.get("name") or ""),
+                "service": str(row.get("service") or ""),
+                "state": str(row.get("state") or ""),
+                "status": str(row.get("status") or ""),
             }
         )
         workspace_ids[project] = ws_id
@@ -400,18 +404,6 @@ def _parse_workspace_projects(stdout: str) -> list[_WorkspaceProject]:
         )
         for project, containers in sorted(grouped.items())
     ]
-
-
-def _parse_labels(labels: str) -> dict[str, str]:
-    out: dict[str, str] = {}
-    for pair in labels.split(","):
-        if "=" not in pair:
-            continue
-        key, _, value = pair.partition("=")
-        key = key.strip()
-        if key:
-            out[key] = value
-    return out
 
 
 def _workspace_id_from_project(project: str) -> str | None:
