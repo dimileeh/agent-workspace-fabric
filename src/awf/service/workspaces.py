@@ -58,6 +58,11 @@ OWNED_PATH_OVERLAP_RISK_MESSAGE = (
     "Owned paths overlap active workspaces; this may require rebase "
     "or conflict resolution."
 )
+OWNED_PATH_OVERLAP_PAYLOAD_FIELDS = (
+    "workspace_id",
+    "existing_path",
+    "requested_path",
+)
 RETRYABLE_WORKSPACE_STATUSES = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
@@ -612,34 +617,41 @@ def owned_path_overlap_warnings(workspace: Workspace) -> list[WorkspaceWarningRe
 def _owned_path_overlap_warning_response(
     payload: dict[str, Any],
 ) -> WorkspaceWarningResponse:
-    overlaps = payload.get("overlaps")
-    workspace_ids = payload.get("workspace_ids")
     return WorkspaceWarningResponse(
         warning_code=str(payload.get("warning_code", OWNED_PATH_OVERLAP_RISK_CODE)),
         message=str(payload.get("message", OWNED_PATH_OVERLAP_RISK_MESSAGE)),
-        workspace_ids=[
-            workspace_id
-            for workspace_id in workspace_ids
-            if isinstance(workspace_id, str)
-        ]
-        if isinstance(workspace_ids, list)
-        else [],
-        overlaps=[
-            OwnedPathOverlapResponse(
-                workspace_id=str(item["workspace_id"]),
-                existing_path=str(item["existing_path"]),
-                requested_path=str(item["requested_path"]),
-            )
-            for item in overlaps
-            if (
-                isinstance(item, dict)
-                and "workspace_id" in item
-                and "existing_path" in item
-                and "requested_path" in item
-            )
-        ]
-        if isinstance(overlaps, list)
-        else [],
+        workspace_ids=_string_payload_list(payload, "workspace_ids"),
+        overlaps=_owned_path_overlap_payload_responses(payload),
+    )
+
+
+def _string_payload_list(payload: dict[str, Any], field: str) -> list[str]:
+    value = payload.get(field)
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]
+
+
+def _owned_path_overlap_payload_responses(
+    payload: dict[str, Any],
+) -> list[OwnedPathOverlapResponse]:
+    overlaps = payload.get("overlaps")
+    if not isinstance(overlaps, list):
+        return []
+    return [
+        OwnedPathOverlapResponse(
+            workspace_id=str(item["workspace_id"]),
+            existing_path=str(item["existing_path"]),
+            requested_path=str(item["requested_path"]),
+        )
+        for item in overlaps
+        if _has_owned_path_overlap_payload_fields(item)
+    ]
+
+
+def _has_owned_path_overlap_payload_fields(item: Any) -> bool:
+    return isinstance(item, dict) and all(
+        field in item for field in OWNED_PATH_OVERLAP_PAYLOAD_FIELDS
     )
 
 
