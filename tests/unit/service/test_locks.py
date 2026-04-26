@@ -205,3 +205,46 @@ async def test_list_workspace_lock_page_reports_more_rows_and_uses_next_cursor(
     assert [lock.workspace_id for lock in second_page.items] == [oldest_id]
     assert second_page.has_more is False
     assert second_page.next_cursor is None
+
+
+@pytest.mark.unit
+async def test_list_workspace_locks_includes_overlap_risk_metadata(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.locks import list_workspace_locks
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    existing_id = await _workspace(
+        session_factory,
+        title="Existing 1",
+        task_class="refactor_task",
+        owned_paths=["src/awf/service/**"],
+        status=WorkspaceStatus.running,
+        created_at=now,
+    )
+    overlapping_id = await _workspace(
+        session_factory,
+        title="Overlap 2",
+        task_class="docs_task",
+        owned_paths=["src/awf/service/workspaces.py"],
+        status=WorkspaceStatus.requested,
+        created_at=now + timedelta(minutes=1),
+    )
+
+    locks = await list_workspace_locks(session_factory)
+    by_id = {lock.workspace_id: lock for lock in locks}
+
+    assert by_id[overlapping_id].overlap_risks == (
+        {
+            "workspace_id": existing_id,
+            "existing_path": "src/awf/service/**",
+            "requested_path": "src/awf/service/workspaces.py",
+        },
+    )
+    assert by_id[existing_id].overlap_risks == (
+        {
+            "workspace_id": overlapping_id,
+            "existing_path": "src/awf/service/workspaces.py",
+            "requested_path": "src/awf/service/**",
+        },
+    )
