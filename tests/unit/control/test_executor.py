@@ -156,6 +156,7 @@ class TestHappyPath:
 
         commit_calls = [call.args for call in fake.calls if "commit" in call.args]
         assert commit_calls
+        assert any(arg.startswith("safe.directory=") for arg in commit_calls[0])
         assert "user.name=AWF Agent" in commit_calls[0]
         assert "user.email=awf@example.com" in commit_calls[0]
 

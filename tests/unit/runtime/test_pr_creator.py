@@ -48,7 +48,9 @@ class TestPushAndOpen:
         assert len(runner.calls) == 5
         # The push is at index 3 (after the 3 diagnostics).
         push_call = runner.calls[3]
-        assert push_call.args[:2] == ["git", "-C"]
+        assert push_call.args[0] == "git"
+        assert f"safe.directory={_WORKTREE}" in push_call.args
+        assert "-C" in push_call.args
         assert "push" in push_call.args
         assert "-u" in push_call.args
         assert "origin" in push_call.args
@@ -153,6 +155,7 @@ class TestPushAndOpen:
         # The first three calls are the diagnostics, in order.
         call0, call1, call2, call3, _ = runner.calls
         assert "rev-parse" in call0.args and "HEAD" in call0.args
+        assert f"safe.directory={_WORKTREE}" in call0.args
         assert "--abbrev-ref" in call1.args
         assert "log" in call2.args and "origin/development..HEAD" in call2.args
         # The FOURTH call is the push.

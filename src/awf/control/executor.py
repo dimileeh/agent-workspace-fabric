@@ -27,7 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.adapters.base import AgentAdapter, AgentDefaults, AgentRunError, get_adapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
 from awf.common.commands import AsyncCommandRunner
-from awf.common.git_identity import git_identity_config_args
+from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.control.validation_fix_cycle import (
     ValidationFixContext,
@@ -248,7 +248,15 @@ class WorkspaceExecutor:
         base_commit: str = ws.base_commit
 
         async def _git_in_worktree(args: list[str]):  # type: ignore[no-untyped-def]
-            return await self._runner.run(["git", "-C", str(worktree_host), *args])
+            return await self._runner.run(
+                [
+                    "git",
+                    *git_safe_directory_config_args(worktree_host),
+                    "-C",
+                    str(worktree_host),
+                    *args,
+                ]
+            )
 
         expected_branch = ws.branch_name or f"awf/{workspace_id}"
 
@@ -400,6 +408,7 @@ class WorkspaceExecutor:
                 commit_result = await self._runner.run(
                     [
                         "git",
+                        *git_safe_directory_config_args(worktree_host),
                         "-C",
                         str(worktree_host),
                         *git_identity_config_args(),
@@ -470,6 +479,7 @@ class WorkspaceExecutor:
                     recover_commit = await self._runner.run(
                         [
                             "git",
+                            *git_safe_directory_config_args(worktree_host),
                             "-C",
                             str(worktree_host),
                             *git_identity_config_args(),

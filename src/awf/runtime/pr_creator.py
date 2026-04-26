@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from awf.common.commands import AsyncCommandRunner
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
@@ -99,7 +100,16 @@ class PullRequestCreator:
 
         # Step 1: push the branch.
         push = await self._runner.run(
-            ["git", "-C", str(worktree_path), "push", "-u", "origin", branch_name],
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "push",
+                "-u",
+                "origin",
+                branch_name,
+            ],
         )
         # Log the verbatim push output BEFORE the ok check. If the push
         # silently said "Everything up-to-date" with returncode 0 (the
@@ -179,13 +189,31 @@ class PullRequestCreator:
         they're diagnostic only. Normal push either succeeds (fine) or
         fails with a real error (triaged by the push step below).
         """
-        head_sha = await self._runner.run(["git", "-C", str(worktree_path), "rev-parse", "HEAD"])
+        head_sha = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "HEAD",
+            ]
+        )
         current_branch = await self._runner.run(
-            ["git", "-C", str(worktree_path), "rev-parse", "--abbrev-ref", "HEAD"]
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "--abbrev-ref",
+                "HEAD",
+            ]
         )
         ahead_of_base = await self._runner.run(
             [
                 "git",
+                *git_safe_directory_config_args(worktree_path),
                 "-C",
                 str(worktree_path),
                 "log",
