@@ -761,7 +761,15 @@ class WorkspaceExecutor:
         happened before the workspace entered ``monitoring_pr``.
         """
         ws = await self._load_workspace(workspace_id)
-        if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
+        if ws is None:
+            _log.warning("executor.resume_skip_unknown", workspace_id=workspace_id)
+            return
+        if ws.status != WorkspaceStatus.monitoring_pr.value:
+            _log.info(
+                "executor.resume_skip_not_monitoring_pr",
+                workspace_id=workspace_id,
+                status=ws.status,
+            )
             return
 
         missing = _missing_monitor_recovery_metadata(ws)

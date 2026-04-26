@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.control.executor as executor_module
@@ -763,6 +764,50 @@ class TestPrMonitorFactoryPath:
 
 
 class TestPrMonitorResume:
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_logs_unknown_workspace(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake, factory, tmp_path)
+
+        with structlog.testing.capture_logs() as captured:
+            await executor.resume_pr_monitor("ws_never_existed")
+
+        assert fake.calls == []
+        assert any(
+            event.get("event") == "executor.resume_skip_unknown"
+            and event.get("workspace_id") == "ws_never_existed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_logs_unexpected_status(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+
+        def _monitor_factory(*_args: Any) -> object:
+            raise AssertionError("monitor factory must not run for non-monitoring workspaces")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        with structlog.testing.capture_logs() as captured:
+            await executor.resume_pr_monitor(ws_id)
+
+        assert fake.calls == []
+        assert any(
+            event.get("event") == "executor.resume_skip_not_monitoring_pr"
+            and event.get("workspace_id") == ws_id
+            and event.get("status") == WorkspaceStatus.ready.value
+            for event in captured
+        )
+
     @pytest.mark.unit
     async def test_resume_pr_monitor_uses_persisted_workspace_metadata(
         self,
