@@ -150,6 +150,12 @@ class WorkspaceExecutor:
         ws = await self._claim_ready(workspace_id)
         if ws is None:
             return
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.running,
+            action="execute",
+        ):
+            return
 
         compose_file = (
             Path(ws.compose_file_path)
@@ -193,6 +199,12 @@ class WorkspaceExecutor:
                     )[:2000],
                 )
                 return
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.running,
+                action="agent_run",
+            ):
+                return
             await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -235,6 +247,13 @@ class WorkspaceExecutor:
             return
 
         # ── Step 1b: capture the agent's work as a commit on the feature branch ──
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.running,
+            action="post_agent_commit",
+        ):
+            return
+
         # Coding CLIs make file edits reliably but are inconsistent about git:
         # some commit, some leave changes unstaged, some commit partial subsets
         # and leave the rest dirty. AWF normalizes: after the agent exits, we
@@ -540,7 +559,14 @@ class WorkspaceExecutor:
             return
 
         # ── Step 2: validation (tests + optional Alembic), with fix-cycle ──
-        await self._transition(workspace_id, to=WorkspaceStatus.validating, reason="AGENT_RUN_OK")
+        if not await self._transition_if_current(
+            workspace_id,
+            from_status=WorkspaceStatus.running,
+            to=WorkspaceStatus.validating,
+            reason="AGENT_RUN_OK",
+            action="start_validation",
+        ):
+            return
 
         max_fix_passes = self._config.max_validation_fix_passes
         profile = _profile_for_workspace(ws, worktree_path=worktree_path)
@@ -553,6 +579,12 @@ class WorkspaceExecutor:
         for pass_number in range(max_fix_passes + 1):
             # pass_number == 0 is the initial run (already-committed agent
             # work). 1..N are fix attempts driven by the retry prompt.
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.validating,
+                action="validate",
+            ):
+                return
             val_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -615,6 +647,12 @@ class WorkspaceExecutor:
                 max_fix_passes=max_fix_passes,
                 failed_command=first_fail.command,
             )
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.validating,
+                action="validation_fix_agent_run",
+            ):
+                return
             try:
                 await adapter.run(
                     compose_project=compose_project,
@@ -636,12 +674,17 @@ class WorkspaceExecutor:
                     reason_code=exc.reason_code,
                 )
 
-            # Commit whatever the fix pass produced. Simpler than the
-            # initial post-agent commit block — orphan-history recovery
-            # isn't possible here (HEAD already descends from base after
-            # the initial run succeeded); zero-change fix passes are
-            # allowed (agent may think no change was needed, which next
-            # validation will confirm or refute).
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.validating,
+                action="validation_fix_commit",
+            ):
+                return
+
+            # Commit whatever the fix pass produced. Simpler than the initial
+            # post-agent commit block — orphan-history recovery isn't possible
+            # here (HEAD already descends from base after the initial run
+            # succeeded); zero-change fix passes are allowed.
             fix_add = await _git_in_worktree(["add", "-A"])
             if not fix_add.ok:
                 _log.warning(
@@ -679,7 +722,14 @@ class WorkspaceExecutor:
             # Loop back to re-validate.
 
         # ── Step 3: push + open PR ──────────────────────────────────────────
-        await self._transition(workspace_id, to=WorkspaceStatus.pushing, reason="VALIDATION_OK")
+        if not await self._transition_if_current(
+            workspace_id,
+            from_status=WorkspaceStatus.validating,
+            to=WorkspaceStatus.pushing,
+            reason="VALIDATION_OK",
+            action="start_push",
+        ):
+            return
 
         pr_title = ws.task_title
         pr_body = _build_pr_body(ws)
@@ -722,6 +772,16 @@ class WorkspaceExecutor:
             persisted = await repo.get(workspace_id)
             if persisted is None:  # pragma: no cover - destroyed mid-flight
                 return
+            if persisted.status != WorkspaceStatus.pushing.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    persisted,
+                    action="persist_pr",
+                    expected=WorkspaceStatus.pushing,
+                    reason_code="EXECUTOR_STALE_STATUS",
+                )
+                await session.commit()
+                return
             persisted.pr_url = pr.url
             persisted.pr_number = _extract_pr_number(pr.url)
             if persisted.task_kind == "feature_branch_pr" and not persisted.remote_push_branch:
@@ -761,6 +821,12 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 pr_url=pr.url,
             )
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.monitoring_pr,
+                action="run_pr_monitor",
+            ):
+                return
             await monitor.run(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -792,6 +858,12 @@ class WorkspaceExecutor:
                 status=ws.status,
             )
             return
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.monitoring_pr,
+            action="resume_pr_monitor",
+        ):
+            return
 
         if not ws.remote_push_branch and ws.task_kind == "feature_branch_pr" and ws.branch_name:
             recovered_remote_push_branch = await self._recover_feature_branch_remote_push_branch(
@@ -818,6 +890,13 @@ class WorkspaceExecutor:
         compose_file_path = ws.compose_file_path
         assert compose_project is not None
         assert compose_file_path is not None
+
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.monitoring_pr,
+            action="resume_compose",
+        ):
+            return
 
         try:
             await self._compose.ensure_project_up(
@@ -890,6 +969,12 @@ class WorkspaceExecutor:
             pr_url=ws.pr_url,
             pr_number=ws.pr_number,
         )
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.monitoring_pr,
+            action="resume_monitor_run",
+        ):
+            return
         await monitor.run(
             workspace_id=workspace_id,
             compose_project=compose_project,
@@ -956,14 +1041,90 @@ class WorkspaceExecutor:
             # Return a detached snapshot (session closes).
             return ws
 
-    async def _transition(self, workspace_id: str, *, to: WorkspaceStatus, reason: str) -> None:
+    async def _recheck_status(
+        self,
+        workspace_id: str,
+        *,
+        expected: WorkspaceStatus,
+        action: str,
+        reason_code: str = "EXECUTOR_STALE_STATUS",
+    ) -> bool:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
             if ws is None:  # pragma: no cover - destroyed mid-flight
-                return
+                _log.warning(
+                    "executor.skip_unknown",
+                    workspace_id=workspace_id,
+                    action=action,
+                )
+                return False
+            if ws.status == expected.value:
+                return True
+            await self._record_stale_action_skip(
+                repo,
+                ws,
+                action=action,
+                expected=expected,
+                reason_code=reason_code,
+            )
+            await session.commit()
+            return False
+
+    async def _transition_if_current(
+        self,
+        workspace_id: str,
+        *,
+        from_status: WorkspaceStatus,
+        to: WorkspaceStatus,
+        reason: str,
+        action: str,
+    ) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - destroyed mid-flight
+                return False
+            if ws.status != from_status.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    ws,
+                    action=action,
+                    expected=from_status,
+                    reason_code="EXECUTOR_STALE_STATUS",
+                )
+                await session.commit()
+                return False
             await repo.transition(ws, to=to, reason_code=reason)
             await session.commit()
+            return True
+
+    async def _record_stale_action_skip(
+        self,
+        repo: WorkspaceRepository,
+        ws: Workspace,
+        *,
+        action: str,
+        expected: WorkspaceStatus,
+        reason_code: str,
+    ) -> None:
+        _log.info(
+            "executor.skip_stale_status",
+            workspace_id=ws.id,
+            action=action,
+            expected_status=expected.value,
+            status=ws.status,
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.stale_action_skipped",
+            reason_code=reason_code,
+            payload={
+                "action": action,
+                "expected_status": expected.value,
+                "actual_status": ws.status,
+            },
+        )
 
     async def _mark_failed(
         self,
@@ -981,6 +1142,14 @@ class WorkspaceExecutor:
                 return
             if ws.status != from_status.value:
                 # Already moved (e.g. cancelled) — respect it.
+                await self._record_stale_action_skip(
+                    repo,
+                    ws,
+                    action="mark_failed",
+                    expected=from_status,
+                    reason_code="EXECUTOR_MARK_FAILED_SKIPPED",
+                )
+                await session.commit()
                 return
             ws.failure_reason = failure_reason.value
             ws.failure_message = message

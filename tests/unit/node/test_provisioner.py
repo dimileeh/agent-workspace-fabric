@@ -19,7 +19,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
-from awf.node.git_manager import GitManager, GitOperationError
+from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 
 
@@ -68,6 +68,20 @@ def provisioner(
         git=git_manager,
         config=ProvisionerConfig(node_id="test-node-01"),
     )
+
+
+async def _force_destroy_provisioning_workspace(
+    session_factory: async_sessionmaker[AsyncSession], workspace_id: str
+) -> None:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.provisioning.value
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_DESTROY")
+        await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="TEST_DESTROY")
+        await repo.transition(ws, to=WorkspaceStatus.destroyed, reason_code="TEST_DESTROY")
+        await s.commit()
 
 
 class TestSuccess:
@@ -307,6 +321,147 @@ class TestFailureHandling:
             assert reloaded.failure_message is not None
             assert "unexpected provisioning failure" in reloaded.failure_message
             assert "workspace.base.yml.j2" in reloaded.failure_message
+
+
+class TestOperatorControlRaces:
+    @pytest.mark.unit
+    async def test_destroy_after_claim_skips_git_and_ready_transition(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingGit:
+            def __init__(self) -> None:
+                self.add_worktree_calls: list[str] = []
+                self.head_calls: list[str] = []
+
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del repo_url, base_branch
+                self.add_worktree_calls.append(workspace_id)
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                self.head_calls.append(workspace_id)
+                return "c" * 40
+
+        class _DestroyAfterClaimProvisioner(Provisioner):
+            async def _load_and_claim(
+                self, session: AsyncSession, workspace_id: str
+            ) -> Any:
+                ws = await super()._load_and_claim(session, workspace_id)
+                assert ws is not None
+                await _force_destroy_provisioning_workspace(session_factory, workspace_id)
+                return ws
+
+        fake_git = _RecordingGit()
+        provisioner = _DestroyAfterClaimProvisioner(
+            session_factory=session_factory,
+            git=fake_git,  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert fake_git.add_worktree_calls == []
+        assert fake_git.head_calls == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value
+            skip_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_action_skipped"
+            ]
+            assert skip_events
+            assert skip_events[-1].reason_code == "PROVISIONER_STALE_STATUS"
+            assert skip_events[-1].payload == {
+                "action": "provision",
+                "expected_status": WorkspaceStatus.provisioning.value,
+                "actual_status": WorkspaceStatus.destroyed.value,
+            }
+
+    @pytest.mark.unit
+    async def test_stack_failure_after_destroy_does_not_mark_workspace_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _DestroyingFailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                await _force_destroy_provisioning_workspace(
+                    session_factory, request.workspace_id
+                )
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr="workspace was already destroyed",
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_DestroyingFailingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ComposeOperationError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value
+            assert reloaded.failure_reason is None
+            assert reloaded.failure_message is None
+            skip_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_action_skipped"
+            ]
+            assert skip_events
+            assert skip_events[-1].reason_code == "PROVISIONER_MARK_FAILED_SKIPPED"
+            assert skip_events[-1].payload == {
+                "action": "mark_failed",
+                "expected_status": WorkspaceStatus.provisioning.value,
+                "actual_status": WorkspaceStatus.destroyed.value,
+            }
 
 
 class TestIdempotency:

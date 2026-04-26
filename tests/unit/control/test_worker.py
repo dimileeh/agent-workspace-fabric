@@ -142,6 +142,24 @@ async def _create_monitoring_pr(
         return ws.id
 
 
+async def _move_to_operator_control_status(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    final_status: WorkspaceStatus,
+) -> None:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_OPERATOR")
+        if final_status == WorkspaceStatus.destroyed:
+            await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="TEST_OPERATOR")
+            await repo.transition(ws, to=WorkspaceStatus.destroyed, reason_code="TEST_OPERATOR")
+        else:
+            assert final_status == WorkspaceStatus.cancelled
+        await s.commit()
+
+
 class _TransitioningProvisioner:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -479,6 +497,42 @@ class TestRunOnceExecution:
             assert ws.failure_reason is None
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed]
+    )
+    async def test_stale_ready_list_entry_is_rechecked_before_dispatch(
+        self,
+        final_status: WorkspaceStatus,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(session_factory, origin_repo, "stale-ready")
+        await _move_to_operator_control_status(session_factory, ready_id, final_status)
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+        )
+
+        async def _stale_ready_list(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            del limit, exclude_ids
+            return [ready_id]
+
+        worker._list_ready = _stale_ready_list  # type: ignore[method-assign]
+
+        assert await worker.run_once() == 0
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
+
+    @pytest.mark.unit
     async def test_bad_ready_execution_does_not_abort_other_ready_workspaces(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -586,6 +640,44 @@ class TestRunOnceMonitorRecovery:
         assert await worker.run_once() == 1
         await worker.wait_for_execution_tasks()
         assert executor.calls == [ready_id]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed]
+    )
+    async def test_stale_monitoring_list_entry_is_rechecked_before_dispatch(
+        self,
+        final_status: WorkspaceStatus,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory, origin_repo, "stale-monitor"
+        )
+        await _move_to_operator_control_status(session_factory, monitor_id, final_status)
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=3),
+        )
+
+        async def _stale_monitor_list(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            del limit, exclude_ids
+            return [monitor_id]
+
+        worker._list_monitoring_pr = _stale_monitor_list  # type: ignore[method-assign]
+
+        assert await worker.run_once() == 0
+        await worker.wait_for_execution_tasks()
+
+        assert executor.resume_calls == []
 
     @pytest.mark.unit
     async def test_monitor_resume_does_not_duplicate_active_task(
