@@ -360,11 +360,11 @@ async def create_workspace_v2_row(
 
 
 def owned_path_conflict_detail(conflicts: list[OwnedPathConflict]) -> dict[str, Any]:
-    workspace_ids: list[str] = []
+    workspace_ids: dict[str, None] = {}
     conflict_items: list[dict[str, str]] = []
     for conflict in conflicts:
         if conflict.workspace_id not in workspace_ids:
-            workspace_ids.append(conflict.workspace_id)
+            workspace_ids[conflict.workspace_id] = None
         conflict_items.append(
             {
                 "workspace_id": conflict.workspace_id,
@@ -373,7 +373,7 @@ def owned_path_conflict_detail(conflicts: list[OwnedPathConflict]) -> dict[str, 
             }
         )
     return {
-        "workspace_ids": workspace_ids,
+        "workspace_ids": list(workspace_ids),
         "conflicts": conflict_items,
     }
 
