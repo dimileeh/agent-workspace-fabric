@@ -10,11 +10,12 @@ SQLAlchemy calls everywhere. Rules:
 
 from __future__ import annotations
 
+import hashlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.ids import new_event_id, new_log_stream_id, new_operation_id, new_workspace_id
@@ -124,6 +125,30 @@ class WorkspaceRepository:
     async def get_by_idempotency_key(self, key: str) -> Workspace | None:
         stmt = select(Workspace).where(Workspace.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def acquire_owned_path_conflict_lock(
+        self,
+        *,
+        repo_url: str,
+        branch_base: str,
+        owned_paths: list[str],
+    ) -> None:
+        """Serialize owned-path admission for one repo/base transaction on Postgres."""
+        if not any(_normalize_owned_path(path) != "" for path in owned_paths):
+            return
+
+        bind = self._session.get_bind()
+        if bind.dialect.name != "postgresql":
+            return
+
+        lock_key = _owned_path_conflict_advisory_lock_key(
+            repo_url=repo_url,
+            branch_base=branch_base,
+        )
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:lock_key)"),
+            {"lock_key": lock_key},
+        )
 
     async def find_active_owned_path_conflicts(
         self,
@@ -253,6 +278,16 @@ def _owned_paths_overlap(left: str, right: str) -> bool:
     if left_prefix is not None and right_prefix is not None:
         return _wildcard_prefixes_overlap(left_prefix, right_prefix)
     return False
+
+
+def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -> int:
+    digest = hashlib.sha256(
+        f"awf:owned-path-conflicts\x00{repo_url}\x00{branch_base}".encode()
+    ).digest()
+    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
+    if unsigned >= 1 << 63:
+        return unsigned - (1 << 64)
+    return unsigned
 
 
 def _normalize_owned_path(path: str) -> str:

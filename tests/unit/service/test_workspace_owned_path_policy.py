@@ -49,6 +49,55 @@ def _request(
 
 
 @pytest.mark.unit
+async def test_create_v2_acquires_conflict_lock_before_lookup(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order: list[str] = []
+    original_lock = WorkspaceRepository.acquire_owned_path_conflict_lock
+    original_lookup = WorkspaceRepository.find_active_owned_path_conflicts
+
+    async def lock_spy(
+        self: WorkspaceRepository,
+        *,
+        repo_url: str,
+        branch_base: str,
+        owned_paths: list[str],
+    ) -> None:
+        order.append("lock")
+        await original_lock(
+            self,
+            repo_url=repo_url,
+            branch_base=branch_base,
+            owned_paths=owned_paths,
+        )
+
+    async def lookup_spy(
+        self: WorkspaceRepository,
+        *,
+        repo_url: str,
+        branch_base: str,
+        owned_paths: list[str],
+    ):
+        order.append("lookup")
+        return await original_lookup(
+            self,
+            repo_url=repo_url,
+            branch_base=branch_base,
+            owned_paths=owned_paths,
+        )
+
+    monkeypatch.setattr(WorkspaceRepository, "acquire_owned_path_conflict_lock", lock_spy)
+    monkeypatch.setattr(WorkspaceRepository, "find_active_owned_path_conflicts", lookup_spy)
+
+    service = WorkspaceService(factory)
+
+    await service.create_v2(_request(title="new", owned_paths=["src/awf/api/**"]))
+
+    assert order[:2] == ["lock", "lookup"]
+
+
+@pytest.mark.unit
 async def test_create_v2_allows_empty_requested_owned_paths(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

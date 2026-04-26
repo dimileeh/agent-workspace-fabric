@@ -317,6 +317,11 @@ async def create_workspace_v2_row(
 ) -> Workspace:
     """Persist one v2 workspace request without committing the session."""
     repo = WorkspaceRepository(session)
+    await repo.acquire_owned_path_conflict_lock(
+        repo_url=payload.repo.url,
+        branch_base=payload.repo.base_branch,
+        owned_paths=payload.task.owned_paths,
+    )
     conflicts = await repo.find_active_owned_path_conflicts(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,

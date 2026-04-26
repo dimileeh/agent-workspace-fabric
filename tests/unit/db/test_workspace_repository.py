@@ -64,6 +64,32 @@ async def _create_policy_workspace(
     return workspace
 
 
+class _FakeDialect:
+    def __init__(self, name: str) -> None:
+        self.name = name
+
+
+class _FakeBind:
+    def __init__(self, dialect_name: str) -> None:
+        self.dialect = _FakeDialect(dialect_name)
+
+
+class _RecordingSession:
+    def __init__(self, dialect_name: str) -> None:
+        self._bind = _FakeBind(dialect_name)
+        self.executed: list[tuple[str, dict[str, object]]] = []
+
+    def get_bind(self) -> _FakeBind:
+        return self._bind
+
+    async def execute(
+        self,
+        statement: object,
+        parameters: dict[str, object] | None = None,
+    ) -> None:
+        self.executed.append((str(statement), dict(parameters or {})))
+
+
 class TestCreate:
     @pytest.mark.unit
     async def test_create_returns_workspace_in_requested_state(self, session: AsyncSession) -> None:
@@ -426,6 +452,45 @@ class TestListWorkspaces:
 
 
 class TestOwnedPathConflictLookup:
+    @pytest.mark.unit
+    async def test_postgres_conflict_lookup_lock_uses_transaction_advisory_lock(self) -> None:
+        session = _RecordingSession("postgresql")
+        repo = WorkspaceRepository(session)  # type: ignore[arg-type]
+
+        await repo.acquire_owned_path_conflict_lock(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/awf/api/**"],
+        )
+
+        assert len(session.executed) == 1
+        sql, parameters = session.executed[0]
+        assert "pg_advisory_xact_lock" in sql
+        assert isinstance(parameters["lock_key"], int)
+
+    @pytest.mark.unit
+    async def test_conflict_lookup_lock_is_noop_without_postgres_or_owned_paths(self) -> None:
+        sqlite_session = _RecordingSession("sqlite")
+        sqlite_repo = WorkspaceRepository(sqlite_session)  # type: ignore[arg-type]
+
+        await sqlite_repo.acquire_owned_path_conflict_lock(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/awf/api/**"],
+        )
+
+        postgres_session = _RecordingSession("postgresql")
+        postgres_repo = WorkspaceRepository(postgres_session)  # type: ignore[arg-type]
+
+        await postgres_repo.acquire_owned_path_conflict_lock(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=[" ", "./"],
+        )
+
+        assert sqlite_session.executed == []
+        assert postgres_session.executed == []
+
     @pytest.mark.unit
     async def test_empty_requested_owned_paths_do_not_conflict(
         self, session: AsyncSession
