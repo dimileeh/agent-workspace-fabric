@@ -20,6 +20,7 @@ from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import Select
+from sqlalchemy.sql.elements import ColumnElement
 
 from awf.common.ids import (
     new_event_id,
@@ -516,6 +517,7 @@ class WorkspaceRepository:
         from_status: WorkspaceStatus,
         to: WorkspaceStatus,
         reason_code: str,
+        extra_conditions: tuple[ColumnElement[bool], ...] = (),
     ) -> Workspace | None:
         """Atomically transition a row only if it is still in ``from_status``."""
         WorkspaceStateMachine.assert_transition(from_status, to)
@@ -526,6 +528,7 @@ class WorkspaceRepository:
             .where(
                 Workspace.id == workspace_id,
                 Workspace.status == from_status.value,
+                *extra_conditions,
             )
             .values(
                 status=to.value,
@@ -609,6 +612,50 @@ class WorkspaceRepository:
             )
             .values(
                 monitor_claim_expires_at=lease_expires_at,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def refresh_execution_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        """Extend this worker's active-execution lease."""
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.execution_claimed_by == owner_id,
+            )
+            .values(
+                execution_claim_expires_at=lease_expires_at,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def release_execution_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> bool:
+        """Release this worker's active-execution lease, if it still owns it."""
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.execution_claimed_by == owner_id,
+            )
+            .values(
+                execution_claimed_by=None,
+                execution_claim_expires_at=None,
                 updated_at=Workspace.updated_at,
             )
             .returning(Workspace.id)

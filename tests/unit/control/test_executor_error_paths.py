@@ -342,8 +342,8 @@ class TestOperatorControlRaces:
         executor = _make_executor(fake, factory, tmp_path, validation=validation)
         original_claim_ready = executor._claim_ready
 
-        async def _claim_then_operator_control(workspace_id: str) -> Any:
-            ws = await original_claim_ready(workspace_id)
+        async def _claim_then_operator_control(workspace_id: str, **kwargs: Any) -> Any:
+            ws = await original_claim_ready(workspace_id, **kwargs)
             assert ws is not None
             async with factory() as s:
                 repo = WorkspaceRepository(s)

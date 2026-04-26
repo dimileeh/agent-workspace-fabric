@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import subprocess
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -19,10 +20,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -142,6 +144,99 @@ async def _create_monitoring_pr(
         return ws.id
 
 
+async def _create_active_execution(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    status: WorkspaceStatus,
+    *,
+    compose_project_name: str | None = None,
+    node_id: str | None = None,
+    persist_compose_project: bool = True,
+) -> str:
+    assert status in {
+        WorkspaceStatus.running,
+        WorkspaceStatus.validating,
+        WorkspaceStatus.pushing,
+    }
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.remote_push_branch = ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.node_id = node_id
+        if persist_compose_project:
+            ws.compose_project_name = (
+                compose_project_name
+                if compose_project_name is not None
+                else f"awf_{ws.id}"
+            )
+        else:
+            ws.compose_project_name = None
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        if status in {WorkspaceStatus.validating, WorkspaceStatus.pushing}:
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        if status == WorkspaceStatus.pushing:
+            await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        await s.commit()
+        return ws.id
+
+
+async def _create_terminal_execution(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    status: WorkspaceStatus,
+) -> str:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.remote_push_branch = ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        if status == WorkspaceStatus.failed:
+            ws.failure_reason = "infrastructure_failure"
+            ws.failure_message = "seed failure"
+            await repo.transition(ws, to=WorkspaceStatus.failed, reason_code="SEED")
+        elif status == WorkspaceStatus.cancelled:
+            await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="SEED")
+        else:
+            await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+            await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+            if status == WorkspaceStatus.completed:
+                await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="SEED")
+            else:
+                assert status == WorkspaceStatus.destroyed
+                await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="SEED")
+                await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="SEED")
+                await repo.transition(ws, to=WorkspaceStatus.destroyed, reason_code="SEED")
+        await s.commit()
+        return ws.id
+
+
 async def _move_to_operator_control_status(
     session_factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -185,11 +280,21 @@ class _RecordingExecutor:
         self.calls: list[str] = []
         self.resume_calls: list[str] = []
 
-    async def execute(self, workspace_id: str) -> None:
+    async def execute(self, workspace_id: str, **_kwargs: object) -> None:
         self.calls.append(workspace_id)
 
     async def resume_pr_monitor(self, workspace_id: str) -> None:
         self.resume_calls.append(workspace_id)
+
+
+class _RecordingRuntimeInspector:
+    def __init__(self, snapshots: dict[str | None, RuntimeSnapshot]) -> None:
+        self._snapshots = snapshots
+        self.calls: list[str | None] = []
+
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        self.calls.append(compose_project_name)
+        return self._snapshots[compose_project_name]
 
 
 class TestRunOnce:
@@ -310,7 +415,7 @@ class TestRunOnceExecution:
             def __init__(self) -> None:
                 self.calls: list[str] = []
 
-            async def execute(self, workspace_id: str) -> None:
+            async def execute(self, workspace_id: str, **_kwargs: object) -> None:
                 self.calls.append(workspace_id)
                 started.set()
                 await release.wait()
@@ -516,7 +621,7 @@ class TestRunOnceExecution:
         ready_id = await _create_ready(session_factory, origin_repo, "race")
 
         class _CancellingExecutor:
-            async def execute(self, workspace_id: str) -> None:
+            async def execute(self, workspace_id: str, **_kwargs: object) -> None:
                 async with session_factory() as s:
                     repo = WorkspaceRepository(s)
                     ws = await repo.get(workspace_id)
@@ -589,7 +694,7 @@ class TestRunOnceExecution:
             def __init__(self) -> None:
                 self.calls: list[str] = []
 
-            async def execute(self, workspace_id: str) -> None:
+            async def execute(self, workspace_id: str, **_kwargs: object) -> None:
                 self.calls.append(workspace_id)
                 if workspace_id == first_id:
                     raise RuntimeError("boom")
@@ -682,7 +787,7 @@ class TestRunOnceExecution:
         calls: list[str] = []
 
         class _ClaimingExecutor:
-            async def execute(self, workspace_id: str) -> None:
+            async def execute(self, workspace_id: str, **_kwargs: object) -> None:
                 async with session_factory() as s:
                     repo = WorkspaceRepository(s)
                     ws = await repo.transition_if_current(
@@ -954,3 +1059,553 @@ class TestRunOnceMonitorRecovery:
             assert ws is not None
             assert ws.monitor_claimed_by is None
             assert ws.monitor_claim_expires_at is None
+
+
+class TestRunOnceStaleActiveExecutionRecovery:
+    @pytest.mark.unit
+    async def test_stale_running_with_missing_compose_project_fails(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-running",
+            WorkspaceStatus.running,
+            persist_compose_project=False,
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                None: RuntimeSnapshot(
+                    stack_state="unknown",
+                    reason="workspace has no compose project",
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "active execution was lost after a service or Docker restart" in (
+                ws.failure_message
+            )
+            assert "preserved" in ws.failure_message
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+            assert any(
+                event.event_type == "workspace.state_changed"
+                and event.reason_code == "STALE_ACTIVE_EXECUTION"
+                for event in events
+            )
+        assert inspector.calls == [None]
+
+    @pytest.mark.unit
+    async def test_stale_validating_with_unavailable_docker_fails(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-validating",
+            WorkspaceStatus.validating,
+            compose_project_name="awf_validating_unavailable",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_validating_unavailable": RuntimeSnapshot(
+                    stack_state="unavailable",
+                    reason="Cannot connect to the Docker daemon",
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "Cannot connect to the Docker daemon" in ws.failure_message
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+            assert any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+
+    @pytest.mark.unit
+    async def test_stale_pushing_with_running_stack_is_preserved_and_evented(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-pushing",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_pushing_running",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_pushing_running": RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="abc123",
+                            image="awf-agent:latest",
+                            state="running",
+                            status="Up 2 minutes",
+                            health="healthy",
+                        )
+                    ],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.pushing.value
+            assert ws.failure_reason is None
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+            assert len(events) == 1
+            assert events[0].reason_code == "STALE_ACTIVE_EXECUTION"
+            assert events[0].payload == {
+                "compose_project_name": "awf_pushing_running",
+                "workspace_status": "pushing",
+                "runtime": {
+                    "stack_state": "running",
+                    "reason": None,
+                    "services": [
+                        {
+                            "name": "agent",
+                            "container_id": "abc123",
+                            "image": "awf-agent:latest",
+                            "state": "running",
+                            "status": "Up 2 minutes",
+                            "health": "healthy",
+                            "ports": [],
+                            "started_at": None,
+                        }
+                    ],
+                },
+            }
+        assert inspector.calls == ["awf_pushing_running", "awf_pushing_running"]
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_scan_is_throttled_between_intervals(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        current_time = 1_000.0
+        monkeypatch.setattr("awf.control.worker.monotonic", lambda: current_time)
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "throttled-running",
+            WorkspaceStatus.pushing,
+            compose_project_name="awf_throttled_running",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_throttled_running": RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="abc123",
+                            image="awf-agent:latest",
+                            state="running",
+                        )
+                    ],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                stale_active_execution_scan_interval_seconds=60.0,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert await worker.run_once() == 0
+        assert inspector.calls == ["awf_throttled_running"]
+
+        current_time = 1_060.0
+
+        assert await worker.run_once() == 0
+        assert inspector.calls == ["awf_throttled_running", "awf_throttled_running"]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.pushing.value
+
+    @pytest.mark.unit
+    async def test_current_in_memory_execution_task_is_not_touched(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "owned-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_owned_running",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_owned_running": RuntimeSnapshot(
+                    stack_state="unavailable",
+                    reason="docker unavailable",
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        release = asyncio.Event()
+
+        async def _busy() -> None:
+            await release.wait()
+
+        task = asyncio.create_task(_busy())
+        worker._execution_tasks[workspace_id] = task
+        try:
+            assert await worker.run_once() == 0
+            async with session_factory() as s:
+                ws = await WorkspaceRepository(s).get(workspace_id)
+                assert ws is not None
+                assert ws.status == WorkspaceStatus.running.value
+                assert ws.failure_reason is None
+            assert inspector.calls == []
+        finally:
+            release.set()
+            await asyncio.wait_for(task, timeout=0.2)
+            worker._execution_tasks.pop(workspace_id, None)
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_scan_skips_unexpired_execution_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "claimed-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_claimed_running",
+            node_id="node-a",
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "other-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector({})
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.failure_reason is None
+        assert inspector.calls == []
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_scan_recovers_expired_execution_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "expired-claim-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_expired_claim_running",
+            node_id="node-a",
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "dead-worker"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_expired_claim_running": RuntimeSnapshot(
+                    stack_state="unavailable",
+                    reason="docker unavailable",
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+        assert inspector.calls == ["awf_expired_claim_running"]
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_failure_rechecks_refreshed_claim(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "refreshed-claim-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_refreshed_claim_running",
+            node_id="node-a",
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.execution_claimed_by = "worker-a"
+            ws.execution_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await s.commit()
+
+        class _RefreshingInspector:
+            def __init__(self) -> None:
+                self.calls: list[str | None] = []
+
+            async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+                self.calls.append(compose_project_name)
+                async with session_factory() as s:
+                    ws = await WorkspaceRepository(s).get(workspace_id)
+                    assert ws is not None
+                    ws.execution_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+                    await s.commit()
+                return RuntimeSnapshot(
+                    stack_state="unavailable",
+                    reason="docker unavailable",
+                )
+
+        inspector = _RefreshingInspector()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.failure_reason is None
+        assert inspector.calls == ["awf_refreshed_claim_running"]
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_scan_is_limited_to_worker_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        local_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "local-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_local_running",
+            node_id="node-a",
+        )
+        remote_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "remote-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_remote_running",
+            node_id="node-b",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_local_running": RuntimeSnapshot(
+                    stack_state="unavailable",
+                    reason="docker unavailable",
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            local_ws = await WorkspaceRepository(s).get(local_id)
+            remote_ws = await WorkspaceRepository(s).get(remote_id)
+            assert local_ws is not None
+            assert remote_ws is not None
+            assert local_ws.status == WorkspaceStatus.failed.value
+            assert remote_ws.status == WorkspaceStatus.running.value
+            assert remote_ws.failure_reason is None
+        assert inspector.calls == ["awf_local_running"]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_is_not_touched_by_stale_active_execution_scan(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitoring-pr",
+        )
+        inspector = _RecordingRuntimeInspector({})
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+        assert inspector.calls == []
+        assert executor.resume_calls == []
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "status",
+        [
+            WorkspaceStatus.completed,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+            WorkspaceStatus.destroyed,
+        ],
+    )
+    async def test_terminal_rows_are_ignored(
+        self,
+        status: WorkspaceStatus,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_terminal_execution(
+            session_factory,
+            origin_repo,
+            f"terminal-{status.value}",
+            status,
+        )
+        inspector = _RecordingRuntimeInspector({})
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == status.value
+        assert inspector.calls == []

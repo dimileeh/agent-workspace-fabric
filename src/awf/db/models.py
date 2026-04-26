@@ -136,6 +136,13 @@ class Workspace(Base):
     node_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     compose_project_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
     compose_file_path: Mapped[str | None] = mapped_column(String(1024), nullable=True)
+    execution_claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    """Ephemeral service-worker owner currently driving active execution."""
+
+    execution_claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """Lease expiry for ``execution_claimed_by`` so crashed workers can be recovered."""
 
     # Terminal-state metadata
     pr_url: Mapped[str | None] = mapped_column(String(512), nullable=True)
