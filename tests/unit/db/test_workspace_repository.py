@@ -17,6 +17,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -25,7 +26,13 @@ from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
-from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
+from awf.db.repositories import (
+    TaskAttemptRepository,
+    TaskRepository,
+    ValidationRunRepository,
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 
 
@@ -169,6 +176,76 @@ class TestCreate:
         assert events[0].event_type == "workspace.created"
         assert events[0].new_state == WorkspaceStatus.requested.value
         assert events[0].reason_code == "CREATED"
+
+
+class TestRelationshipLoading:
+    @pytest.mark.unit
+    async def test_list_does_not_eager_load_validation_runs(self) -> None:
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = make_session_factory(engine)
+        async with factory() as s:
+            workspace = await WorkspaceRepository(s).create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="main",
+                task_title="validation provenance",
+                task_prompt="run validation",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            task = await TaskRepository(s).create_or_get(
+                repo_url=workspace.repo_url,
+                base_branch=workspace.branch_base,
+                title=workspace.task_title,
+                prompt=workspace.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=None,
+                owned_paths=[],
+            )
+            attempt = await TaskAttemptRepository(s).create_for_workspace(
+                task=task,
+                workspace=workspace,
+            )
+            await ValidationRunRepository(s).start(
+                workspace_id=workspace.id,
+                attempt_id=attempt.id,
+                tier=1,
+                commands=[],
+                base_commit=None,
+                target_branch=None,
+                target_head_sha=None,
+                log_stream_refs={},
+            )
+            await s.commit()
+
+        statements: list[str] = []
+
+        def record_sql(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, parameters, context, executemany
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            async with factory() as s:
+                rows = await WorkspaceRepository(s).list()
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+            await engine.dispose()
+
+        assert len(rows) == 1
+        assert not [
+            statement for statement in statements if "from validation_runs" in statement
+        ]
 
 
 class TestMonitorPolicyMigration:

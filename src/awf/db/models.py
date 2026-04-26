@@ -243,7 +243,7 @@ class Workspace(Base):
     validation_runs: Mapped[list[ValidationRun]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="raise",
         order_by="ValidationRun.started_at",
     )
 
@@ -362,7 +362,7 @@ class TaskAttempt(Base):
     )
     validation_runs: Mapped[list[ValidationRun]] = relationship(
         back_populates="attempt",
-        lazy="selectin",
+        lazy="raise",
         order_by="ValidationRun.started_at",
     )
 
