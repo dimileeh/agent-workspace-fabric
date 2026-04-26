@@ -150,6 +150,7 @@ async def _create_active_execution(
     status: WorkspaceStatus,
     *,
     compose_project_name: str | None = None,
+    node_id: str | None = None,
     persist_compose_project: bool = True,
 ) -> str:
     assert status in {
@@ -171,6 +172,7 @@ async def _create_active_execution(
         ws.branch_name = f"awf/{ws.id}"
         ws.remote_push_branch = ws.branch_name
         ws.base_commit = "a" * 40
+        ws.node_id = node_id
         if persist_compose_project:
             ws.compose_project_name = (
                 compose_project_name
@@ -1270,6 +1272,60 @@ class TestRunOnceStaleActiveExecutionRecovery:
             release.set()
             await asyncio.wait_for(task, timeout=0.2)
             worker._execution_tasks.pop(workspace_id, None)
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_scan_is_limited_to_worker_node(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        local_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "local-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_local_running",
+            node_id="node-a",
+        )
+        remote_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "remote-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_remote_running",
+            node_id="node-b",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_local_running": RuntimeSnapshot(
+                    stack_state="unavailable",
+                    reason="docker unavailable",
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=0,
+                node_id="node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            local_ws = await WorkspaceRepository(s).get(local_id)
+            remote_ws = await WorkspaceRepository(s).get(remote_id)
+            assert local_ws is not None
+            assert remote_ws is not None
+            assert local_ws.status == WorkspaceStatus.failed.value
+            assert remote_ws.status == WorkspaceStatus.running.value
+            assert remote_ws.failure_reason is None
+        assert inspector.calls == ["awf_local_running"]
 
     @pytest.mark.unit
     async def test_monitoring_pr_is_not_touched_by_stale_active_execution_scan(

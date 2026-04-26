@@ -79,12 +79,13 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         agent_runtime_image=settings.agent_runtime_image,
         auth_mount_resolver=auth_mount_resolver,
     )
+    node_id = settings.node_id or socket.gethostname()
     provisioner = Provisioner(
         session_factory=session_factory,
         git=git,
         stack_launcher=stack_launcher,
         config=ProvisionerConfig(
-            node_id=settings.node_id or socket.gethostname(),
+            node_id=node_id,
             branch_prefix=settings.branch_prefix,
         ),
     )
@@ -142,6 +143,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             poll_interval_seconds=settings.worker_poll_interval_seconds,
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,
             max_concurrent_executions=settings.worker_max_concurrent_executions,
+            node_id=node_id,
         ),
     )
     return WorkerRuntime(engine=engine, worker=worker)

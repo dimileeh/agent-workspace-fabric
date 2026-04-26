@@ -50,6 +50,7 @@ class WorkerConfig:
     max_concurrent_provisions: int = 3
     max_concurrent_executions: int = 3
     monitor_claim_lease_seconds: float = 300.0
+    node_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -284,6 +285,7 @@ class ControlWorker:
         stmt = (
             select(Workspace.id, Workspace.status, Workspace.compose_project_name)
             .where(Workspace.status.in_(active_status_values))
+            .where(Workspace.node_id == self._config.node_id)
             .order_by(Workspace.created_at.asc(), Workspace.id.asc())
         )
         if exclude_ids:
