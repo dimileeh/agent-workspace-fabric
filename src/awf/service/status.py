@@ -3,24 +3,62 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import subprocess
 from collections.abc import Awaitable, Callable, Mapping
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
 import httpx
 from sqlalchemy import text
 
+from awf.db.enums import WorkspaceStatus
 from awf.db.session import make_engine
 from awf.service.config import ServiceSettings
 from awf.service.disk import DiskUsage, check_disk_space
 
 _CHECK_TIMEOUT_SECONDS = 5.0
+_ORPHAN_EXAMPLE_LIMIT = 5
+_AWF_PROJECT_PREFIXES = ("awf_", "awf-")
+
+_ACTIVE_WORKSPACE_STATUSES = frozenset(
+    {
+        WorkspaceStatus.requested.value,
+        WorkspaceStatus.provisioning.value,
+        WorkspaceStatus.ready.value,
+        WorkspaceStatus.running.value,
+        WorkspaceStatus.validating.value,
+        WorkspaceStatus.pushing.value,
+        WorkspaceStatus.monitoring_pr.value,
+        WorkspaceStatus.destroying.value,
+    }
+)
+_TERMINAL_WORKSPACE_STATUSES = frozenset(
+    {
+        WorkspaceStatus.completed.value,
+        WorkspaceStatus.failed.value,
+        WorkspaceStatus.cancelled.value,
+        WorkspaceStatus.destroyed.value,
+    }
+)
 
 CheckPayload = dict[str, object]
 DbProbe = Callable[[str], Awaitable[CheckPayload]]
 SocketExists = Callable[[Path], bool]
+
+
+@dataclass(frozen=True)
+class WorkspaceIdView:
+    """Snapshot of workspace ids partitioned by lifecycle, used for orphan checks."""
+
+    active_ids: frozenset[str]
+    terminal_ids: frozenset[str]
+    available: bool
+
+
+WorkspaceIdLookup = Callable[[str], Awaitable[WorkspaceIdView]]
 
 
 class HttpResponse(Protocol):
@@ -54,6 +92,13 @@ class SubprocessRun(Protocol):
     ) -> CompletedProcessLike: ...
 
 
+@dataclass(frozen=True)
+class _WorkspaceProject:
+    compose_project: str
+    workspace_id: str
+    containers: list[dict[str, str]]
+
+
 async def collect_service_status(
     settings: ServiceSettings,
     *,
@@ -62,6 +107,7 @@ async def collect_service_status(
     run_subprocess: SubprocessRun | None = None,
     socket_exists: SocketExists | None = None,
     disk_usage: DiskUsage | None = None,
+    workspace_id_lookup: WorkspaceIdLookup | None = None,
 ) -> dict[str, object]:
     """Collect service dependency status without requiring Docker in tests."""
 
@@ -69,6 +115,17 @@ async def collect_service_status(
     resolved_db_probe = db_probe or check_database
     resolved_run = run_subprocess or _run_subprocess
     resolved_socket_exists = socket_exists or Path.exists
+    resolved_workspace_lookup = workspace_id_lookup or _default_workspace_id_lookup
+
+    async def _await_workspace_view() -> WorkspaceIdView:
+        return await resolved_workspace_lookup(settings.database_url)
+
+    ps_task: asyncio.Task[CompletedProcessLike | Exception] = asyncio.create_task(
+        asyncio.to_thread(_run_workspace_ps, settings, resolved_run)
+    )
+    workspace_lookup_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
+        _await_workspace_view()
+    )
 
     api_check, db_check, docker_check, image_check, disk_check = await asyncio.gather(
         _check_api(settings, resolved_api_get),
@@ -82,12 +139,16 @@ async def collect_service_status(
             disk_usage=disk_usage,
         ),
     )
+    ps_result = await ps_task
+    workspace_view = await workspace_lookup_task
+    orphan_check = _build_orphan_check(ps_result, workspace_view=workspace_view)
     checks = {
         "api": api_check,
         "db": db_check,
         "docker": docker_check,
         "agent_runtime_image": image_check,
         "disk": disk_check.to_dict(),
+        "orphan_workspaces": orphan_check,
     }
     overall_ok = all(bool(check["ok"]) for check in checks.values())
     return {
@@ -166,6 +227,228 @@ def _check_agent_runtime_image(
         result,
         fail_reason="AGENT_RUNTIME_IMAGE_MISSING",
         detail_prefix=f"{settings.agent_runtime_image}: ",
+    )
+
+
+def _run_workspace_ps(
+    settings: ServiceSettings,
+    run_subprocess: SubprocessRun,
+) -> CompletedProcessLike | Exception:
+    return _run_docker_command(
+        [
+            "docker",
+            "ps",
+            "-a",
+            "--filter",
+            "label=com.docker.compose.project",
+            "--format",
+            "{{json .}}",
+        ],
+        settings=settings,
+        run_subprocess=run_subprocess,
+    )
+
+
+def _build_orphan_check(
+    result: CompletedProcessLike | Exception,
+    *,
+    workspace_view: WorkspaceIdView,
+) -> CheckPayload:
+    if isinstance(result, FileNotFoundError):
+        return _orphan_unavailable("DOCKER_CLI_NOT_FOUND", "docker binary not found on PATH")
+    if isinstance(result, subprocess.TimeoutExpired):
+        return _orphan_unavailable("DOCKER_UNAVAILABLE", _truncate(str(result)))
+    if isinstance(result, Exception):
+        return _orphan_unavailable(
+            "DOCKER_UNAVAILABLE",
+            _truncate(f"{type(result).__name__}: {result}"),
+        )
+    if result.returncode != 0:
+        detail = _truncate(result.stderr or result.stdout) or "docker ps exited non-zero"
+        return _orphan_unavailable("DOCKER_UNAVAILABLE", detail)
+
+    workspace_projects = _parse_workspace_projects(result.stdout)
+
+    if not workspace_view.available:
+        examples = [
+            {
+                "compose_project": project.compose_project,
+                "workspace_id": project.workspace_id,
+                "containers": project.containers,
+                "classification": "unknown",
+                "reason": "DB_UNAVAILABLE",
+            }
+            for project in workspace_projects[:_ORPHAN_EXAMPLE_LIMIT]
+        ]
+        return {
+            "ok": True,
+            "status": "unknown",
+            "reason": "DB_UNAVAILABLE",
+            "detail": (
+                "Workspace database is unreachable; cannot classify AWF compose projects."
+            ),
+            "container_count": len(workspace_projects),
+            "examples": examples,
+            "action": (
+                "Re-run `awf service status` once the control-plane database is reachable."
+            ),
+        }
+
+    orphans: list[dict[str, object]] = []
+    expected_count = 0
+    for project in workspace_projects:
+        if project.workspace_id in workspace_view.active_ids:
+            expected_count += 1
+            continue
+        if project.workspace_id in workspace_view.terminal_ids:
+            classification = "terminal"
+            reason = "WORKSPACE_TERMINAL"
+        else:
+            classification = "missing"
+            reason = "WORKSPACE_MISSING"
+        orphans.append(
+            {
+                "compose_project": project.compose_project,
+                "workspace_id": project.workspace_id,
+                "containers": project.containers,
+                "classification": classification,
+                "reason": reason,
+            }
+        )
+
+    if not orphans:
+        return {
+            "ok": True,
+            "status": "ok",
+            "reason": "NO_ORPHANS",
+            "active_count": expected_count,
+            "orphan_count": 0,
+            "examples": [],
+        }
+
+    missing_count = sum(1 for orphan in orphans if orphan["classification"] == "missing")
+    terminal_count = len(orphans) - missing_count
+    return {
+        "ok": False,
+        "status": "fail",
+        "reason": "ORPHANS_PRESENT",
+        "active_count": expected_count,
+        "orphan_count": len(orphans),
+        "orphan_missing_count": missing_count,
+        "orphan_terminal_count": terminal_count,
+        "examples": orphans[:_ORPHAN_EXAMPLE_LIMIT],
+        "action": (
+            "Run `docker compose -p <project> down -v --remove-orphans` for each "
+            "orphan project, then `awf service gc --execute` to reclaim filesystem state."
+        ),
+    }
+
+
+def _orphan_unavailable(reason: str, detail: str) -> CheckPayload:
+    return {
+        "ok": True,
+        "status": "unavailable",
+        "reason": reason,
+        "detail": detail,
+        "orphan_count": 0,
+        "examples": [],
+    }
+
+
+def _parse_workspace_projects(stdout: str) -> list[_WorkspaceProject]:
+    grouped: dict[str, list[dict[str, str]]] = {}
+    workspace_ids: dict[str, str] = {}
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        labels = _parse_labels(str(row.get("Labels") or ""))
+        project = labels.get("com.docker.compose.project")
+        if not project:
+            continue
+        ws_id = _workspace_id_from_project(project)
+        if ws_id is None:
+            continue
+        grouped.setdefault(project, []).append(
+            {
+                "id": str(row.get("ID") or ""),
+                "name": str(row.get("Names") or ""),
+                "service": labels.get("com.docker.compose.service", ""),
+                "state": str(row.get("State") or ""),
+                "status": str(row.get("Status") or ""),
+            }
+        )
+        workspace_ids[project] = ws_id
+    return [
+        _WorkspaceProject(
+            compose_project=project,
+            workspace_id=workspace_ids[project],
+            containers=containers,
+        )
+        for project, containers in sorted(grouped.items())
+    ]
+
+
+def _parse_labels(labels: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for pair in labels.split(","):
+        if "=" not in pair:
+            continue
+        key, _, value = pair.partition("=")
+        key = key.strip()
+        if key:
+            out[key] = value
+    return out
+
+
+def _workspace_id_from_project(project: str) -> str | None:
+    for prefix in _AWF_PROJECT_PREFIXES:
+        if project.startswith(prefix):
+            ws_id = project[len(prefix) :]
+            if ws_id.startswith("ws_"):
+                return ws_id
+    return None
+
+
+async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
+    """Read live workspace ids from the control-plane DB.
+
+    Failures (missing tables, unreachable host, auth errors) collapse to
+    ``available=False`` so the orphan check can degrade gracefully instead
+    of raising.
+    """
+
+    engine = make_engine(database_url)
+    try:
+        async with engine.connect() as conn:
+            rows = (await conn.execute(text("SELECT id, status FROM workspaces"))).all()
+    except Exception:
+        return WorkspaceIdView(
+            active_ids=frozenset(),
+            terminal_ids=frozenset(),
+            available=False,
+        )
+    finally:
+        await engine.dispose()
+
+    active: set[str] = set()
+    terminal: set[str] = set()
+    for ws_id, status in rows:
+        ws_id_str = str(ws_id)
+        status_str = str(status)
+        if status_str in _ACTIVE_WORKSPACE_STATUSES:
+            active.add(ws_id_str)
+        elif status_str in _TERMINAL_WORKSPACE_STATUSES:
+            terminal.add(ws_id_str)
+    return WorkspaceIdView(
+        active_ids=frozenset(active),
+        terminal_ids=frozenset(terminal),
+        available=True,
     )
 
 
