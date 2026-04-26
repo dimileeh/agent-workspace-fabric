@@ -100,6 +100,7 @@ async def _seed_ready_workspace(
     test_commands: list[str] | None = None,
     requires_database: bool = False,
     compose_file_path: str | None = None,
+    resolved_profile: dict | None = None,
 ) -> str:
     """Insert a workspace already in the ``ready`` state for the executor to pick up."""
     async with factory() as s:
@@ -112,6 +113,7 @@ async def _seed_ready_workspace(
             agent=agent,
             test_commands=test_commands or ["pytest -q"],
             requires_database=requires_database,
+            resolved_profile=resolved_profile,
         )
         # Walk through the transitions: requested → provisioning → ready.
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
@@ -527,6 +529,144 @@ class TestFailurePaths:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "validation_failure"
+
+    @pytest.mark.unit
+    async def test_coverage_below_threshold_fails_validation_with_structured_reason(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+        pr = PullRequestCreator(fake)
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=compose,
+            validation=validation,
+            pr_creator=pr,
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                default_models={
+                    AgentRuntime.codex: "gpt-5",
+                    AgentRuntime.claude_code: "sonnet",
+                    AgentRuntime.gemini: "gemini-2.5-pro",
+                },
+                max_validation_fix_passes=0,
+            ),
+        )
+        ws_id = await _seed_ready_workspace(
+            factory,
+            test_commands=[],
+            resolved_profile={
+                "name": "coverage-executor",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term",
+                    }
+                },
+            },
+        )
+        async with factory() as session:
+            await session.execute(
+                text(
+                    """
+                    INSERT INTO operations (
+                        id,
+                        workspace_id,
+                        type,
+                        status,
+                        payload,
+                        created_at
+                    )
+                    VALUES (
+                        'op_validate_coverage',
+                        :workspace_id,
+                        'validate',
+                        'pending',
+                        '{"reason":"manual_validate"}',
+                        :created_at
+                    )
+                    """
+                ),
+                {"workspace_id": ws_id, "created_at": datetime.now(UTC)},
+            )
+            await session.commit()
+
+        fake.queue_result(returncode=0, stdout="codex finished")  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "Name        Stmts   Miss  Cover\n"
+                "-------------------------------\n"
+                "TOTAL         100      2    98%\n"
+            ),
+        )  # coverage cmd
+
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+            run = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT status, reason_code, log_stream_refs
+                        FROM validation_runs
+                        WHERE workspace_id = :workspace_id
+                        """
+                    ),
+                    {"workspace_id": ws_id},
+                )
+            ).mappings().one()
+            operation = (
+                await session.execute(
+                    text(
+                        """
+                        SELECT status, error_code, result
+                        FROM operations
+                        WHERE id = 'op_validate_coverage'
+                        """
+                    )
+                )
+            ).mappings().one()
+
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == "validation_failure"
+        assert "coverage" in (workspace.failure_message or "").lower()
+        assert run["status"] == "failed"
+        assert run["reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+        assert json.loads(run["log_stream_refs"])["coverage"] == {
+            "provider": "python",
+            "percent": 98.0,
+            "minimum_percent": 99.0,
+            "enforce": True,
+            "status": "failed",
+            "reason_code": "COVERAGE_BELOW_THRESHOLD",
+        }
+        assert operation["status"] == "failed"
+        assert operation["error_code"] == "COVERAGE_BELOW_THRESHOLD"
+        assert json.loads(operation["result"])["coverage"] == {
+            "provider": "python",
+            "percent": 98.0,
+            "minimum_percent": 99.0,
+            "enforce": True,
+            "status": "failed",
+            "reason_code": "COVERAGE_BELOW_THRESHOLD",
+        }
 
     @pytest.mark.unit
     async def test_push_failure_marks_failed_with_infrastructure_reason(
