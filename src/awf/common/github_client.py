@@ -94,6 +94,7 @@ query($owner: String!, $repo: String!, $number: Int!) {
                     targetUrl
                   }
                 }
+                pageInfo { hasNextPage }
               }
             }
           }
@@ -207,6 +208,13 @@ class GitHubClient:
         check_state_str = (rollup or {}).get("state") or "PENDING"
         check_state = _parse_check_state(check_state_str)
         checks = _parse_check_contexts(rollup)
+        if _dig(rollup, "contexts", "pageInfo", "hasNextPage") is True:
+            _log.warning(
+                "github.check_contexts_truncated",
+                repo=repo.slug(),
+                pr_number=pr_number,
+                fetched_contexts_limit=100,
+            )
 
         # ── Mergeable ──────────────────────────────────────────────────
         mergeable = _parse_mergeable(pr.get("mergeable"))

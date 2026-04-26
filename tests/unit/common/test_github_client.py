@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 
 import pytest
+import structlog
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import (
@@ -60,6 +61,7 @@ def _sample_pr_payload(
     merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
     check_contexts: list[dict] | None = None,
+    check_contexts_has_next_page: bool = False,
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
     comments: list[dict] | None = None,
@@ -84,7 +86,12 @@ def _sample_pr_payload(
                                     "commit": {
                                         "statusCheckRollup": {
                                             "state": check_state,
-                                            "contexts": {"nodes": check_contexts or []},
+                                            "contexts": {
+                                                "nodes": check_contexts or [],
+                                                "pageInfo": {
+                                                    "hasNextPage": check_contexts_has_next_page
+                                                },
+                                            },
                                         }
                                     }
                                 }
@@ -200,6 +207,28 @@ class TestFetchPrStatus:
         assert status_context.name == "ci/build"
         assert status_context.status == "PENDING"
         assert status_context.details_url == "https://checks.example/build"
+
+    @pytest.mark.unit
+    async def test_warns_when_check_contexts_are_truncated(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(check_contexts_has_next_page=True),
+        )
+        client = GitHubClient(fake)
+
+        with structlog.testing.capture_logs() as captured:
+            await client.fetch_pr_status(
+                repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+            )
+
+        assert {
+            "event": "github.check_contexts_truncated",
+            "repo": "o/r",
+            "pr_number": 1,
+            "fetched_contexts_limit": 100,
+            "log_level": "warning",
+        } in captured
 
     @pytest.mark.unit
     async def test_ignores_non_actionable_review_disabled_issue_comment(self) -> None:
@@ -585,6 +614,7 @@ class TestFetchPrStatus:
         assert args[0:3] == ["gh", "api", "graphql"]
         # Query passed via -f query=…, numeric number passed via -F
         assert any(a.startswith("query=") and "pullRequest" in a for a in args)
+        assert any(a.startswith("query=") and "pageInfo { hasNextPage }" in a for a in args)
         assert "number=123" in args and "-F" in args
         assert "owner=dimileeh" in args and "repo=aira-web" in args
 
