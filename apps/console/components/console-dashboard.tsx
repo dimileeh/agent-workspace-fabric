@@ -56,6 +56,7 @@ import type {
 
 const pollMs = Number(process.env.NEXT_PUBLIC_AWF_CONSOLE_POLL_MS || "5000");
 const maxLogChars = 180_000;
+const mergeQueueLimit = 20;
 
 type WorkspaceSortKey = "created_at" | "updated_at";
 type SortDirection = "asc" | "desc";
@@ -121,6 +122,7 @@ export function ConsoleDashboard() {
   const [resourceSaturation, setResourceSaturation] = useState<ResourceSaturationSummary | null>(null);
   const [resourceError, setResourceError] = useState<string | null>(null);
   const [mergeQueue, setMergeQueue] = useState<MergeQueueItem[]>([]);
+  const [mergeQueueHasMore, setMergeQueueHasMore] = useState(false);
   const [mergeQueueLoaded, setMergeQueueLoaded] = useState(false);
   const [mergeQueueError, setMergeQueueError] = useState<string | null>(null);
   const [retryState, setRetryState] = useState<RetryActionState>({ status: "idle" });
@@ -175,7 +177,7 @@ export function ConsoleDashboard() {
   }, []);
 
   const loadMergeQueue = useCallback(async () => {
-    const result = await apiGet<ListEnvelope<MergeQueueItem>>("/api/awf/merge-queue?limit=20");
+    const result = await apiGet<ListEnvelope<MergeQueueItem>>(`/api/awf/merge-queue?limit=${mergeQueueLimit}`);
     setMergeQueueLoaded(true);
     if (!result.ok) {
       setMergeQueueError(result.message);
@@ -183,6 +185,7 @@ export function ConsoleDashboard() {
     }
     setMergeQueueError(null);
     setMergeQueue(result.data.items);
+    setMergeQueueHasMore(result.data.has_more);
   }, []);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
@@ -567,6 +570,7 @@ export function ConsoleDashboard() {
             <ResourceCapacityPanel saturation={resourceSaturation} error={resourceError} />
             <MergeQueuePanel
               items={mergeQueue}
+              hasMore={mergeQueueHasMore}
               loaded={mergeQueueLoaded}
               error={mergeQueueError}
             />
@@ -1095,10 +1099,12 @@ function ResourceCapacityPanel({
 
 function MergeQueuePanel({
   items,
+  hasMore,
   loaded,
   error,
 }: {
   items: MergeQueueItem[];
+  hasMore: boolean;
   loaded: boolean;
   error: string | null;
 }) {
@@ -1110,7 +1116,7 @@ function MergeQueuePanel({
       icon={<GitPullRequest size={16} aria-hidden />}
       action={
         <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600">
-          {loaded ? `${items.length} candidate${items.length === 1 ? "" : "s"}` : "loading"}
+          {loaded ? `${items.length}${hasMore ? "+" : ""} candidate${items.length === 1 ? "" : "s"}` : "loading"}
         </span>
       }
     >
@@ -1125,6 +1131,11 @@ function MergeQueuePanel({
           {error ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               Showing last merge queue snapshot. Refresh failed: {error}
+            </div>
+          ) : null}
+          {hasMore ? (
+            <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+              Showing first {items.length} merge candidates. More are queued.
             </div>
           ) : null}
           <div className="grid max-h-[460px] gap-2 overflow-auto pr-1">
