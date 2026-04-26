@@ -244,6 +244,7 @@ class TestTaskAttemptRepository:
             ).scalars()
         )
         candidates = await MergeCandidateRepository(session).list_for_task(task.id, limit=10)
+        queued_candidates = await MergeCandidateRepository(session).list_queue(limit=10)
 
         assert [attempt.id for attempt in attempts] == [first_attempt.id, second_attempt.id]
         assert attempts[0].is_canonical_for_merge is False
@@ -263,6 +264,7 @@ class TestTaskAttemptRepository:
         assert first_candidate.not_canonical is True
         assert second_candidate.status == "open"
         assert second_candidate.close_reason is None
+        assert [candidate.attempt_id for candidate in queued_candidates] == [second_attempt.id]
 
 
 class TestTaskAttemptMigration:

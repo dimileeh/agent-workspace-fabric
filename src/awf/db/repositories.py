@@ -360,6 +360,7 @@ class MergeCandidateRepository:
             select(MergeCandidate)
             .join(Workspace, MergeCandidate.workspace_id == Workspace.id)
             .where(
+                MergeCandidate.status == "open",
                 ~Workspace.status.in_(
                     (
                         WorkspaceStatus.destroying.value,
