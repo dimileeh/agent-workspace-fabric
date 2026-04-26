@@ -10,7 +10,11 @@ from typing import Any
 import pytest
 
 from awf.service.config import ServiceSettings
-from awf.service.status import WorkspaceIdView, collect_service_status
+from awf.service.status import (
+    WorkspaceIdView,
+    _default_workspace_id_lookup,
+    collect_service_status,
+)
 
 
 def _settings(tmp_path: Path, *, min_free_disk_bytes: int = 200) -> ServiceSettings:
@@ -533,3 +537,12 @@ def test_orphan_check_handles_missing_docker_binary(tmp_path: Path) -> None:
     assert orphans["ok"] is True
     assert orphans["status"] == "unavailable"
     assert orphans["reason"] == "DOCKER_CLI_NOT_FOUND"
+
+
+@pytest.mark.unit
+def test_default_workspace_id_lookup_returns_unavailable_for_malformed_url() -> None:
+    view = asyncio.run(_default_workspace_id_lookup("not-a-real-database-url"))
+
+    assert view.available is False
+    assert view.active_ids == frozenset()
+    assert view.terminal_ids == frozenset()

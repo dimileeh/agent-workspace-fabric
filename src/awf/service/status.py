@@ -419,16 +419,18 @@ def _workspace_id_from_project(project: str) -> str | None:
 async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
     """Read live workspace ids from the control-plane DB.
 
-    Failures (missing tables, unreachable host, auth errors) collapse to
+    Failures (missing tables, unreachable host, auth errors, or even a
+    malformed URL that trips engine construction) collapse to
     ``available=False`` so the orphan check can degrade gracefully instead
     of raising.
     """
 
-    engine = make_engine(database_url)
     stmt = text("SELECT id, status FROM workspaces WHERE status IN :statuses").bindparams(
         bindparam("statuses", expanding=True)
     )
+    engine = None
     try:
+        engine = make_engine(database_url)
         async with engine.connect() as conn:
             rows = (
                 await conn.execute(stmt, {"statuses": _KNOWN_WORKSPACE_STATUSES})
@@ -440,7 +442,8 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
             available=False,
         )
     finally:
-        await engine.dispose()
+        if engine is not None:
+            await engine.dispose()
 
     active: set[str] = set()
     terminal: set[str] = set()
