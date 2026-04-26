@@ -38,6 +38,7 @@ def validation_run_summary(
             validation_target_head_sha=run.target_head_sha,
             current_target_head_sha=current_target_head_sha,
         ),
+        **validation_coverage_fields(run),
     )
 
 
@@ -79,3 +80,25 @@ def _json_dict(value: object) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return {str(k): v for k, v in value.items()}
     return {}
+
+
+def validation_coverage_fields(run: ValidationRun) -> dict[str, Any]:
+    coverage = _json_dict(_json_dict(run.log_stream_refs).get("coverage"))
+    return {
+        "coverage_percent": _json_float(coverage.get("percent")),
+        "coverage_minimum_percent": _json_float(coverage.get("minimum_percent")),
+        "coverage_status": _json_str(coverage.get("status")),
+        "coverage_reason_code": _json_str(coverage.get("reason_code")),
+    }
+
+
+def _json_float(value: object) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int | float):
+        return float(value)
+    return None
+
+
+def _json_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
