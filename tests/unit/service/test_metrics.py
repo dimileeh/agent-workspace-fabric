@@ -74,6 +74,7 @@ async def _reservation_for_workspace(
     peak_cpu: float,
     peak_memory_gb: float,
     disk_mb: int | None = None,
+    reserved_at: datetime | None = None,
     released_at: datetime | None = None,
 ) -> None:
     async with session_factory() as session:
@@ -89,10 +90,13 @@ async def _reservation_for_workspace(
             task_class=workspace.task_class,
             owned_paths=list(workspace.owned_paths),
         )
-        attempt = await TaskAttemptRepository(session).create_for_workspace(
-            task=task,
-            workspace=workspace,
-        )
+        attempt_repo = TaskAttemptRepository(session)
+        attempt = await attempt_repo.get_by_workspace_id(workspace.id)
+        if attempt is None:
+            attempt = await attempt_repo.create_for_workspace(
+                task=task,
+                workspace=workspace,
+            )
         reservation = await ResourceReservationRepository(session).create(
             workspace_id=workspace.id,
             attempt_id=attempt.id,
@@ -103,6 +107,7 @@ async def _reservation_for_workspace(
             peak_memory_gb=peak_memory_gb,
             disk_mb=disk_mb,
             phase="workspace_lifecycle",
+            reserved_at=reserved_at,
         )
         reservation.released_at = released_at
         await session.commit()
@@ -661,6 +666,61 @@ async def test_resource_saturation_prefers_active_reservations_and_falls_back_fo
     assert summary.reserved_resources.steady_memory_gb == 22.0
     assert summary.reserved_resources.peak_cpu == 14.0
     assert summary.reserved_resources.peak_memory_gb == 40.0
+
+
+@pytest.mark.unit
+async def test_resource_saturation_uses_latest_active_reservation_per_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        workspace_steady_cpu=3.0,
+        workspace_steady_memory_gb=10.0,
+        workspace_peak_cpu=6.0,
+        workspace_peak_memory_gb=16.0,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=4.0,
+        steady_memory_gb=12.0,
+        peak_cpu=8.0,
+        peak_memory_gb=24.0,
+        disk_mb=4096,
+        reserved_at=now - timedelta(minutes=5),
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=6.0,
+        steady_memory_gb=14.0,
+        peak_cpu=10.0,
+        peak_memory_gb=28.0,
+        disk_mb=4096,
+        reserved_at=now,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.reserved_resources.active_workspace_count == 1
+    assert summary.reserved_resources.steady_cpu == 6.0
+    assert summary.reserved_resources.steady_memory_gb == 14.0
+    assert summary.reserved_resources.peak_cpu == 10.0
+    assert summary.reserved_resources.peak_memory_gb == 28.0
 
 
 @pytest.mark.unit

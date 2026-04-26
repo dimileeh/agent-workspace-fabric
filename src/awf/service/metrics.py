@@ -632,19 +632,40 @@ async def _reserved_resources_for_session(
 
 
 async def _active_reservation_totals(session: AsyncSession) -> dict[str, float | int]:
-    stmt = (
+    latest_active_reservations = (
         select(
-            func.count(func.distinct(ResourceReservation.workspace_id)),
-            func.coalesce(func.sum(ResourceReservation.steady_cpu), 0.0),
-            func.coalesce(func.sum(ResourceReservation.steady_memory_gb), 0.0),
-            func.coalesce(func.sum(ResourceReservation.peak_cpu), 0.0),
-            func.coalesce(func.sum(ResourceReservation.peak_memory_gb), 0.0),
+            ResourceReservation.workspace_id.label("workspace_id"),
+            ResourceReservation.steady_cpu.label("steady_cpu"),
+            ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
+            ResourceReservation.peak_cpu.label("peak_cpu"),
+            ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
+            func.row_number()
+            .over(
+                partition_by=ResourceReservation.workspace_id,
+                order_by=(
+                    ResourceReservation.reserved_at.desc(),
+                    ResourceReservation.id.desc(),
+                ),
+            )
+            .label("reservation_rank"),
         )
         .join(Workspace, ResourceReservation.workspace_id == Workspace.id)
         .where(
             ResourceReservation.released_at.is_(None),
             ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
         )
+        .subquery()
+    )
+    stmt = (
+        select(
+            func.count(latest_active_reservations.c.workspace_id),
+            func.coalesce(func.sum(latest_active_reservations.c.steady_cpu), 0.0),
+            func.coalesce(func.sum(latest_active_reservations.c.steady_memory_gb), 0.0),
+            func.coalesce(func.sum(latest_active_reservations.c.peak_cpu), 0.0),
+            func.coalesce(func.sum(latest_active_reservations.c.peak_memory_gb), 0.0),
+        )
+        .select_from(latest_active_reservations)
+        .where(latest_active_reservations.c.reservation_rank == 1)
     )
     row = (await session.execute(stmt)).one()
     return {
