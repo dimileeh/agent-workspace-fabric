@@ -211,6 +211,92 @@ class Workspace(Base):
         lazy="selectin",
         order_by="WorkspaceLogStream.opened_at",
     )
+    task_attempt: Mapped[TaskAttempt | None] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        uselist=False,
+    )
+
+
+class Task(Base):
+    """First-class logical task, separate from any workspace execution attempt."""
+
+    __tablename__ = "tasks"
+    __table_args__ = (
+        UniqueConstraint("external_id", name="uq_tasks_external_id"),
+        UniqueConstraint("idempotency_key", name="uq_tasks_idempotency_key"),
+        Index("ix_tasks_created_at", "created_at"),
+        Index("ix_tasks_repo_base", "repo_url", "base_branch"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    external_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
+
+    repo_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    base_branch: Mapped[str] = mapped_column(String(256), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    prompt: Mapped[str] = mapped_column(String(16384), nullable=False)
+    task_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    owned_paths: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list, server_default=text("'[]'")
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+    attempts: Mapped[list[TaskAttempt]] = relationship(
+        back_populates="task",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="TaskAttempt.attempt_number",
+    )
+
+
+class TaskAttempt(Base):
+    """One execution lineage node for a task, currently backed by one workspace."""
+
+    __tablename__ = "task_attempts"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", name="uq_task_attempts_workspace_id"),
+        UniqueConstraint("task_id", "attempt_number", name="uq_task_attempts_task_number"),
+        Index("ix_task_attempts_task", "task_id"),
+        Index("ix_task_attempts_status", "status"),
+        Index("ix_task_attempts_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=False)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    agent: Mapped[str] = mapped_column(String(32), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+
+    repo_url: Mapped[str] = mapped_column(String(512), nullable=False)
+    base_branch: Mapped[str] = mapped_column(String(256), nullable=False)
+    title: Mapped[str] = mapped_column(String(512), nullable=False)
+    task_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    owned_paths: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list, server_default=text("'[]'")
+    )
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+    task: Mapped[Task] = relationship(back_populates="attempts")
+    workspace: Mapped[Workspace] = relationship(back_populates="task_attempt")
 
 
 class Operation(Base):

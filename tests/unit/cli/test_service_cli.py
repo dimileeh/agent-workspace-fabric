@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import pytest
+from sqlalchemy.engine import make_url
 from typer.testing import CliRunner
 
 from awf.cli.main import app
@@ -632,6 +633,9 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     created: dict[str, Any] = {}
 
     class _Engine:
+        def __init__(self) -> None:
+            self.url = make_url("sqlite+aiosqlite:///:memory:")
+
         async def dispose(self) -> None:
             created["disposed"] = True
 
@@ -697,6 +701,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
 
     def _make_engine(url: str) -> _Engine:
         created["db_url"] = url
+        engine.url = make_url(url)
         return engine
 
     def _make_session_factory(eng: _Engine) -> object:
