@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from sqlalchemy import inspect
 
-from awf.db.enums import TaskClass, WorkspaceStatus
+from awf.db.enums import TaskClass
 from awf.db.models import Workspace
 
 
@@ -16,9 +16,6 @@ def _task_class_tier(task_class: str | None) -> int:
 
 def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
     """Return (stale_reason, required_next_action)."""
-    if workspace.status != WorkspaceStatus.monitoring_pr.value:
-        return None, None
-
     state = inspect(workspace)
     operations = workspace.operations if "operations" not in state.unloaded else []
 
