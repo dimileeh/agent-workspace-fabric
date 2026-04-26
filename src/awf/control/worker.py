@@ -83,8 +83,10 @@ class ControlWorker:
         if self._executor is not None:
             execution_slots = self._available_execution_slots()
             if execution_slots > 0:
+                active_execution_ids = set(self._execution_tasks)
                 monitoring_ids = await self._list_monitoring_pr(
-                    limit=self._config.max_concurrent_executions
+                    limit=execution_slots,
+                    exclude_ids=active_execution_ids,
                 )
                 dispatched_ids.update(
                     self._dispatch_monitor_resumes(monitoring_ids, limit=execution_slots)
@@ -92,7 +94,10 @@ class ControlWorker:
 
             execution_slots = self._available_execution_slots()
             if execution_slots > 0:
-                ready_ids = await self._list_ready(limit=self._config.max_concurrent_executions)
+                ready_ids = await self._list_ready(
+                    limit=execution_slots,
+                    exclude_ids=set(self._execution_tasks),
+                )
                 dispatched_ids.update(
                     self._dispatch_ready_executions(ready_ids, limit=execution_slots)
                 )
@@ -131,27 +136,49 @@ class ControlWorker:
             limit=self._config.max_concurrent_provisions,
         )
 
-    async def _list_ready(self, *, limit: int | None = None) -> list[str]:
+    async def _list_ready(
+        self,
+        *,
+        limit: int | None = None,
+        exclude_ids: set[str] | None = None,
+    ) -> list[str]:
         """Return up to ``max_concurrent_executions`` workspace IDs in ``ready``."""
         row_limit = self._config.max_concurrent_executions if limit is None else limit
-        return await self._list_by_status(WorkspaceStatus.ready, limit=row_limit)
+        return await self._list_by_status(
+            WorkspaceStatus.ready,
+            limit=row_limit,
+            exclude_ids=exclude_ids,
+        )
 
-    async def _list_monitoring_pr(self, *, limit: int | None = None) -> list[str]:
+    async def _list_monitoring_pr(
+        self,
+        *,
+        limit: int | None = None,
+        exclude_ids: set[str] | None = None,
+    ) -> list[str]:
         """Return up to ``max_concurrent_executions`` IDs in ``monitoring_pr``."""
         row_limit = self._config.max_concurrent_executions if limit is None else limit
-        return await self._list_by_status(WorkspaceStatus.monitoring_pr, limit=row_limit)
+        return await self._list_by_status(
+            WorkspaceStatus.monitoring_pr,
+            limit=row_limit,
+            exclude_ids=exclude_ids,
+        )
 
-    async def _list_by_status(self, status: WorkspaceStatus, *, limit: int) -> list[str]:
+    async def _list_by_status(
+        self,
+        status: WorkspaceStatus,
+        *,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+    ) -> list[str]:
         if limit <= 0:
             return []
 
         async with self._session_factory() as session:
-            stmt = (
-                select(Workspace.id)
-                .where(Workspace.status == status.value)
-                .order_by(Workspace.created_at)
-                .limit(limit)
-            )
+            stmt = select(Workspace.id).where(Workspace.status == status.value)
+            if exclude_ids:
+                stmt = stmt.where(~Workspace.id.in_(exclude_ids))
+            stmt = stmt.order_by(Workspace.created_at).limit(limit)
             result = await session.execute(stmt)
             return [row[0] for row in result.all()]
 

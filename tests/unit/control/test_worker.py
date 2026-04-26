@@ -347,6 +347,85 @@ class TestRunOnceExecution:
         assert set(executor.calls) == set(ready_ids[:3])
 
     @pytest.mark.unit
+    async def test_execution_queries_are_limited_to_available_slots(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=3,
+            ),
+        )
+        release = asyncio.Event()
+
+        async def _busy() -> None:
+            await release.wait()
+
+        active_task = asyncio.create_task(_busy())
+        worker._execution_tasks["busy"] = active_task
+
+        limits: dict[str, int | None] = {}
+        exclusions: dict[str, set[str]] = {}
+
+        async def _list_monitoring_pr(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            limits["monitoring"] = limit
+            exclusions["monitoring"] = set(exclude_ids or set())
+            return []
+
+        async def _list_ready(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            limits["ready"] = limit
+            exclusions["ready"] = set(exclude_ids or set())
+            return []
+
+        worker._list_monitoring_pr = _list_monitoring_pr  # type: ignore[method-assign]
+        worker._list_ready = _list_ready  # type: ignore[method-assign]
+
+        try:
+            assert await worker.run_once() == 0
+            assert limits == {"monitoring": 2, "ready": 2}
+            assert exclusions == {"monitoring": {"busy"}, "ready": {"busy"}}
+        finally:
+            release.set()
+            await asyncio.wait_for(active_task, timeout=0.2)
+            worker._execution_tasks.pop("busy", None)
+
+    @pytest.mark.unit
+    async def test_monitor_query_excludes_active_ids_before_limiting(
+        self,
+        worker: ControlWorker,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_ids = [
+            await _create_monitoring_pr(
+                session_factory,
+                origin_repo,
+                f"needs-monitor-resume-{i}",
+                pr_number=100 + i,
+            )
+            for i in range(3)
+        ]
+
+        assert await worker._list_monitoring_pr(
+            limit=2,
+            exclude_ids={monitor_ids[0]},
+        ) == monitor_ids[1:]
+
+    @pytest.mark.unit
     async def test_ready_workspace_is_noop_when_no_executor_is_wired(
         self,
         session_factory: async_sessionmaker[AsyncSession],
