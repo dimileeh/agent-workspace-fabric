@@ -70,6 +70,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Stage 2: GitHub CLI ───────────────────────────────────────────────────
+ARG GH_VERSION=2.91.0
 RUN mkdir -p -m 755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -77,7 +78,7 @@ RUN mkdir -p -m 755 /etc/apt/keyrings \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
       > /etc/apt/sources.list.d/github-cli.list \
     && apt-get update \
-    && apt-get install -y --no-install-recommends gh \
+    && apt-get install -y --no-install-recommends "gh=${GH_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
     && gh --version
 
