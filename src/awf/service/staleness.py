@@ -419,8 +419,17 @@ class StalenessRefreshService:
         from awf.runtime.merge_eligibility import compute_stale_reason
 
         validation_reason, _ = compute_stale_reason(candidate.workspace)
+        existing_validation_reason = (
+            candidate.stale_reason
+            if candidate.stale_reason == "validation_insufficient_tier"
+            else None
+        )
         next_stale = stale or validation_reason is not None
-        next_stale_reason = validation_reason or _path_stale_reason(candidate, stale=stale)
+        next_stale_reason = (
+            validation_reason
+            or (existing_validation_reason if stale else None)
+            or ("stale" if stale else None)
+        )
         if candidate.stale != next_stale or candidate.stale_reason != next_stale_reason:
             candidate.stale = next_stale
             candidate.stale_reason = next_stale_reason
@@ -478,14 +487,6 @@ def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
         task_class=workspace.task_class or attempt.task_class,
         base_sha=candidate.base_sha,
     )
-
-
-def _path_stale_reason(candidate: MergeCandidate, *, stale: bool) -> str | None:
-    if not stale:
-        return None
-    if candidate.stale_reason == "validation_insufficient_tier":
-        return candidate.stale_reason
-    return "stale"
 
 
 async def _load_candidate(session: AsyncSession, candidate_id: str) -> MergeCandidate | None:
