@@ -471,6 +471,7 @@ async def retry_workspace_row(
         idempotency_key=None,
     )
     retried.task_kind = source.task_kind
+    retried.remote_push_branch = source.remote_push_branch
 
     task = await _retry_task_for_source(session, source)
     attempt = await TaskAttemptRepository(session).create_for_workspace(

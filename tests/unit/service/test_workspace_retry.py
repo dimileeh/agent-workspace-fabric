@@ -28,14 +28,14 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         await engine.dispose()
 
 
-def _request() -> WorkspaceCreateV2Request:
+def _request(*, task_kind: str = "feature_branch_pr") -> WorkspaceCreateV2Request:
     return WorkspaceCreateV2Request(
         repo={"url": "git@github.com:example/retryable.git", "base_branch": "development"},
         task={
             "title": "Retry flaky validation",
             "prompt": "Fix the intermittent validation failure.",
             "agent": "codex",
-            "kind": "feature_branch_pr",
+            "kind": task_kind,
             "external_id": "TICKET-RETRY",
             "task_class": "test_task",
             "owned_paths": ["src/awf/retry/**"],
@@ -51,6 +51,9 @@ def _request() -> WorkspaceCreateV2Request:
 async def _mark_failed(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
+    *,
+    branch_name: str = "codex/old-attempt",
+    remote_push_branch: str | None = None,
 ) -> dict[str, object]:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -59,7 +62,8 @@ async def _mark_failed(
         await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
         workspace.failure_reason = "validation_failure"
         workspace.failure_message = "pytest failed"
-        workspace.branch_name = "codex/old-attempt"
+        workspace.branch_name = branch_name
+        workspace.remote_push_branch = remote_push_branch
         workspace.pr_url = "https://github.com/example/retryable/pull/10"
         workspace.compose_project_name = "awf_old_attempt"
         assert workspace.resolved_profile is not None
@@ -163,3 +167,33 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
         (retried.id, "workspace.retry_created", first.id),
     }
 
+
+@pytest.mark.unit
+async def test_retry_preserves_remote_push_branch_for_sync_workspace(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request(task_kind="sync_release_pr"))
+    await _mark_failed(
+        factory,
+        first.id,
+        branch_name="release-sync/ws_old",
+        remote_push_branch="development",
+    )
+
+    retry = await service.retry_workspace(first.id)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        original = await repo.get(first.id)
+        retried = await repo.get(retry.new_workspace_id)
+
+    assert original is not None
+    assert retried is not None
+    assert original.task_kind == "sync_release_pr"
+    assert original.branch_name == "release-sync/ws_old"
+    assert original.remote_push_branch == "development"
+
+    assert retried.task_kind == "sync_release_pr"
+    assert retried.branch_name is None
+    assert retried.remote_push_branch == "development"
