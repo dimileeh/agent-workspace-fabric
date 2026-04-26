@@ -236,6 +236,28 @@ class WorkspaceOverviewListResponse(BaseModel):
     has_more: bool = False
 
 
+class WorkspaceLockResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    workspace_id: str
+    title: str
+    agent: AgentRuntime
+    status: WorkspaceStatus
+    repo_url: str
+    branch_base: str
+    task_class: TaskClass | None
+    owned_paths: list[str]
+    pr_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceLockListResponse(BaseModel):
+    items: list[WorkspaceLockResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
 class RuntimeServiceResponse(BaseModel):
     name: str
     container_id: str | None = None
