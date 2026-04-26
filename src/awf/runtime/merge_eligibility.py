@@ -32,12 +32,14 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
         required_tier = max(required_tier, 2)
 
     actual_tier = 1
+    
+    default_op_tier = 1
     if workspace.resolved_profile and "validation" in workspace.resolved_profile:
-        actual_tier = workspace.resolved_profile["validation"].get("requested_tier", 1)
+        default_op_tier = workspace.resolved_profile["validation"].get("requested_tier", 1)
 
     for op in operations:
         if op.type == "validate" and op.status == "succeeded":
-            op_tier = actual_tier
+            op_tier = default_op_tier
             if isinstance(op.payload, dict):
                 if isinstance(op.payload.get("requested_tier"), int):
                     op_tier = op.payload["requested_tier"]
