@@ -543,11 +543,37 @@ class PullRequestMonitorRunner:
 
             if stale_reason is not None:
                 if not ws.auto_merge:
-                    action = Abort(AbortReason.stale)
+                    return await self._execute(
+                        action=Abort(AbortReason.stale),
+                        workspace_id=workspace_id,
+                        repo_url=repo_url,
+                        repo=repo,
+                        pr_number=pr_number,
+                        status=status,
+                        state=state,
+                        base_branch=base_branch,
+                        remote_branch=remote_branch,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        monitor_log=monitor_log,
+                    )
                 else:
                     has_failed_rebase = any(op.type == "rebase" and op.status == "failed" for op in ws.operations)
                     if req_action == "rebase" and has_failed_rebase:
-                        action = NotifyHuman(message=f"Agent could not resolve {stale_reason}. Rebase conflicted. Manual intervention required.")
+                        return await self._execute(
+                            action=NotifyHuman(message=f"Agent could not resolve {stale_reason}. Rebase conflicted. Manual intervention required."),
+                            workspace_id=workspace_id,
+                            repo_url=repo_url,
+                            repo=repo,
+                            pr_number=pr_number,
+                            status=status,
+                            state=state,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                            monitor_log=monitor_log,
+                        )
                     else:
                         async with self._deps.session_factory() as s:
                             from awf.db.repositories import OperationRepository, WorkspaceRepository
