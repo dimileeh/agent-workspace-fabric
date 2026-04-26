@@ -236,7 +236,7 @@ class ProfileEgress(BaseModel):
             raise ValueError("allowlist must be populated when egress mode is allowlist")
         if self.mode == EgressMode.allowlist:
             for item in self.allowlist:
-                if not item or item == "*" or "/" in item:
+                if not item or item.startswith("*") or "/" in item:
                     raise ValueError(f"invalid allowlist entry: '{item}'")
         return self
 
