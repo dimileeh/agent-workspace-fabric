@@ -496,3 +496,59 @@ class TestConnectionErrors:
 
         assert result.exit_code == 2
         assert "could not reach" in result.stderr
+
+
+class TestServiceStatusOrphanReporting:
+    @pytest.mark.unit
+    def test_pretty_output_surfaces_orphan_summary(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from awf.service import config as config_mod
+        from awf.service import status as status_mod
+
+        settings = object()
+        monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+
+        async def _collect(received: object) -> dict[str, object]:
+            assert received is settings
+            return {
+                "service": "awf",
+                "status": "fail",
+                "checks": {
+                    "orphan_workspaces": {
+                        "ok": False,
+                        "status": "fail",
+                        "reason": "ORPHANS_PRESENT",
+                        "orphan_count": 2,
+                        "active_count": 1,
+                        "examples": [
+                            {
+                                "workspace_id": "ws_dead",
+                                "compose_project": "awf_ws_dead",
+                                "classification": "terminal",
+                                "reason": "WORKSPACE_TERMINAL",
+                            },
+                            {
+                                "workspace_id": "ws_ghost",
+                                "compose_project": "awf-ws_ghost",
+                                "classification": "missing",
+                                "reason": "WORKSPACE_MISSING",
+                            },
+                        ],
+                        "action": (
+                            "Run docker compose -p <project> down -v --remove-orphans"
+                        ),
+                    }
+                },
+            }
+
+        monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+        result = _runner.invoke(app, ["service", "status", "--format", "pretty"])
+
+        assert result.exit_code == 1, result.output
+        assert "checks.orphan_workspaces.orphan_count: 2" in result.stdout
+        assert "checks.orphan_workspaces.active_count: 1" in result.stdout
+        assert "ORPHANS_PRESENT" in result.stdout
+        assert "ws_dead" in result.stdout
+        assert "ws_ghost" in result.stdout

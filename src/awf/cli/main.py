@@ -97,6 +97,10 @@ def _emit_pretty_dict(d: dict[str, Any], *, prefix: str = "") -> None:
         if isinstance(value, dict):
             _emit_pretty_dict(value, prefix=pretty_key)
             continue
+        if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+            for i, item in enumerate(value):
+                _emit_pretty_dict(item, prefix=f"{pretty_key}[{i}]")
+            continue
         typer.echo(f"  {pretty_key}: {value}")
 
 
