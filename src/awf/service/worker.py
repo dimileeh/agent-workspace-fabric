@@ -9,12 +9,15 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from sqlalchemy.engine import make_url
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.adapters.registry  # noqa: F401 - populate adapter registry for service execution
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.github_client import GitHubClient
+from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.models import Workspace
@@ -26,11 +29,17 @@ from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
-from awf.runtime.merge_coordinator import InProcessMergeCoordinator
+from awf.runtime.merge_coordinator import (
+    InProcessMergeCoordinator,
+    MergeCoordinator,
+    PostgresAdvisoryMergeCoordinator,
+)
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 from awf.service.config import ServiceSettings
+
+_log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -53,7 +62,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runner = AsyncioSubprocessRunner()
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
-    merge_coordinator = InProcessMergeCoordinator()
+    merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
     validation = ValidationRunner(
         runner=runner,
         artifacts_dir=work_dir / "artifacts",
@@ -136,6 +145,37 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         ),
     )
     return WorkerRuntime(engine=engine, worker=worker)
+
+
+def _merge_coordinator_for_database_url(
+    database_url: str,
+    *,
+    engine: AsyncEngine,
+) -> MergeCoordinator:
+    if _is_postgres_database_url(database_url):
+        return PostgresAdvisoryMergeCoordinator(engine)
+    return InProcessMergeCoordinator()
+
+
+def _is_postgres_database_url(database_url: str) -> bool:
+    try:
+        backend = make_url(database_url).get_backend_name()
+    except ArgumentError as exc:
+        _log.warning(
+            "worker.database_url_parse_failed",
+            error=str(exc),
+            merge_coordinator="in_process",
+        )
+        return False
+    if backend in {"postgres", "postgresql"}:
+        return True
+    if backend.startswith("postgres"):
+        _log.warning(
+            "worker.postgres_merge_coordinator_not_selected",
+            backend=backend,
+            merge_coordinator="in_process",
+        )
+    return False
 
 
 def _service_git_environment(host_home: Path, *, github_token: str | None = None) -> dict[str, str]:
