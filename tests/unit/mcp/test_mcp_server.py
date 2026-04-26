@@ -17,9 +17,11 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.base import Base
-from awf.db.repositories import WorkspaceRepository
+from awf.db.enums import OperationStatus, OperationType
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.mcp.server import WorkspaceService, build_mcp_server
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
 
 
@@ -79,6 +81,8 @@ class TestToolRegistration:
         } <= names
         assert {
             "awf_create_workspace_v2",
+            "awf_get_workspace_runtime",
+            "awf_list_workspace_operations",
             "awf_list_workspace_events",
             "awf_list_workspace_logs",
             "awf_read_workspace_log",
@@ -350,6 +354,149 @@ class TestWorkspaceEvents:
         result = await _call(
             mcp,
             "awf_list_workspace_events",
+            {"workspace_id": "ws_missing"},
+        )
+
+        assert result is None
+
+
+class TestWorkspaceRuntime:
+    @pytest.mark.unit
+    async def test_get_workspace_runtime_returns_container_snapshot(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        class FakeRuntimeInspector:
+            async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+                assert compose_project_name == "awf_ws_mcp_runtime"
+                return RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="abc123",
+                            image="awf-agent-runtime:latest",
+                            state="running",
+                            status="Up 1 minute",
+                            health="healthy",
+                            ports=["127.0.0.1:8000->8000/tcp"],
+                            started_at="2026-04-25T10:00:00Z",
+                        )
+                    ],
+                )
+
+        service = WorkspaceService(factory, runtime_inspector=FakeRuntimeInspector())
+        mcp = build_mcp_server(service=service)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe runtime",
+                task_prompt="Inspect runtime.",
+                agent="codex",
+                test_commands=[],
+            )
+            workspace.compose_project_name = "awf_ws_mcp_runtime"
+            await session.commit()
+
+        runtime = await _call(
+            mcp,
+            "awf_get_workspace_runtime",
+            {"workspace_id": workspace.id},
+        )
+
+        assert runtime == {
+            "workspace_id": workspace.id,
+            "compose_project_name": "awf_ws_mcp_runtime",
+            "stack_state": "running",
+            "services": [
+                {
+                    "name": "agent",
+                    "container_id": "abc123",
+                    "image": "awf-agent-runtime:latest",
+                    "state": "running",
+                    "status": "Up 1 minute",
+                    "health": "healthy",
+                    "ports": ["127.0.0.1:8000->8000/tcp"],
+                    "started_at": "2026-04-25T10:00:00Z",
+                }
+            ],
+            "logs_available": True,
+            "control_available": True,
+            "reason": None,
+        }
+
+    @pytest.mark.unit
+    async def test_get_workspace_runtime_missing_workspace_returns_none(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await _call(
+            mcp,
+            "awf_get_workspace_runtime",
+            {"workspace_id": "ws_missing"},
+        )
+
+        assert result is None
+
+
+class TestWorkspaceOperations:
+    @pytest.mark.unit
+    async def test_list_workspace_operations_respects_limit(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe operations",
+                task_prompt="List operations.",
+                agent="codex",
+                test_commands=[],
+            )
+            repo = OperationRepository(session)
+            create = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.create,
+                status=OperationStatus.succeeded,
+            )
+            validate = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+            )
+            stop = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.stop,
+                status=OperationStatus.pending,
+            )
+            create.created_at = base
+            validate.created_at = base + timedelta(seconds=1)
+            stop.created_at = base + timedelta(seconds=2)
+            await session.commit()
+
+        operations = await _call(
+            mcp,
+            "awf_list_workspace_operations",
+            {"workspace_id": workspace.id, "limit": 2},
+        )
+
+        assert isinstance(operations, list)
+        assert [item["id"] for item in operations] == [stop.id, validate.id]
+        assert [item["type"] for item in operations] == ["stop", "validate"]
+        assert [item["status"] for item in operations] == ["pending", "running"]
+
+    @pytest.mark.unit
+    async def test_list_workspace_operations_missing_workspace_returns_none(
+        self,
+        mcp,
+    ) -> None:  # type: ignore[no-untyped-def]
+        result = await _call(
+            mcp,
+            "awf_list_workspace_operations",
             {"workspace_id": "ws_missing"},
         )
 
