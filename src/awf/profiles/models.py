@@ -185,7 +185,7 @@ class ProfileSecret(BaseModel):
         # Broad targets check
         if self.kind == "mount":
             target_norm = self.target.rstrip("/")
-            if target_norm in ("", "/", "/tmp", "/var", "/etc", "/root", "/home"):
+            if target_norm in ("", "/", "/tmp", "/var", "/etc", "/root", "/home", "/dev", "/proc", "/sys"):
                 raise ValueError(f"secret target '{self.target}' is too broad")
         elif self.kind == "env":
             if self.target in ("PATH", "HOME", "USER", ""):
