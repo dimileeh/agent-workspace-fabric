@@ -8,10 +8,9 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-
 
 _V2_PROFILE_BODY = {
     "repo": {
@@ -57,6 +56,18 @@ async def _create_v2_profile_workspace(client: AsyncClient) -> str:
 
 async def _create_v1_workspace(client: AsyncClient) -> str:
     response = await client.post("/v1/workspaces", json=_V1_BODY)
+    assert response.status_code == 202
+    return str(response.json()["workspace_id"])
+
+
+async def _create_v1_workspace_with_commands(
+    client: AsyncClient,
+    commands: list[str],
+) -> str:
+    response = await client.post(
+        "/v1/workspaces",
+        json={**_V1_BODY, "test_commands": commands},
+    )
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
@@ -123,6 +134,17 @@ async def _mark_workspace_completed(engine: AsyncEngine, workspace_id: str) -> N
         workspace.status = WorkspaceStatus.completed.value
         workspace.branch_name = "codex/validation-provenance"
         workspace.base_commit = "abc123def456"
+        await session.commit()
+
+
+async def _mark_workspace_validation_failed(engine: AsyncEngine, workspace_id: str) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.failed.value
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = "validation failed: ruff check"
         await session.commit()
 
 
@@ -223,6 +245,48 @@ async def test_validation_provenance_marks_open_streams_running_and_uses_request
     assert item["command"] == "pytest -q"
     assert item["status"] == "running"
     assert item["closed_at"] is None
+
+
+@pytest.mark.unit
+async def test_validation_provenance_marks_failed_command_from_workspace_failure(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace_with_commands(
+        client,
+        ["pytest -q", "ruff check"],
+    )
+    await _mark_workspace_validation_failed(engine, workspace_id)
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.cmd_01",
+        phase="validate",
+        stdout_bytes=20,
+        stdout_lines=1,
+        stderr_bytes=0,
+        stderr_lines=0,
+    )
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.cmd_02",
+        phase="validate",
+        stdout_bytes=0,
+        stdout_lines=0,
+        stderr_bytes=15,
+        stderr_lines=1,
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    assert [
+        (item["command"], item["status"]) for item in response.json()["items"]
+    ] == [
+        ("pytest -q", "succeeded"),
+        ("ruff check", "failed"),
+    ]
 
 
 @pytest.mark.unit

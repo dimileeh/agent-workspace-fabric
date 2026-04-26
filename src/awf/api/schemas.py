@@ -350,6 +350,32 @@ class WorkspaceLogReadResponse(BaseModel):
     data: str
 
 
+ValidationProvenanceStatus = Literal["running", "succeeded", "failed", "unknown"]
+
+
+class ValidationProvenanceItemResponse(BaseModel):
+    workspace_id: str
+    phase: str
+    command_index: int
+    command: str | None
+    stream_ids: dict[str, str | None]
+    stdout_byte_count: int
+    stdout_line_count: int
+    stderr_byte_count: int
+    stderr_line_count: int
+    opened_at: datetime
+    closed_at: datetime | None
+    status: ValidationProvenanceStatus
+    base_commit: str | None
+    branch_name: str | None
+
+
+class ValidationProvenanceListResponse(BaseModel):
+    items: list[ValidationProvenanceItemResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
 class OperationResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
