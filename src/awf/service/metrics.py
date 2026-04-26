@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
@@ -243,11 +244,14 @@ async def summarize_resource_saturation_for_session(
         resource_defaults=resource_defaults,
     )
     concurrency = _resource_concurrency(status_counts, worker=worker)
-    resolved_disk_check = disk_check or check_disk_space(
-        settings.work_dir,
-        min_free_bytes=settings.min_free_disk_bytes,
-        disk_usage=disk_usage,
-    )
+    resolved_disk_check = disk_check
+    if resolved_disk_check is None:
+        resolved_disk_check = await asyncio.to_thread(
+            check_disk_space,
+            settings.work_dir,
+            min_free_bytes=settings.min_free_disk_bytes,
+            disk_usage=disk_usage,
+        )
     admission = _resource_admission_summary(
         disk_check=resolved_disk_check,
         concurrency=concurrency,

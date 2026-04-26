@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -318,3 +319,52 @@ async def test_resource_saturation_admission_blocks_on_disk_pressure(
     assert summary.admission.status == "blocked"
     assert summary.admission.reason == "INSUFFICIENT_DISK"
     assert summary.admission.detail is not None
+
+
+@pytest.mark.unit
+async def test_resource_saturation_runs_fallback_disk_check_in_thread(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import awf.service.metrics as metrics_mod
+    from awf.service.metrics import summarize_resource_saturation
+
+    class _Usage:
+        total = 1000
+        used = 100
+        free = 900
+
+    def fake_disk_usage(_path: object) -> _Usage:
+        return _Usage()
+
+    to_thread_calls: list[tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = []
+
+    async def fake_to_thread(
+        func: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        to_thread_calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_mod.asyncio, "to_thread", fake_to_thread)
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        min_free_disk_bytes=400,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_usage=fake_disk_usage,
+    )
+
+    assert summary.disk.reason == "SUFFICIENT_DISK"
+    assert len(to_thread_calls) == 1
+    func, args, kwargs = to_thread_calls[0]
+    assert func is metrics_mod.check_disk_space
+    assert args == (settings.work_dir,)
+    assert kwargs["min_free_bytes"] == settings.min_free_disk_bytes
+    assert kwargs["disk_usage"] is fake_disk_usage
