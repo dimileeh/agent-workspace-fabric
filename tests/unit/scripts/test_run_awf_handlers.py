@@ -1275,6 +1275,20 @@ class TestAgentEnvironmentWithHostAuth:
         assert ("GITHUB_TOKEN", "ghp_raw_secret") not in env
 
     @pytest.mark.unit
+    def test_accepts_standard_gh_token_as_compose_placeholder(self) -> None:
+        env = run_awf._agent_environment_with_host_auth(
+            (),
+            host_env={
+                "GH_TOKEN": "ghp_raw_secret",
+            },
+        )
+
+        assert ("GH_TOKEN", "${GH_TOKEN}") in env
+        assert ("GITHUB_TOKEN", "${GH_TOKEN}") in env
+        assert ("GH_TOKEN", "ghp_raw_secret") not in env
+        assert ("GITHUB_TOKEN", "ghp_raw_secret") not in env
+
+    @pytest.mark.unit
     def test_profile_env_wins_over_host_passthrough(self) -> None:
         env = run_awf._agent_environment_with_host_auth(
             (("GEMINI_API_KEY", "profile-value"),),

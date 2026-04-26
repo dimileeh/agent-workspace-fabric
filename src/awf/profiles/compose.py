@@ -62,16 +62,24 @@ def agent_environment_with_github_token(
 ) -> tuple[tuple[str, str], ...]:
     """Expose AWF's GitHub token to agent containers via Compose placeholders."""
     source_env = os.environ if host_env is None else host_env
-    if not source_env.get("AWF_GITHUB_TOKEN"):
+    token_placeholder = _github_token_placeholder(source_env)
+    if token_placeholder is None:
         return base_environment
 
     merged: list[tuple[str, str]] = list(base_environment)
     existing = {key for key, _ in merged}
     for name in ("GH_TOKEN", "GITHUB_TOKEN"):
         if name not in existing:
-            merged.append((name, "${AWF_GITHUB_TOKEN}"))
+            merged.append((name, token_placeholder))
             existing.add(name)
     return tuple(merged)
+
+
+def _github_token_placeholder(source_env: Mapping[str, str]) -> str | None:
+    for name in ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
+        if source_env.get(name):
+            return "${" + name + "}"
+    return None
 
 
 def agent_environment_with_host_auth(

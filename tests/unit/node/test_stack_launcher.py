@@ -109,6 +109,8 @@ async def test_compose_stack_launcher_passes_github_token_placeholders(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("AWF_GITHUB_TOKEN", "ghp_raw_secret")
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -131,6 +133,38 @@ async def test_compose_stack_launcher_passes_github_token_placeholders(
     env = dict(compose.specs[0].agent_environment)
     assert env["GH_TOKEN"] == "${AWF_GITHUB_TOKEN}"
     assert env["GITHUB_TOKEN"] == "${AWF_GITHUB_TOKEN}"
+    assert "ghp_raw_secret" not in repr(compose.specs[0].agent_environment)
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_accepts_standard_gh_token_placeholder(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("AWF_GITHUB_TOKEN", raising=False)
+    monkeypatch.setenv("GH_TOKEN", "ghp_raw_secret")
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    layout = WorktreeLayout(
+        mirror_path=Path("/host/awf/git/mirrors/repo.git"),
+        worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
+        branch_name="awf/ws_launcher",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=WorkspaceProfile(name="generic"),
+        )
+    )
+
+    env = dict(compose.specs[0].agent_environment)
+    assert env["GH_TOKEN"] == "${GH_TOKEN}"
+    assert env["GITHUB_TOKEN"] == "${GH_TOKEN}"
     assert "ghp_raw_secret" not in repr(compose.specs[0].agent_environment)
 
 
@@ -171,6 +205,8 @@ async def test_compose_stack_launcher_omits_github_token_placeholders_when_absen
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("AWF_GITHUB_TOKEN", raising=False)
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]

@@ -859,7 +859,10 @@ docker image inspect awf-agent-runtime:latest
 
 ### Configure Environment
 
-Local service development should use Postgres via the Compose stack:
+Local service development should use Postgres via the Compose stack. The
+service worker needs a GitHub token for PR creation, review-thread inspection,
+and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and
+`GITHUB_TOKEN` are accepted fallbacks.
 
 ```bash
 cp .env.example .env
