@@ -471,7 +471,6 @@ class WorkspaceRepository:
                 ),
             )
             .order_by(Workspace.updated_at.desc(), Workspace.id.desc())
-            .limit(limit)
         )
         if repo_url is not None:
             stmt = stmt.where(Workspace.repo_url == repo_url)
@@ -489,6 +488,7 @@ class WorkspaceRepository:
                     ),
                 )
             )
+        stmt = stmt.limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
     async def list_schedulable_ids(
