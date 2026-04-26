@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import threading
 from pathlib import Path
 from typing import Any
@@ -16,6 +17,155 @@ from awf.cli.main import app
 from awf.common.config import Settings
 
 _runner = CliRunner()
+
+
+def _combined_output(result: Any) -> str:
+    return f"{result.stdout}{getattr(result, 'stderr', '')}"
+
+
+@pytest.mark.unit
+def test_service_logs_defaults_to_tail_api_and_worker_logs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(
+            args, returncode=0, stdout="api log\nworker log\n", stderr=""
+        )
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "api log\nworker log\n"
+    assert calls == [
+        (
+            [
+                "docker",
+                "compose",
+                "-f",
+                "docker/compose/local-service.yml",
+                "logs",
+                "--tail",
+                "100",
+                "api",
+                "worker",
+            ],
+            {"check": False, "capture_output": True, "text": True},
+        )
+    ]
+
+
+@pytest.mark.unit
+def test_service_logs_accepts_repeated_service_filters(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(
+        app,
+        [
+            "service",
+            "logs",
+            "--tail",
+            "25",
+            "--service",
+            "postgres",
+            "--service",
+            "migrate",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker/compose/local-service.yml",
+            "logs",
+            "--tail",
+            "25",
+            "postgres",
+            "migrate",
+        ]
+    ]
+
+
+@pytest.mark.unit
+def test_service_logs_follow_streams_without_capturing_subprocess_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[list[str], dict[str, object]]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode=0, stdout="not replayed\n", stderr="")
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs", "--follow", "--service", "worker"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert calls == [
+        (
+            [
+                "docker",
+                "compose",
+                "-f",
+                "docker/compose/local-service.yml",
+                "logs",
+                "--tail",
+                "100",
+                "--follow",
+                "worker",
+            ],
+            {"check": False, "capture_output": False, "text": True},
+        )
+    ]
+
+
+@pytest.mark.unit
+def test_service_logs_docker_compose_failure_is_clean_typer_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(
+            args,
+            returncode=17,
+            stdout="",
+            stderr='service "api" is not running\n',
+        )
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    result = _runner.invoke(app, ["service", "logs"])
+
+    output = _combined_output(result)
+    assert result.exit_code == 1
+    assert 'error: docker compose logs failed (exit 17): service "api" is not running' in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.unit
+def test_readme_documents_service_logs_command() -> None:
+    readme = Path("README.md").read_text()
+
+    assert "awf service logs" in readme
+    assert "docker/compose/local-service.yml" in readme
+    assert "--tail" in readme
+    assert "--service worker" in readme
+    assert "--follow" in readme
 
 
 @pytest.mark.unit
