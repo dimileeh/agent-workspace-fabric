@@ -9,16 +9,22 @@ from typing import Any
 import pytest
 
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
+from awf.runtime.merge_coordinator import InProcessMergeCoordinator
 from awf.service import worker as worker_mod
 from awf.service.config import ServiceSettings
 
 
-def _settings(tmp_path: Path, *, github_token: str | None = None) -> ServiceSettings:
+def _settings(
+    tmp_path: Path,
+    *,
+    database_url: str | None = None,
+    github_token: str | None = None,
+) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
         env="local",
         api_base_url="http://localhost:8000",
-        database_url=f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}",
+        database_url=database_url or f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}",
         docker_host="unix:///var/run/docker.sock",
         agent_runtime_image="custom-agent-runtime:dev",
         work_dir=str((tmp_path / "awf-work").resolve()),
@@ -220,6 +226,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "merge_coordinator" in created["feature_monitor_kwargs"]
+    assert isinstance(
+        created["feature_monitor_kwargs"]["merge_coordinator"],
+        InProcessMergeCoordinator,
+    )
 
     manual_monitor = created["executor_monitor_factory"](
         object(),
@@ -234,6 +244,79 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert (
         created["release_monitor_kwargs"]["merge_coordinator"]
         is created["feature_monitor_kwargs"]["merge_coordinator"]
+    )
+
+
+@pytest.mark.unit
+def test_build_worker_runtime_uses_postgres_advisory_merge_coordinator_for_postgres(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    created: dict[str, Any] = {}
+
+    class _Engine:
+        pass
+
+    class _AnyInit:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    class _WorkspaceExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created["pr_monitor_factory"] = kwargs["pr_monitor_factory"]
+
+    class _ControlWorker:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            pass
+
+    class _PostgresCoordinator:
+        def __init__(self, engine: object) -> None:
+            created["coordinator_engine"] = engine
+
+    engine = _Engine()
+    session_factory = object()
+
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: engine)
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: session_factory)
+    monkeypatch.setattr(worker_mod, "AsyncioSubprocessRunner", _AnyInit)
+    monkeypatch.setattr(worker_mod, "LogStore", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ValidationRunner", _AnyInit)
+    monkeypatch.setattr(worker_mod, "PullRequestCreator", _AnyInit)
+    monkeypatch.setattr(worker_mod, "GitHubClient", _AnyInit)
+    monkeypatch.setattr(worker_mod, "GitManager", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ComposeManager", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", _AnyInit)
+    monkeypatch.setattr(worker_mod, "ComposeStackLauncher", _AnyInit)
+    monkeypatch.setattr(worker_mod, "Provisioner", _AnyInit)
+    monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _WorkspaceExecutor)
+    monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+    monkeypatch.setattr(worker_mod, "PostgresAdvisoryMergeCoordinator", _PostgresCoordinator)
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
+
+    def _build_feature_monitor(**kwargs: object) -> object:
+        created["feature_monitor_kwargs"] = kwargs
+        return object()
+
+    monkeypatch.setattr(worker_mod, "build_feature_pr_monitor", _build_feature_monitor)
+    monkeypatch.setattr(worker_mod, "build_release_pr_monitor", lambda **_kwargs: object())
+
+    settings = _settings(
+        tmp_path,
+        database_url="postgresql+asyncpg://awf:pw@localhost:5432/awf",
+    )
+
+    worker_mod.build_worker_runtime(settings)
+    created["pr_monitor_factory"](
+        object(),
+        WorkspaceProfile(name="default"),
+        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+    )
+
+    assert created["coordinator_engine"] is engine
+    assert isinstance(
+        created["feature_monitor_kwargs"]["merge_coordinator"],
+        _PostgresCoordinator,
     )
 
 
