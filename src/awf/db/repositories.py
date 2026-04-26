@@ -10,8 +10,9 @@ SQLAlchemy calls everywhere. Rules:
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Final
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,6 +21,23 @@ from awf.common.ids import new_event_id, new_log_stream_id, new_operation_id, ne
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent, WorkspaceLogStream
+
+ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
+    WorkspaceStatus.requested.value,
+    WorkspaceStatus.provisioning.value,
+    WorkspaceStatus.ready.value,
+    WorkspaceStatus.running.value,
+    WorkspaceStatus.validating.value,
+    WorkspaceStatus.pushing.value,
+    WorkspaceStatus.monitoring_pr.value,
+)
+
+
+@dataclass(frozen=True)
+class OwnedPathConflict:
+    workspace_id: str
+    existing_path: str
+    requested_path: str
 
 
 class WorkspaceRepository:
@@ -107,6 +125,45 @@ class WorkspaceRepository:
         stmt = select(Workspace).where(Workspace.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def find_active_owned_path_conflicts(
+        self,
+        *,
+        repo_url: str,
+        branch_base: str,
+        owned_paths: list[str],
+    ) -> list[OwnedPathConflict]:
+        requested_paths = [
+            path for path in owned_paths if _normalize_owned_path(path) != ""
+        ]
+        if not requested_paths:
+            return []
+
+        stmt = (
+            select(Workspace)
+            .where(
+                Workspace.repo_url == repo_url,
+                Workspace.branch_base == branch_base,
+                Workspace.status.in_(ACTIVE_OWNED_PATH_CONFLICT_STATUSES),
+            )
+            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+        )
+        rows = list((await self._session.execute(stmt)).scalars())
+        conflicts: list[OwnedPathConflict] = []
+        for workspace in rows:
+            for existing_path in workspace.owned_paths:
+                if _normalize_owned_path(existing_path) == "":
+                    continue
+                for requested_path in requested_paths:
+                    if _owned_paths_overlap(existing_path, requested_path):
+                        conflicts.append(
+                            OwnedPathConflict(
+                                workspace_id=workspace.id,
+                                existing_path=existing_path,
+                                requested_path=requested_path,
+                            )
+                        )
+        return conflicts
+
     async def list(
         self,
         *,
@@ -177,6 +234,69 @@ class WorkspaceRepository:
         workspace.events.append(event)
         await self._session.flush()
         return event
+
+
+def _owned_paths_overlap(left: str, right: str) -> bool:
+    left_path = _normalize_owned_path(left)
+    right_path = _normalize_owned_path(right)
+    if left_path == "" or right_path == "":
+        return False
+    if _literal_paths_overlap(left_path, right_path):
+        return True
+
+    left_prefix = _wildcard_prefix(left_path)
+    right_prefix = _wildcard_prefix(right_path)
+    if left_prefix is not None and _wildcard_prefix_overlaps(left_prefix, right_path):
+        return True
+    if right_prefix is not None and _wildcard_prefix_overlaps(right_prefix, left_path):
+        return True
+    if left_prefix is not None and right_prefix is not None:
+        return _wildcard_prefixes_overlap(left_prefix, right_prefix)
+    return False
+
+
+def _normalize_owned_path(path: str) -> str:
+    normalized = path.strip().replace("\\", "/")
+    while "//" in normalized:
+        normalized = normalized.replace("//", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    normalized = normalized.lstrip("/")
+    normalized = normalized.rstrip("/")
+    return "" if normalized == "." else normalized
+
+
+def _literal_paths_overlap(left: str, right: str) -> bool:
+    return left == right or _is_descendant(left, right) or _is_descendant(right, left)
+
+
+def _is_descendant(parent: str, child: str) -> bool:
+    return child.startswith(f"{parent.rstrip('/')}/")
+
+
+def _wildcard_prefix(path: str) -> str | None:
+    wildcard_indexes = [
+        index for index in (path.find("*"), path.find("?"), path.find("[")) if index >= 0
+    ]
+    if not wildcard_indexes:
+        return None
+    return path[: min(wildcard_indexes)]
+
+
+def _wildcard_prefix_overlaps(prefix: str, path: str) -> bool:
+    if prefix == "":
+        return True
+    if path.startswith(prefix):
+        return True
+    return _literal_paths_overlap(prefix.rstrip("/"), path.rstrip("/"))
+
+
+def _wildcard_prefixes_overlap(left: str, right: str) -> bool:
+    if left == "" or right == "":
+        return True
+    if left.startswith(right) or right.startswith(left):
+        return True
+    return _literal_paths_overlap(left.rstrip("/"), right.rstrip("/"))
 
 
 class WorkspaceEventRepository:

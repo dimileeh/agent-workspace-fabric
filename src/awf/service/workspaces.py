@@ -23,6 +23,7 @@ from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
+    OwnedPathConflict,
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
@@ -42,6 +43,18 @@ from awf.service.controls import (
 
 class RuntimeInspection(Protocol):
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot: ...
+
+
+OWNED_PATH_CONFLICT_CODE = "WORKSPACE_OWNED_PATH_CONFLICT"
+OWNED_PATH_CONFLICT_MESSAGE = "Requested owned paths overlap an active workspace."
+
+
+class WorkspaceOwnedPathConflictError(Exception):
+    def __init__(self, conflicts: list[OwnedPathConflict]) -> None:
+        self.error_code = OWNED_PATH_CONFLICT_CODE
+        self.message = OWNED_PATH_CONFLICT_MESSAGE
+        self.detail = owned_path_conflict_detail(conflicts)
+        super().__init__(self.message)
 
 
 class WorkspaceService:
@@ -303,8 +316,17 @@ async def create_workspace_v2_row(
     idempotency_key: str | None = None,
 ) -> Workspace:
     """Persist one v2 workspace request without committing the session."""
+    repo = WorkspaceRepository(session)
+    conflicts = await repo.find_active_owned_path_conflicts(
+        repo_url=payload.repo.url,
+        branch_base=payload.repo.base_branch,
+        owned_paths=payload.task.owned_paths,
+    )
+    if conflicts:
+        raise WorkspaceOwnedPathConflictError(conflicts)
+
     requested_profile, resolved_profile = v2_profile_snapshots(payload)
-    ws = await WorkspaceRepository(session).create(
+    ws = await repo.create(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,
         task_title=payload.task.title,
@@ -330,6 +352,25 @@ async def create_workspace_v2_row(
     ws.task_kind = payload.task.kind
     await session.flush()
     return ws
+
+
+def owned_path_conflict_detail(conflicts: list[OwnedPathConflict]) -> dict[str, Any]:
+    workspace_ids: list[str] = []
+    conflict_items: list[dict[str, str]] = []
+    for conflict in conflicts:
+        if conflict.workspace_id not in workspace_ids:
+            workspace_ids.append(conflict.workspace_id)
+        conflict_items.append(
+            {
+                "workspace_id": conflict.workspace_id,
+                "existing_path": conflict.existing_path,
+                "requested_path": conflict.requested_path,
+            }
+        )
+    return {
+        "workspace_ids": workspace_ids,
+        "conflicts": conflict_items,
+    }
 
 
 def v2_profile_snapshots(

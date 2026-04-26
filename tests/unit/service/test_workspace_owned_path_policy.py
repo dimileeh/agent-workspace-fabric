@@ -12,7 +12,7 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.service.workspaces import WorkspaceService
+from awf.service.workspaces import WorkspaceOwnedPathConflictError, WorkspaceService
 
 
 @pytest.fixture
@@ -101,16 +101,14 @@ async def test_create_v2_rejects_conflicts_with_useful_detail(
         _request(title="existing", owned_paths=["src/awf/service/**"])
     )
 
-    with pytest.raises(Exception) as exc_info:
+    with pytest.raises(WorkspaceOwnedPathConflictError) as exc_info:
         await service.create_v2(
             _request(title="new", owned_paths=["src/awf/service/workspaces.py"])
         )
 
-    assert getattr(exc_info.value, "error_code") == "WORKSPACE_OWNED_PATH_CONFLICT"
-    assert getattr(exc_info.value, "message") == (
-        "Requested owned paths overlap an active workspace."
-    )
-    assert getattr(exc_info.value, "detail") == {
+    assert exc_info.value.error_code == "WORKSPACE_OWNED_PATH_CONFLICT"
+    assert exc_info.value.message == "Requested owned paths overlap an active workspace."
+    assert exc_info.value.detail == {
         "workspace_ids": [existing.id],
         "conflicts": [
             {
