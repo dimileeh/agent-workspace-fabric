@@ -1,7 +1,7 @@
 """Add scheduler decision and resource reservation records.
 
 Revision ID: a8b9c0d1e2f3
-Revises: f7a8b9c0d1e2
+Revises: 8b9c0d1e2f3a
 Create Date: 2026-04-26 18:30:00.000000+00:00
 """
 
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "a8b9c0d1e2f3"
-down_revision: str | Sequence[str] | None = "f7a8b9c0d1e2"
+down_revision: str | Sequence[str] | None = "8b9c0d1e2f3a"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

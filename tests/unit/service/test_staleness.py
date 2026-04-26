@@ -488,6 +488,44 @@ class TestStalenessRefreshService:
         assert first.resolved_at is None
 
     @pytest.mark.unit
+    async def test_refresh_preserves_specific_stale_reason_from_readiness(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        _workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="refactor_task",
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("src/awf/api/routes/health.py",),
+                    advanced_commits=4,
+                ),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+
+        assert candidate is not None
+        assert candidate.stale is True
+        assert candidate.stale_reason == "validation_insufficient_tier"
+
+    @pytest.mark.unit
     async def test_refresh_preserves_existing_validation_stale_reason(
         self,
         factory: async_sessionmaker[AsyncSession],

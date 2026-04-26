@@ -628,6 +628,7 @@ class Operation(Base):
         Index("ix_operations_status", "status"),
         Index("ix_operations_type", "type"),
         Index("ix_operations_created_at_id", "created_at", "id"),
+        Index("ix_operations_idempotency_key_created_at_id", "idempotency_key", "created_at", "id"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True)

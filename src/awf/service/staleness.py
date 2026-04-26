@@ -420,10 +420,10 @@ class StalenessRefreshService:
 
         validation_reason, _ = compute_stale_reason(candidate.workspace)
         next_stale = stale or validation_reason is not None
-        if candidate.stale == next_stale and candidate.stale_reason == validation_reason:
-            return
-        candidate.stale = next_stale
-        candidate.stale_reason = validation_reason
+        next_stale_reason = validation_reason or ("stale" if stale else None)
+        if candidate.stale != next_stale or candidate.stale_reason != next_stale_reason:
+            candidate.stale = next_stale
+            candidate.stale_reason = next_stale_reason
         # Re-sync derived readiness flags so the merge-queue blocker reason
         # picks up the new stale state without an out-of-band refresh.
         _sync_candidate_readiness(
