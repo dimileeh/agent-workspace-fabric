@@ -28,6 +28,8 @@ def _settings(tmp_path: Path, *, github_token: str | None = None) -> ServiceSett
         worker_poll_interval_seconds=0.25,
         worker_max_concurrent_provisions=2,
         worker_max_concurrent_executions=4,
+        agent_wall_timeout_seconds=111,
+        agent_idle_timeout_seconds=22,
         node_id="node-1",
     )
 
@@ -189,6 +191,8 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["validation_artifacts_dir"] == work_dir / "artifacts"
     assert created["executor_config"].worktrees_root == work_dir / "git" / "worktrees"
     assert created["executor_config"].compose_projects_root == work_dir / "compose"
+    assert created["executor_config"].agent_wall_timeout_seconds == 111
+    assert created["executor_config"].agent_idle_timeout_seconds == 22
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2
     assert created["worker_config"].max_concurrent_executions == 4

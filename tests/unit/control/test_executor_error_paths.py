@@ -276,6 +276,64 @@ class TestUnexpectedErrorDuringAgentRun:
             assert "unexpected error" in (ws.failure_message or "")
 
 
+class TestAgentWatchdogConfig:
+    @pytest.mark.unit
+    async def test_executor_passes_agent_watchdog_config_to_adapter_factory(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        captured: dict[str, Any] = {}
+
+        class _Adapter:
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.codex
+
+            async def run(
+                self,
+                *,
+                compose_project: str,
+                compose_file: Path,
+                prompt: str,
+                model: str | None = None,
+                workspace_id: str | None = None,
+            ) -> None:
+                del compose_project, compose_file, prompt, model, workspace_id
+                raise RuntimeError("stop after adapter factory capture")
+
+        def _get_adapter(_runtime: AgentRuntime, **kwargs: Any) -> _Adapter:
+            captured.update(kwargs)
+            return _Adapter()
+
+        monkeypatch.setattr(executor_module, "get_adapter", _get_adapter)
+
+        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+        pr = PullRequestCreator(fake)
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=compose,
+            validation=validation,
+            pr_creator=pr,
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                agent_wall_timeout_seconds=12,
+                agent_idle_timeout_seconds=3,
+            ),
+        )
+
+        await executor.execute(ws_id)
+
+        assert captured["agent_wall_timeout_seconds"] == 12
+        assert captured["agent_idle_timeout_seconds"] == 3
+
+
 class TestBranchDriftRecovery:
     """2026-04-24 incident (T41 Phase 3, ws_9ca6134a): agent CLI
     switched to a custom branch and committed there. pr_creator

@@ -88,6 +88,22 @@ class Settings(BaseSettings):
     worker_max_concurrent_executions: int = Field(default=3, gt=0)
     worker_node_id: str | None = Field(default=None)
     worker_branch_prefix: str = Field(default="awf")
+    agent_wall_timeout_seconds: float = Field(
+        default=7200,
+        gt=0,
+        description=(
+            "Maximum wall-clock seconds for one agent CLI run before AWF terminates it. "
+            "Default: 7200 seconds."
+        ),
+    )
+    agent_idle_timeout_seconds: float = Field(
+        default=900,
+        gt=0,
+        description=(
+            "Maximum seconds with no agent stdout/stderr before AWF terminates it. "
+            "Default: 900 seconds."
+        ),
+    )
 
     # Workspace resource defaults (overridable per-request)
     workspace_steady_cpu: float = Field(default=3.0, gt=0)

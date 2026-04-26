@@ -24,7 +24,14 @@ from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.adapters.base import AgentAdapter, AgentDefaults, AgentRunError, get_adapter
+from awf.adapters.base import (
+    DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
+    DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
+    AgentAdapter,
+    AgentDefaults,
+    AgentRunError,
+    get_adapter,
+)
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
 from awf.common.commands import AsyncCommandRunner
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
@@ -74,6 +81,12 @@ class ExecutorConfig:
 
     agent_defaults: Mapping[AgentRuntime, AgentDefaults] = DEFAULT_AGENT_DEFAULTS
     """Default model and effort policy for each agent runtime."""
+
+    agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS
+    """Maximum wall-clock seconds for one agent CLI run. Default: 7200 seconds."""
+
+    agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS
+    """Maximum seconds with no agent stdout/stderr. Default: 900 seconds."""
 
     max_validation_fix_passes: int = 5
     """Maximum fix attempts on validation failure. After the initial agent
@@ -156,6 +169,8 @@ class WorkspaceExecutor:
                 runner=self._runner,
                 defaults=defaults,
                 log_store=self._log_store,
+                agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
+                agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
             )
             profile = _profile_for_workspace(ws, worktree_path=worktree_path)
             setup_result = await self._validation.run_profile_phases(
@@ -207,6 +222,7 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 agent=ws.agent,
                 returncode=exc.result.returncode,
+                reason_code=exc.reason_code,
             )
         except Exception as exc:  # unexpected — surface with generic reason
             _log.exception("executor.unexpected_in_agent", workspace_id=workspace_id)
@@ -617,6 +633,7 @@ class WorkspaceExecutor:
                     workspace_id=workspace_id,
                     pass_number=pass_number + 1,
                     returncode=exc.result.returncode,
+                    reason_code=exc.reason_code,
                 )
 
             # Commit whatever the fix pass produced. Simpler than the

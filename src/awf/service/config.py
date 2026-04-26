@@ -29,6 +29,8 @@ class ServiceSettings:
     worker_poll_interval_seconds: float
     worker_max_concurrent_provisions: int
     worker_max_concurrent_executions: int = 3
+    agent_wall_timeout_seconds: float = 7200
+    agent_idle_timeout_seconds: float = 900
     host_home: str = "~"
     node_id: str | None = None
     branch_prefix: str = "awf"
@@ -73,6 +75,8 @@ def resolve_service_settings(
         worker_poll_interval_seconds=settings.worker_poll_interval_seconds,
         worker_max_concurrent_provisions=settings.worker_max_concurrent_provisions,
         worker_max_concurrent_executions=settings.worker_max_concurrent_executions,
+        agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
+        agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
         node_id=settings.worker_node_id,
         branch_prefix=settings.worker_branch_prefix,
     )
