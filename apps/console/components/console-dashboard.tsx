@@ -38,6 +38,7 @@ import {
 import type {
   ApiEnvelope,
   AwfStreamFrame,
+  FailureSummaryResponse,
   ListEnvelope,
   MergeQueueItem,
   Operation,
@@ -126,6 +127,9 @@ export function ConsoleDashboard() {
   const [mergeQueueHasMore, setMergeQueueHasMore] = useState(false);
   const [mergeQueueStatus, setMergeQueueStatus] = useState<MergeQueueStatus>("loading");
   const [mergeQueueError, setMergeQueueError] = useState<string | null>(null);
+  const [failureSummary, setFailureSummary] = useState<FailureSummaryResponse | null>(null);
+  const [failureSummaryStatus, setFailureSummaryStatus] = useState<"loading" | "success" | "error" | "unavailable">("loading");
+  const [failureSummaryError, setFailureSummaryError] = useState<string | null>(null);
   const [retryState, setRetryState] = useState<RetryActionState>({ status: "idle" });
   const [apiState, setApiState] = useState<"checking" | "ok" | "error">("checking");
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
@@ -190,6 +194,22 @@ export function ConsoleDashboard() {
     setMergeQueueStatus("success");
   }, []);
 
+  const loadFailureSummary = useCallback(async () => {
+    const result = await apiGet<FailureSummaryResponse>("/api/awf/metrics/failures/summary");
+    if (!result.ok) {
+      if (result.status === 404 || result.status === 503) {
+        setFailureSummaryStatus("unavailable");
+      } else {
+        setFailureSummaryStatus("error");
+        setFailureSummaryError(result.message);
+      }
+      return;
+    }
+    setFailureSummary(result.data);
+    setFailureSummaryStatus("success");
+    setFailureSummaryError(null);
+  }, []);
+
   const loadWorkspace = useCallback(async (workspaceId: string) => {
     const [workspace, runtime, events, operations, streams] = await Promise.all([
       apiGet<Workspace>(`/api/awf/workspaces/${workspaceId}`),
@@ -245,8 +265,8 @@ export function ConsoleDashboard() {
       newWorkspaceId: result.data.new_workspace_id,
       operationId: result.data.operation_id,
     });
-    await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue()]);
-  }, [loadMergeQueue, loadOverview, loadResourceSaturation, selectedId]);
+    await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary()]);
+  }, [loadMergeQueue, loadOverview, loadResourceSaturation, loadFailureSummary, selectedId]);
 
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream) => {
@@ -326,6 +346,12 @@ export function ConsoleDashboard() {
     const interval = window.setInterval(() => void loadMergeQueue(), pollMs);
     return () => window.clearInterval(interval);
   }, [loadMergeQueue]);
+
+  useEffect(() => {
+    void loadFailureSummary();
+    const interval = window.setInterval(() => void loadFailureSummary(), pollMs);
+    return () => window.clearInterval(interval);
+  }, [loadFailureSummary]);
 
   useEffect(() => {
     setDetail(emptyDetail);
@@ -576,6 +602,13 @@ export function ConsoleDashboard() {
               status={mergeQueueStatus}
               error={mergeQueueError}
             />
+            <div className="2xl:col-span-2">
+              <FailureAnalysisPanel
+                summary={failureSummary}
+                status={failureSummaryStatus}
+                error={failureSummaryError}
+              />
+            </div>
           </div>
           {selectedId && selectedOverview ? (
             <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(420px,0.9fr)]">
@@ -2403,4 +2436,116 @@ function formatLogStamp(value: string): string {
     minute: "2-digit",
     second: "2-digit",
   }).format(date);
+}
+
+function FailureAnalysisPanel({
+  summary,
+  status,
+  error,
+}: {
+  summary: FailureSummaryResponse | null;
+  status: "loading" | "success" | "error" | "unavailable";
+  error: string | null;
+}) {
+  if (status === "unavailable") {
+    return (
+      <Panel title="Failure Analysis" icon={<AlertCircle size={16} aria-hidden />}>
+        <MutedLine>Failure analysis is currently unavailable.</MutedLine>
+      </Panel>
+    );
+  }
+
+  const isLoading = status === "loading";
+  const isError = status === "error";
+
+  return (
+    <Panel
+      title="Failure Analysis"
+      icon={<Activity size={16} aria-hidden />}
+      action={
+        <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600">
+          {isLoading && !summary ? "loading" : isError && !summary ? "error" : `${summary?.total_failures ?? 0} failures in window`}
+        </span>
+      }
+    >
+      {isLoading && !summary ? (
+        <MutedLine>Failure analysis loading.</MutedLine>
+      ) : isError && !summary ? (
+        <MutedLine>Unable to load failure analysis: {error}</MutedLine>
+      ) : !summary ? (
+        <MutedLine>No failure analysis data available.</MutedLine>
+      ) : (
+        <div className="grid gap-4">
+          {error ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Showing last snapshot. Refresh failed: {error}
+            </div>
+          ) : null}
+
+          {summary.taxonomy && summary.taxonomy.length > 0 ? (
+            <div className="grid gap-2 sm:grid-cols-2 md:grid-cols-3 xl:grid-cols-4">
+              {summary.taxonomy.map((tax) => (
+                <div key={tax.reason} className="min-w-0 rounded-md border border-slate-200 bg-slate-50 px-3 py-2">
+                  <div className="truncate text-[10px] font-medium text-slate-500" title={tax.reason}>{tax.reason}</div>
+                  <div className="mono mt-1 text-lg font-semibold text-slate-900">{tax.count}</div>
+                </div>
+              ))}
+            </div>
+          ) : null}
+
+          {summary.latest_examples && summary.latest_examples.length > 0 ? (
+             <div className="grid gap-2">
+               <h3 className="text-xs font-semibold text-slate-700">Latest Examples</h3>
+               <div className="max-h-[320px] overflow-auto rounded-md border border-slate-200">
+                 <table className="w-full min-w-[720px] text-left text-xs">
+                   <thead className="sticky top-0 bg-slate-50 text-slate-600 shadow-[0_1px_0_var(--border)]">
+                     <tr>
+                       <Th>Workspace</Th>
+                       <Th>Context</Th>
+                       <Th>Reason</Th>
+                       <Th>Message</Th>
+                       <Th>Time</Th>
+                     </tr>
+                   </thead>
+                   <tbody>
+                     {summary.latest_examples.map((example) => (
+                       <tr key={example.workspace_id} className="border-t border-slate-100 bg-white">
+                         <Td>
+                           <div className="font-medium text-slate-950 truncate max-w-[200px]" title={example.title}>{example.title}</div>
+                           <div className="mono text-[11px] text-slate-500 mt-0.5">{compactId(example.workspace_id, 10)}</div>
+                         </Td>
+                         <Td>
+                            <div className="truncate max-w-[150px]" title={example.repo_url}>{example.repo_url}</div>
+                            <div className="text-[11px] text-slate-500 mt-0.5 flex items-center gap-1">
+                               <Bot size={10} aria-hidden />
+                               {example.agent}
+                            </div>
+                         </Td>
+                         <Td>
+                           <span className="inline-flex rounded-md border border-red-200 bg-red-50 px-1.5 py-0.5 text-[10px] font-medium text-red-800">
+                             {example.failure_reason}
+                           </span>
+                         </Td>
+                         <Td>
+                           <div className="truncate max-w-[300px] text-slate-600" title={example.failure_message}>
+                             {example.failure_message}
+                           </div>
+                         </Td>
+                         <Td>
+                           <div className="flex items-center gap-2">
+                             <span className="text-slate-500 whitespace-nowrap">{formatDateTime(example.timestamp)}</span>
+                             {example.pr_url ? <SmallExternalAnchor href={example.pr_url} label="PR" /> : null}
+                           </div>
+                         </Td>
+                       </tr>
+                     ))}
+                   </tbody>
+                 </table>
+               </div>
+             </div>
+          ) : null}
+        </div>
+      )}
+    </Panel>
+  );
 }
