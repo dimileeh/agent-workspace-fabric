@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,6 +26,10 @@ _BODY = {
     "agent": "codex",
     "test_commands": ["pytest -q"],
 }
+_ACTIVE_CLAIM_EXPIRES_AT = datetime(2026, 4, 26, 12, 30, tzinfo=UTC)
+_ACTIVE_CLAIM_EXPIRES_AT_JSON = _ACTIVE_CLAIM_EXPIRES_AT.replace(
+    tzinfo=None
+).isoformat()
 
 
 @pytest.fixture(autouse=True)
@@ -89,11 +93,10 @@ async def _seed_monitoring_workspace(
             raise AssertionError(f"unsupported seed status {final_status}")
 
         if with_active_claims:
-            future = datetime.now(UTC) + timedelta(hours=1)
             workspace.monitor_claimed_by = "dead-monitor-worker"
-            workspace.monitor_claim_expires_at = future
+            workspace.monitor_claim_expires_at = _ACTIVE_CLAIM_EXPIRES_AT
             workspace.execution_claimed_by = "dead-execution-worker"
-            workspace.execution_claim_expires_at = future
+            workspace.execution_claim_expires_at = _ACTIVE_CLAIM_EXPIRES_AT
         await session.commit()
         return workspace.id
 
@@ -427,8 +430,10 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
     assert operation.result == {
         "status": WorkspaceStatus.monitoring_pr.value,
         "claims_reset": {
-            "monitor_claim": True,
-            "execution_claim": True,
+            "monitor_claimed_by": "dead-monitor-worker",
+            "monitor_claim_expires_at": _ACTIVE_CLAIM_EXPIRES_AT_JSON,
+            "execution_claimed_by": "dead-execution-worker",
+            "execution_claim_expires_at": _ACTIVE_CLAIM_EXPIRES_AT_JSON,
         },
     }
     remonitor_event = next(
@@ -441,8 +446,10 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
         "reason": "operator recovery",
         "operation_id": payload["operation_id"],
         "claims_reset": {
-            "monitor_claim": True,
-            "execution_claim": True,
+            "monitor_claimed_by": "dead-monitor-worker",
+            "monitor_claim_expires_at": _ACTIVE_CLAIM_EXPIRES_AT_JSON,
+            "execution_claimed_by": "dead-execution-worker",
+            "execution_claim_expires_at": _ACTIVE_CLAIM_EXPIRES_AT_JSON,
         },
     }
 

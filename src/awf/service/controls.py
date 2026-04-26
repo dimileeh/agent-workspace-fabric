@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -317,16 +318,7 @@ class WorkspaceControlService:
             payload=operation_payload,
             idempotency_key=idempotency_key,
         )
-        claims_reset = {
-            "monitor_claim": (
-                workspace.monitor_claimed_by is not None
-                or workspace.monitor_claim_expires_at is not None
-            ),
-            "execution_claim": (
-                workspace.execution_claimed_by is not None
-                or workspace.execution_claim_expires_at is not None
-            ),
-        }
+        claims_reset = _claim_reset_snapshot(workspace)
         workspace.monitor_claimed_by = None
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
@@ -630,6 +622,23 @@ def _operation_payload(
     if expected_version is not None:
         operation_payload["expected_version"] = expected_version
     return operation_payload
+
+
+def _claim_reset_snapshot(workspace: Workspace) -> dict[str, str | None]:
+    return {
+        "monitor_claimed_by": workspace.monitor_claimed_by,
+        "monitor_claim_expires_at": _json_datetime(workspace.monitor_claim_expires_at),
+        "execution_claimed_by": workspace.execution_claimed_by,
+        "execution_claim_expires_at": _json_datetime(
+            workspace.execution_claim_expires_at
+        ),
+    }
+
+
+def _json_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    return value.isoformat()
 
 
 def _is_active(status_value: WorkspaceStatus) -> bool:
