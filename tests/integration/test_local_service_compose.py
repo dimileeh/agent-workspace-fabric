@@ -28,8 +28,10 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         }
 
     dockerfile = dockerfile_path.read_text()
-    assert "docker-ce-cli" in dockerfile
-    assert "docker-compose-plugin" in dockerfile
+    assert "ARG DOCKER_CE_CLI_VERSION=" in dockerfile
+    assert '"docker-ce-cli=${DOCKER_CE_CLI_VERSION}"' in dockerfile
+    assert "ARG DOCKER_COMPOSE_PLUGIN_VERSION=" in dockerfile
+    assert '"docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_VERSION}"' in dockerfile
     assert "githubcli-archive-keyring.gpg" in dockerfile
     assert "gh" in dockerfile
     assert "COPY src ./src" in dockerfile

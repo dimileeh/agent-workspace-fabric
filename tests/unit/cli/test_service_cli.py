@@ -725,7 +725,7 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         service_name="awf",
         env="local",
         api_base_url="http://localhost:8000",
-        database_url="postgresql+asyncpg://awf:pw@localhost:5433/awf",
+        database_url=f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}",
         docker_host="unix:///var/run/docker.sock",
         agent_runtime_image="custom-agent-runtime:dev",
         work_dir=str(host_work_dir),

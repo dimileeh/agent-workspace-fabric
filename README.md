@@ -823,6 +823,9 @@ uv run --python 3.12 --extra dev mypy
 ### Build the Agent Runtime Image
 
 AWF workspaces use `awf-agent-runtime:latest` unless configured otherwise.
+The image includes the Docker CLI and Docker Compose plugin so DinD profiles
+can run project Compose diagnostics inside the workspace sidecar. Rebuild this
+image whenever the runtime Dockerfile or those Docker tooling packages change.
 
 ```bash
 docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
