@@ -437,6 +437,48 @@ async def test_failure_analysis_filters_by_since_hours(
 
 
 @pytest.mark.unit
+async def test_failure_analysis_accepts_example_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    workspace_ids: list[str] = []
+    for index in range(6):
+        workspace_ids.append(
+            await _workspace(
+                session_factory,
+                status=WorkspaceStatus.failed,
+                updated_at=now - timedelta(minutes=index),
+                failure_reason=FailureReason.infrastructure_failure,
+            )
+        )
+
+    summary = await summarize_failure_analysis(
+        session_factory,
+        failure_example_limit=6,
+        now=now,
+    )
+
+    assert [example.workspace_id for example in summary.latest_examples] == workspace_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("failure_example_limit", [0, 26])
+async def test_failure_analysis_validates_example_limit(
+    session_factory: async_sessionmaker[AsyncSession],
+    failure_example_limit: int,
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    with pytest.raises(ValueError, match="failure_example_limit must be between 1 and 25"):
+        await summarize_failure_analysis(
+            session_factory,
+            failure_example_limit=failure_example_limit,
+        )
+
+
+@pytest.mark.unit
 async def test_resource_saturation_reports_active_counts_and_configured_defaults(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

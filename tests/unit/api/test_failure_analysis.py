@@ -128,6 +128,35 @@ async def test_failure_summary_endpoint_returns_console_payload(
 
 
 @pytest.mark.unit
+async def test_failure_summary_endpoint_accepts_example_limit(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    now = datetime.now(UTC)
+    workspace_ids: list[str] = []
+    for index in range(6):
+        workspace_ids.append(
+            await _workspace(
+                engine,
+                status=WorkspaceStatus.failed,
+                updated_at=now - timedelta(minutes=index),
+                failure_reason=FailureReason.infrastructure_failure,
+                task_title=f"Infrastructure failure {index}",
+            )
+        )
+
+    response = await client.get(
+        "/v1/metrics/failures/summary",
+        params={"limit": 6},
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["total_failed_workspaces"] == 6
+    assert [example["workspace_id"] for example in body["latest_examples"]] == workspace_ids
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("since_hours", ["0", "169"])
 async def test_failure_summary_validates_since_hours_bounds(
     client: AsyncClient,
@@ -136,6 +165,20 @@ async def test_failure_summary_validates_since_hours_bounds(
     response = await client.get(
         "/v1/metrics/failures/summary",
         params={"since_hours": since_hours},
+    )
+
+    assert response.status_code == 422
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("limit", ["0", "26"])
+async def test_failure_summary_validates_limit_bounds(
+    client: AsyncClient,
+    limit: str,
+) -> None:
+    response = await client.get(
+        "/v1/metrics/failures/summary",
+        params={"limit": limit},
     )
 
     assert response.status_code == 422

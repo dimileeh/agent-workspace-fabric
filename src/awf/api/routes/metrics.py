@@ -15,8 +15,11 @@ from awf.api.deps import get_db_session
 from awf.common.config import Settings, get_settings
 from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.metrics import (
+    DEFAULT_FAILURE_EXAMPLE_LIMIT,
     DEFAULT_SUMMARY_WINDOW_HOURS,
+    MAX_FAILURE_EXAMPLE_LIMIT,
     MAX_SUMMARY_WINDOW_HOURS,
+    MIN_FAILURE_EXAMPLE_LIMIT,
     MIN_SUMMARY_WINDOW_HOURS,
     summarize_failure_analysis_for_session,
     summarize_resource_saturation_for_session,
@@ -219,11 +222,20 @@ async def get_failure_analysis_summary(
             le=MAX_SUMMARY_WINDOW_HOURS,
         ),
     ] = DEFAULT_SUMMARY_WINDOW_HOURS,
+    limit: Annotated[
+        int,
+        Query(
+            ge=MIN_FAILURE_EXAMPLE_LIMIT,
+            le=MAX_FAILURE_EXAMPLE_LIMIT,
+            description="Maximum number of latest failed workspace examples to include.",
+        ),
+    ] = DEFAULT_FAILURE_EXAMPLE_LIMIT,
     session: AsyncSession = Depends(get_db_session),
 ) -> FailureAnalysisSummaryResponse:
     summary = await summarize_failure_analysis_for_session(
         session,
         since_hours=since_hours,
+        failure_example_limit=limit,
     )
     return FailureAnalysisSummaryResponse.model_validate(summary)
 

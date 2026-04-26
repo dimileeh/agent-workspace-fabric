@@ -18,6 +18,8 @@ DEFAULT_SUMMARY_WINDOW_HOURS = 24
 MIN_SUMMARY_WINDOW_HOURS = 1
 MAX_SUMMARY_WINDOW_HOURS = 168
 DEFAULT_FAILURE_EXAMPLE_LIMIT = 5
+MIN_FAILURE_EXAMPLE_LIMIT = 1
+MAX_FAILURE_EXAMPLE_LIMIT = 25
 UNKNOWN_FAILURE_REASON = "unknown"
 
 TERMINAL_WORKSPACE_STATUSES = frozenset(
@@ -299,6 +301,7 @@ async def summarize_failure_analysis(
     session_factory: async_sessionmaker[AsyncSession],
     *,
     since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
+    failure_example_limit: int = DEFAULT_FAILURE_EXAMPLE_LIMIT,
     now: datetime | None = None,
 ) -> FailureAnalysisSummary:
     """Summarize failed workspaces by deterministic failure class and latest examples."""
@@ -307,6 +310,7 @@ async def summarize_failure_analysis(
         return await summarize_failure_analysis_for_session(
             session,
             since_hours=since_hours,
+            failure_example_limit=failure_example_limit,
             now=now,
         )
 
@@ -315,11 +319,13 @@ async def summarize_failure_analysis_for_session(
     session: AsyncSession,
     *,
     since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
+    failure_example_limit: int = DEFAULT_FAILURE_EXAMPLE_LIMIT,
     now: datetime | None = None,
 ) -> FailureAnalysisSummary:
     """Build a console-oriented failure analysis summary from workspace rows."""
 
     _validate_since_hours(since_hours)
+    _validate_failure_example_limit(failure_example_limit)
     generated_at = _to_utc(now or datetime.now(UTC))
     window_start = generated_at - timedelta(hours=since_hours)
 
@@ -327,7 +333,7 @@ async def summarize_failure_analysis_for_session(
     latest_examples = await _latest_failed_workspace_examples(
         session,
         window_start=window_start,
-        limit=DEFAULT_FAILURE_EXAMPLE_LIMIT,
+        limit=failure_example_limit,
     )
 
     return FailureAnalysisSummary(
@@ -706,6 +712,14 @@ def _validate_since_hours(since_hours: int) -> None:
     if not MIN_SUMMARY_WINDOW_HOURS <= since_hours <= MAX_SUMMARY_WINDOW_HOURS:
         raise ValueError(
             f"since_hours must be between {MIN_SUMMARY_WINDOW_HOURS} and {MAX_SUMMARY_WINDOW_HOURS}"
+        )
+
+
+def _validate_failure_example_limit(failure_example_limit: int) -> None:
+    if not MIN_FAILURE_EXAMPLE_LIMIT <= failure_example_limit <= MAX_FAILURE_EXAMPLE_LIMIT:
+        raise ValueError(
+            "failure_example_limit must be between "
+            f"{MIN_FAILURE_EXAMPLE_LIMIT} and {MAX_FAILURE_EXAMPLE_LIMIT}"
         )
 
 
