@@ -63,9 +63,10 @@ def _make_executor(
     *,
     pr_monitor_factory: Any = None,
     compose: Any = None,
+    validation: Any = None,
 ) -> WorkspaceExecutor:
     compose = compose or _NoopResumeCompose()
-    validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+    validation = validation or ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
     pr = PullRequestCreator(fake)
     return WorkspaceExecutor(
         session_factory=factory,
@@ -96,6 +97,38 @@ class _NoopResumeCompose:
         wait: bool = True,
     ) -> None:
         del project_name, compose_file, workspace_id, wait
+
+
+class _RecordingValidation:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...],
+        **_kwargs: Any,
+    ) -> SimpleNamespace:
+        self.calls.append(phase_names)
+        return SimpleNamespace(all_passed=True, first_failure=None)
+
+
+async def _move_to_operator_control_status(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    final_status: WorkspaceStatus,
+) -> None:
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_OPERATOR")
+        if final_status == WorkspaceStatus.destroyed:
+            await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="TEST_OPERATOR")
+            await repo.transition(ws, to=WorkspaceStatus.destroyed, reason_code="TEST_OPERATOR")
+        else:
+            assert final_status == WorkspaceStatus.cancelled
+        await s.commit()
 
 
 async def _seed_ready(
@@ -290,6 +323,108 @@ class TestUnexpectedErrorDuringAgentRun:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert "unexpected error" in (ws.failure_message or "")
+
+
+class TestOperatorControlRaces:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed]
+    )
+    async def test_execute_rechecks_after_claim_before_setup(
+        self,
+        final_status: WorkspaceStatus,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        validation = _RecordingValidation()
+        executor = _make_executor(fake, factory, tmp_path, validation=validation)
+        original_claim_ready = executor._claim_ready
+
+        async def _claim_then_operator_control(workspace_id: str) -> Any:
+            ws = await original_claim_ready(workspace_id)
+            assert ws is not None
+            async with factory() as s:
+                repo = WorkspaceRepository(s)
+                fresh = await repo.get(workspace_id)
+                assert fresh is not None
+                assert fresh.status == WorkspaceStatus.running.value
+            await _move_to_operator_control_status(factory, workspace_id, final_status)
+            return ws
+
+        executor._claim_ready = _claim_then_operator_control  # type: ignore[method-assign]
+
+        await executor.execute(ws_id)
+
+        assert validation.calls == []
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == final_status.value
+            assert ws.failure_reason is None
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed]
+    )
+    async def test_resume_pr_monitor_rechecks_after_load_before_compose(
+        self,
+        final_status: WorkspaceStatus,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        compose_calls: list[str] = []
+        monitor_calls: list[str] = []
+
+        class _RecordingCompose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+            ) -> None:
+                del project_name, compose_file, wait
+                compose_calls.append(workspace_id)
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(factory)
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args: _Monitor(),
+            compose=_RecordingCompose(),
+        )
+        original_load_workspace = executor._load_workspace
+
+        async def _load_then_operator_control(workspace_id: str) -> Any:
+            ws = await original_load_workspace(workspace_id)
+            assert ws is not None
+            await _move_to_operator_control_status(factory, workspace_id, final_status)
+            return ws
+
+        executor._load_workspace = _load_then_operator_control  # type: ignore[method-assign]
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert compose_calls == []
+        assert monitor_calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == final_status.value
+            assert ws.failure_reason is None
 
 
 class TestAgentWatchdogConfig:
