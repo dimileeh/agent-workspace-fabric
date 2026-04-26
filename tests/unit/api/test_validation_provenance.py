@@ -143,14 +143,18 @@ async def _mark_workspace_completed(engine: AsyncEngine, workspace_id: str) -> N
         await session.commit()
 
 
-async def _mark_workspace_validation_failed(engine: AsyncEngine, workspace_id: str) -> None:
+async def _mark_workspace_validation_failed(
+    engine: AsyncEngine,
+    workspace_id: str,
+    message: str = "validation failed: ruff check",
+) -> None:
     factory = make_session_factory(engine)
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
         workspace.status = WorkspaceStatus.failed.value
         workspace.failure_reason = FailureReason.validation_failure.value
-        workspace.failure_message = "validation failed: ruff check"
+        workspace.failure_message = message
         await session.commit()
 
 
@@ -354,6 +358,46 @@ async def test_validation_provenance_marks_failed_command_from_workspace_failure
         ["pytest -q", "ruff check"],
     )
     await _mark_workspace_validation_failed(engine, workspace_id)
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.cmd_01",
+        phase="validate",
+        stdout_bytes=20,
+        stdout_lines=1,
+        stderr_bytes=0,
+        stderr_lines=0,
+    )
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.cmd_02",
+        phase="validate",
+        stdout_bytes=0,
+        stdout_lines=0,
+        stderr_bytes=15,
+        stderr_lines=1,
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    assert [(item["command"], item["status"]) for item in response.json()["items"]] == [
+        ("pytest -q", "succeeded"),
+        ("ruff check", "failed"),
+    ]
+
+
+@pytest.mark.unit
+async def test_validation_provenance_phase_failure_uses_last_matching_phase_record(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace_with_commands(
+        client,
+        ["pytest -q", "ruff check"],
+    )
+    await _mark_workspace_validation_failed(engine, workspace_id, message="validate phase failed")
     await _create_stream_pair(
         engine,
         workspace_id=workspace_id,

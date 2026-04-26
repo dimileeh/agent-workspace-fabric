@@ -302,4 +302,4 @@ def _failed_record(
             return record
 
     matches = [record for record in records if record.phase in message]
-    return matches[0] if len(matches) == 1 else None
+    return matches[-1] if matches else None
