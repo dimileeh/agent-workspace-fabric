@@ -1,0 +1,238 @@
+"""Merge queue visualization API tests."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+import pytest
+from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncEngine
+
+from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_session_factory
+
+
+async def _create_queue_workspace(
+    engine: AsyncEngine,
+    *,
+    title: str,
+    status: WorkspaceStatus,
+    pr_url: str | None,
+    repo_url: str = "git@github.com:example/console.git",
+    base_branch: str = "main",
+    branch_name: str = "codex/merge-queue",
+    auto_merge: bool = True,
+    task_class: str | None = "test_task",
+    owned_paths: list[str] | None = None,
+    updated_at: datetime | None = None,
+) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url=repo_url,
+            branch_base=base_branch,
+            task_title=title,
+            task_prompt=f"Implement {title}.",
+            task_external_id=None,
+            task_class=task_class,
+            owned_paths=["src/awf/api/**"] if owned_paths is None else owned_paths,
+            auto_merge=auto_merge,
+            agent=AgentRuntime.codex.value,
+            test_commands=["pytest -q"],
+        )
+        workspace.status = status.value
+        workspace.branch_name = branch_name
+        workspace.pr_url = pr_url
+        if updated_at is not None:
+            workspace.updated_at = updated_at
+        await repo.add_event(
+            workspace,
+            event_type="merge_queue.test_marker",
+            reason_code="TEST",
+            payload={"title": title},
+        )
+        await session.commit()
+        return workspace.id
+
+
+class TestMergeQueueList:
+    @pytest.mark.unit
+    async def test_lists_pr_workspaces_newest_updated_first_with_required_shape(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        older_id = await _create_queue_workspace(
+            engine,
+            title="Older monitored PR",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/1",
+            updated_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        )
+        newer_id = await _create_queue_workspace(
+            engine,
+            title="Newer completed PR",
+            status=WorkspaceStatus.completed,
+            pr_url="https://github.com/example/console/pull/2",
+            branch_name="codex/completed",
+            updated_at=datetime(2026, 4, 21, 12, 0, tzinfo=UTC),
+        )
+        await _create_queue_workspace(
+            engine,
+            title="No PR yet",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url=None,
+            updated_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["next_cursor"] is None
+        assert body["has_more"] is False
+        assert [item["workspace_id"] for item in body["items"]] == [newer_id, older_id]
+
+        item = body["items"][0]
+        assert set(item) == {
+            "workspace_id",
+            "title",
+            "repo_url",
+            "base_branch",
+            "branch_name",
+            "pr_url",
+            "status",
+            "auto_merge",
+            "task_class",
+            "owned_paths",
+            "created_at",
+            "updated_at",
+            "last_event",
+            "merge_blocker_reason",
+        }
+        assert item["title"] == "Newer completed PR"
+        assert item["repo_url"] == "git@github.com:example/console.git"
+        assert item["base_branch"] == "main"
+        assert item["branch_name"] == "codex/completed"
+        assert item["pr_url"] == "https://github.com/example/console/pull/2"
+        assert item["status"] == WorkspaceStatus.completed.value
+        assert item["auto_merge"] is True
+        assert item["task_class"] == "test_task"
+        assert item["owned_paths"] == ["src/awf/api/**"]
+        assert item["last_event"]["event_type"] == "merge_queue.test_marker"
+        assert item["merge_blocker_reason"] == "completed"
+
+    @pytest.mark.unit
+    async def test_filters_by_repo_base_status_and_limit(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        expected_id = await _create_queue_workspace(
+            engine,
+            title="Expected",
+            status=WorkspaceStatus.monitoring_pr,
+            repo_url="git@github.com:example/console.git",
+            base_branch="development",
+            pr_url="https://github.com/example/console/pull/3",
+            updated_at=datetime(2026, 4, 23, 12, 0, tzinfo=UTC),
+        )
+        await _create_queue_workspace(
+            engine,
+            title="Older matching row beyond limit",
+            status=WorkspaceStatus.monitoring_pr,
+            repo_url="git@github.com:example/console.git",
+            base_branch="development",
+            pr_url="https://github.com/example/console/pull/4",
+            updated_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+        )
+        await _create_queue_workspace(
+            engine,
+            title="Wrong repo",
+            status=WorkspaceStatus.monitoring_pr,
+            repo_url="git@github.com:example/api.git",
+            base_branch="development",
+            pr_url="https://github.com/example/api/pull/5",
+            updated_at=datetime(2026, 4, 24, 12, 0, tzinfo=UTC),
+        )
+        await _create_queue_workspace(
+            engine,
+            title="Wrong base branch",
+            status=WorkspaceStatus.monitoring_pr,
+            repo_url="git@github.com:example/console.git",
+            base_branch="main",
+            pr_url="https://github.com/example/console/pull/6",
+            updated_at=datetime(2026, 4, 25, 12, 0, tzinfo=UTC),
+        )
+        await _create_queue_workspace(
+            engine,
+            title="Wrong status",
+            status=WorkspaceStatus.completed,
+            repo_url="git@github.com:example/console.git",
+            base_branch="development",
+            pr_url="https://github.com/example/console/pull/7",
+            updated_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        )
+
+        response = await client.get(
+            "/v1/merge-queue",
+            params={
+                "repo_url": "git@github.com:example/console.git",
+                "base_branch": "development",
+                "status": WorkspaceStatus.monitoring_pr.value,
+                "limit": 1,
+            },
+        )
+
+        assert response.status_code == 200
+        assert [item["workspace_id"] for item in response.json()["items"]] == [expected_id]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("limit", [0, 501])
+    async def test_validates_limit_bounds(self, client: AsyncClient, limit: int) -> None:
+        response = await client.get("/v1/merge-queue", params={"limit": limit})
+
+        assert response.status_code == 422
+
+    @pytest.mark.unit
+    async def test_derives_blocker_reasons_from_workspace_state_only(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        rows = [
+            (
+                "auto monitor",
+                WorkspaceStatus.monitoring_pr,
+                True,
+                "ready_to_merge_or_waiting_for_github",
+            ),
+            ("manual monitor", WorkspaceStatus.monitoring_pr, False, "manual_merge_required"),
+            ("pushing", WorkspaceStatus.pushing, True, "waiting_for_monitor"),
+            ("validating", WorkspaceStatus.validating, True, "workspace_not_terminal"),
+            ("completed", WorkspaceStatus.completed, True, "completed"),
+            ("failed", WorkspaceStatus.failed, True, "failed_or_cancelled"),
+            ("cancelled", WorkspaceStatus.cancelled, True, "failed_or_cancelled"),
+        ]
+        expected: dict[str, str] = {}
+        for index, (title, status, auto_merge, reason) in enumerate(rows):
+            workspace_id = await _create_queue_workspace(
+                engine,
+                title=title,
+                status=status,
+                auto_merge=auto_merge,
+                pr_url=f"https://github.com/example/console/pull/{index + 10}",
+                updated_at=datetime(2026, 4, 20 + index, 12, 0, tzinfo=UTC),
+            )
+            expected[workspace_id] = reason
+
+        response = await client.get("/v1/merge-queue", params={"limit": 20})
+
+        assert response.status_code == 200
+        actual = {
+            item["workspace_id"]: item["merge_blocker_reason"]
+            for item in response.json()["items"]
+        }
+        assert actual == expected
