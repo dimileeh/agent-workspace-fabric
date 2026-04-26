@@ -36,7 +36,7 @@ from awf.db.repositories import (
 )
 from awf.service.merge_queue import (
     MergeQueueBlocker,
-    list_merge_queue_blockers_for_candidate,
+    list_merge_queue_blockers_for_candidates,
 )
 
 router = APIRouter(prefix="/v1/merge-queue", tags=["merge-queue"])
@@ -134,13 +134,10 @@ async def _load_queue_blockers(
     rows: list[MergeCandidate | Workspace],
 ) -> dict[str, list[MergeQueueBlocker]]:
     candidate_ids = [row.id for row in rows if isinstance(row, MergeCandidate)]
-    blockers_by_candidate: dict[str, list[MergeQueueBlocker]] = {}
-    for candidate_id in candidate_ids:
-        blockers_by_candidate[candidate_id] = await list_merge_queue_blockers_for_candidate(
-            session,
-            candidate_id=candidate_id,
-        )
-    return blockers_by_candidate
+    return await list_merge_queue_blockers_for_candidates(
+        session,
+        candidate_ids=candidate_ids,
+    )
 
 
 def _item_from_row(

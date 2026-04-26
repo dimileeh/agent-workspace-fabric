@@ -7,7 +7,7 @@ from datetime import UTC, datetime
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
@@ -603,6 +603,51 @@ class TestMergeQueueList:
                 "blocker_state": "monitor_owned_recovery",
                 "reason_code": "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
             }
+        ]
+
+    @pytest.mark.unit
+    async def test_loads_queue_blockers_without_per_candidate_queries(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        for index in range(3):
+            await _create_queue_workspace(
+                engine,
+                title=f"Queue candidate {index}",
+                status=WorkspaceStatus.monitoring_pr,
+                pr_url=f"https://github.com/example/console/pull/{70 + index}",
+                branch_name=f"codex/queue-{index}",
+                updated_at=datetime(2026, 4, 21 + index, 12, 0, tzinfo=UTC),
+                candidate_created_at=datetime(2026, 4, 20, 12, index, tzinfo=UTC),
+            )
+
+        statements: list[str] = []
+
+        def record_sql(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, parameters, context, executemany
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            response = await client.get("/v1/merge-queue", params={"limit": 20})
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+        assert response.status_code == 200
+        assert len(response.json()["items"]) == 3
+        assert not [
+            statement
+            for statement in statements
+            if "from merge_candidates" in statement
+            and "where merge_candidates.id = ?" in statement
         ]
 
     @pytest.mark.unit
