@@ -305,6 +305,46 @@ class WorkspaceOverviewListResponse(BaseModel):
     has_more: bool = False
 
 
+StaleReasonStatus = Literal["active", "resolved"]
+StaleReasonCode = Literal[
+    "STALE_TARGET_ADVANCED",
+    "STALE_OVERLAP",
+    "STALE_DEPENDENCY",
+    "STALE_BUILD_CONFIG",
+    "STALE_SCHEMA",
+]
+StaleReasonTrigger = Literal[
+    "target_advanced",
+    "path_overlap",
+    "schema_changed",
+    "dependency_changed",
+    "build_config_changed",
+]
+
+
+class StaleReasonResponse(BaseModel):
+    """Public projection of one ``stale_reasons`` row."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    workspace_id: str
+    candidate_id: str | None
+    attempt_id: str | None
+    task_id: str | None
+    trigger_type: StaleReasonTrigger
+    trigger_ref: str | None
+    reason_code: StaleReasonCode
+    explanation: str
+    status: StaleReasonStatus
+    detected_at: datetime
+    resolved_at: datetime | None
+
+
+class StaleReasonListResponse(BaseModel):
+    items: list[StaleReasonResponse]
+
+
 class MergeQueueItemResponse(BaseModel):
     candidate_id: str | None = None
     candidate_status: MergeCandidateStatus | None = None
@@ -327,6 +367,7 @@ class MergeQueueItemResponse(BaseModel):
     merge_blocker_reason: MergeBlockerReason
     readiness: MergeCandidateReadinessResponse | None = None
     canonical: bool
+    stale_reasons: list[StaleReasonResponse] = Field(default_factory=list)
 
 
 class MergeQueueListResponse(BaseModel):

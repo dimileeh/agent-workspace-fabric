@@ -36,3 +36,7 @@ def new_event_id() -> str:
 
 def new_log_stream_id() -> str:
     return f"log_{uuid4().hex[:24]}"
+
+
+def new_stale_reason_id() -> str:
+    return f"sr_{uuid4().hex[:24]}"

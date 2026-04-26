@@ -154,7 +154,9 @@ class TestMergeQueueList:
             "merge_blocker_reason",
             "readiness",
             "canonical",
+            "stale_reasons",
         }
+        assert item["stale_reasons"] == []
         assert item["candidate_id"].startswith("mc_")
         assert item["candidate_status"] == "open"
         assert item["attempt_id"].startswith("att_")

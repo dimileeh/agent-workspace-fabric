@@ -14,7 +14,7 @@ Covers:
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import datetime
 from typing import Any
 
 import pytest
@@ -259,7 +259,7 @@ class TestEvaluateStaleness:
         assert "STALE_OVERLAP" in codes
         overlap = next(f for f in findings if f.reason_code == "STALE_OVERLAP")
         assert overlap.trigger_type == "path_overlap"
-        assert "src/awf/api/routes/health.py" == overlap.trigger_ref
+        assert overlap.trigger_ref == "src/awf/api/routes/health.py"
 
     @pytest.mark.unit
     def test_migration_task_schema_change_emits_stale_schema(self) -> None:
@@ -731,7 +731,7 @@ class TestStaleReasonResponseShape:
 
         response = StaleReasonResponse.model_validate(row)
         dumped: dict[str, Any] = response.model_dump()
-        assert _PAYLOAD_SHAPE_KEYS <= set(dumped.keys())
+        assert set(dumped.keys()) >= _PAYLOAD_SHAPE_KEYS
         assert isinstance(dumped["detected_at"], datetime) or isinstance(
             dumped["detected_at"], str
         )

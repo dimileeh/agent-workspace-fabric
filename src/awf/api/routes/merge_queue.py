@@ -19,11 +19,16 @@ from awf.api.schemas import (
     MergeCandidateReadinessResponse,
     MergeQueueItemResponse,
     MergeQueueListResponse,
+    StaleReasonResponse,
     WorkspaceEventResponse,
 )
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import MergeCandidate, Workspace, WorkspaceEvent
-from awf.db.repositories import MergeCandidateRepository, WorkspaceRepository
+from awf.db.models import MergeCandidate, StaleReason, Workspace, WorkspaceEvent
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    StaleReasonRepository,
+    WorkspaceRepository,
+)
 
 router = APIRouter(prefix="/v1/merge-queue", tags=["merge-queue"])
 
@@ -81,8 +86,14 @@ async def list_merge_queue(
     )
     page_rows = rows[:limit]
     has_more = len(rows) > limit
+
+    stale_reasons_by_candidate = await _load_active_stale_reasons(session, page_rows)
+
     return MergeQueueListResponse(
-        items=[_item_from_row(row) for row in page_rows],
+        items=[
+            _item_from_row(row, stale_reasons_by_candidate)
+            for row in page_rows
+        ],
         next_cursor=_encode_cursor(_row_workspace(page_rows[-1]))
         if has_more and page_rows
         else None,
@@ -90,13 +101,39 @@ async def list_merge_queue(
     )
 
 
-def _item_from_row(row: MergeCandidate | Workspace) -> MergeQueueItemResponse:
+async def _load_active_stale_reasons(
+    session: AsyncSession,
+    rows: list[MergeCandidate | Workspace],
+) -> dict[str, list[StaleReason]]:
+    candidate_ids = [
+        row.id for row in rows if isinstance(row, MergeCandidate)
+    ]
+    if not candidate_ids:
+        return {}
+    repo = StaleReasonRepository(session)
+    out: dict[str, list[StaleReason]] = {}
+    for candidate_id in candidate_ids:
+        out[candidate_id] = await repo.list_active_for_candidate(candidate_id)
+    return out
+
+
+def _item_from_row(
+    row: MergeCandidate | Workspace,
+    stale_reasons_by_candidate: dict[str, list[StaleReason]],
+) -> MergeQueueItemResponse:
     if isinstance(row, MergeCandidate):
-        return _item_from_candidate(row)
+        return _item_from_candidate(
+            row,
+            stale_reasons=stale_reasons_by_candidate.get(row.id, []),
+        )
     return _item_from_legacy_workspace(row)
 
 
-def _item_from_candidate(candidate: MergeCandidate) -> MergeQueueItemResponse:
+def _item_from_candidate(
+    candidate: MergeCandidate,
+    *,
+    stale_reasons: list[StaleReason],
+) -> MergeQueueItemResponse:
     workspace = candidate.workspace
     latest_event = _latest_event(workspace.events)
     return MergeQueueItemResponse(
@@ -125,6 +162,7 @@ def _item_from_candidate(candidate: MergeCandidate) -> MergeQueueItemResponse:
         merge_blocker_reason=_merge_blocker_reason(candidate),
         readiness=_readiness_from_candidate(candidate),
         canonical=candidate.attempt.is_canonical_for_merge,
+        stale_reasons=[StaleReasonResponse.model_validate(r) for r in stale_reasons],
     )
 
 
@@ -159,6 +197,7 @@ def _item_from_legacy_workspace(workspace: Workspace) -> MergeQueueItemResponse:
         merge_blocker_reason=_merge_blocker_reason_from_workspace(workspace),
         readiness=None,
         canonical=False,
+        stale_reasons=[],
     )
 
 
