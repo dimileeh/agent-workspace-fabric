@@ -24,7 +24,7 @@ from typing import Any
 import httpx
 import typer
 
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
@@ -38,9 +38,11 @@ app = typer.Typer(
 workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy).")
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
+locks_app = typer.Typer(help="Lock reservation visibility.")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
 app.add_typer(service_app, name="service")
+app.add_typer(locks_app, name="locks")
 
 
 class OutputFormat(StrEnum):
@@ -102,7 +104,12 @@ def _call(method: str, path: str, *, base_url: str, **kwargs: Any) -> httpx.Resp
         raise typer.Exit(code=2) from exc
 
 
-def _handle_response(response: httpx.Response, fmt: OutputFormat) -> None:
+def _handle_response(
+    response: httpx.Response,
+    fmt: OutputFormat,
+    *,
+    pretty_items: bool = False,
+) -> None:
     if response.status_code >= 400:
         try:
             typer.echo(json.dumps(response.json(), indent=2), err=True)
@@ -111,7 +118,16 @@ def _handle_response(response: httpx.Response, fmt: OutputFormat) -> None:
         raise typer.Exit(code=1)
     if response.status_code == 204 or not response.content:
         return
-    _emit(response.json(), fmt)
+    payload = response.json()
+    if (
+        pretty_items
+        and fmt == OutputFormat.pretty
+        and isinstance(payload, dict)
+        and isinstance(payload.get("items"), list)
+    ):
+        _emit(payload["items"], fmt)
+        return
+    _emit(payload, fmt)
 
 
 # ── Commands ─────────────────────────────────────────────────────────────
@@ -359,6 +375,34 @@ def workspace_list(
         params={"limit": limit},
     )
     _handle_response(response, fmt)
+
+
+@locks_app.command("list")
+def locks_list(
+    repo_url: str | None = typer.Option(None, "--repo-url"),
+    task_class: TaskClass | None = typer.Option(None, "--task-class"),
+    status: WorkspaceStatus | None = typer.Option(None, "--status"),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """List workspace lock reservations."""
+    params: dict[str, Any] = {"limit": limit}
+    if repo_url is not None:
+        params["repo_url"] = repo_url
+    if task_class is not None:
+        params["task_class"] = task_class.value
+    if status is not None:
+        params["status"] = status.value
+    response = _call(
+        "GET",
+        "/v1/locks",
+        base_url=_base_url(base_url),
+        params=params,
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt, pretty_items=True)
 
 
 @workspace_app.command("events")
