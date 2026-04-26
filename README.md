@@ -522,9 +522,11 @@ plane. The stack runs:
 
 The API, worker, and migration services use the local `awf-control-plane:local`
 image built from `docker/control-plane.Dockerfile`. It includes Python, `uv`,
-git/SSH tooling, the Docker CLI, and the Docker Compose plugin. Both the API and
-worker containers mount `/var/run/docker.sock` so AWF can create, inspect, and
-manage per-workspace Compose stacks on the host Docker daemon.
+git/SSH tooling, the Docker CLI, the Docker Compose plugin, and the AWF package
+itself. The default service stack does not bind-mount the repository into the
+control-plane containers; rebuild the image to pick up code changes. Both the
+API and worker containers mount `/var/run/docker.sock` so AWF can create,
+inspect, and manage per-workspace Compose stacks on the host Docker daemon.
 
 Because the API and worker use the host Docker daemon, AWF state must live at a
 host-visible path that is mounted at the same absolute path inside the
@@ -761,9 +763,8 @@ Key local service values:
 AWF_DATABASE_URL=postgresql+asyncpg://awf:awf_dev@localhost:5433/awf
 AWF_API_TOKEN=local-dev-token
 AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
-AWF_WORK_DIR=.awf
-AWF_HOST_WORK_DIR=
-AWF_HOST_HOME=
+AWF_HOST_WORK_DIR=${HOME}/.awf/service
+AWF_HOST_HOME=${HOME}
 AWF_GITHUB_TOKEN=
 ```
 

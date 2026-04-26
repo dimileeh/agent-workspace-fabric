@@ -30,11 +30,15 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     dockerfile = dockerfile_path.read_text()
     assert "docker-ce-cli" in dockerfile
     assert "docker-compose-plugin" in dockerfile
+    assert "COPY src ./src" in dockerfile
+    assert "COPY migrations ./migrations" in dockerfile
+    assert "uv sync --frozen --extra dev" in dockerfile
 
     expected_work_dir = "${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}"
     expected_host_home = "${AWF_HOST_HOME:-${HOME}}"
     for service_name in ("api", "worker"):
         volumes = services[service_name]["volumes"]
+        assert "../..:/app" not in volumes
         assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
         assert f"{expected_work_dir}:{expected_work_dir}" in volumes
         assert f"{expected_host_home}:{expected_host_home}:ro" in volumes
@@ -48,14 +52,14 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert (
             environment["GOOGLE_APPLICATION_CREDENTIALS"] == "${GOOGLE_APPLICATION_CREDENTIALS:-}"
         )
-        assert environment["UV_PROJECT_ENVIRONMENT"] == "/tmp/awf-venv"
-        assert environment["UV_LINK_MODE"] == "copy"
 
     assert "awf-work" not in data.get("volumes", {})
     migrate_command = services["migrate"]["command"]
     assert "alembic upgrade head" in migrate_command
+    assert "uv run" not in migrate_command
 
     for service_name in ("api", "worker"):
+        assert "uv run" not in services[service_name]["command"]
         depends_on = services[service_name]["depends_on"]
         assert depends_on["postgres"]["condition"] == "service_healthy"
         assert depends_on["migrate"]["condition"] == "service_completed_successfully"

@@ -1,6 +1,8 @@
 FROM ghcr.io/astral-sh/uv:python3.12-bookworm
 
 ENV DEBIAN_FRONTEND=noninteractive
+ENV UV_LINK_MODE=copy
+ENV PATH="/app/.venv/bin:${PATH}"
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -21,3 +23,9 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
+
+COPY pyproject.toml uv.lock README.md alembic.ini ./
+COPY migrations ./migrations
+COPY src ./src
+
+RUN uv sync --frozen --extra dev

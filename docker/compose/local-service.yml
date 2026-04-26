@@ -7,7 +7,6 @@ x-awf-service: &awf-service
   image: awf-control-plane:local
   working_dir: /app
   volumes:
-    - ../..:/app
     - /var/run/docker.sock:/var/run/docker.sock
     - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
     - ${AWF_HOST_HOME:-${HOME}}:${AWF_HOST_HOME:-${HOME}}:ro
@@ -28,8 +27,6 @@ x-awf-service: &awf-service
     AWF_WORKER_POLL_INTERVAL_SECONDS: "1.0"
     AWF_WORKER_MAX_CONCURRENT_PROVISIONS: "3"
     AWF_WORKER_MAX_CONCURRENT_EXECUTIONS: "3"
-    UV_PROJECT_ENVIRONMENT: /tmp/awf-venv
-    UV_LINK_MODE: copy
 
 services:
   postgres:
@@ -53,7 +50,7 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-    command: sh -c "uv run --python 3.12 --extra dev alembic upgrade head"
+    command: sh -c "alembic upgrade head"
     restart: "no"
 
   api:
@@ -65,7 +62,7 @@ services:
         condition: service_completed_successfully
     ports:
       - "8000:8000"
-    command: sh -c "uv run --python 3.12 --extra dev awf serve --host 0.0.0.0 --port 8000"
+    command: sh -c "awf serve --host 0.0.0.0 --port 8000"
 
   worker:
     <<: *awf-service
@@ -74,7 +71,7 @@ services:
         condition: service_healthy
       migrate:
         condition: service_completed_successfully
-    command: sh -c "uv run --python 3.12 --extra dev awf worker"
+    command: sh -c "awf worker"
 
 volumes:
   awf-postgres-data:
