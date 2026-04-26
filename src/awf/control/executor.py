@@ -730,12 +730,6 @@ class WorkspaceExecutor:
             action="start_push",
         ):
             return
-        if not await self._recheck_status(
-            workspace_id,
-            expected=WorkspaceStatus.pushing,
-            action="push_pr",
-        ):
-            return
 
         pr_title = ws.task_title
         pr_body = _build_pr_body(ws)
