@@ -387,6 +387,41 @@ def workspace_retry(
     _handle_response(response, fmt)
 
 
+@workspace_app.command("remonitor")
+def workspace_remonitor(
+    workspace_id: str = typer.Argument(...),
+    reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
+    idempotency_key: str = typer.Option(
+        ...,
+        "--idempotency-key",
+        help="Required idempotency key for this mutating control.",
+    ),
+    if_match: int | None = typer.Option(
+        None,
+        "--if-match",
+        help="Optional expected workspace version.",
+    ),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Request PR monitor recovery for a monitoring workspace."""
+    headers = {
+        **_api_token_headers(api_token),
+        "Idempotency-Key": idempotency_key,
+    }
+    if if_match is not None:
+        headers["If-Match"] = str(if_match)
+    response = _call(
+        "POST",
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        base_url=_base_url(base_url),
+        json={"reason": reason},
+        headers=headers,
+    )
+    _handle_response(response, fmt)
+
+
 @workspace_app.command("list")
 def workspace_list(
     limit: int = typer.Option(50, "--limit"),

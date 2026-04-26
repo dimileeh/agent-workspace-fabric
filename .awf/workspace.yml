@@ -12,6 +12,10 @@ awf:
     coverage:
       minimum_percent: 99
       enforce: true
+      provider: python
+      command:
+        command: uv run --python 3.12 --extra dev pytest --cov=awf --cov-report=term-missing
+        timeout_seconds: 900
   phases:
     setup:
       - command: uv sync --extra dev
