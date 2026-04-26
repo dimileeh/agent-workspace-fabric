@@ -109,7 +109,7 @@ def test_service_logs_follow_streams_without_capturing_subprocess_output(
 
     def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
         calls.append((args, kwargs))
-        return subprocess.CompletedProcess(args, returncode=0, stdout="not replayed\n", stderr="")
+        return subprocess.CompletedProcess(args, returncode=0, stdout=None, stderr=None)
 
     monkeypatch.setattr(subprocess, "run", _run)
 
