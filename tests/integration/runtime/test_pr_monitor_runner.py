@@ -1358,7 +1358,7 @@ class TestGitHubApiError:
 
 class TestAgentRunErrorResilience:
     @pytest.mark.unit
-    async def test_cli_crash_during_address_thread_defers(
+    async def test_cli_crash_during_address_thread_records_agent_failed(
         self,
         factory: async_sessionmaker[AsyncSession],
         cmd: FakeCommandRunner,
@@ -1366,8 +1366,8 @@ class TestAgentRunErrorResilience:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
-        """CLI process dies mid-address — monitor logs + records 'defer'
-        rather than aborting the whole workspace."""
+        """CLI process dies mid-address — monitor logs + records a retryable
+        agent failure rather than aborting the whole workspace."""
         ws_id = await _seed_monitoring_workspace(factory)
         thread = {
             "id": "T_crash",
@@ -1384,7 +1384,7 @@ class TestAgentRunErrorResilience:
         adapter.queue(returncode=2, raise_error=True)
         cmd.queue_result(returncode=0, stdout=_pr_payload())  # settle refetch
         cmd.queue_result(returncode=0)  # push (maybe nothing, still called)
-        # Iter 2: thread addressed-as-defer in state → Merge gate.
+        # Iter 2: thread addressed-as-agent-failed in state remains retryable.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
         cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=_pr_payload(threads=[thread]))
@@ -1405,7 +1405,7 @@ class TestAgentRunErrorResilience:
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.monitor_threads_addressed.get("T_crash") == "defer"
+            assert ws.monitor_threads_addressed.get("T_crash") == "agent_failed"
 
     @pytest.mark.unit
     async def test_cli_crash_during_sync_base_continues_to_push(
