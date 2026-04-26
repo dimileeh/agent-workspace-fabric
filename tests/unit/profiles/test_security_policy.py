@@ -36,9 +36,20 @@ def test_inconsistent_egress_allowlist_when_open():
         WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "open", "allowlist": ["api.github.com"]}}})
 
 @pytest.mark.unit
+def test_inconsistent_egress_allowlist_when_offline():
+    with pytest.raises(ValidationError, match="allowlist cannot be populated"):
+        WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "offline", "allowlist": ["api.github.com"]}}})
+
+@pytest.mark.unit
 def test_invalid_allowlist_entries():
     with pytest.raises(ValidationError):
         WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "allowlist", "allowlist": ["*"]}}})
+
+@pytest.mark.unit
+def test_valid_egress_mirrored_with_allowlist():
+    profile = WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "mirrored", "allowlist": ["api.github.com"]}}})
+    assert profile.security.egress.mode == "mirrored"
+    assert profile.security.egress.allowlist == ["api.github.com"]
 
 @pytest.mark.unit
 def test_broad_secret_targets():
@@ -48,7 +59,14 @@ def test_broad_secret_targets():
 @pytest.mark.unit
 def test_raw_looking_secret_values():
     with pytest.raises(ValidationError, match="raw secret value"):
-        WorkspaceProfile.model_validate({"name": "test", "secrets": [{"name": "s1", "target": "/etc/s1", "ref": "sk-1234567890abcdef"}]})
+        WorkspaceProfile.model_validate({"name": "test", "secrets": [{"name": "s1", "target": "/etc/s1", "provider": "aws", "ref": "sk-1234567890abcdef"}]})
+
+@pytest.mark.unit
+def test_missing_provider_or_ref():
+    with pytest.raises(ValidationError, match="secret 'ref' must be provided if 'provider' is specified"):
+        WorkspaceProfile.model_validate({"name": "test", "secrets": [{"name": "s1", "target": "/etc/s1", "provider": "aws"}]})
+    with pytest.raises(ValidationError, match="secret 'provider' must be provided if 'ref' is specified"):
+        WorkspaceProfile.model_validate({"name": "test", "secrets": [{"name": "s1", "target": "/etc/s1", "ref": "my-secret"}]})
 
 @pytest.mark.unit
 def test_profile_security_serialization():

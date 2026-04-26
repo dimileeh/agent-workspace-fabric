@@ -191,11 +191,15 @@ class ProfileSecret(BaseModel):
             if self.target in ("PATH", "HOME", "USER", ""):
                 raise ValueError(f"secret target '{self.target}' is too broad or invalid")
 
-        # Missing provider/ref on required secrets check? No, provider/ref is optional.
-        # But if provider is given, maybe ref is required?
+        # Missing provider/ref on required secrets check
         if self.provider and not self.ref:
             raise ValueError("secret 'ref' must be provided if 'provider' is specified")
-
+        if self.ref and not self.provider:
+            raise ValueError("secret 'provider' must be provided if 'ref' is specified")
+        
+        # If required and it's not a legacy 'secrets' declaration, we might enforce both,
+        # but for compatibility, we only require they be symmetric right now.
+        
         # Raw looking values
         def _looks_like_raw_secret(value: str | None) -> bool:
             if not value:
@@ -230,11 +234,11 @@ class ProfileEgress(BaseModel):
 
     @model_validator(mode="after")
     def _validate_egress(self) -> ProfileEgress:
-        if self.mode != EgressMode.allowlist and self.allowlist:
+        if self.mode not in (EgressMode.allowlist, EgressMode.mirrored) and self.allowlist:
             raise ValueError(f"allowlist cannot be populated when egress mode is {self.mode}")
         if self.mode == EgressMode.allowlist and not self.allowlist:
             raise ValueError("allowlist must be populated when egress mode is allowlist")
-        if self.mode == EgressMode.allowlist:
+        if self.mode in (EgressMode.allowlist, EgressMode.mirrored):
             for item in self.allowlist:
                 if not item or item.startswith("*") or "/" in item:
                     raise ValueError(f"invalid allowlist entry: '{item}'")
