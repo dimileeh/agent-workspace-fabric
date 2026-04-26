@@ -43,13 +43,15 @@ async def list_tasks(
         repo_url=repo_url,
         limit=limit,
     )
+    canonical_attempt_ids = await attempt_repo.list_canonical_ids_for_tasks(
+        row.task_id for row in attempt_rows
+    )
     items: list[TaskResponse] = []
     for row in attempt_rows:
-        canonical = await attempt_repo.get_canonical_for_task(row.task_id)
         items.append(
             _task_from_attempt(
                 row,
-                canonical_attempt_id=canonical.id if canonical is not None else None,
+                canonical_attempt_id=canonical_attempt_ids.get(row.task_id),
             )
         )
     items.extend(_task_from_workspace(row) for row in legacy_rows)

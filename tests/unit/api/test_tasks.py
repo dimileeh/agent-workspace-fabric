@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import TaskAttemptRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 
 _V1_BODY = {
@@ -260,6 +260,73 @@ class TestTaskList:
             "not_canonical": False,
             "stale": False,
         }
+
+    @pytest.mark.unit
+    async def test_tasks_batches_canonical_attempt_lookup(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        workspace_ids = [
+            await _create_v2_workspace(
+                client,
+                external_id=f"TICKET-CANONICAL-BATCH-{number}",
+                title=f"Canonical batch task {number}",
+            )
+            for number in range(2)
+        ]
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            for number, workspace_id in enumerate(workspace_ids, start=1):
+                workspace = await repo.get(workspace_id)
+                assert workspace is not None
+                for target in (
+                    WorkspaceStatus.provisioning,
+                    WorkspaceStatus.ready,
+                    WorkspaceStatus.running,
+                    WorkspaceStatus.validating,
+                    WorkspaceStatus.pushing,
+                ):
+                    await repo.transition(workspace, to=target, reason_code="TEST")
+                workspace.branch_name = f"awf/canonical-batch-{number}"
+                workspace.remote_push_branch = f"awf/canonical-batch-{number}"
+                workspace.base_commit = "a" * 40
+                workspace.pr_url = f"https://github.com/example/console/pull/{number}"
+                workspace.pr_number = number
+                await repo.transition(
+                    workspace,
+                    to=WorkspaceStatus.monitoring_pr,
+                    reason_code="PR_OPENED",
+                )
+            await session.commit()
+
+        async def fail_get_canonical_for_task(
+            self: TaskAttemptRepository,
+            task_id: str,
+        ) -> object:
+            raise AssertionError(
+                f"list_tasks should batch canonical lookup for task {task_id}"
+            )
+
+        monkeypatch.setattr(
+            TaskAttemptRepository,
+            "get_canonical_for_task",
+            fail_get_canonical_for_task,
+        )
+
+        response = await client.get("/v1/tasks")
+
+        assert response.status_code == 200
+        items = [
+            item
+            for item in response.json()["items"]
+            if item["task_id"].startswith("TICKET-CANONICAL-BATCH-")
+        ]
+        assert len(items) == 2
+        assert all(item["canonical_attempt_id"] == item["attempt_id"] for item in items)
 
     @pytest.mark.unit
     async def test_task_attempts_endpoint_resolves_external_id_and_lists_lineage_newest_first(

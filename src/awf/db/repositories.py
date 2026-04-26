@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import builtins
 import hashlib
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -225,6 +226,18 @@ class TaskAttemptRepository:
             TaskAttempt.is_canonical_for_merge.is_(True),
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_canonical_ids_for_tasks(self, task_ids: Iterable[str]) -> dict[str, str]:
+        unique_task_ids = tuple(dict.fromkeys(task_ids))
+        if not unique_task_ids:
+            return {}
+
+        stmt = select(TaskAttempt.task_id, TaskAttempt.id).where(
+            TaskAttempt.task_id.in_(unique_task_ids),
+            TaskAttempt.is_canonical_for_merge.is_(True),
+        )
+        rows = (await self._session.execute(stmt)).tuples().all()
+        return dict(rows)
 
     async def mark_canonical_for_merge(self, attempt: TaskAttempt) -> TaskAttempt:
         current = await self.get_canonical_for_task(attempt.task_id)
