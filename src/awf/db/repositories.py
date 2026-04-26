@@ -239,15 +239,15 @@ class TaskAttemptRepository:
         rows = (await self._session.execute(stmt)).tuples().all()
         return dict(rows)
 
-    async def mark_canonical_for_merge(self, attempt: TaskAttempt) -> TaskAttempt:
-        current = await self.get_canonical_for_task(attempt.task_id)
-        if current is not None and current.id != attempt.id:
-            current.is_canonical_for_merge = False
-            current.superseded_by_attempt_id = attempt.id
-            await self._session.flush([current])
+    async def mark_canonical_for_merge(self, attempt: TaskAttempt) -> TaskAttempt | None:
+        previous = await self.get_canonical_for_task(attempt.task_id)
+        if previous is not None and previous.id != attempt.id:
+            previous.is_canonical_for_merge = False
+            previous.superseded_by_attempt_id = attempt.id
+            await self._session.flush([previous])
         attempt.is_canonical_for_merge = True
         await self._session.flush()
-        return attempt
+        return previous
 
     async def list_for_task(self, task_id: str, *, limit: int = 100) -> list[TaskAttempt]:
         stmt = (
@@ -454,8 +454,7 @@ class MergeCandidateRepository:
         base_sha: str | None = None,
     ) -> MergeCandidate:
         attempt_repo = TaskAttemptRepository(self._session)
-        previous = await attempt_repo.get_canonical_for_task(attempt.task_id)
-        await attempt_repo.mark_canonical_for_merge(attempt)
+        previous = await attempt_repo.mark_canonical_for_merge(attempt)
         if previous is not None and previous.id != attempt.id:
             await self.close_open_for_attempt(
                 previous.id,

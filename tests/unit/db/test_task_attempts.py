@@ -195,6 +195,37 @@ class TestTaskAttemptRepository:
             await session.flush()
 
     @pytest.mark.unit
+    async def test_mark_canonical_for_merge_returns_previous_canonical_attempt(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        from awf.db.repositories import TaskAttemptRepository
+
+        task = await _task(session)
+        first_workspace = await _workspace(session, title="first attempt")
+        second_workspace = await _workspace(session, title="second attempt")
+
+        attempt_repo = TaskAttemptRepository(session)
+        first_attempt = await attempt_repo.create_for_workspace(
+            task=task,
+            workspace=first_workspace,
+        )
+        second_attempt = await attempt_repo.create_for_workspace(
+            task=task,
+            workspace=second_workspace,
+        )
+
+        initial_previous = await attempt_repo.mark_canonical_for_merge(first_attempt)
+        superseded_previous = await attempt_repo.mark_canonical_for_merge(second_attempt)
+
+        assert initial_previous is None
+        assert superseded_previous is not None
+        assert superseded_previous.id == first_attempt.id
+        assert first_attempt.is_canonical_for_merge is False
+        assert first_attempt.superseded_by_attempt_id == second_attempt.id
+        assert second_attempt.is_canonical_for_merge is True
+
+    @pytest.mark.unit
     async def test_retry_pr_ready_attempt_supersedes_canonical_and_closes_old_candidate(
         self,
         session: AsyncSession,
