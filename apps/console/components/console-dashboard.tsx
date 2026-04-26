@@ -39,6 +39,7 @@ import type {
   ApiEnvelope,
   AwfStreamFrame,
   ListEnvelope,
+  MergeQueueItem,
   Operation,
   ConcurrencyLane,
   ResourceSaturationSummary,
@@ -119,6 +120,9 @@ export function ConsoleDashboard() {
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
   const [resourceSaturation, setResourceSaturation] = useState<ResourceSaturationSummary | null>(null);
   const [resourceError, setResourceError] = useState<string | null>(null);
+  const [mergeQueue, setMergeQueue] = useState<MergeQueueItem[]>([]);
+  const [mergeQueueLoaded, setMergeQueueLoaded] = useState(false);
+  const [mergeQueueError, setMergeQueueError] = useState<string | null>(null);
   const [retryState, setRetryState] = useState<RetryActionState>({ status: "idle" });
   const [apiState, setApiState] = useState<"checking" | "ok" | "error">("checking");
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
@@ -168,6 +172,17 @@ export function ConsoleDashboard() {
     }
     setResourceError(null);
     setResourceSaturation(result.data);
+  }, []);
+
+  const loadMergeQueue = useCallback(async () => {
+    const result = await apiGet<ListEnvelope<MergeQueueItem>>("/api/awf/merge-queue?limit=20");
+    setMergeQueueLoaded(true);
+    if (!result.ok) {
+      setMergeQueueError(result.message);
+      return;
+    }
+    setMergeQueueError(null);
+    setMergeQueue(result.data.items);
   }, []);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
@@ -225,8 +240,8 @@ export function ConsoleDashboard() {
       newWorkspaceId: result.data.new_workspace_id,
       operationId: result.data.operation_id,
     });
-    await Promise.all([loadOverview(), loadResourceSaturation()]);
-  }, [loadOverview, loadResourceSaturation, selectedId]);
+    await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue()]);
+  }, [loadMergeQueue, loadOverview, loadResourceSaturation, selectedId]);
 
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream) => {
@@ -300,6 +315,12 @@ export function ConsoleDashboard() {
     const interval = window.setInterval(() => void loadResourceSaturation(), pollMs);
     return () => window.clearInterval(interval);
   }, [loadResourceSaturation]);
+
+  useEffect(() => {
+    void loadMergeQueue();
+    const interval = window.setInterval(() => void loadMergeQueue(), pollMs);
+    return () => window.clearInterval(interval);
+  }, [loadMergeQueue]);
 
   useEffect(() => {
     setDetail(emptyDetail);
@@ -501,6 +522,7 @@ export function ConsoleDashboard() {
           startTransition(() => {
             void loadOverview();
             void loadResourceSaturation();
+            void loadMergeQueue();
           })
         }
         isPending={isPending}
@@ -541,8 +563,13 @@ export function ConsoleDashboard() {
 
         <section className="min-w-0">
           {error ? <ErrorBanner message={error} /> : null}
-          <div className="p-4 pb-0">
+          <div className="grid gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
             <ResourceCapacityPanel saturation={resourceSaturation} error={resourceError} />
+            <MergeQueuePanel
+              items={mergeQueue}
+              loaded={mergeQueueLoaded}
+              error={mergeQueueError}
+            />
           </div>
           {selectedId && selectedOverview ? (
             <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(420px,0.9fr)]">
@@ -1064,6 +1091,126 @@ function ResourceCapacityPanel({
       )}
     </Panel>
   );
+}
+
+function MergeQueuePanel({
+  items,
+  loaded,
+  error,
+}: {
+  items: MergeQueueItem[];
+  loaded: boolean;
+  error: string | null;
+}) {
+  const hasSnapshot = items.length > 0;
+
+  return (
+    <Panel
+      title="Merge Queue"
+      icon={<GitPullRequest size={16} aria-hidden />}
+      action={
+        <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600">
+          {loaded ? `${items.length} candidate${items.length === 1 ? "" : "s"}` : "loading"}
+        </span>
+      }
+    >
+      {!loaded && !hasSnapshot ? (
+        <MutedLine>Merge queue snapshot loading.</MutedLine>
+      ) : !hasSnapshot ? (
+        <MutedLine>
+          {error ? `Unable to load merge queue: ${error}` : "No PR-backed merge candidates are queued."}
+        </MutedLine>
+      ) : (
+        <div className="grid gap-2">
+          {error ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Showing last merge queue snapshot. Refresh failed: {error}
+            </div>
+          ) : null}
+          <div className="grid max-h-[460px] gap-2 overflow-auto pr-1">
+            {items.map((item, index) => (
+              <MergeQueueRow key={item.workspace_id} item={item} position={index + 1} />
+            ))}
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function MergeQueueRow({ item, position }: { item: MergeQueueItem; position: number }) {
+  return (
+    <article className="grid gap-2 border-b border-slate-100 pb-2 text-xs last:border-b-0 last:pb-0">
+      <div className="flex min-w-0 items-start justify-between gap-2">
+        <div className="min-w-0">
+          <div className="flex min-w-0 items-center gap-2">
+            <span className="mono shrink-0 rounded-md border border-slate-200 bg-slate-50 px-1.5 py-0.5 text-[10px] text-slate-500">
+              #{position}
+            </span>
+            <h3 className="truncate text-sm font-semibold text-slate-950">{item.title}</h3>
+          </div>
+          <div className="mono mt-1 truncate text-[11px] text-slate-500">{item.workspace_id}</div>
+        </div>
+        <div className="flex shrink-0 items-center gap-1">
+          <Badge value={item.status} />
+          <SmallExternalAnchor href={item.pr_url} label="PR" />
+        </div>
+      </div>
+      <div className="grid gap-1 sm:grid-cols-2">
+        <QueueDatum label="Mode" value={item.auto_merge ? "auto-merge" : "manual"} />
+        <QueueDatum label="Task class" value={item.task_class ?? "unclassified"} />
+        <QueueDatum label="Last event" value={lastEventReason(item.last_event)} mono />
+        <QueueDatum label="Blocker" value={item.merge_blocker_reason} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
+      </div>
+      <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
+        <span className="truncate">
+          base <span className="mono text-slate-700">{item.base_branch}</span>
+        </span>
+        <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
+      </div>
+    </article>
+  );
+}
+
+function QueueDatum({
+  label,
+  value,
+  mono = false,
+  tone,
+}: {
+  label: string;
+  value: string;
+  mono?: boolean;
+  tone?: ReturnType<typeof statusTone>;
+}) {
+  return (
+    <div className={`min-w-0 rounded-md border px-2 py-1.5 ${tone ? toneClass(tone) : "border-slate-200 bg-slate-50"}`}>
+      <div className="text-[10px] font-medium text-slate-500">{label}</div>
+      <div className={`${mono ? "mono" : ""} truncate text-[11px] text-slate-900`}>{value}</div>
+    </div>
+  );
+}
+
+function lastEventReason(event: WorkspaceEvent | null): string {
+  if (!event) {
+    return "none";
+  }
+  return event.reason_code ?? event.event_type;
+}
+
+function mergeBlockerTone(reason: MergeQueueItem["merge_blocker_reason"]): ReturnType<typeof statusTone> {
+  switch (reason) {
+    case "ready_to_merge_or_waiting_for_github":
+    case "completed":
+      return "good";
+    case "manual_merge_required":
+    case "waiting_for_monitor":
+      return "warn";
+    case "failed_or_cancelled":
+      return "bad";
+    default:
+      return "info";
+  }
 }
 
 function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
