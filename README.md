@@ -480,6 +480,12 @@ Run the provisioning worker:
 uv run --python 3.12 --extra dev awf worker
 ```
 
+Local service mode uses a stable worker node id, `local`, so active rows
+survive API/worker/migrate container rebuilds without becoming owned by a dead
+container hostname. Multi-node deployments should set a unique
+`AWF_WORKER_NODE_ID` per node; stale active-execution recovery remains scoped to
+the current node id and does not recover rows owned by unrelated nodes.
+
 Inspect local service settings and dependency status:
 
 ```bash

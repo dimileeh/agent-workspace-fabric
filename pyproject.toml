@@ -72,11 +72,13 @@ packages = ["src/awf"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+force-exclude = true
 extend-exclude = [
     ".venv",
     "migrations/versions",
     "build",
     "dist",
+    "docker/compose/local-service.yml",
 ]
 
 [tool.ruff.lint]
