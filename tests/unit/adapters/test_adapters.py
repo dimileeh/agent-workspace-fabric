@@ -12,8 +12,10 @@ argv it's handed and returns canned output. We verify:
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Any
 
 import pytest
+import structlog
 
 # Importing the registry module forces adapter self-registration.
 import awf.adapters.registry  # noqa: F401
@@ -23,7 +25,7 @@ from awf.adapters.claude_code import ClaudeCodeAdapter
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.gemini import GeminiAdapter
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
@@ -39,6 +41,67 @@ def _assert_docker_exec_prefix(args: list[str]) -> None:
     exec_idx = args.index("exec")
     assert args[exec_idx : exec_idx + 4] == ["exec", "-T", "-w", "/workspace"]
     assert "agent" in args
+
+
+class _TimeoutStreamingRunner:
+    def __init__(self, *, reason_code: str) -> None:
+        self.reason_code = reason_code
+        self.used_streaming = False
+        self.wall_timeout_seconds: float | None = None
+        self.idle_timeout_seconds: float | None = None
+
+    async def run(self, *_args: Any, **_kwargs: Any) -> CommandResult:
+        raise AssertionError("agent watchdogs require the streaming runner path")
+
+    async def run_streaming(
+        self,
+        _args: list[str],
+        *,
+        on_stdout: Any = None,
+        on_stderr: Any = None,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+        wall_timeout_seconds: float | None = None,
+        idle_timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        del input_bytes, cwd
+        self.used_streaming = True
+        self.wall_timeout_seconds = wall_timeout_seconds
+        self.idle_timeout_seconds = idle_timeout_seconds
+        if on_stdout is not None:
+            await on_stdout("partial work\n")
+        if on_stderr is not None:
+            await on_stderr("watchdog fired\n")
+        return CommandResult(
+            returncode=124,
+            stdout="partial work\n",
+            stderr="watchdog fired\n",
+            reason_code=self.reason_code,
+        )
+
+
+class _RecordingSinks:
+    def __init__(self) -> None:
+        self.stdout_data: list[str] = []
+        self.stderr_data: list[str] = []
+        self.closed = False
+
+    async def write_stdout(self, data: str) -> None:
+        self.stdout_data.append(data)
+
+    async def write_stderr(self, data: str) -> None:
+        self.stderr_data.append(data)
+
+    async def close(self) -> None:
+        self.closed = True
+
+
+class _RecordingLogStore:
+    def __init__(self) -> None:
+        self.sinks = _RecordingSinks()
+
+    async def open_command_streams(self, **_kwargs: Any) -> _RecordingSinks:
+        return self.sinks
 
 
 class TestCodexAdapter:
@@ -116,6 +179,61 @@ class TestCodexAdapter:
         )
 
         assert runner.calls[0].input_bytes == b""
+
+    @pytest.mark.unit
+    async def test_wall_timeout_raises_structured_error_and_closes_log_streams(self) -> None:
+        runner = _TimeoutStreamingRunner(reason_code="COMMAND_TIMEOUT")
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,
+            log_store=log_store,  # type: ignore[arg-type]
+            agent_wall_timeout_seconds=12.0,
+            agent_idle_timeout_seconds=3.0,
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            with pytest.raises(AgentRunError) as exc:
+                await adapter.run(
+                    compose_project=_COMPOSE_PROJECT,
+                    compose_file=_COMPOSE_FILE,
+                    prompt=_PROMPT,
+                    workspace_id="ws_timeout",
+                )
+
+        assert exc.value.reason_code == "AGENT_TIMEOUT"
+        assert exc.value.result.stdout == "partial work\n"
+        assert runner.wall_timeout_seconds == 12.0
+        assert runner.idle_timeout_seconds == 3.0
+        assert log_store.sinks.stdout_data == ["partial work\n"]
+        assert log_store.sinks.stderr_data == ["watchdog fired\n"]
+        assert log_store.sinks.closed is True
+        assert any(
+            event.get("event") == "agent.run.timeout"
+            and event.get("reason_code") == "AGENT_TIMEOUT"
+            and event.get("workspace_id") == "ws_timeout"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_idle_timeout_uses_streaming_runner_even_without_log_store(self) -> None:
+        runner = _TimeoutStreamingRunner(reason_code="COMMAND_IDLE_TIMEOUT")
+        adapter = CodexAdapter(
+            runner=runner,
+            agent_wall_timeout_seconds=12.0,
+            agent_idle_timeout_seconds=3.0,
+        )
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+            )
+
+        assert exc.value.reason_code == "AGENT_IDLE_TIMEOUT"
+        assert runner.used_streaming is True
+        assert runner.wall_timeout_seconds == 12.0
+        assert runner.idle_timeout_seconds == 3.0
 
 
 class TestClaudeCodeAdapter:
