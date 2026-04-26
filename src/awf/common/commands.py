@@ -170,13 +170,14 @@ class AsyncioSubprocessRunner:
             if wall_timeout_seconds is None and idle_timeout_seconds is None:
                 return
 
+            wall_deadline = (
+                started_at + wall_timeout_seconds
+                if wall_timeout_seconds is not None
+                else None
+            )
+
             while not wait_task.done():
                 now = loop.time()
-                wall_deadline = (
-                    started_at + wall_timeout_seconds
-                    if wall_timeout_seconds is not None
-                    else None
-                )
                 idle_deadline = (
                     last_output_at + idle_timeout_seconds
                     if idle_timeout_seconds is not None
