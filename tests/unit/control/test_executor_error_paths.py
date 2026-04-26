@@ -1028,6 +1028,58 @@ class TestPrMonitorFactoryPath:
         assert len(monitor_calls) == 1  # monitor.run fired
 
     @pytest.mark.unit
+    async def test_existing_pr_recovery_pushes_and_resumes_monitor_without_duplicate_create(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_calls: list[str] = []
+
+        class _FakeMonitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        def _monitor_factory(adapter: Any) -> _FakeMonitor:
+            del adapter
+            return _FakeMonitor()
+
+        ws_id = await _seed_ready(factory)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+            workspace.pr_url = "https://github.com/x/y/pull/42"
+            workspace.pr_number = 42
+            await session.commit()
+
+        fake.queue_result(returncode=0, stdout="adapter ok")  # agent
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="a\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0)  # validation cmd
+        fake.queue_result(returncode=0, stdout="deadbeef\n")  # rev-parse HEAD
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
+        fake.queue_result(returncode=0, stdout="abc commit\n")  # ahead of base
+        fake.queue_result(returncode=0)  # git push
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+        await executor.execute(ws_id)
+
+        assert monitor_calls == [ws_id]
+        assert all(call.args[:3] != ["gh", "pr", "create"] for call in fake.calls)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+            assert workspace.status == WorkspaceStatus.monitoring_pr.value
+            assert workspace.pr_url == "https://github.com/x/y/pull/42"
+            assert any(event.reason_code == "PR_UPDATED" for event in workspace.events)
+
+    @pytest.mark.unit
     async def test_executor_passes_workspace_row_to_three_arg_factory(
         self,
         fake: FakeCommandRunner,

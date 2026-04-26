@@ -64,6 +64,28 @@ class TestPushAndOpen:
         assert "--body" in gh_args
 
     @pytest.mark.unit
+    async def test_reuses_existing_pr_after_push_without_creating_duplicate(self) -> None:
+        runner = FakeCommandRunner()
+        _queue_pre_push_diagnostics(runner)
+        runner.queue_result(returncode=0)  # git push
+
+        creator = PullRequestCreator(runner)
+        result = await creator.push_and_open(
+            worktree_path=_WORKTREE,
+            branch_name="awf/ws_xyz",
+            base_branch="development",
+            title="Add docstring",
+            body="One-line docstring on the module.",
+            existing_pr_url="https://github.com/dimileeh/aira-agent/pull/42",
+        )
+
+        assert result.url == "https://github.com/dimileeh/aira-agent/pull/42"
+        assert result.branch == "awf/ws_xyz"
+        assert result.head_sha == "abc123def4567890"
+        assert len(runner.calls) == 4
+        assert all(call.args[:3] != ["gh", "pr", "create"] for call in runner.calls)
+
+    @pytest.mark.unit
     async def test_extracts_pr_url_even_with_leading_noise(self) -> None:
         runner = FakeCommandRunner()
         _queue_pre_push_diagnostics(runner)
