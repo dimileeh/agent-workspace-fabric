@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,7 +23,6 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     seed_monitoring_workspace,
 )
 from tests.unit.runtime.test_pr_monitor import _status
-
 
 REPO_URL = "git@github.com:dimileeh/aira-web.git"
 

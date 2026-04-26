@@ -43,6 +43,7 @@ from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.runtime.logs import LogStore, WorkspaceLogSink
+from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
 from awf.runtime.monitor_prompts import (
     address_review_comment_prompt,
     address_thread_prompt,
@@ -122,6 +123,7 @@ class PullRequestMonitorRunner:
         worktrees_root: Path,
         artifacts_root: Path | None = None,
         log_store: LogStore | None = None,
+        merge_coordinator: MergeCoordinator | None = None,
     ) -> None:
         self._deps = _RunnerDeps(
             session_factory=session_factory,
@@ -133,6 +135,7 @@ class PullRequestMonitorRunner:
         )
         self._config = monitor_config or MonitorConfig()
         self._runner_config = runner_config or MonitorRunnerConfig()
+        self._merge_coordinator = merge_coordinator or DEFAULT_MERGE_COORDINATOR
         self._worktrees_root = worktrees_root
         # Orchestrator-facing JSON drops — one ``<ws_id>.defer-signal.json``
         # per terminal transition. Default layout matches ``run_awf.py``'s
@@ -285,6 +288,7 @@ class PullRequestMonitorRunner:
                 terminal = await self._execute(
                     action=action,
                     workspace_id=workspace_id,
+                    repo_url=ws.repo_url,
                     repo=repo,
                     pr_number=pr_number,
                     status=status,
@@ -330,6 +334,7 @@ class PullRequestMonitorRunner:
         *,
         action: MonitorAction,
         workspace_id: str,
+        repo_url: str,
         repo: RepoRef,
         pr_number: int,
         status: PRStatus,
@@ -477,85 +482,140 @@ class PullRequestMonitorRunner:
                 await self._deps.sleep(grace_wait_seconds)
                 return False
 
-            if self._config.pre_merge_settle_seconds > 0:
-                await self._deps.sleep(self._config.pre_merge_settle_seconds)
-                try:
-                    fresh_status = await self._fetch_status_for_decision(
-                        repo=repo,
-                        pr_number=pr_number,
-                        workspace_id=workspace_id,
-                        base_branch=base_branch,
-                    )
-                except GitHubClientError as exc:
-                    await self._terminate_failed(
-                        workspace_id,
-                        message=f"monitor: github error during pre-merge recheck: {exc}"[:2000],
-                    )
-                    return True
-                fresh_action = decide(fresh_status, state, self._config)
-                if not isinstance(fresh_action, Merge):
-                    _log.info(
-                        "monitor.pre_merge_recheck_changed_action",
-                        workspace_id=workspace_id,
-                        pr_number=pr_number,
-                        original_action="Merge",
-                        fresh_action=type(fresh_action).__name__,
-                        head_sha=fresh_status.head_sha[:10],
-                        unresolved_threads=len(fresh_status.unresolved_inline_threads),
-                        unresolved_reviews=len(fresh_status.unresolved_review_comments),
-                        check_state=fresh_status.check_state.value,
-                        merge_state=(
-                            fresh_status.merge_state_status.value
-                            if fresh_status.merge_state_status
-                            else None
-                        ),
-                    )
-                    # This re-enters the dispatcher at most one stack frame
-                    # deeper: the original action was Merge, and we only
-                    # recurse when the refreshed decision is explicitly not
-                    # Merge. Non-Merge actions do not perform this pre-merge
-                    # recheck, so decision oscillation is handled by the
-                    # outer monitor loop rather than recursive growth.
-                    return await self._execute(
-                        action=fresh_action,
-                        workspace_id=workspace_id,
-                        repo=repo,
-                        pr_number=pr_number,
-                        status=fresh_status,
-                        state=state,
-                        base_branch=base_branch,
-                        remote_branch=remote_branch,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        monitor_log=monitor_log,
-                    )
-                status = fresh_status
+            await self._record_merge_coordination_event(
+                "monitor.merge_critical_section_waiting",
+                monitor_log=monitor_log,
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                base_branch=base_branch,
+                pr_number=pr_number,
+                status=status,
+            )
+            fresh_action: MonitorAction | None = None
+            fresh_status: PRStatus | None = None
+            merge_sha: str | None = None
+            merge_blocker: GitHubClientError | None = None
+            recheck_error: GitHubClientError | None = None
+            merge_status = status
+            async with self._merge_coordinator.serialized_merge(
+                repo_url=repo_url,
+                base_branch=base_branch,
+            ):
+                await self._record_merge_coordination_event(
+                    "monitor.merge_critical_section_entered",
+                    monitor_log=monitor_log,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    base_branch=base_branch,
+                    pr_number=pr_number,
+                    status=merge_status,
+                )
+                if self._config.pre_merge_settle_seconds > 0:
+                    await self._deps.sleep(self._config.pre_merge_settle_seconds)
+                    try:
+                        checked_status = await self._fetch_status_for_decision(
+                            repo=repo,
+                            pr_number=pr_number,
+                            workspace_id=workspace_id,
+                            base_branch=base_branch,
+                        )
+                    except GitHubClientError as exc:
+                        recheck_error = exc
+                    else:
+                        checked_action = decide(checked_status, state, self._config)
+                        if not isinstance(checked_action, Merge):
+                            fresh_action = checked_action
+                            fresh_status = checked_status
+                            _log.info(
+                                "monitor.pre_merge_recheck_changed_action",
+                                workspace_id=workspace_id,
+                                pr_number=pr_number,
+                                original_action="Merge",
+                                fresh_action=type(checked_action).__name__,
+                                head_sha=checked_status.head_sha[:10],
+                                unresolved_threads=len(
+                                    checked_status.unresolved_inline_threads
+                                ),
+                                unresolved_reviews=len(
+                                    checked_status.unresolved_review_comments
+                                ),
+                                check_state=checked_status.check_state.value,
+                                merge_state=(
+                                    checked_status.merge_state_status.value
+                                    if checked_status.merge_state_status
+                                    else None
+                                ),
+                            )
+                        else:
+                            merge_status = checked_status
 
-            try:
-                merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
-            except GitHubClientError as exc:
+                if recheck_error is None and fresh_action is None:
+                    try:
+                        merge_sha = await self._deps.gh.merge_pr(
+                            repo=repo, pr_number=pr_number
+                        )
+                    except GitHubClientError as exc:
+                        merge_blocker = exc
+
+            if recheck_error is not None:
+                await self._terminate_failed(
+                    workspace_id,
+                    message=(
+                        f"monitor: github error during pre-merge recheck: {recheck_error}"
+                    )[:2000],
+                )
+                return True
+
+            if fresh_action is not None:
+                if fresh_status is None:  # pragma: no cover - defensive invariant
+                    raise RuntimeError("pre-merge recheck produced an action without status")
+                # This re-enters the dispatcher at most one stack frame
+                # deeper: the original action was Merge, and we only
+                # recurse when the refreshed decision is explicitly not
+                # Merge. Non-Merge actions do not perform this pre-merge
+                # recheck, so decision oscillation is handled by the
+                # outer monitor loop rather than recursive growth.
+                return await self._execute(
+                    action=fresh_action,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=fresh_status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                )
+
+            if merge_blocker is not None:
                 # Branch protection often blocks merges; fall back to the
                 # release-PR flow rather than failing.
                 _log.warning(
                     "monitor.merge_blocked_falling_back_to_notify",
                     workspace_id=workspace_id,
-                    stderr=exc.stderr,
+                    stderr=merge_blocker.stderr,
                 )
                 await self._post_human_notification_once(
                     repo=repo,
                     pr_number=pr_number,
-                    status=status,
+                    status=merge_status,
                     state=state,
-                    blocker_reason=_merge_rejection_reason(exc.stderr),
+                    blocker_reason=_merge_rejection_reason(merge_blocker.stderr),
                 )
                 await self._deps.sleep(self._config.poll_interval_seconds)
                 return False
+
+            if merge_sha is None:  # pragma: no cover - defensive invariant
+                raise RuntimeError("merge critical section exited without a merge result")
             self._write_defer_signal(
                 workspace_id=workspace_id,
                 pr_number=pr_number,
                 terminal_action="Merge",
                 merged=True,
-                status=status,
+                status=merge_status,
                 state=state,
             )
             await self._terminate_completed(
@@ -579,6 +639,27 @@ class PullRequestMonitorRunner:
         # If we got here the MonitorAction union gained a variant without
         # a dispatch arm — fail loudly so tests catch it.
         raise RuntimeError(f"unhandled monitor action: {action!r}")  # pragma: no cover
+
+    async def _record_merge_coordination_event(
+        self,
+        event: str,
+        *,
+        monitor_log: WorkspaceLogSink | None,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+        pr_number: int,
+        status: PRStatus,
+    ) -> None:
+        payload = {
+            "workspace_id": workspace_id,
+            "repo_url": repo_url,
+            "base_branch": base_branch,
+            "pr_number": pr_number,
+            "head_sha": status.head_sha[:10],
+        }
+        _log.info(event, **payload)
+        await self._write_monitor_log(monitor_log, {"event": event, **payload})
 
     async def _post_human_notification_once(
         self,

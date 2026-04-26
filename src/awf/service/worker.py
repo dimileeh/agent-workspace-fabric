@@ -26,6 +26,7 @@ from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
+from awf.runtime.merge_coordinator import InProcessMergeCoordinator
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
@@ -52,6 +53,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runner = AsyncioSubprocessRunner()
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
+    merge_coordinator = InProcessMergeCoordinator()
     validation = ValidationRunner(
         runner=runner,
         artifacts_dir=work_dir / "artifacts",
@@ -91,16 +93,19 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             if workspace.initial_review_grace_period_seconds is not None
             else profile.monitor.initial_review_grace_period_seconds
         )
-        return monitor_builder(
-            session_factory=session_factory,
-            runner=runner,
-            adapter=adapter,
-            gh=gh,
-            worktrees_root=work_dir / "git" / "worktrees",
-            artifacts_root=work_dir / "artifacts",
-            initial_review_grace_period_seconds=grace_seconds,
-            log_store=log_store,
-        )
+        monitor_kwargs: dict[str, Any] = {
+            "session_factory": session_factory,
+            "runner": runner,
+            "adapter": adapter,
+            "gh": gh,
+            "worktrees_root": work_dir / "git" / "worktrees",
+            "artifacts_root": work_dir / "artifacts",
+            "initial_review_grace_period_seconds": grace_seconds,
+            "log_store": log_store,
+        }
+        if workspace.auto_merge:
+            monitor_kwargs["merge_coordinator"] = merge_coordinator
+        return monitor_builder(**monitor_kwargs)
 
     executor = WorkspaceExecutor(
         session_factory=session_factory,

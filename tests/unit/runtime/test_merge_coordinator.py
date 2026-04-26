@@ -14,7 +14,6 @@ import pytest
 
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
 
-
 REPO_URL = "git@github.com:dimileeh/aira-web.git"
 
 
