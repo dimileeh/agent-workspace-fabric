@@ -1058,6 +1058,68 @@ class TestPrMonitorResume:
             }
 
     @pytest.mark.unit
+    async def test_resume_pr_monitor_does_not_use_stale_recovery_when_status_changed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _UnexpectedCompose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+            ) -> None:
+                del project_name, compose_file, workspace_id, wait
+                raise AssertionError("compose must not restart after recovery skips")
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            branch_name="awf/concurrent-feature",
+            remote_push_branch=None,
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args: object(),
+            compose=_UnexpectedCompose(),
+        )
+        original_load_workspace = executor._load_workspace
+
+        async def _load_then_complete(workspace_id: str) -> Any:
+            ws = await original_load_workspace(workspace_id)
+            async with factory() as s:
+                repo = WorkspaceRepository(s)
+                fresh = await repo.get(workspace_id)
+                assert fresh is not None
+                await repo.transition(
+                    fresh,
+                    to=WorkspaceStatus.completed,
+                    reason_code="CONCURRENT_COMPLETED",
+                )
+                await s.commit()
+            return ws
+
+        executor._load_workspace = _load_then_complete  # type: ignore[method-assign]
+
+        await executor.resume_pr_monitor(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.remote_push_branch is None
+            assert not [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.remote_push_branch_recovered"
+            ]
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "field",
         [

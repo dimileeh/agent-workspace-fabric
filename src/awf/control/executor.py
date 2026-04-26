@@ -794,11 +794,12 @@ class WorkspaceExecutor:
             return
 
         if not ws.remote_push_branch and ws.task_kind == "feature_branch_pr" and ws.branch_name:
-            await self._recover_feature_branch_remote_push_branch(
+            recovered_remote_push_branch = await self._recover_feature_branch_remote_push_branch(
                 workspace_id=workspace_id,
                 remote_push_branch=ws.branch_name,
             )
-            ws.remote_push_branch = ws.branch_name
+            if recovered_remote_push_branch:
+                ws.remote_push_branch = recovered_remote_push_branch
 
         missing = _missing_monitor_recovery_metadata(ws)
         if missing:
@@ -906,16 +907,16 @@ class WorkspaceExecutor:
         *,
         workspace_id: str,
         remote_push_branch: str,
-    ) -> None:
+    ) -> str | None:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
             if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
-                return
+                return None
             if ws.remote_push_branch:
-                return
+                return ws.remote_push_branch
             if ws.task_kind != "feature_branch_pr" or not ws.branch_name:
-                return
+                return None
             ws.remote_push_branch = remote_push_branch
             await repo.add_event(
                 ws,
@@ -927,6 +928,7 @@ class WorkspaceExecutor:
                 },
             )
             await session.commit()
+            return remote_push_branch
 
     def _defaults_for(self, agent: AgentRuntime) -> AgentDefaults | None:
         defaults = defaults_with_model_overrides(
