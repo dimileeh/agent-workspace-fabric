@@ -11,7 +11,6 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 
-
 _V1_BODY = {
     "repo_url": "git@github.com:example/console.git",
     "branch_base": "main",

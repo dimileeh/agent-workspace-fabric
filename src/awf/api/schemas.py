@@ -187,6 +187,8 @@ class TaskResponse(BaseModel):
     """Workspace-backed task row for operator consoles."""
 
     task_id: str
+    attempt_id: str | None = None
+    attempt_number: int | None = None
     workspace_id: str
     title: str
     repo_url: str

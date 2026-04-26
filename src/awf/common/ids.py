@@ -14,6 +14,14 @@ def new_workspace_id() -> str:
     return f"ws_{uuid4().hex[:24]}"
 
 
+def new_task_id() -> str:
+    return f"task_{uuid4().hex[:24]}"
+
+
+def new_task_attempt_id() -> str:
+    return f"att_{uuid4().hex[:24]}"
+
+
 def new_operation_id() -> str:
     return f"op_{uuid4().hex[:24]}"
 

@@ -24,6 +24,8 @@ from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
     OwnedPathConflict,
+    TaskAttemptRepository,
+    TaskRepository,
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
@@ -355,6 +357,19 @@ async def create_workspace_v2_row(
         idempotency_key=idempotency_key,
     )
     ws.task_kind = payload.task.kind
+    task = await TaskRepository(session).create_or_get(
+        repo_url=payload.repo.url,
+        base_branch=payload.repo.base_branch,
+        title=payload.task.title,
+        prompt=payload.task.prompt,
+        external_id=payload.task.external_id,
+        idempotency_key=idempotency_key,
+        task_class=(
+            payload.task.task_class.value if payload.task.task_class is not None else None
+        ),
+        owned_paths=payload.task.owned_paths,
+    )
+    await TaskAttemptRepository(session).create_for_workspace(task=task, workspace=ws)
     await session.flush()
     return ws
 
