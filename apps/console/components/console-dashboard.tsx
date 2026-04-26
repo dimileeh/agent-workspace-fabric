@@ -1091,16 +1091,17 @@ function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["works
 }
 
 function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
-  const denominator = Math.max(lane.limit, lane.in_use, 1);
-  const fill = Math.min(100, Math.max(0, (lane.in_use / denominator) * 100));
-  const saturated = lane.limit > 0 && lane.in_use >= lane.limit;
+  const hasFiniteLimit = lane.limit > 0;
+  const fill = hasFiniteLimit ? Math.min(100, Math.max(0, (lane.in_use / lane.limit) * 100)) : 0;
+  const saturated = hasFiniteLimit && lane.in_use >= lane.limit;
+  const limitLabel = hasFiniteLimit ? `${lane.in_use}/${lane.limit}` : `${lane.in_use} active`;
 
   return (
     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold text-slate-900">{label}</span>
         <span className={saturated ? "font-semibold text-amber-800" : "text-slate-600"}>
-          {lane.in_use}/{lane.limit} in use
+          {hasFiniteLimit ? `${limitLabel} in use` : `${limitLabel} / no limit`}
         </span>
       </div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
