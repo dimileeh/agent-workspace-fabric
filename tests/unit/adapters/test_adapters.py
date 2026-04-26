@@ -191,14 +191,16 @@ class TestCodexAdapter:
             agent_idle_timeout_seconds=3.0,
         )
 
-        with structlog.testing.capture_logs() as captured:
-            with pytest.raises(AgentRunError) as exc:
-                await adapter.run(
-                    compose_project=_COMPOSE_PROJECT,
-                    compose_file=_COMPOSE_FILE,
-                    prompt=_PROMPT,
-                    workspace_id="ws_timeout",
-                )
+        with (
+            structlog.testing.capture_logs() as captured,
+            pytest.raises(AgentRunError) as exc,
+        ):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_timeout",
+            )
 
         assert exc.value.reason_code == "AGENT_TIMEOUT"
         assert exc.value.result.stdout == "partial work\n"

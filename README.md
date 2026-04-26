@@ -816,7 +816,13 @@ AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
 AWF_HOST_WORK_DIR=${HOME}/.awf/service
 AWF_HOST_HOME=${HOME}
 AWF_GITHUB_TOKEN=<token from gh auth token>
+AWF_AGENT_WALL_TIMEOUT_SECONDS=7200
+AWF_AGENT_IDLE_TIMEOUT_SECONDS=900
 ```
+
+Agent watchdogs are conservative by default: AWF terminates a coding CLI after
+7200 seconds of wall-clock runtime or 900 seconds without stdout/stderr output.
+Partial stdout/stderr is kept in workspace logs for salvage and diagnosis.
 
 The local dogfood runner uses its own SQLite DB under `--work-dir`, so it does
 not require a separate Postgres control-plane database.
