@@ -135,12 +135,13 @@ class WorkspaceControlService:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         payload: dict[str, object | None] = {"reason": reason, "stop_stack": stop_stack}
+        operation_payload = _operation_payload(payload, expected_version=expected_version)
         workspace, replay = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
             operation_type=OperationType.cancel,
-            payload=payload,
+            payload=operation_payload,
             idempotency_key=idempotency_key,
             expected_version=expected_version,
         )
@@ -155,7 +156,7 @@ class WorkspaceControlService:
             workspace_id=workspace_id,
             operation_type=OperationType.cancel,
             status=OperationStatus.running,
-            payload=payload,
+            payload=operation_payload,
             idempotency_key=idempotency_key,
         )
         if stop_stack:
@@ -200,12 +201,13 @@ class WorkspaceControlService:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         payload: dict[str, object | None] = {"reason": reason}
+        operation_payload = _operation_payload(payload, expected_version=expected_version)
         workspace, replay = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
             operation_type=OperationType.stop,
-            payload=payload,
+            payload=operation_payload,
             idempotency_key=idempotency_key,
             expected_version=expected_version,
         )
@@ -220,7 +222,7 @@ class WorkspaceControlService:
             workspace_id=workspace_id,
             operation_type=OperationType.stop,
             status=OperationStatus.running,
-            payload=payload,
+            payload=operation_payload,
             idempotency_key=idempotency_key,
         )
         await self._project_stopper(workspace.compose_project_name)
@@ -267,12 +269,13 @@ class WorkspaceControlService:
             "remove_volumes": remove_volumes,
             "remove_worktree": remove_worktree,
         }
+        operation_payload = _operation_payload(payload, expected_version=expected_version)
         workspace, replay = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
             operation_type=OperationType.destroy,
-            payload=payload,
+            payload=operation_payload,
             idempotency_key=idempotency_key,
             expected_version=expected_version,
         )
@@ -292,7 +295,7 @@ class WorkspaceControlService:
             workspace_id=workspace_id,
             operation_type=OperationType.destroy,
             status=OperationStatus.running,
-            payload=payload,
+            payload=operation_payload,
             idempotency_key=idempotency_key,
         )
         if current == WorkspaceStatus.destroyed:
@@ -511,6 +514,17 @@ def _control_response(
         status=WorkspaceStatus(workspace.status),
         message=message,
     )
+
+
+def _operation_payload(
+    payload: dict[str, object | None],
+    *,
+    expected_version: int | None,
+) -> dict[str, object | None]:
+    operation_payload = dict(payload)
+    if expected_version is not None:
+        operation_payload["expected_version"] = expected_version
+    return operation_payload
 
 
 def _is_active(status_value: WorkspaceStatus) -> bool:

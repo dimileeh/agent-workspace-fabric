@@ -174,6 +174,49 @@ async def test_same_key_with_different_payload_returns_idempotency_conflict(
 
 @pytest.mark.unit
 @pytest.mark.parametrize("action", ["cancel", "stop", "destroy"])
+async def test_same_key_with_different_if_match_returns_idempotency_conflict(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    workspace_id = await _create_workspace(client)
+    stop_calls: list[str | None] = []
+
+    async def fake_stop(compose_project_name: str | None) -> None:
+        stop_calls.append(compose_project_name)
+
+    monkeypatch.setattr(controls_route, "_stop_project", fake_stop)
+    FakeCleaner.calls = []
+    monkeypatch.setattr(controls_route, "_cleaner", FakeCleaner)
+    headers = {
+        **_auth(monkeypatch),
+        "Idempotency-Key": f"{action}-if-match-conflict",
+        "If-Match": "1",
+    }
+
+    first = await _call_control(client, workspace_id, action, headers=headers)
+    before_counts = await _counts(engine, workspace_id)
+    conflict = await _call_control(
+        client,
+        workspace_id,
+        action,
+        headers={**headers, "If-Match": "0"},
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+    assert after_counts == before_counts
+    if action in {"cancel", "stop"}:
+        assert len(stop_calls) == 1
+    if action == "destroy":
+        assert len(FakeCleaner.calls) == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["cancel", "stop", "destroy"])
 async def test_stale_if_match_rejects_without_mutating(
     client: AsyncClient,
     engine: AsyncEngine,
