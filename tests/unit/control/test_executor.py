@@ -538,6 +538,7 @@ class TestMonitorHandoff:
             assert ws.status == _WS.completed.value
             assert ws.pr_url == "https://github.com/dimileeh/aira-web/pull/7777"
             assert ws.pr_number == 7777
+            assert ws.remote_push_branch == f"awf/{ws_id}"
             assert ws.pr_merge_sha == "stub_merge_sha"
             transitions = [(e.old_state, e.new_state) for e in ws.events]
             assert ("pushing", "monitoring_pr") in transitions

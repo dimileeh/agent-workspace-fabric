@@ -110,6 +110,38 @@ class TestUp:
         assert paths.compose_file.name == "compose.yml"
 
 
+class TestEnsureProjectUp:
+    @pytest.mark.unit
+    async def test_uses_persisted_project_and_file_without_rendering(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        compose_file = tmp_path / "persisted-compose.yml"
+        with patch(
+            "awf.node.compose_manager.asyncio.create_subprocess_exec",
+            return_value=_mock_proc(),
+        ) as mock_exec:
+            await manager.ensure_project_up(
+                project_name="awf_persisted_ws",
+                compose_file=compose_file,
+                workspace_id="ws_persisted",
+                wait=True,
+            )
+
+        cmd = mock_exec.call_args[0]
+        assert cmd == (
+            "docker",
+            "compose",
+            "--project-name",
+            "awf_persisted_ws",
+            "--file",
+            str(compose_file),
+            "up",
+            "-d",
+            "--wait",
+        )
+        assert not (tmp_path / "work" / "compose" / "ws_persisted").exists()
+
+
 class TestDown:
     @pytest.mark.unit
     async def test_down_is_noop_when_project_never_rendered(

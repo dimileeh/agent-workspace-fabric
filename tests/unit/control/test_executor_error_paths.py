@@ -62,8 +62,9 @@ def _make_executor(
     tmp_path: Path,
     *,
     pr_monitor_factory: Any = None,
+    compose: Any = None,
 ) -> WorkspaceExecutor:
-    compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+    compose = compose or _NoopResumeCompose()
     validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
     pr = PullRequestCreator(fake)
     return WorkspaceExecutor(
@@ -83,6 +84,18 @@ def _make_executor(
         ),
         pr_monitor_factory=pr_monitor_factory,
     )
+
+
+class _NoopResumeCompose:
+    async def ensure_project_up(
+        self,
+        *,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        wait: bool = True,
+    ) -> None:
+        del project_name, compose_file, workspace_id, wait
 
 
 async def _seed_ready(
@@ -118,6 +131,8 @@ async def _seed_ready(
 async def _seed_monitoring_pr(
     factory: async_sessionmaker[AsyncSession],
     *,
+    branch_name: str | None = "awf/x",
+    task_kind: str = "feature_branch_pr",
     pr_number: int | None = 42,
     pr_url: str | None = "https://github.com/x/y/pull/42",
     remote_push_branch: str | None = "awf/x",
@@ -141,8 +156,9 @@ async def _seed_monitoring_pr(
             auto_merge=auto_merge,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
         )
+        ws.task_kind = task_kind
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
-        ws.branch_name = "awf/x"
+        ws.branch_name = branch_name
         ws.remote_push_branch = remote_push_branch
         ws.base_commit = "a" * 40
         ws.compose_project_name = compose_project_name
@@ -941,12 +957,112 @@ class TestPrMonitorResume:
         ]
 
     @pytest.mark.unit
+    async def test_resume_pr_monitor_restarts_persisted_compose_stack_before_monitor(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        compose_file = tmp_path / "persisted-compose" / "compose.yml"
+        compose_file_path = compose_file
+        call_order: list[str] = []
+
+        class _RecordingCompose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+            ) -> None:
+                call_order.append("compose")
+                assert project_name == "persisted_project"
+                assert compose_file == compose_file_path
+                assert workspace_id == ws_id
+                assert wait is True
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                call_order.append("monitor")
+                assert call_order == ["compose", "monitor"]
+                assert workspace_id == ws_id
+                assert compose_project == "persisted_project"
+                assert compose_file == compose_file_path
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            compose_project_name="persisted_project",
+            compose_file_path=str(compose_file),
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args: _Monitor(),
+            compose=_RecordingCompose(),
+        )
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert call_order == ["compose", "monitor"]
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_recovers_feature_branch_remote_push_branch(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_calls: list[str] = []
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            branch_name="awf/legacy-feature",
+            remote_push_branch=None,
+        )
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert monitor_calls == [ws_id]
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.remote_push_branch == "awf/legacy-feature"
+            recovery_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.remote_push_branch_recovered"
+            ]
+            assert len(recovery_events) == 1
+            assert recovery_events[0].reason_code == "REMOTE_PUSH_BRANCH_RECOVERED"
+            assert recovery_events[0].payload == {
+                "remote_push_branch": "awf/legacy-feature",
+                "source": "branch_name",
+            }
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "field",
         [
             "pr_number",
             "pr_url",
-            "remote_push_branch",
             "compose_project_name",
             "compose_file_path",
         ],
@@ -976,3 +1092,35 @@ class TestPrMonitorResume:
             assert field in (ws.failure_message or "")
             assert "monitor recovery" in (ws.failure_message or "")
             assert ws.events[-1].reason_code == "MONITOR_RECOVERY_METADATA_MISSING"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("task_kind", ["monitor_release_pr", "sync_release_pr", "sync_feature_pr"])
+    async def test_sync_and_release_resume_fail_when_remote_push_branch_is_unknown(
+        self,
+        task_kind: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            task_kind=task_kind,
+            branch_name="release-sync/local-only",
+            remote_push_branch=None,
+        )
+
+        def _monitor_factory(*_args: Any) -> object:
+            raise AssertionError("monitor factory must not run without a safe remote branch")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "remote_push_branch" in (ws.failure_message or "")
+            assert task_kind in (ws.failure_message or "")
+            assert ws.remote_push_branch is None
