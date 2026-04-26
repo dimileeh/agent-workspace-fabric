@@ -44,11 +44,24 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
     profile = WorkspaceProfile.model_validate(
         {
             "name": "awf-self",
-            "validation": {"coverage": {"minimum_percent": 99}},
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99,
+                    "enforce": True,
+                    "command": {
+                        "command": "uv run pytest --cov=awf --cov-report=term",
+                        "timeout_seconds": 900,
+                    },
+                }
+            },
         }
     )
 
     assert profile.validation.coverage.minimum_percent == 99
+    assert profile.validation.coverage.enforce is True
+    assert profile.validation.coverage.command is not None
+    assert profile.validation.coverage.command.command == "uv run pytest --cov=awf --cov-report=term"
+    assert profile.validation.coverage.command.timeout_seconds == 900
 
 
 @pytest.mark.unit

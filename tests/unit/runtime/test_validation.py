@@ -132,6 +132,101 @@ class TestFailureStopsEarly:
         assert len(fake.calls) == 1
 
 
+class TestCoverageEnforcement:
+    @pytest.mark.unit
+    async def test_runs_configured_python_coverage_command_and_records_percent(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="tests ok")
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "Name        Stmts   Miss  Cover\n"
+                "-------------------------------\n"
+                "TOTAL         100      5    95%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-pass",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 90,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_coverage_pass",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+        )
+
+        assert result.all_passed
+        assert result.coverage is not None
+        assert result.coverage.percent == 95
+        assert result.coverage.minimum_percent == 90
+        assert result.coverage.reason_code == "COVERAGE_OK"
+        assert [(command.phase, command.command) for command in result.commands] == [
+            ("validate", "pytest -q"),
+            ("coverage", "pytest --cov=awf --cov-report=term"),
+        ]
+        assert result.commands[-1].stdout_path.name == "01_coverage.stdout"
+        assert "pytest --cov=awf --cov-report=term" in fake.calls[-1].args[-1]
+
+    @pytest.mark.unit
+    async def test_fails_when_configured_coverage_is_below_threshold(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="tests ok")
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "Name        Stmts   Miss  Cover\n"
+                "-------------------------------\n"
+                "TOTAL         100     12    88%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-fail",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 90,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_coverage_fail",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+        )
+
+        assert not result.all_passed
+        assert result.coverage is not None
+        assert result.coverage.percent == 88
+        assert result.coverage.minimum_percent == 90
+        assert result.coverage.reason_code == "COVERAGE_BELOW_THRESHOLD"
+        assert result.first_failure is not None
+        assert result.first_failure.phase == "coverage"
+        assert result.first_failure.reason_code == "COVERAGE_BELOW_THRESHOLD"
+
+
 class TestMigration:
     @pytest.mark.unit
     async def test_requires_database_no_longer_injects_alembic(
