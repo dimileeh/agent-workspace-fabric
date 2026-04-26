@@ -148,7 +148,7 @@ async def list_workspace_lock_page_for_session(
         )
     stmt = stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc()).limit(limit + 1)
 
-    rows = list((await session.execute(stmt)).scalars())
+    rows = (await session.execute(stmt)).scalars().all()
     page_rows = rows[:limit]
     has_more = len(rows) > limit
     return WorkspaceLockPage(
