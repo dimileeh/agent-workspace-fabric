@@ -31,6 +31,7 @@ from sqlalchemy import (
     Integer,
     String,
     UniqueConstraint,
+    text,
     true,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -82,7 +83,9 @@ class Workspace(Base):
     task_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
     """Optional PRD policy class used by later deterministic scheduling work."""
 
-    owned_paths: Mapped[list[str]] = mapped_column(JSON, nullable=False, default=list)
+    owned_paths: Mapped[list[str]] = mapped_column(
+        JSON, nullable=False, default=list, server_default=text("'[]'")
+    )
     """Caller-declared path globs/strings the task expects to own.
 
     This slice persists and exposes the contract only; lock scheduling consumes
