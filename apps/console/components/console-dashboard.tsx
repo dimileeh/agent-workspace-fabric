@@ -541,6 +541,9 @@ export function ConsoleDashboard() {
 
         <section className="min-w-0">
           {error ? <ErrorBanner message={error} /> : null}
+          <div className="p-4 pb-0">
+            <ResourceCapacityPanel saturation={resourceSaturation} error={resourceError} />
+          </div>
           {selectedId && selectedOverview ? (
             <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(420px,0.9fr)]">
               <div className="grid min-w-0 gap-4">
@@ -550,7 +553,6 @@ export function ConsoleDashboard() {
                   retryState={retryState}
                   onRetry={retrySelectedWorkspace}
                 />
-                <ResourceCapacityPanel saturation={resourceSaturation} error={resourceError} />
                 <LifecycleRail status={selectedOverview.status} />
                 <RuntimePanel runtime={detail.runtime} />
                 <OperationsPanel operations={detail.operations} />
