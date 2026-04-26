@@ -213,7 +213,13 @@ BUILTIN_PROFILES: dict[str, WorkspaceProfile] = {
 }
 
 
-def get_builtin_profile(name: str) -> WorkspaceProfile | None:
+def get_builtin_profile(
+    name: str, *, worktree_path: Path | None = None
+) -> WorkspaceProfile | None:
+    if name == "java" and worktree_path is not None:
+        java_build_tool = _detect_java_build_tool(worktree_path)
+        if java_build_tool is not None:
+            return java_profile(build_tool=java_build_tool)
     profile = BUILTIN_PROFILES.get(name)
     return profile.model_copy(deep=True) if profile is not None else None
 

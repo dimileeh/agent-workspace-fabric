@@ -108,6 +108,41 @@ def test_language_profiles_can_be_selected_from_registry(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("marker", "contents", "setup_command", "validate_command"),
+    [
+        (
+            "build.gradle",
+            "plugins { id 'java' }\n",
+            "gradle --no-daemon dependencies",
+            "gradle --no-daemon test",
+        ),
+        (
+            "gradlew",
+            "#!/bin/sh\n",
+            "./gradlew --no-daemon dependencies",
+            "./gradlew --no-daemon test",
+        ),
+    ],
+)
+def test_explicit_java_registry_profile_uses_detected_build_tool(
+    tmp_path: Path,
+    marker: str,
+    contents: str,
+    setup_command: str,
+    validate_command: str,
+) -> None:
+    (tmp_path / marker).write_text(contents, encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="java")
+
+    assert result.reason == "central registry profile java"
+    assert result.profile.name == "java"
+    assert result.profile.source == "builtin:java"
+    assert result.profile.phases.setup[0].command == setup_command
+    assert [c.command for c in result.profile.phases.validate_commands] == [validate_command]
+
+
+@pytest.mark.unit
 def test_auto_detection_prefers_docker_compose(tmp_path: Path) -> None:
     (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
