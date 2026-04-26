@@ -15,7 +15,13 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.runtime.pr_monitor import CheckTiming
+from awf.runtime.pr_monitor import (
+    CheckState,
+    CheckTiming,
+    MergeableState,
+    MonitorState,
+    PRStatus,
+)
 from awf.runtime.pr_monitor_runner import _is_pending_check, _stale_pending_check_warning_key
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -78,6 +84,16 @@ async def _pending_check_events(
             workspace_id=workspace_id,
             event_type="workspace.pending_check_stale",
         )
+
+
+class CountingSessionFactory:
+    def __init__(self, wrapped: async_sessionmaker[AsyncSession]) -> None:
+        self._wrapped = wrapped
+        self.calls = 0
+
+    def __call__(self) -> AsyncSession:
+        self.calls += 1
+        return self._wrapped()
 
 
 class TestStalePendingCheckWarnings:
@@ -211,6 +227,65 @@ class TestStalePendingCheckWarnings:
         assert payload["pr_number"] == 42
         assert payload["head_sha"] == "abc1234567890def"
         assert payload["age_seconds"] >= 60
+
+    @pytest.mark.unit
+    async def test_multiple_stale_pending_checks_use_one_event_session(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        counted_factory = CountingSessionFactory(factory)
+        started = datetime.now(UTC) - timedelta(seconds=75)
+        runner = make_runner(
+            factory=counted_factory,  # type: ignore[arg-type]
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            stale_pending_check_warning_seconds=60,
+        )
+        status = PRStatus(
+            number=42,
+            head_sha="abc1234567890def",
+            mergeable=MergeableState.MERGEABLE,
+            check_state=CheckState.PENDING,
+            unresolved_inline_threads=(),
+            unresolved_review_comments=(),
+            base_behind_count=0,
+            checks=(
+                CheckTiming(
+                    name="Greptile",
+                    status="IN_PROGRESS",
+                    started_at=started,
+                    details_url="https://checks.example/greptile",
+                ),
+                CheckTiming(
+                    name="Unit Tests",
+                    status="QUEUED",
+                    started_at=started,
+                    details_url="https://checks.example/unit",
+                ),
+            ),
+        )
+
+        emitted = await runner._record_stale_pending_check_warnings(
+            workspace_id=ws_id,
+            status=status,
+            state=MonitorState(),
+            monitor_log=None,
+        )
+
+        assert emitted is True
+        assert counted_factory.calls == 1
+        events = await _pending_check_events(factory, ws_id)
+        assert {e.payload["check_name"] for e in events if e.payload is not None} == {
+            "Greptile",
+            "Unit Tests",
+        }
 
     @pytest.mark.unit
     async def test_duplicate_polls_do_not_spam_same_threshold_window(

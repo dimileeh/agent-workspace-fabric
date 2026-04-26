@@ -41,7 +41,7 @@ from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.logs import LogStore, WorkspaceLogSink
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
 from awf.runtime.monitor_prompts import (
@@ -179,6 +179,7 @@ class PullRequestMonitorRunner:
             now=datetime.now(UTC),
             threshold_seconds=self._config.stale_pending_check_warning_seconds,
         )
+        events: list[WorkspaceEventCreate] = []
         for warning in warnings:
             key = _stale_pending_check_warning_key(
                 workspace_id=workspace_id,
@@ -200,34 +201,30 @@ class PullRequestMonitorRunner:
                     **payload,
                 },
             )
-            await self._append_workspace_event(
-                workspace_id=workspace_id,
-                event_type="workspace.pending_check_stale",
-                reason_code="PENDING_CHECK_STALE",
-                payload=payload,
+            events.append(
+                WorkspaceEventCreate(
+                    event_type="workspace.pending_check_stale",
+                    reason_code="PENDING_CHECK_STALE",
+                    payload=payload,
+                )
             )
             emitted = True
+        if events:
+            await self._append_workspace_events(workspace_id=workspace_id, events=events)
         return emitted
 
-    async def _append_workspace_event(
+    async def _append_workspace_events(
         self,
         *,
         workspace_id: str,
-        event_type: str,
-        reason_code: str | None,
-        payload: dict[str, object],
+        events: list[WorkspaceEventCreate],
     ) -> None:
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
             if ws is None:
                 return
-            await repo.add_event(
-                ws,
-                event_type=event_type,
-                reason_code=reason_code,
-                payload=payload,
-            )
+            await repo.add_events(ws, events=events)
             await s.commit()
 
     # ── Entry point ────────────────────────────────────────────────────────
