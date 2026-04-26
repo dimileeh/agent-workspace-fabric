@@ -526,7 +526,7 @@ class TestStalenessRefreshService:
         assert candidate.stale_reason == "validation_insufficient_tier"
 
     @pytest.mark.unit
-    async def test_refresh_clears_stale_when_findings_no_longer_apply(
+    async def test_refresh_preserves_existing_validation_stale_reason(
         self,
         factory: async_sessionmaker[AsyncSession],
     ) -> None:
@@ -539,6 +539,58 @@ class TestStalenessRefreshService:
             factory,
             owned_paths=["src/awf/api/**"],
             task_class="refactor_task",
+        )
+
+        async with factory() as session:
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+            assert candidate is not None
+            assert candidate.stale is True
+            assert candidate.stale_reason == "validation_insufficient_tier"
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("src/awf/api/routes/health.py",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            from awf.db.repositories import StaleReasonRepository
+
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+            reasons = await StaleReasonRepository(session).list_active_for_candidate(
+                candidate_id,
+            )
+
+        assert candidate is not None
+        assert candidate.stale is True
+        assert candidate.stale_reason == "validation_insufficient_tier"
+        assert {r.reason_code for r in reasons} >= {"STALE_OVERLAP"}
+
+    @pytest.mark.unit
+    async def test_refresh_clears_stale_when_findings_no_longer_apply(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        _workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="docs_task",
         )
 
         async with factory() as session:

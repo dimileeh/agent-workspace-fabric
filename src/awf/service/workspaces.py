@@ -24,11 +24,15 @@ from awf.api.schemas import (
     WorkspaceRuntimeResponse,
     WorkspaceWarningResponse,
 )
+from awf.common.config import Settings, get_settings
+from awf.common.logging import get_logger
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     OperationRepository,
     OwnedPathOverlap,
+    QueueDecisionRepository,
+    ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceEventRepository,
@@ -63,10 +67,30 @@ OWNED_PATH_OVERLAP_PAYLOAD_FIELDS = (
     "existing_path",
     "requested_path",
 )
+QUEUE_DECISION_ADMITTED = "admitted"
+QUEUE_DECISION_ADMITTED_LOCAL_REASON = "ADMITTED_LOCAL"
+RESOURCE_RESERVATION_PHASE_WORKSPACE = "workspace_lifecycle"
 RETRYABLE_WORKSPACE_STATUSES = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
 )
+TASK_CLASS_PRIORITIES = {
+    "migration_task": 5,
+    "dependency_task": 4,
+    "build_config_task": 3,
+    "refactor_task": 2,
+    "test_task": 1,
+    "docs_task": 0,
+}
+TASK_CLASS_BIASES = {
+    "migration_task": 15,
+    "dependency_task": 12,
+    "build_config_task": 10,
+    "refactor_task": 4,
+    "test_task": 2,
+    "docs_task": 0,
+}
+_log = get_logger(__name__)
 
 
 class WorkspaceRetryError(Exception):
@@ -114,6 +138,28 @@ class WorkspaceRetryResult:
     new_workspace: Workspace
     operation: Operation
     attempt_number: int
+
+
+@dataclass(frozen=True)
+class ResourceReservationPlan:
+    node_id: str
+    steady_cpu: float
+    steady_memory_gb: float
+    peak_cpu: float
+    peak_memory_gb: float
+    disk_mb: int | None
+    phase: str = RESOURCE_RESERVATION_PHASE_WORKSPACE
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "node_id": self.node_id,
+            "steady_cpu": self.steady_cpu,
+            "steady_memory_gb": self.steady_memory_gb,
+            "peak_cpu": self.peak_cpu,
+            "peak_memory_gb": self.peak_memory_gb,
+            "disk_mb": self.disk_mb,
+            "phase": self.phase,
+        }
 
 
 class WorkspaceService:
@@ -379,8 +425,10 @@ async def create_workspace_v2_row(
     payload: WorkspaceCreateV2Request,
     *,
     idempotency_key: str | None = None,
+    settings: Settings | None = None,
 ) -> Workspace:
     """Persist one v2 workspace request without committing the session."""
+    resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
     overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=payload.repo.url,
@@ -425,7 +473,37 @@ async def create_workspace_v2_row(
         ),
         owned_paths=payload.task.owned_paths,
     )
-    await TaskAttemptRepository(session).create_for_workspace(task=task, workspace=ws)
+    attempt = await TaskAttemptRepository(session).create_for_workspace(task=task, workspace=ws)
+    reservation_plan = resource_reservation_plan(payload, settings=resolved_settings)
+    await ResourceReservationRepository(session).create(
+        workspace_id=ws.id,
+        attempt_id=attempt.id,
+        node_id=reservation_plan.node_id,
+        steady_cpu=reservation_plan.steady_cpu,
+        steady_memory_gb=reservation_plan.steady_memory_gb,
+        peak_cpu=reservation_plan.peak_cpu,
+        peak_memory_gb=reservation_plan.peak_memory_gb,
+        disk_mb=reservation_plan.disk_mb,
+        phase=reservation_plan.phase,
+    )
+    await QueueDecisionRepository(session).create(
+        workspace_id=ws.id,
+        task_id=task.id,
+        attempt_id=attempt.id,
+        decision=QUEUE_DECISION_ADMITTED,
+        reason_code=QUEUE_DECISION_ADMITTED_LOCAL_REASON,
+        class_priority=task_class_priority(ws.task_class),
+        computed_priority=computed_priority(
+            base_priority=payload.task.priority,
+            task_class=ws.task_class,
+            age_boost=0,
+            retry_bonus=0,
+        ),
+        age_boost=0,
+        retry_bonus=0,
+        resource_summary=reservation_plan.summary(),
+        overlap_risk_summary=overlap_risk_summary(overlaps),
+    )
     await _record_owned_path_overlap_risk(repo, ws, overlaps)
     await session.flush()
     return ws
@@ -600,6 +678,114 @@ def owned_path_overlap_warning_payload(overlaps: list[OwnedPathOverlap]) -> dict
         "workspace_ids": list(workspace_ids),
         "overlaps": overlap_items,
     }
+
+
+def overlap_risk_summary(overlaps: list[OwnedPathOverlap]) -> dict[str, Any]:
+    if not overlaps:
+        return {
+            "warning_code": None,
+            "overlap_count": 0,
+            "workspace_ids": [],
+            "overlaps": [],
+        }
+    payload = owned_path_overlap_warning_payload(overlaps)
+    return {
+        "warning_code": OWNED_PATH_OVERLAP_RISK_CODE,
+        "overlap_count": len(overlaps),
+        "workspace_ids": payload["workspace_ids"],
+        "overlaps": payload["overlaps"],
+    }
+
+
+def task_class_priority(task_class: str | None) -> int:
+    return TASK_CLASS_PRIORITIES.get(task_class or "", 0)
+
+
+def computed_priority(
+    *,
+    base_priority: int,
+    task_class: str | None,
+    age_boost: int,
+    retry_bonus: int,
+) -> int:
+    return (
+        base_priority
+        + TASK_CLASS_BIASES.get(task_class or "", 0)
+        + age_boost
+        + retry_bonus
+    )
+
+
+def resource_reservation_plan(
+    payload: WorkspaceCreateV2Request,
+    *,
+    settings: Settings,
+) -> ResourceReservationPlan:
+    resources = payload.resources
+    legacy_memory_gb = _parse_memory_gb(resources.memory)
+    return ResourceReservationPlan(
+        node_id=settings.worker_node_id or "local",
+        steady_cpu=(
+            resources.steady_state_cpu_cores
+            if resources.steady_state_cpu_cores is not None
+            else resources.cpu
+            if resources.cpu is not None
+            else settings.workspace_steady_cpu
+        ),
+        steady_memory_gb=(
+            resources.steady_state_memory_gb
+            if resources.steady_state_memory_gb is not None
+            else legacy_memory_gb
+            if legacy_memory_gb is not None
+            else settings.workspace_steady_memory_gb
+        ),
+        peak_cpu=(
+            resources.peak_cpu_cores
+            if resources.peak_cpu_cores is not None
+            else resources.cpu
+            if resources.cpu is not None
+            else settings.workspace_peak_cpu
+        ),
+        peak_memory_gb=(
+            resources.peak_memory_gb
+            if resources.peak_memory_gb is not None
+            else legacy_memory_gb
+            if legacy_memory_gb is not None
+            else settings.workspace_peak_memory_gb
+        ),
+        disk_mb=resources.disk_mb,
+    )
+
+
+def _parse_memory_gb(value: str | None) -> float | None:
+    if value is None:
+        return None
+    normalized = value.strip().lower().replace(" ", "")
+    if normalized == "":
+        return None
+    multipliers = {
+        "gb": 1.0,
+        "g": 1.0,
+        "mb": 1.0 / 1024.0,
+        "m": 1.0 / 1024.0,
+    }
+    for suffix, multiplier in multipliers.items():
+        if normalized.endswith(suffix):
+            number = normalized[: -len(suffix)]
+            try:
+                return float(number) * multiplier
+            except ValueError:
+                return None
+    try:
+        memory_gb = float(normalized)
+    except ValueError:
+        return None
+    _log.warning(
+        "workspace.resources.memory_unit_missing",
+        raw_value=normalized,
+        interpreted_unit="gb",
+    )
+    return memory_gb
 
 
 def owned_path_overlap_warnings(workspace: Workspace) -> list[WorkspaceWarningResponse]:

@@ -396,6 +396,68 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert listed.json()[0]["owned_paths"] == ["src/awf/**/*.py", "tests/unit/**"]
 
     @pytest.mark.unit
+    async def test_workspace_response_exposes_latest_decision_and_active_reservation(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "task": {
+                **_V2_MINIMAL_BODY["task"],
+                "task_class": "dependency_task",
+                "priority": 25,
+                "owned_paths": ["pyproject.toml", "uv.lock"],
+            },
+            "resources": {
+                "steady_state_cpu_cores": 4.0,
+                "steady_state_memory_gb": 12.0,
+                "peak_cpu_cores": 8.0,
+                "peak_memory_gb": 24.0,
+                "disk_mb": 4096,
+            },
+        }
+
+        create = await client.post("/v2/workspaces", json=payload)
+        assert create.status_code == 202
+
+        ws_id = create.json()["workspace_id"]
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        body = response.json()
+        decision = body["latest_queue_decision"]
+        reservation = body["active_resource_reservation"]
+        assert decision["id"].startswith("qd_")
+        assert decision["decision"] == "admitted"
+        assert decision["reason_code"] == "ADMITTED_LOCAL"
+        assert decision["class_priority"] == 4
+        assert decision["computed_priority"] == 37
+        assert decision["age_boost"] == 0
+        assert decision["retry_bonus"] == 0
+        assert decision["resource_summary"]["peak_cpu"] == 8.0
+        assert decision["overlap_risk_summary"]["overlap_count"] == 0
+        assert reservation["id"].startswith("rr_")
+        assert reservation["node_id"] == "local"
+        assert reservation["steady_cpu"] == 4.0
+        assert reservation["steady_memory_gb"] == 12.0
+        assert reservation["peak_cpu"] == 8.0
+        assert reservation["peak_memory_gb"] == 24.0
+        assert reservation["disk_mb"] == 4096
+        assert reservation["phase"] == "workspace_lifecycle"
+        assert reservation["released_at"] is None
+
+    @pytest.mark.unit
+    async def test_rejects_zero_disk_reservation(self, client: AsyncClient) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "resources": {"disk_mb": 0},
+        }
+
+        response = await client.post("/v2/workspaces", json=payload)
+
+        assert response.status_code == 422
+
+    @pytest.mark.unit
     async def test_legacy_v1_defaults_policy_metadata(self, client: AsyncClient) -> None:
         ws_id = await _create_workspace(client)
 

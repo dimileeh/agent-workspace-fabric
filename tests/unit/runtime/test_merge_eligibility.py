@@ -40,7 +40,7 @@ async def test_merge_candidate_requires_sufficient_validation_tier() -> None:
 
 
 @pytest.mark.asyncio
-async def test_merge_candidate_clears_stale_state_when_computed_reason_clears() -> None:
+async def test_merge_candidate_clears_validation_stale_state_when_reason_clears() -> None:
     workspace = Workspace(
         id="ws_1",
         status=WorkspaceStatus.monitoring_pr.value,
@@ -58,7 +58,7 @@ async def test_merge_candidate_clears_stale_state_when_computed_reason_clears() 
         attempt=attempt,
         status="open",
         stale=True,
-        stale_reason="previous_computed_reason",
+        stale_reason="validation_insufficient_tier",
     )
 
     _sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)

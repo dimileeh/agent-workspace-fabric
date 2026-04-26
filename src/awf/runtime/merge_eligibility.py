@@ -50,7 +50,8 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
                 if isinstance(op.payload.get("requested_tier"), int):
                     op_tier = op.payload["requested_tier"]
                 elif isinstance(op.payload.get("validation"), dict) and isinstance(
-                    op.payload["validation"].get("requested_tier"), int
+                    op.payload["validation"].get("requested_tier"),
+                    int,
                 ):
                     op_tier = op.payload["validation"]["requested_tier"]
 

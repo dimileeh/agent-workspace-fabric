@@ -29,6 +29,8 @@ from awf.common.ids import (
     new_log_stream_id,
     new_merge_candidate_id,
     new_operation_id,
+    new_queue_decision_id,
+    new_resource_reservation_id,
     new_stale_reason_id,
     new_task_attempt_id,
     new_task_id,
@@ -41,6 +43,8 @@ from awf.db.enums import AgentRuntime, OperationStatus, OperationType, Workspace
 from awf.db.models import (
     MergeCandidate,
     Operation,
+    QueueDecision,
+    ResourceReservation,
     StaleReason,
     Task,
     TaskAttempt,
@@ -323,6 +327,161 @@ class TaskAttemptRepository:
 
         stmt = stmt.order_by(TaskAttempt.created_at.desc(), TaskAttempt.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+
+class QueueDecisionRepository:
+    """CRUD helpers for durable scheduler admission decisions."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        workspace_id: str,
+        task_id: str,
+        attempt_id: str,
+        decision: str,
+        reason_code: str,
+        class_priority: int,
+        computed_priority: int,
+        age_boost: int,
+        retry_bonus: int,
+        resource_summary: dict[str, Any],
+        overlap_risk_summary: dict[str, Any],
+        decided_at: datetime | None = None,
+    ) -> QueueDecision:
+        row = QueueDecision(
+            id=new_queue_decision_id(),
+            workspace_id=workspace_id,
+            task_id=task_id,
+            attempt_id=attempt_id,
+            decision=decision,
+            reason_code=reason_code,
+            class_priority=class_priority,
+            computed_priority=computed_priority,
+            age_boost=age_boost,
+            retry_bonus=retry_bonus,
+            resource_summary=dict(resource_summary),
+            overlap_risk_summary=dict(overlap_risk_summary),
+            decided_at=decided_at or datetime.now(UTC),
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def list_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        limit: int = 50,
+    ) -> builtins.list[QueueDecision]:
+        stmt = (
+            select(QueueDecision)
+            .where(QueueDecision.workspace_id == workspace_id)
+            .order_by(QueueDecision.decided_at.desc(), QueueDecision.id.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def list_for_attempt(
+        self,
+        attempt_id: str,
+        *,
+        limit: int = 50,
+    ) -> builtins.list[QueueDecision]:
+        stmt = (
+            select(QueueDecision)
+            .where(QueueDecision.attempt_id == attempt_id)
+            .order_by(QueueDecision.decided_at.desc(), QueueDecision.id.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+
+class ResourceReservationRepository:
+    """CRUD helpers for local resource reservation records."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def create(
+        self,
+        *,
+        workspace_id: str,
+        attempt_id: str,
+        node_id: str,
+        steady_cpu: float,
+        steady_memory_gb: float,
+        peak_cpu: float,
+        peak_memory_gb: float,
+        disk_mb: int | None,
+        phase: str,
+        reserved_at: datetime | None = None,
+    ) -> ResourceReservation:
+        row = ResourceReservation(
+            id=new_resource_reservation_id(),
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            node_id=node_id,
+            steady_cpu=steady_cpu,
+            steady_memory_gb=steady_memory_gb,
+            peak_cpu=peak_cpu,
+            peak_memory_gb=peak_memory_gb,
+            disk_mb=disk_mb,
+            phase=phase,
+            reserved_at=reserved_at or datetime.now(UTC),
+            released_at=None,
+        )
+        self._session.add(row)
+        await self._session.flush()
+        return row
+
+    async def list_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        limit: int = 50,
+    ) -> builtins.list[ResourceReservation]:
+        stmt = (
+            select(ResourceReservation)
+            .where(ResourceReservation.workspace_id == workspace_id)
+            .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def active_for_workspace(self, workspace_id: str) -> ResourceReservation | None:
+        stmt = (
+            select(ResourceReservation)
+            .where(
+                ResourceReservation.workspace_id == workspace_id,
+                ResourceReservation.released_at.is_(None),
+            )
+            .order_by(ResourceReservation.reserved_at.desc(), ResourceReservation.id.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def release_active_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        released_at: datetime | None = None,
+    ) -> builtins.list[ResourceReservation]:
+        release_time = released_at or datetime.now(UTC)
+        result = await self._session.execute(
+            update(ResourceReservation)
+            .where(
+                ResourceReservation.workspace_id == workspace_id,
+                ResourceReservation.released_at.is_(None),
+            )
+            .values(released_at=release_time)
+            .returning(ResourceReservation)
+        )
+        rows = list(result.scalars())
+        rows.sort(key=lambda row: (row.reserved_at, row.id))
+        return rows
 
 
 class MergeCandidateRepository:
@@ -1201,6 +1360,10 @@ class WorkspaceRepository:
         if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
             workspace.monitor_started_at = datetime.now(UTC)
         await self._sync_merge_candidate_lifecycle(workspace, attempt=attempt, to=to)
+        if _releases_resource_reservation(to):
+            await ResourceReservationRepository(self._session).release_active_for_workspace(
+                workspace.id
+            )
 
         workspace.events.append(
             WorkspaceEvent(
@@ -1256,6 +1419,11 @@ class WorkspaceRepository:
         if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
             workspace.monitor_started_at = now
         await self._sync_merge_candidate_lifecycle(workspace, attempt=attempt, to=to)
+        if _releases_resource_reservation(to):
+            await ResourceReservationRepository(self._session).release_active_for_workspace(
+                workspace.id,
+                released_at=now,
+            )
 
         workspace.events.append(
             WorkspaceEvent(
@@ -1472,14 +1640,27 @@ def _candidate_terminal_close_reason(status: WorkspaceStatus) -> str:
     return f"WORKSPACE_{status.value.upper()}"
 
 
+def _releases_resource_reservation(status: WorkspaceStatus) -> bool:
+    return status in {
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
+        WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroyed,
+    }
+
+
 def _sync_candidate_readiness(
     candidate: MergeCandidate,
     *,
     workspace: Workspace,
     attempt: TaskAttempt,
-    recompute_stale: bool = True,
+    sync_validation_staleness: bool = True,
+    recompute_stale: bool | None = None,
 ) -> None:
     from awf.runtime.merge_eligibility import compute_stale_reason
+
+    if recompute_stale is not None:
+        sync_validation_staleness = recompute_stale
 
     workspace_status = WorkspaceStatus(workspace.status)
     is_open = candidate.status == "open"
@@ -1491,12 +1672,15 @@ def _sync_candidate_readiness(
     }
     not_canonical = not is_canonical
 
-    if recompute_stale:
+    if sync_validation_staleness:
         stale_reason, _ = compute_stale_reason(workspace)
-        computed_stale = stale_reason is not None
-        if candidate.stale != computed_stale or candidate.stale_reason != stale_reason:
-            candidate.stale = computed_stale
+        # If there's an active stale reason, update it. If the reason clears, clear it.
+        if stale_reason is not None:
+            candidate.stale = True
             candidate.stale_reason = stale_reason
+        elif stale_reason is None and candidate.stale_reason in ("validation_insufficient_tier",):
+            candidate.stale = False
+            candidate.stale_reason = None
 
     candidate.completed = is_completed
     candidate.failed_or_cancelled = failed_or_cancelled
