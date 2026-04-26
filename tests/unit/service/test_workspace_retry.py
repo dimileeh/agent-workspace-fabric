@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateV2Request
@@ -197,3 +197,42 @@ async def test_retry_preserves_remote_push_branch_for_sync_workspace(
     assert retried.task_kind == "sync_release_pr"
     assert retried.branch_name is None
     assert retried.remote_push_branch == "development"
+
+
+@pytest.mark.unit
+async def test_retry_persists_task_kind_without_post_insert_update() -> None:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = make_session_factory(engine)
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request(task_kind="sync_release_pr"))
+    await _mark_failed(factory, first.id)
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+    try:
+        await service.retry_workspace(first.id)
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+        await engine.dispose()
+
+    task_kind_updates = [
+        statement
+        for statement in statements
+        if statement.startswith("update workspaces") and "task_kind" in statement
+    ]
+    assert task_kind_updates == []

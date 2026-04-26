@@ -404,8 +404,8 @@ async def create_workspace_v2_row(
         test_commands=payload.validation.commands,
         requires_database=False,
         idempotency_key=idempotency_key,
+        task_kind=payload.task.kind,
     )
-    ws.task_kind = payload.task.kind
     task = await TaskRepository(session).create_or_get(
         repo_url=payload.repo.url,
         base_branch=payload.repo.base_branch,
@@ -469,9 +469,9 @@ async def retry_workspace_row(
         test_commands=list(source.test_commands),
         requires_database=source.requires_database,
         idempotency_key=None,
+        task_kind=source.task_kind,
+        remote_push_branch=source.remote_push_branch,
     )
-    retried.task_kind = source.task_kind
-    retried.remote_push_branch = source.remote_push_branch
 
     task = await _retry_task_for_source(session, source)
     attempt = await TaskAttemptRepository(session).create_for_workspace(
