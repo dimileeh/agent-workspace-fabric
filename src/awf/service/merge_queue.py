@@ -48,13 +48,13 @@ class MergeQueueBlocker:
             "reason_code": self.reason_code,
             "repo_url": repo_url,
             "base_branch": base_branch,
-            "blocked_candidate_id": self.candidate_id,
-            "blocked_workspace_id": self.workspace_id,
-            "blocked_pr_url": self.pr_url,
-            "blocked_pr_number": self.pr_number,
-            "blocked_title": self.title,
-            "blocked_status": self.status,
-            "blocked_state": self.blocker_state,
+            "blocker_candidate_id": self.candidate_id,
+            "blocker_workspace_id": self.workspace_id,
+            "blocker_pr_url": self.pr_url,
+            "blocker_pr_number": self.pr_number,
+            "blocker_title": self.title,
+            "blocker_status": self.status,
+            "blocker_state": self.blocker_state,
         }
 
 

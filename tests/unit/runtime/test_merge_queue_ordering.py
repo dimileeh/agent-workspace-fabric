@@ -196,13 +196,13 @@ async def test_monitor_waits_for_older_candidate_without_notify_human(
         "reason_code": "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
         "repo_url": REPO_URL,
         "base_branch": "development",
-        "blocked_candidate_id": older_candidate_id,
-        "blocked_workspace_id": older_workspace_id,
-        "blocked_pr_url": "https://github.com/dimileeh/aira-web/pull/101",
-        "blocked_pr_number": 101,
-        "blocked_title": "Older candidate",
-        "blocked_status": older_status.value,
-        "blocked_state": "monitor_owned_recovery"
+        "blocker_candidate_id": older_candidate_id,
+        "blocker_workspace_id": older_workspace_id,
+        "blocker_pr_url": "https://github.com/dimileeh/aira-web/pull/101",
+        "blocker_pr_number": 101,
+        "blocker_title": "Older candidate",
+        "blocker_status": older_status.value,
+        "blocker_state": "monitor_owned_recovery"
         if recovery_operation
         else "merge_eligible",
     }

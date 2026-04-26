@@ -18,7 +18,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
-from awf.service.merge_queue import list_merge_queue_blockers_for_candidate
+from awf.service.merge_queue import MergeQueueBlocker, list_merge_queue_blockers_for_candidate
 
 
 @pytest.fixture
@@ -30,6 +30,40 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.unit
+def test_blocker_event_payload_uses_blocker_field_names() -> None:
+    blocker = MergeQueueBlocker(
+        candidate_id="candidate-older",
+        workspace_id="workspace-older",
+        attempt_id="attempt-older",
+        task_id="task-older",
+        title="Older candidate",
+        pr_url="https://github.com/example/service/pull/11",
+        pr_number=11,
+        status=WorkspaceStatus.monitoring_pr.value,
+        blocker_state="merge_eligible",
+    )
+
+    payload = blocker.event_payload(
+        repo_url="git@github.com:example/service.git",
+        base_branch="development",
+    )
+
+    assert payload == {
+        "reason_code": "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
+        "repo_url": "git@github.com:example/service.git",
+        "base_branch": "development",
+        "blocker_candidate_id": "candidate-older",
+        "blocker_workspace_id": "workspace-older",
+        "blocker_pr_url": "https://github.com/example/service/pull/11",
+        "blocker_pr_number": 11,
+        "blocker_title": "Older candidate",
+        "blocker_status": WorkspaceStatus.monitoring_pr.value,
+        "blocker_state": "merge_eligible",
+    }
+    assert not any(key.startswith("blocked_") for key in payload)
 
 
 async def _seed_candidate(
