@@ -96,7 +96,7 @@ Still not complete:
 - Multi-node scheduling.
 - Cloud backend.
 - Full web dashboard.
-- Full secret lease broker.
+- Full secret lease broker (local profiles declare security/egress and secrets metadata, but full cloud enforcement is pending).
 
 See:
 
