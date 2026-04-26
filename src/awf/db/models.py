@@ -624,6 +624,7 @@ class ValidationRun(Base):
 
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    retry_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default=text("0"))
     started_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )

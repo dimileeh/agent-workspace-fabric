@@ -807,6 +807,7 @@ class TestMergeQueueList:
                 ]
             },
             "fresh_for_target": False,
+            "retry_count": 0,
             "coverage_percent": None,
             "coverage_minimum_percent": None,
             "coverage_status": None,

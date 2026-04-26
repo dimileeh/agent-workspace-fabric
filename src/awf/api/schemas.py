@@ -414,6 +414,7 @@ class ValidationRunSummaryResponse(BaseModel):
     finished_at: datetime | None = None
     log_stream_refs: dict[str, Any] = Field(default_factory=dict)
     fresh_for_target: bool | None = None
+    retry_count: int = 0
     coverage_percent: float | None = None
     coverage_minimum_percent: float | None = None
     coverage_status: str | None = None
@@ -607,6 +608,7 @@ class ValidationProvenanceItemResponse(BaseModel):
     finished_at: datetime | None = None
     log_stream_refs: dict[str, Any] = Field(default_factory=dict)
     fresh_for_target: bool | None = None
+    retry_count: int = 0
     coverage_percent: float | None = None
     coverage_minimum_percent: float | None = None
     coverage_status: str | None = None

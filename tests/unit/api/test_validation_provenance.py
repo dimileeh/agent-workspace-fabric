@@ -177,6 +177,7 @@ async def _insert_validation_run(
     started_at: datetime = datetime(2026, 4, 26, 13, 0, tzinfo=UTC),
     finished_at: datetime | None = datetime(2026, 4, 26, 13, 2, tzinfo=UTC),
     log_stream_refs: dict | None = None,
+    retry_count: int = 0,
 ) -> None:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -195,6 +196,7 @@ async def _insert_validation_run(
                     target_head_sha,
                     status,
                     reason_code,
+                    retry_count,
                     started_at,
                     finished_at,
                     log_stream_refs
@@ -211,6 +213,7 @@ async def _insert_validation_run(
                     :target_head_sha,
                     :status,
                     :reason_code,
+                    :retry_count,
                     :started_at,
                     :finished_at,
                     :log_stream_refs
@@ -229,6 +232,7 @@ async def _insert_validation_run(
                 "target_head_sha": target_head_sha,
                 "status": status,
                 "reason_code": reason_code,
+                "retry_count": retry_count,
                 "started_at": started_at,
                 "finished_at": finished_at,
                 "log_stream_refs": json.dumps(log_stream_refs or {}),
@@ -385,6 +389,7 @@ async def test_validation_provenance_prefers_persisted_validation_runs(
     assert item["target_head_sha"] == "target-persisted"
     assert item["current_target_head_sha"] is None
     assert item["fresh_for_target"] is None
+    assert item["retry_count"] == 0
     assert item["started_at"] == "2026-04-26T13:00:00Z"
     assert item["finished_at"] == "2026-04-26T13:02:00Z"
     assert item["log_stream_refs"] == {
