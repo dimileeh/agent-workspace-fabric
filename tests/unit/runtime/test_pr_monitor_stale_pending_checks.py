@@ -16,7 +16,7 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import CheckTiming
-from awf.runtime.pr_monitor_runner import _is_pending_check
+from awf.runtime.pr_monitor_runner import _is_pending_check, _stale_pending_check_warning_key
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -92,6 +92,25 @@ class TestStalePendingCheckWarnings:
         check = CheckTiming(name="Future CI", status="AWAITING_RUN", conclusion="SUCCESS")
 
         assert not _is_pending_check(check)
+
+    @pytest.mark.unit
+    def test_warning_key_encodes_colons_in_check_name(self) -> None:
+        key_with_colon_check = _stale_pending_check_warning_key(
+            workspace_id="ws_1",
+            head_sha="sha1",
+            check_name="a:b",
+            threshold_seconds=60.0,
+            threshold_window=1,
+        )
+        boundary_shifted_key = _stale_pending_check_warning_key(
+            workspace_id="ws_1",
+            head_sha="sha1:a",
+            check_name="b",
+            threshold_seconds=60.0,
+            threshold_window=1,
+        )
+
+        assert key_with_colon_check != boundary_shifted_key
 
     @pytest.mark.unit
     async def test_no_event_before_threshold(

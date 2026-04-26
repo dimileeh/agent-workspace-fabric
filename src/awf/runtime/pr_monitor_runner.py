@@ -1659,9 +1659,9 @@ def _stale_pending_check_warning_key(
     threshold_seconds: float,
     threshold_window: int,
 ) -> str:
-    return (
-        "__awf_pending_check_stale__:"
-        f"{workspace_id}:{head_sha}:{check_name}:{threshold_seconds:g}:{threshold_window}"
+    return "__awf_pending_check_stale__:" + json.dumps(
+        [workspace_id, head_sha, check_name, f"{threshold_seconds:g}", threshold_window],
+        separators=(",", ":"),
     )
 
 
