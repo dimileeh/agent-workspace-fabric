@@ -17,6 +17,7 @@ import awf.adapters.registry  # noqa: F401 - populate adapter registry for servi
 from awf.adapters.base import AgentAdapter
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.github_client import GitHubClient
+from awf.common.logging import get_logger
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.models import Workspace
@@ -37,6 +38,8 @@ from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.release_pr_monitor import build_feature_pr_monitor, build_release_pr_monitor
 from awf.runtime.validation import ValidationRunner
 from awf.service.config import ServiceSettings
+
+_log = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -157,9 +160,22 @@ def _merge_coordinator_for_database_url(
 def _is_postgres_database_url(database_url: str) -> bool:
     try:
         backend = make_url(database_url).get_backend_name()
-    except ArgumentError:
+    except ArgumentError as exc:
+        _log.warning(
+            "worker.database_url_parse_failed",
+            error=str(exc),
+            merge_coordinator="in_process",
+        )
         return False
-    return backend in {"postgres", "postgresql"}
+    if backend in {"postgres", "postgresql"}:
+        return True
+    if backend.startswith("postgres"):
+        _log.warning(
+            "worker.postgres_merge_coordinator_not_selected",
+            backend=backend,
+            merge_coordinator="in_process",
+        )
+    return False
 
 
 def _service_git_environment(host_home: Path, *, github_token: str | None = None) -> dict[str, str]:

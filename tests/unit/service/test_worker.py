@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.merge_coordinator import InProcessMergeCoordinator
@@ -317,6 +318,33 @@ def test_build_worker_runtime_uses_postgres_advisory_merge_coordinator_for_postg
     assert isinstance(
         created["feature_monitor_kwargs"]["merge_coordinator"],
         _PostgresCoordinator,
+    )
+
+
+@pytest.mark.unit
+def test_is_postgres_database_url_warns_on_parse_failure() -> None:
+    with structlog.testing.capture_logs() as captured:
+        assert worker_mod._is_postgres_database_url("not a url") is False
+
+    assert any(
+        event.get("event") == "worker.database_url_parse_failed"
+        and event.get("log_level") == "warning"
+        and event.get("merge_coordinator") == "in_process"
+        for event in captured
+    )
+
+
+@pytest.mark.unit
+def test_is_postgres_database_url_warns_on_postgres_backend_typo() -> None:
+    with structlog.testing.capture_logs() as captured:
+        assert worker_mod._is_postgres_database_url("postgresq://awf:secret@localhost/awf") is False
+
+    assert any(
+        event.get("event") == "worker.postgres_merge_coordinator_not_selected"
+        and event.get("log_level") == "warning"
+        and event.get("backend") == "postgresq"
+        and event.get("merge_coordinator") == "in_process"
+        for event in captured
     )
 
 
