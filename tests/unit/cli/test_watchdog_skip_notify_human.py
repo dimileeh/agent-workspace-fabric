@@ -19,7 +19,6 @@ watchdog.
 from __future__ import annotations
 
 import json
-import logging
 import os
 import time
 from pathlib import Path
@@ -86,9 +85,7 @@ class TestShouldSkipRespawn:
             is False
         )
 
-    def test_notify_human_terminal_with_same_sha_skips(
-        self, tmp_path: Path, caplog
-    ) -> None:
+    def test_notify_human_terminal_with_same_sha_skips(self, tmp_path: Path, capsys) -> None:
         """The whole point of the fix: PR has a NotifyHuman artifact AND
         the head_sha hasn't moved → don't respawn."""
         artifacts_root = tmp_path / "artifacts"
@@ -101,25 +98,21 @@ class TestShouldSkipRespawn:
             terminal_action="NotifyHuman",
             head_sha=head,
         )
-        with caplog.at_level(logging.INFO):
-            result = _should_skip_respawn(
-                owner="dimileeh",
-                repo="aira-agent",
-                pr_number=355,
-                current_head_sha=head,
-                artifacts_root=artifacts_root,
-            )
+        result = _should_skip_respawn(
+            owner="dimileeh",
+            repo="aira-agent",
+            pr_number=355,
+            current_head_sha=head,
+            artifacts_root=artifacts_root,
+        )
         assert result is True
-        # Operator should be able to grep for this exact event.
-        assert any(
-            "watchdog.skipped_notify_human_terminal" in rec.getMessage()
-            or "watchdog.skipped_notify_human_terminal" in str(rec.__dict__)
-            for rec in caplog.records
-        ), "expected watchdog.skipped_notify_human_terminal log line"
+        # Operator should be able to grep stdout for this exact event.
+        captured = capsys.readouterr()
+        assert "watchdog.skipped_notify_human_terminal" in (captured.out + captured.err), (
+            "expected watchdog.skipped_notify_human_terminal log line"
+        )
 
-    def test_notify_human_terminal_with_different_sha_respawns(
-        self, tmp_path: Path
-    ) -> None:
+    def test_notify_human_terminal_with_different_sha_respawns(self, tmp_path: Path) -> None:
         """New commits arrived since the NotifyHuman → re-engage."""
         artifacts_root = tmp_path / "artifacts"
         _write_artifact(
@@ -306,9 +299,7 @@ class TestShouldSkipRespawn:
             is False
         )
 
-    def test_picks_latest_artifact_when_multiple_notify_human(
-        self, tmp_path: Path
-    ) -> None:
+    def test_picks_latest_artifact_when_multiple_notify_human(self, tmp_path: Path) -> None:
         """Symmetric counter-test: newest IS NotifyHuman → skip wins."""
         artifacts_root = tmp_path / "artifacts"
         now = time.time()

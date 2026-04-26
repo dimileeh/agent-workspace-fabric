@@ -87,7 +87,12 @@ def _default_gh_lister(repo: str, *, limit: int = 200) -> str:
 
     ``limit`` maps directly to ``gh pr list --limit``. The watchdog
     binds this via ``functools.partial`` from ``WatchdogConfig.gh_pr_limit``
-    so operators can raise it if a repo ever exceeds the default."""
+    so operators can raise it if a repo ever exceeds the default.
+
+    ``headRefOid`` is requested so the NotifyHuman-aware respawn-skip
+    can compare the PR's current head SHA against the SHA recorded in
+    the latest defer-signal artifact — without it, a NotifyHuman PR
+    that received new commits would never re-engage."""
     result = subprocess.run(
         [
             "gh",
@@ -100,7 +105,7 @@ def _default_gh_lister(repo: str, *, limit: int = 200) -> str:
             "--head",
             "awf/",
             "--json",
-            "number,headRefName,baseRefName",
+            "number,headRefName,headRefOid,baseRefName",
             "--limit",
             str(limit),
         ],
@@ -180,6 +185,80 @@ def _extract_owner_name(repo: str) -> tuple[str, str]:
     return owner, name
 
 
+def _latest_defer_signal_for_pr(
+    artifacts_root: Path, *, owner: str, repo: str, pr_number: int
+) -> dict | None:
+    """Scan ``artifacts_root`` for the most-recent ``*.defer-signal.json``
+    whose payload matches this owner/repo/pr_number triple. Returns the
+    parsed JSON or None if no match is found. Corrupt files are skipped
+    silently — the watchdog's default behaviour (respawn) covers the
+    fall-through case correctly.
+
+    Multiple workspaces can drive the same PR over its lifetime
+    (a workspace exits, the operator re-attaches, etc.); we use file
+    mtime to pick the freshest artifact so a stale NotifyHuman cannot
+    silence a more recent Abort."""
+    if not artifacts_root.is_dir():
+        return None
+    expected_slug = f"{owner}/{repo}"
+    candidates: list[tuple[float, dict]] = []
+    for path in artifacts_root.glob("*.defer-signal.json"):
+        try:
+            payload = json.loads(path.read_text())
+        except (OSError, json.JSONDecodeError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("pr_number") != pr_number:
+            continue
+        if payload.get("repo") != expected_slug:
+            continue
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            continue
+        candidates.append((mtime, payload))
+    if not candidates:
+        return None
+    candidates.sort(key=lambda c: c[0], reverse=True)
+    return candidates[0][1]
+
+
+def _should_skip_respawn(
+    *,
+    owner: str,
+    repo: str,
+    pr_number: int,
+    current_head_sha: str,
+    artifacts_root: Path,
+) -> bool:
+    """Return True iff the previous monitor for this PR exited via
+    ``NotifyHuman`` AND the PR's head_sha hasn't moved since.
+
+    Crash recovery is the watchdog's primary purpose, so the default for
+    every uncertain case is False (respawn). We only skip when there is
+    POSITIVE evidence the previous run reached a terminal that explicitly
+    handed control back to a human and there's nothing new to look at."""
+    signal = _latest_defer_signal_for_pr(
+        artifacts_root, owner=owner, repo=repo, pr_number=pr_number
+    )
+    if signal is None:
+        return False  # crash recovery — never silence
+    if signal.get("terminal_action") != "NotifyHuman":
+        return False  # Merge / Abort / ShortCircuitCompleted → respawn
+    artifact_sha = str(signal.get("head_sha") or "")
+    if not artifact_sha or artifact_sha != current_head_sha:
+        return False  # new commits arrived → re-engage
+    _log.info(
+        "watchdog.skipped_notify_human_terminal",
+        repo=f"{owner}/{repo}",
+        pr_number=pr_number,
+        head_sha=current_head_sha[:10],
+        reason="awaiting human merge or new commits",
+    )
+    return True
+
+
 def _pr_already_monitored(*, repo: str, pr_number: int, ps_output: str) -> bool:
     """True iff ``ps_output`` contains a process line that references
     the deterministic spec filename for this repo+PR.
@@ -242,6 +321,7 @@ def run_one_scan(
             _log.warning("watchdog.gh_output_wrong_shape", repo=repo, raw=repr(prs)[:200])
             continue
 
+        owner, name = _extract_owner_name(repo)
         for pr in prs:
             pr_number = pr.get("number") if isinstance(pr, dict) else None
             if not isinstance(pr_number, int):
@@ -250,6 +330,16 @@ def run_one_scan(
 
             if _pr_already_monitored(repo=repo, pr_number=pr_number, ps_output=ps_output):
                 _log.info("watchdog.pr_already_monitored", repo=repo, pr=pr_number)
+                continue
+
+            head_sha = pr.get("headRefOid") if isinstance(pr, dict) else None
+            if _should_skip_respawn(
+                owner=owner,
+                repo=name,
+                pr_number=pr_number,
+                current_head_sha=str(head_sha or ""),
+                artifacts_root=config.work_dir / "artifacts",
+            ):
                 continue
 
             _log.info("watchdog.respawning_monitor", repo=repo, pr=pr_number)

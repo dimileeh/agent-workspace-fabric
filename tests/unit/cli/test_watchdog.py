@@ -283,9 +283,7 @@ class TestWatchdogSkipNotifyHuman:
     watchdog re-spawns the same monitor every poll for a release PR
     that's intentionally awaiting human merge."""
 
-    def test_main_loop_skips_notify_human_pr_with_same_sha(
-        self, tmp_path: Path
-    ) -> None:
+    def test_main_loop_skips_notify_human_pr_with_same_sha(self, tmp_path: Path) -> None:
         head = "deadbeefcafe1234"
         gh = _FakeGhLister(
             per_repo={
@@ -323,9 +321,7 @@ class TestWatchdogSkipNotifyHuman:
         # The whole point: no respawn for an intentionally-deferred PR.
         assert spawn.calls == []
 
-    def test_main_loop_respawns_notify_human_pr_when_sha_advanced(
-        self, tmp_path: Path
-    ) -> None:
+    def test_main_loop_respawns_notify_human_pr_when_sha_advanced(self, tmp_path: Path) -> None:
         """Same artifact, but the PR has new commits → must re-engage."""
         gh = _FakeGhLister(
             per_repo={
@@ -362,9 +358,7 @@ class TestWatchdogSkipNotifyHuman:
         assert len(spawn.calls) == 1
         assert spawn.calls[0]["pr_number"] == 355
 
-    def test_main_loop_respawns_when_no_artifact_exists(
-        self, tmp_path: Path
-    ) -> None:
+    def test_main_loop_respawns_when_no_artifact_exists(self, tmp_path: Path) -> None:
         """Crash recovery — if no artifact was ever written for this PR,
         respawn (the watchdog's primary purpose)."""
         gh = _FakeGhLister(

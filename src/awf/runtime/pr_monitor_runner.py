@@ -300,6 +300,7 @@ class PullRequestMonitorRunner:
                 merged=True,
                 status=status,
                 state=state,
+                repo=repo,
             )
             await self._terminate_completed(
                 workspace_id,
@@ -317,6 +318,7 @@ class PullRequestMonitorRunner:
                 merged=False,
                 status=status,
                 state=state,
+                repo=repo,
             )
             await self._terminate_failed(
                 workspace_id,
@@ -393,6 +395,7 @@ class PullRequestMonitorRunner:
                     merged=False,
                     status=status,
                     state=state,
+                    repo=repo,
                 )
                 await self._terminate_completed(
                     workspace_id,
@@ -408,6 +411,7 @@ class PullRequestMonitorRunner:
                 merged=True,
                 status=status,
                 state=state,
+                repo=repo,
             )
             await self._terminate_completed(
                 workspace_id,
@@ -430,6 +434,7 @@ class PullRequestMonitorRunner:
                 merged=False,
                 status=status,
                 state=state,
+                repo=repo,
             )
             await self._terminate_completed(
                 workspace_id,
@@ -824,6 +829,7 @@ class PullRequestMonitorRunner:
         merged: bool,
         status: PRStatus,
         state: MonitorState,
+        repo: RepoRef,
     ) -> None:
         """Persist a machine-readable drop of the workspace's terminal
         state for an orchestrator to consume.
@@ -834,6 +840,11 @@ class PullRequestMonitorRunner:
         presence as the authoritative "monitor is done" signal without
         also having to handle a missing-file case.
 
+        ``repo`` (owner/name) and ``head_sha`` are recorded so the
+        stranded-PR watchdog can disambiguate cross-repo PR-number
+        collisions and detect new commits since the terminal — both
+        needed for the NotifyHuman-aware respawn-skip.
+
         Called with a best-effort contract: a failure to write MUST NOT
         stop the state-machine transition (the DB write has priority).
         """
@@ -842,8 +853,10 @@ class PullRequestMonitorRunner:
             bot_items, human_items = _collect_defer_items(status, state)
             payload = {
                 "workspace_id": workspace_id,
+                "repo": repo.slug(),
                 "pr_number": pr_number,
                 "terminal_action": terminal_action,
+                "head_sha": status.head_sha,
                 "merged": merged,
                 "deferred_bot_items": bot_items,
                 "deferred_human_items": human_items,
