@@ -838,8 +838,17 @@ class TestPrMonitorResume:
         ]
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("field", ["pr_number", "pr_url", "remote_push_branch"])
-    async def test_missing_pr_or_branch_metadata_fails_cleanly(
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "pr_number",
+            "pr_url",
+            "remote_push_branch",
+            "compose_project_name",
+            "compose_file_path",
+        ],
+    )
+    async def test_missing_monitor_recovery_metadata_fails_cleanly(
         self,
         field: str,
         fake: FakeCommandRunner,
