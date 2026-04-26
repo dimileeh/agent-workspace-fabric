@@ -124,7 +124,9 @@ class TestDeferSignalArtifact:
         assert data["repo"] == "dimileeh/aira-web"
         # ``head_sha`` lets the watchdog detect new commits since the
         # terminal — without it, NotifyHuman + new push would never re-engage.
-        assert data["head_sha"]
+        # Pin the exact SHA so a regression that writes the wrong commit
+        # (e.g. base SHA, empty string) is caught.
+        assert data["head_sha"] == "abc1234567890def"
         assert data["terminal_action"] == "Merge"
         assert data["merged"] is True
         assert len(data["deferred_bot_items"]) == 1
@@ -245,7 +247,7 @@ class TestDeferSignalArtifact:
         data = _artifact_for(artifacts_root, ws_id)
         assert data["terminal_action"] == "NotifyHuman"
         assert data["repo"] == "dimileeh/aira-web"
-        assert data["head_sha"]
+        assert data["head_sha"] == "abc1234567890def"
         assert data["merged"] is False
         assert data["deferred_bot_items"] == []
         assert len(data["deferred_human_items"]) == 1
