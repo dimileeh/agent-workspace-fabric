@@ -15,6 +15,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.app import configure_database, create_app
+from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -258,6 +259,35 @@ class TestCreateWorkspaceV2DiskPressure:
         assert response.status_code == 202
         assert len(listed.json()) == 1
         assert listed.json()[0]["id"] == response.json()["workspace_id"]
+
+    @pytest.mark.unit
+    async def test_disk_admission_uses_dependency_overridden_settings(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+    ) -> None:
+        app, client = disk_app_and_client
+        settings = Settings(
+            _env_file=None,
+            work_dir="/tmp/awf-test-workspaces",
+            min_free_disk_bytes=123,
+        )
+        seen: dict[str, Settings] = {}
+
+        def admission_check(provider_settings: Settings) -> DiskCheck:
+            seen["settings"] = provider_settings
+            return _disk_check(
+                free_bytes=124,
+                threshold_bytes=provider_settings.min_free_disk_bytes,
+                ok=True,
+            )
+
+        app.dependency_overrides[get_settings] = lambda: settings
+        app.state.workspace_admission_disk_check = admission_check
+
+        response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+
+        assert response.status_code == 202
+        assert seen["settings"] is settings
 
 
 class TestCreateWorkspaceV2MonitorPolicy:

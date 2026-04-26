@@ -102,6 +102,7 @@ async def create_workspace_v2(
     payload: WorkspaceCreateV2Request,
     request: Request,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceAcceptedResponse | JSONResponse:
     repo = WorkspaceRepository(session)
@@ -122,7 +123,7 @@ async def create_workspace_v2(
                 )
             return _accepted(existing.id, existing.status, existing.version, existing.created_at)
 
-    disk_check = await _workspace_admission_disk_check(request)
+    disk_check = await _workspace_admission_disk_check(request, settings)
     if not disk_check.ok:
         return _insufficient_disk_response(disk_check)
 
@@ -153,8 +154,7 @@ async def create_workspace_v2(
     return _accepted(ws.id, ws.status, ws.version, ws.created_at)
 
 
-async def _workspace_admission_disk_check(request: Request) -> DiskCheck:
-    settings = get_settings()
+async def _workspace_admission_disk_check(request: Request, settings: Settings) -> DiskCheck:
     provider = cast(
         DiskCheckProvider | None,
         getattr(request.app.state, "workspace_admission_disk_check", None),
