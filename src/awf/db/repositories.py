@@ -409,6 +409,33 @@ class WorkspaceRepository:
         stmt = stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
+    async def claim_schedulable_ids(
+        self,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+    ) -> builtins.list[str]:
+        """Claim schedulable workspace IDs for one worker poll.
+
+        Postgres uses row-level locks with ``SKIP LOCKED`` so concurrent worker
+        processes skip rows another transaction has already selected. SQLite
+        does not support that locking mode, so tests and local DBs use the same
+        deterministic select without lock hints.
+        """
+        if limit <= 0:
+            return []
+
+        bind = self._session.get_bind()
+        stmt = _schedulable_workspace_ids_stmt(
+            status=status,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            skip_locked=bind.dialect.name == "postgresql",
+        )
+        result = await self._session.execute(stmt)
+        return list(result.scalars().all())
+
     async def transition(
         self,
         workspace: Workspace,
@@ -464,6 +491,22 @@ class WorkspaceRepository:
         workspace.events.append(event)
         await self._session.flush()
         return event
+
+
+def _schedulable_workspace_ids_stmt(
+    *,
+    status: WorkspaceStatus,
+    limit: int,
+    exclude_ids: set[str] | None = None,
+    skip_locked: bool,
+) -> Select[tuple[str]]:
+    stmt = select(Workspace.id).where(Workspace.status == status.value)
+    if exclude_ids:
+        stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
+    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc()).limit(limit)
+    if skip_locked:
+        stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
+    return stmt
 
 
 def _owned_paths_overlap(left: str, right: str) -> bool:

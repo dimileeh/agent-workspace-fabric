@@ -422,6 +422,50 @@ class TestRunOnceExecution:
             worker._execution_tasks.pop("busy", None)
 
     @pytest.mark.unit
+    async def test_schedulable_statuses_are_claimed_through_repository(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        claims: list[tuple[WorkspaceStatus, int, set[str]]] = []
+
+        async def _claim_schedulable_ids(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            del self
+            claims.append((status, limit, set(exclude_ids or set())))
+            return []
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "claim_schedulable_ids",
+            _claim_schedulable_ids,
+            raising=False,
+        )
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=2,
+                max_concurrent_executions=4,
+            ),
+        )
+
+        assert await worker.run_once() == 0
+        assert claims == [
+            (WorkspaceStatus.requested, 2, set()),
+            (WorkspaceStatus.monitoring_pr, 4, set()),
+            (WorkspaceStatus.ready, 4, set()),
+        ]
+
+    @pytest.mark.unit
     async def test_monitor_query_excludes_active_ids_before_limiting(
         self,
         worker: ControlWorker,

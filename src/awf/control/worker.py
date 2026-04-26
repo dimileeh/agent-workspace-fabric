@@ -1,8 +1,9 @@
 """Async control-plane worker.
 
 Polls the DB for workspaces needing action and dispatches them to the
-Provisioner. Uses a single-process poll loop for the MVP; multi-node
-``SELECT FOR UPDATE SKIP LOCKED`` scheduling is deferred to Phase 1.5.
+Provisioner. Postgres-backed deployments claim schedulable rows with
+``SELECT FOR UPDATE SKIP LOCKED``; SQLite keeps the portable select path used
+by local tests.
 
 Split into two methods:
 
@@ -24,6 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.logging import get_logger
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
+from awf.db.repositories import WorkspaceRepository
 from awf.node.provisioner import Provisioner
 
 _log = get_logger(__name__)
@@ -190,12 +192,11 @@ class ControlWorker:
             return []
 
         async with self._session_factory() as session:
-            stmt = select(Workspace.id).where(Workspace.status == status.value)
-            if exclude_ids:
-                stmt = stmt.where(~Workspace.id.in_(exclude_ids))
-            stmt = stmt.order_by(Workspace.created_at).limit(limit)
-            result = await session.execute(stmt)
-            return [row[0] for row in result.all()]
+            return await WorkspaceRepository(session).claim_schedulable_ids(
+                status=status,
+                limit=limit,
+                exclude_ids=exclude_ids,
+            )
 
     async def _filter_current_status(
         self,
