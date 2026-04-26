@@ -22,6 +22,14 @@ def new_task_attempt_id() -> str:
     return f"att_{uuid4().hex[:24]}"
 
 
+def new_queue_decision_id() -> str:
+    return f"qd_{uuid4().hex[:24]}"
+
+
+def new_resource_reservation_id() -> str:
+    return f"rr_{uuid4().hex[:24]}"
+
+
 def new_merge_candidate_id() -> str:
     return f"mc_{uuid4().hex[:24]}"
 
