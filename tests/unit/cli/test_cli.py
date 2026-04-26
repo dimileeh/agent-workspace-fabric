@@ -225,6 +225,139 @@ class TestWorkspaceList:
         assert "--- #2 ---" in result.stdout
 
 
+class TestWorkspaceObservability:
+    @pytest.mark.unit
+    def test_events_fetches_workspace_timeline_with_filters(self) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={"items": [{"event_type": "workspace.created", "workspace_id": "ws_obs"}]},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "events",
+                    "ws_obs",
+                    "--limit",
+                    "12",
+                    "--event-type",
+                    "workspace.created",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "workspace.created" in result.stdout
+        assert mock.call_args[0] == ("GET", "http://localhost:8000/v1/workspaces/ws_obs/events")
+        assert mock.call_args.kwargs["params"] == {
+            "limit": 12,
+            "event_type": "workspace.created",
+        }
+
+    @pytest.mark.unit
+    def test_runtime_fetches_without_token_header_when_unset(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+        response = _mock_response(
+            status_code=200,
+            payload={"workspace_id": "ws_obs", "stack_state": "running", "services": []},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "runtime", "ws_obs"])
+
+        assert result.exit_code == 0
+        assert "running" in result.stdout
+        headers = mock.call_args.kwargs.get("headers", {})
+        assert "Authorization" not in headers
+
+    @pytest.mark.unit
+    def test_operations_fetches_workspace_operations_with_limit(self) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={"items": [{"id": "op_1", "type": "validate", "status": "succeeded"}]},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "operations", "ws_obs", "--limit", "5"])
+
+        assert result.exit_code == 0
+        assert "validate" in result.stdout
+        assert mock.call_args[0] == (
+            "GET",
+            "http://localhost:8000/v1/workspaces/ws_obs/operations",
+        )
+        assert mock.call_args.kwargs["params"] == {"limit": 5}
+
+    @pytest.mark.unit
+    def test_logs_injects_env_api_token_without_printing_it(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=200,
+            payload={"items": [{"stream_id": "agent.stdout", "size_bytes": 42}]},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "logs", "ws_obs"])
+
+        assert result.exit_code == 0
+        assert "agent.stdout" in result.stdout
+        assert "env-secret" not in result.stdout
+        assert "env-secret" not in result.stderr
+        assert mock.call_args[0] == ("GET", "http://localhost:8000/v1/workspaces/ws_obs/logs")
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer env-secret"}
+
+    @pytest.mark.unit
+    def test_log_reads_stream_with_cli_token_override(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=200,
+            payload={"stream_id": "agent.stdout", "offset": 64, "data": "tail"},
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "log",
+                    "ws_obs",
+                    "agent.stdout",
+                    "--offset",
+                    "64",
+                    "--limit-bytes",
+                    "1024",
+                    "--api-token",
+                    "cli-secret",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "tail" in result.stdout
+        assert "cli-secret" not in result.stdout
+        assert "cli-secret" not in result.stderr
+        assert mock.call_args[0] == (
+            "GET",
+            "http://localhost:8000/v1/workspaces/ws_obs/logs/agent.stdout",
+        )
+        assert mock.call_args.kwargs["params"] == {"offset": 64, "limit_bytes": 1024}
+        assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer cli-secret"}
+
+    @pytest.mark.unit
+    def test_non_json_upstream_errors_are_printed_as_text(self) -> None:
+        response = _mock_response(status_code=502, text="upstream failed")
+        response.json.side_effect = ValueError("not json")
+        with patch("awf.cli.main.httpx.request", return_value=response):
+            result = _runner.invoke(app, ["workspace", "operations", "ws_obs"])
+
+        assert result.exit_code == 1
+        assert "upstream failed" in result.stderr
+
+
 class TestBaseUrlResolution:
     @pytest.mark.unit
     def test_cli_flag_overrides_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
