@@ -6,6 +6,7 @@ import asyncio
 import json
 import subprocess
 import threading
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,45 @@ _runner = CliRunner()
 
 def _combined_output(result: Any) -> str:
     return f"{result.stdout}{getattr(result, 'stderr', '')}"
+
+
+def _write_gc_file(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def _create_gc_cli_workspace(
+    *,
+    db_url: str,
+    status: str,
+    updated_at: datetime,
+) -> str:
+    async def _setup() -> str:
+        from awf.db.base import Base
+        from awf.db.repositories import WorkspaceRepository
+        from awf.db.session import make_engine, make_session_factory
+
+        engine = make_engine(db_url)
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/repo.git",
+                branch_base="development",
+                task_title="gc cli",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            workspace.status = status
+            workspace.updated_at = updated_at
+            await session.commit()
+            workspace_id = workspace.id
+        await engine.dispose()
+        return workspace_id
+
+    return asyncio.run(_setup())
 
 
 @pytest.mark.unit
@@ -198,6 +238,92 @@ def test_readme_documents_service_logs_command() -> None:
     assert "--tail" in readme
     assert "--service worker" in readme
     assert "--follow" in readme
+
+
+@pytest.mark.unit
+def test_readme_documents_service_gc_command() -> None:
+    readme = Path("README.md").read_text()
+
+    assert "awf service gc" in readme
+    assert "--execute" in readme
+    assert "--min-age-hours" in readme
+    assert "dry-run" in readme.lower()
+    assert "control-plane database" in readme
+    assert "log streams" in readme
+
+
+@pytest.mark.unit
+def test_service_gc_cli_defaults_to_json_dry_run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
+    work_dir = tmp_path / "service"
+    workspace_id = _create_gc_cli_workspace(
+        db_url=db_url,
+        status="failed",
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write_gc_file(worktree / "repo.txt", "repo")
+    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+
+    result = _runner.invoke(app, ["service", "gc", "--min-age-hours", "1"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["dry_run"] is True
+    assert payload["candidate_count"] == 1
+    assert payload["deleted_paths"] == []
+    assert payload["candidates"][0]["workspace_id"] == workspace_id
+    assert payload["candidates"][0]["status"] == "failed"
+    assert payload["candidates"][0]["paths"]["worktree"]["path"] == str(worktree)
+    assert worktree.exists()
+
+
+@pytest.mark.unit
+def test_service_gc_cli_execute_deletes_and_supports_pretty_output(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
+    work_dir = tmp_path / "service"
+    workspace_id = _create_gc_cli_workspace(
+        db_url=db_url,
+        status="destroyed",
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    compose = work_dir / "compose" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write_gc_file(worktree / "repo.txt", "repo")
+    _write_gc_file(compose / "compose.yml", "compose")
+    _write_gc_file(auth / "codex" / "auth.json", "auth")
+    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+
+    result = _runner.invoke(
+        app,
+        [
+            "service",
+            "gc",
+            "--execute",
+            "--min-age-hours",
+            "1",
+            "--format",
+            "pretty",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "dry_run: False" in result.stdout
+    assert "candidate_count: 1" in result.stdout
+    assert workspace_id in result.stdout
+    assert "deleted_paths" in result.stdout
+    assert not worktree.exists()
+    assert not compose.exists()
+    assert not auth.exists()
 
 
 @pytest.mark.unit

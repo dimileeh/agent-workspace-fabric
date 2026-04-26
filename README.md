@@ -497,6 +497,33 @@ uv run --python 3.12 --extra dev awf service logs --follow --service api --servi
 the `api` and `worker` services. Repeat `--service` to select `api`, `worker`,
 `migrate`, or `postgres`.
 
+Plan terminal workspace filesystem garbage collection:
+
+```bash
+uv run --python 3.12 --extra dev awf service gc
+uv run --python 3.12 --extra dev awf service gc --format pretty
+uv run --python 3.12 --extra dev awf service gc --min-age-hours 336 --limit 20
+```
+
+`awf service gc` defaults to a dry-run JSON plan. It only considers terminal
+workspaces in `completed`, `failed`, `cancelled`, or `destroyed`, and it never
+selects active workspaces such as `requested`, `provisioning`, `ready`,
+`running`, `validating`, `pushing`, or `monitoring_pr`. Each candidate reports
+the worktree, compose, and auth paths plus estimated bytes; missing paths are
+reported as zero bytes.
+
+Execute the same filesystem-only cleanup with:
+
+```bash
+uv run --python 3.12 --extra dev awf service gc --execute
+```
+
+Execution deletes only `<work_dir>/git/worktrees/<workspace>`,
+`<work_dir>/compose/<workspace>` or the stored compose-file parent, and
+`<work_dir>/auth/<workspace>`. It does not delete control-plane database rows,
+workspace events, or log streams; durable logs remain available for audit and
+postmortem inspection.
+
 Create a workspace:
 
 ```bash
