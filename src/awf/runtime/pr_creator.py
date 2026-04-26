@@ -54,6 +54,7 @@ def _redact_credentials(text: str) -> str:
 class PullRequestResult:
     url: str
     branch: str
+    head_sha: str | None = None
 
 
 class PullRequestError(Exception):
@@ -92,7 +93,7 @@ class PullRequestCreator:
         # local branch was empty relative to base (bad commit step), or
         # (c) HEAD was detached / on a different branch. These three
         # logs answer all three questions:
-        await self._log_pre_push_diagnostics(
+        head_sha = await self._log_pre_push_diagnostics(
             worktree_path=worktree_path,
             branch_name=branch_name,
             base_branch=base_branch,
@@ -163,7 +164,7 @@ class PullRequestCreator:
 
         url = url_match.group(0)
         _log.info("pr.created", branch=branch_name, url=url)
-        return PullRequestResult(url=url, branch=branch_name)
+        return PullRequestResult(url=url, branch=branch_name, head_sha=head_sha)
 
     async def _log_pre_push_diagnostics(
         self,
@@ -171,7 +172,7 @@ class PullRequestCreator:
         worktree_path: Path,
         branch_name: str,
         base_branch: str,
-    ) -> None:
+    ) -> str | None:
         """Capture the local git state right before the push fires.
 
         Three queries, one structured log line:
@@ -248,3 +249,4 @@ class PullRequestCreator:
             commits_ahead_rc=ahead_of_base.returncode,
             base_branch=base_branch,
         )
+        return head_sha.stdout.strip() or None

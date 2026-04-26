@@ -19,9 +19,9 @@ import inspect
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -44,13 +44,17 @@ from awf.control.validation_fix_cycle import (
 )
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import (
+    TaskAttemptRepository,
+    ValidationRunRepository,
+    WorkspaceRepository,
+)
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
-from awf.runtime.validation import ValidationRunner
+from awf.runtime.validation import ValidationResult, ValidationRunner
 
 
 class _MonitorRunnerProto(Protocol):
@@ -587,6 +591,7 @@ class WorkspaceExecutor:
         ]
         test_commands_tuple = tuple(validation_commands)
         last_failure_message: str | None = None
+        successful_validation_run_id: str | None = None
         for pass_number in range(max_fix_passes + 1):
             # pass_number == 0 is the initial run (already-committed agent
             # work). 1..N are fix attempts driven by the retry prompt.
@@ -596,15 +601,48 @@ class WorkspaceExecutor:
                 action="validate",
             ):
                 return
-            val_result = await self._validation.run_profile_phases(
+            validation_run_id = await self._start_validation_run(
                 workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
                 profile=profile,
-                phase_names=("post_agent", "validate"),
-                run_healthchecks=True,
+                base_commit=base_commit,
+                target_branch=expected_branch,
+                target_head_sha=None,
+            )
+            try:
+                val_result = await self._validation.run_profile_phases(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    profile=profile,
+                    phase_names=("post_agent", "validate"),
+                    run_healthchecks=True,
+                )
+            except Exception as exc:
+                _log.exception(
+                    "executor.validation_run_unexpected_failed",
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                )
+                await self._finish_validation_run(
+                    validation_run_id,
+                    status="failed",
+                    reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=f"unexpected error during validation run: {exc!r}"[:2000],
+                    reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
+                )
+                return
+            await self._finish_validation_run(
+                validation_run_id,
+                status="succeeded" if val_result.all_passed else "failed",
+                reason_code=_validation_run_reason_code(val_result),
             )
             if val_result.all_passed:
+                successful_validation_run_id = validation_run_id
                 if pass_number > 0:
                     _log.info(
                         "executor.validation_recovered",
@@ -795,6 +833,8 @@ class WorkspaceExecutor:
                 return
             persisted.pr_url = pr.url
             persisted.pr_number = _extract_pr_number(pr.url)
+            if pr.head_sha:
+                persisted.monitor_last_commit_sha = pr.head_sha
             if persisted.task_kind == "feature_branch_pr" and not persisted.remote_push_branch:
                 persisted.remote_push_branch = (
                     pr.branch or persisted.branch_name or f"awf/{workspace_id}"
@@ -825,6 +865,20 @@ class WorkspaceExecutor:
                     persisted, to=WorkspaceStatus.completed, reason_code="PR_OPENED"
                 )
                 await session.commit()
+
+        if successful_validation_run_id is not None and pr.head_sha:
+            try:
+                await self._set_validation_run_target_head_sha(
+                    validation_run_id=successful_validation_run_id,
+                    target_head_sha=pr.head_sha,
+                )
+            except Exception:
+                _log.exception(
+                    "executor.validation_run_target_head_sha_update_failed",
+                    workspace_id=workspace_id,
+                    validation_run_id=successful_validation_run_id,
+                    target_head_sha=pr.head_sha,
+                )
 
         if monitor is not None:
             _log.info(
@@ -1185,6 +1239,65 @@ class WorkspaceExecutor:
             )
             await session.commit()
 
+    async def _start_validation_run(
+        self,
+        *,
+        workspace_id: str,
+        profile: WorkspaceProfile,
+        base_commit: str | None,
+        target_branch: str | None,
+        target_head_sha: str | None,
+    ) -> str:
+        command_records = _validation_run_command_records(
+            profile=profile,
+            phase_names=("post_agent", "validate"),
+            run_healthchecks=True,
+        )
+        async with self._session_factory() as session:
+            attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+            run = await ValidationRunRepository(session).start(
+                workspace_id=workspace_id,
+                attempt_id=attempt.id if attempt is not None else None,
+                tier=1,
+                commands=command_records,
+                base_commit=base_commit,
+                target_branch=target_branch,
+                target_head_sha=target_head_sha,
+                log_stream_refs=_validation_run_log_stream_refs(command_records),
+                started_at=datetime.now(UTC),
+            )
+            await session.commit()
+            return run.id
+
+    async def _finish_validation_run(
+        self,
+        validation_run_id: str,
+        *,
+        status: str,
+        reason_code: str | None,
+    ) -> None:
+        async with self._session_factory() as session:
+            await ValidationRunRepository(session).finish(
+                validation_run_id,
+                status=status,
+                reason_code=reason_code,
+                finished_at=datetime.now(UTC),
+            )
+            await session.commit()
+
+    async def _set_validation_run_target_head_sha(
+        self,
+        *,
+        validation_run_id: str,
+        target_head_sha: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            await ValidationRunRepository(session).update_target_head_sha(
+                validation_run_id,
+                target_head_sha=target_head_sha,
+            )
+            await session.commit()
+
 
 _PR_NUMBER_RE = re.compile(r"/pull/(\d+)(?:/|$)")
 
@@ -1295,3 +1408,67 @@ def _validation_command_count(ws: Workspace) -> int:
         profile = WorkspaceProfile.model_validate(ws.resolved_profile)
         return len(profile.phases.post_agent) + len(profile.phases.validate_commands)
     return len(ws.test_commands)
+
+
+def _validation_run_command_records(
+    *,
+    profile: WorkspaceProfile,
+    phase_names: tuple[str, ...],
+    run_healthchecks: bool,
+) -> list[dict[str, Any]]:
+    ordered: list[tuple[str, str]] = []
+    if run_healthchecks:
+        ordered.extend(
+            ("healthcheck", healthcheck.command) for healthcheck in profile.validation.healthchecks
+        )
+    ordered.extend(
+        (phase, command.command) for phase, command in profile.phases.commands_for(phase_names)
+    )
+
+    records: list[dict[str, Any]] = []
+    phase_indices: dict[str, int] = {}
+    for phase, command in ordered:
+        phase_indices[phase] = phase_indices.get(phase, 0) + 1
+        command_index = phase_indices[phase]
+        label = f"{command_index:02d}_{phase}"
+        records.append(
+            {
+                "phase": phase,
+                "command_index": command_index,
+                "command": command,
+                "stream_ids": {
+                    "stdout": f"validation.{label}.stdout",
+                    "stderr": f"validation.{label}.stderr",
+                },
+            }
+        )
+    return records
+
+
+def _validation_run_log_stream_refs(
+    command_records: list[dict[str, Any]],
+) -> dict[str, list[dict[str, str | None]]]:
+    refs: list[dict[str, str | None]] = []
+    for command in command_records:
+        stream_ids = command.get("stream_ids")
+        if not isinstance(stream_ids, dict):
+            refs.append({"stdout": None, "stderr": None})
+            continue
+        stdout = stream_ids.get("stdout")
+        stderr = stream_ids.get("stderr")
+        refs.append(
+            {
+                "stdout": stdout if isinstance(stdout, str) else None,
+                "stderr": stderr if isinstance(stderr, str) else None,
+            }
+        )
+    return {"commands": refs}
+
+
+def _validation_run_reason_code(result: ValidationResult) -> str:
+    if result.all_passed:
+        return "VALIDATION_OK"
+    first_failure = result.first_failure
+    if first_failure is None:
+        return "VALIDATION_FAILED"
+    return first_failure.reason_code

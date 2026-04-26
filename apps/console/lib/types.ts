@@ -70,6 +70,27 @@ export interface MergeCandidateReadiness {
   stale: boolean;
 }
 
+export type ValidationTier = 1 | 2 | 3;
+
+export type ValidationProvenanceStatus = "running" | "succeeded" | "failed" | "unknown";
+
+export interface ValidationRunSummary {
+  validation_run_id: string;
+  attempt_id: string | null;
+  tier: ValidationTier;
+  command_set_hash: string;
+  base_commit: string | null;
+  target_branch: string | null;
+  target_head_sha: string | null;
+  current_target_head_sha: string | null;
+  status: ValidationProvenanceStatus;
+  reason_code: string | null;
+  started_at: string;
+  finished_at: string | null;
+  log_stream_refs: Record<string, unknown>;
+  fresh_for_target: boolean | null;
+}
+
 export type StaleReasonCode =
   | "STALE_TARGET_ADVANCED"
   | "STALE_OVERLAP"
@@ -123,6 +144,7 @@ export interface MergeQueueItem {
   merge_blocker_reason: MergeBlockerReason;
   readiness: MergeCandidateReadiness | null;
   canonical: boolean;
+  latest_validation: ValidationRunSummary | null;
   stale_reasons: StaleReason[];
 }
 
