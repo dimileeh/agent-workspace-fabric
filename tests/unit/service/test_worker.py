@@ -215,6 +215,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 321
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
+    assert "merge_coordinator" in created["feature_monitor_kwargs"]
 
     manual_monitor = created["executor_monitor_factory"](
         object(),
@@ -226,6 +227,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["release_monitor_kwargs"]["initial_review_grace_period_seconds"] == 12.5
     assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
+    assert (
+        created["release_monitor_kwargs"]["merge_coordinator"]
+        is created["feature_monitor_kwargs"]["merge_coordinator"]
+    )
 
 
 @pytest.mark.unit

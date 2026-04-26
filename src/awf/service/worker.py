@@ -102,9 +102,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "artifacts_root": work_dir / "artifacts",
             "initial_review_grace_period_seconds": grace_seconds,
             "log_store": log_store,
+            "merge_coordinator": merge_coordinator,
         }
-        if workspace.auto_merge:
-            monitor_kwargs["merge_coordinator"] = merge_coordinator
         return monitor_builder(**monitor_kwargs)
 
     executor = WorkspaceExecutor(
