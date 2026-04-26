@@ -46,7 +46,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     work_dir = Path(settings.work_dir).expanduser().resolve()
     host_home = Path(settings.host_home).expanduser().resolve()
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
-    git_env = _service_git_environment(host_home)
+    git_env = _service_git_environment(host_home, github_token=settings.github_token)
     _apply_service_git_environment(git_env)
     git = GitManager(work_dir / "git", env=git_env)
     compose = ComposeManager(work_dir=work_dir, template_path=template)
@@ -132,10 +132,15 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     return WorkerRuntime(engine=engine, worker=worker)
 
 
-def _service_git_environment(host_home: Path) -> dict[str, str]:
+def _service_git_environment(host_home: Path, *, github_token: str | None = None) -> dict[str, str]:
     """Git/SSH environment for service-worker host repository operations."""
 
     env = {"HOME": str(host_home)}
+    if github_token:
+        # GitHub CLI cannot read macOS Keychain tokens from inside the local
+        # service container. Forward an explicit service token to gh subprocesses.
+        env["GH_TOKEN"] = github_token
+        env["GITHUB_TOKEN"] = github_token
     ssh_command = ["ssh"]
     if ssh_auth_sock := os.environ.get("SSH_AUTH_SOCK"):
         env["SSH_AUTH_SOCK"] = ssh_auth_sock

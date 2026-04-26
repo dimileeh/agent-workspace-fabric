@@ -26,6 +26,7 @@ x-awf-service: &awf-service
     AWF_API_PORT: "8000"
     AWF_API_BASE_URL: http://api:8000
     AWF_API_TOKEN: ${AWF_API_TOKEN:-local-dev-token}
+    AWF_GITHUB_TOKEN: ${AWF_GITHUB_TOKEN:-}
     AWF_DATABASE_URL: postgresql+asyncpg://awf:awf_dev@postgres:5432/awf
     AWF_DOCKER_HOST: unix:///var/run/docker.sock
     AWF_AGENT_RUNTIME_IMAGE: awf-agent-runtime:latest

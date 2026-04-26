@@ -13,7 +13,7 @@ from awf.service import worker as worker_mod
 from awf.service.config import ServiceSettings
 
 
-def _settings(tmp_path: Path) -> ServiceSettings:
+def _settings(tmp_path: Path, *, github_token: str | None = None) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
         env="local",
@@ -24,7 +24,7 @@ def _settings(tmp_path: Path) -> ServiceSettings:
         work_dir=str((tmp_path / "awf-work").resolve()),
         host_home=str((tmp_path / "host-home").resolve()),
         api_token=None,
-        github_token=None,
+        github_token=github_token,
         worker_poll_interval_seconds=0.25,
         worker_max_concurrent_provisions=2,
         worker_max_concurrent_executions=4,
@@ -247,6 +247,17 @@ def test_service_git_environment_uses_mounted_host_home(tmp_path: Path) -> None:
     assert str(ssh_config) in env["GIT_SSH_COMMAND"]
     assert str(known_hosts) in env["GIT_SSH_COMMAND"]
     assert "StrictHostKeyChecking=accept-new" in env["GIT_SSH_COMMAND"]
+
+
+@pytest.mark.unit
+def test_service_git_environment_forwards_github_token_for_gh_cli(tmp_path: Path) -> None:
+    env = worker_mod._service_git_environment(
+        tmp_path / "host-home",
+        github_token="ghp_service_token",
+    )
+
+    assert env["GH_TOKEN"] == "ghp_service_token"
+    assert env["GITHUB_TOKEN"] == "ghp_service_token"
 
 
 @pytest.mark.unit

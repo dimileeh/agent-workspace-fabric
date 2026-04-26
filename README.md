@@ -749,6 +749,7 @@ Local service development should use Postgres via the Compose stack:
 
 ```bash
 cp .env.example .env
+export AWF_GITHUB_TOKEN="$(gh auth token)"
 docker compose -f docker/compose/local-service.yml up --build
 ```
 
@@ -767,7 +768,7 @@ AWF_API_TOKEN=local-dev-token
 AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
 AWF_HOST_WORK_DIR=${HOME}/.awf/service
 AWF_HOST_HOME=${HOME}
-AWF_GITHUB_TOKEN=
+AWF_GITHUB_TOKEN=<token from gh auth token>
 ```
 
 The local dogfood runner uses its own SQLite DB under `--work-dir`, so it does
