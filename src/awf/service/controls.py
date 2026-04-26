@@ -60,6 +60,26 @@ class ActiveWorkspaceDestroyError(WorkspaceControlError):
         )
 
 
+class WorkspaceStackStopError(WorkspaceControlError):
+    def __init__(
+        self,
+        *,
+        operation: str,
+        returncode: int,
+        stdout: str,
+        stderr: str,
+    ) -> None:
+        self.operation = operation
+        self.returncode = returncode
+        self.stdout = stdout
+        self.stderr = stderr
+        detail = (stderr or stdout).strip() or "<no output>"
+        super().__init__(
+            error_code="STACK_STOP_FAILED",
+            message=f"docker {operation} failed (exit={returncode}): {detail}",
+        )
+
+
 class WorkspaceControlService:
     """Business logic for sensitive workspace lifecycle controls."""
 
@@ -278,27 +298,66 @@ class WorkspaceControlService:
 async def stop_project_containers(compose_project_name: str | None) -> None:
     if not compose_project_name:
         return
-    proc = await asyncio.create_subprocess_exec(
-        "docker",
+    proc = await _docker_process(
         "ps",
         "-q",
         "--filter",
         f"label=com.docker.compose.project={compose_project_name}",
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        operation="ps",
     )
-    stdout, _stderr = await proc.communicate()
-    ids = [line.strip() for line in stdout.decode("utf-8", errors="replace").splitlines() if line]
+    stdout, _stderr = await _communicate(proc, operation="ps")
+    ids = [line.strip() for line in stdout.splitlines() if line.strip()]
     if not ids:
         return
-    stop = await asyncio.create_subprocess_exec(
-        "docker",
+    stop = await _docker_process(
         "stop",
         *ids,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
+        operation="stop",
     )
-    await stop.communicate()
+    await _communicate(stop, operation="stop")
+
+
+async def _docker_process(*args: str, operation: str) -> asyncio.subprocess.Process:
+    try:
+        return await asyncio.create_subprocess_exec(
+            "docker",
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+    except FileNotFoundError as exc:
+        raise WorkspaceStackStopError(
+            operation=operation,
+            returncode=127,
+            stdout="",
+            stderr=f"docker executable is not available: {exc}",
+        ) from exc
+    except OSError as exc:
+        raise WorkspaceStackStopError(
+            operation=operation,
+            returncode=1,
+            stdout="",
+            stderr=f"{type(exc).__name__}: {exc}",
+        ) from exc
+
+
+async def _communicate(
+    proc: asyncio.subprocess.Process,
+    *,
+    operation: str,
+) -> tuple[str, str]:
+    stdout_bytes, stderr_bytes = await proc.communicate()
+    stdout = stdout_bytes.decode("utf-8", errors="replace")
+    stderr = stderr_bytes.decode("utf-8", errors="replace")
+    assert proc.returncode is not None
+    if proc.returncode != 0:
+        raise WorkspaceStackStopError(
+            operation=operation,
+            returncode=proc.returncode,
+            stdout=stdout,
+            stderr=stderr,
+        )
+    return stdout, stderr
 
 
 def default_cleaner() -> WorkspaceCleaner:
