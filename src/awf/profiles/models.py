@@ -196,10 +196,10 @@ class ProfileSecret(BaseModel):
             raise ValueError("secret 'ref' must be provided if 'provider' is specified")
         if self.ref and not self.provider:
             raise ValueError("secret 'provider' must be provided if 'ref' is specified")
-        
+
         # If required and it's not a legacy 'secrets' declaration, we might enforce both,
         # but for compatibility, we only require they be symmetric right now.
-        
+
         # Raw looking values
         def _looks_like_raw_secret(value: str | None) -> bool:
             if not value:
