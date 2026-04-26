@@ -11,10 +11,8 @@ from typing import Any
 
 import httpx
 import pytest
-import typer
 from typer.testing import CliRunner
 
-from awf.cli import main as cli_main
 from awf.cli.main import app
 from awf.common.config import Settings
 
@@ -146,10 +144,10 @@ def test_service_logs_follow_keyboard_interrupt_exits_cleanly(
 
     monkeypatch.setattr(subprocess, "run", _run)
 
-    with pytest.raises(typer.Exit) as exc_info:
-        cli_main.service_logs(tail=100, service=[], follow=True)
+    result = _runner.invoke(app, ["service", "logs", "--follow"])
 
-    assert exc_info.value.exit_code == 130
+    assert result.exit_code == 0, result.output
+    assert _combined_output(result) == ""
 
 
 @pytest.mark.unit

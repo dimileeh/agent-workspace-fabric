@@ -107,6 +107,10 @@ def run_service_logs(
         raise ServiceLogsError(returncode=127, detail="docker binary not found on PATH") from exc
     except OSError as exc:
         raise ServiceLogsError(returncode=1, detail=f"{type(exc).__name__}: {exc}") from exc
+    except KeyboardInterrupt:
+        if follow:
+            return ServiceLogsResult(stdout="", stderr="")
+        raise
 
     stdout = result.stdout or ""
     stderr = result.stderr or ""
