@@ -197,6 +197,30 @@ class TestWorkspaceShow:
         assert id_pos < status_pos
 
 
+class TestWorkspaceRetry:
+    @pytest.mark.unit
+    def test_posts_retry_request_and_prints_new_workspace(self) -> None:
+        response = _mock_response(
+            status_code=202,
+            payload={
+                "source_workspace_id": "ws_old",
+                "new_workspace_id": "ws_new",
+                "operation_id": "op_retry",
+                "status": "requested",
+                "attempt_number": 2,
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(app, ["workspace", "retry", "ws_old"])
+
+        assert result.exit_code == 0
+        assert "ws_new" in result.stdout
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/ws_old/retry",
+        )
+
+
 class TestWorkspaceList:
     @pytest.mark.unit
     def test_passes_limit_as_query_param(self) -> None:
