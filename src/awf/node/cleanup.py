@@ -32,6 +32,8 @@ class WorkspaceCleaner:
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
     ) -> list[str]:
         """Best-effort cleanup. Returns list of failure-step names, empty on full success.
 
@@ -41,7 +43,7 @@ class WorkspaceCleaner:
         """
         failures: list[str] = []
 
-        # Step 1: compose down -v (stops containers, removes volumes + network).
+        # Step 1: compose down (stops containers, optionally removes volumes).
         spec = WorkspaceComposeSpec(
             workspace_id=workspace_id,
             worktree_host_path=worktree_host_path or Path("/dev/null"),
@@ -52,10 +54,10 @@ class WorkspaceCleaner:
                     project_name=compose_project_name or spec.project_name(),
                     compose_file=compose_file_path,
                     workspace_id=workspace_id,
-                    remove_volumes=True,
+                    remove_volumes=remove_volumes,
                 )
             else:
-                await self._compose.down(spec, remove_volumes=True)
+                await self._compose.down(spec, remove_volumes=remove_volumes)
         except ComposeOperationError as exc:
             _log.warning(
                 "cleanup.compose_down_failed",
@@ -66,15 +68,16 @@ class WorkspaceCleaner:
             failures.append("compose_down")
 
         # Step 2: git worktree remove (idempotent already per GitManager).
-        try:
-            await self._git.remove_worktree(workspace_id=workspace_id, repo_url=repo_url)
-        except GitOperationError as exc:
-            _log.warning(
-                "cleanup.git_remove_failed",
-                workspace_id=workspace_id,
-                reason_code=exc.reason_code,
-                stderr=exc.stderr[:1000],
-            )
-            failures.append("worktree_remove")
+        if remove_worktree:
+            try:
+                await self._git.remove_worktree(workspace_id=workspace_id, repo_url=repo_url)
+            except GitOperationError as exc:
+                _log.warning(
+                    "cleanup.git_remove_failed",
+                    workspace_id=workspace_id,
+                    reason_code=exc.reason_code,
+                    stderr=exc.stderr[:1000],
+                )
+                failures.append("worktree_remove")
 
         return failures

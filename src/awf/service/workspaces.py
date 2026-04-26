@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.api.schemas import (
     OperationResponse,
     RuntimeServiceResponse,
+    WorkspaceControlResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
     WorkspaceEventResponse,
@@ -30,6 +31,13 @@ from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.runtime.logs import read_log_chunk
+from awf.service.controls import (
+    CleanerFactory,
+    ProjectStopper,
+    WorkspaceControlService,
+    default_cleaner,
+    stop_project_containers,
+)
 
 
 class RuntimeInspection(Protocol):
@@ -45,10 +53,14 @@ class WorkspaceService:
         *,
         log_root: Path | str | None = None,
         runtime_inspector: RuntimeInspection | None = None,
+        project_stopper: ProjectStopper | None = None,
+        cleaner_factory: CleanerFactory | None = None,
     ) -> None:
         self._factory = session_factory
         self._log_root = Path(log_root).resolve() if log_root is not None else None
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
+        self._project_stopper = project_stopper or stop_project_containers
+        self._cleaner_factory = cleaner_factory or default_cleaner
 
     async def create(self, req: WorkspaceCreateRequest) -> WorkspaceResponse:
         async with self._factory() as s:
@@ -83,6 +95,54 @@ class WorkspaceService:
         async with self._factory() as s:
             rows = await WorkspaceRepository(s).list(limit=limit)
             return [WorkspaceResponse.model_validate(r) for r in rows]
+
+    async def cancel_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        stop_stack: bool = True,
+    ) -> WorkspaceControlResponse:
+        async with self._factory() as s:
+            result = await self._controls(s).cancel_workspace(
+                workspace_id,
+                reason=reason,
+                stop_stack=stop_stack,
+            )
+            await s.commit()
+            return result
+
+    async def stop_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+    ) -> WorkspaceControlResponse:
+        async with self._factory() as s:
+            result = await self._controls(s).stop_workspace(
+                workspace_id,
+                reason=reason,
+            )
+            await s.commit()
+            return result
+
+    async def destroy_workspace(
+        self,
+        workspace_id: str,
+        *,
+        force: bool = False,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> WorkspaceControlResponse:
+        async with self._factory() as s:
+            result = await self._controls(s).destroy_workspace(
+                workspace_id,
+                force=force,
+                remove_volumes=remove_volumes,
+                remove_worktree=remove_worktree,
+            )
+            await s.commit()
+            return result
 
     async def get_runtime(self, workspace_id: str) -> WorkspaceRuntimeResponse | None:
         async with self._factory() as s:
@@ -227,6 +287,13 @@ class WorkspaceService:
             "eof": eof,
             "text": data,
         }
+
+    def _controls(self, session: AsyncSession) -> WorkspaceControlService:
+        return WorkspaceControlService(
+            session,
+            project_stopper=self._project_stopper,
+            cleaner_factory=self._cleaner_factory,
+        )
 
 
 async def create_workspace_v2_row(
