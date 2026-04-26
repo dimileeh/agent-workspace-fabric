@@ -53,6 +53,7 @@ class TestValidationRetry:
         assert len(result.commands) == 1
         assert result.commands[0].ok
         assert "success 3" in result.commands[0].stdout_path.read_text()
+        assert result.commands[0].retry_count == 2
 
         # Output should be appended or overwritten. If appended:
         # assert "timeout 1" in result.commands[0].stderr_path.read_text()
@@ -114,3 +115,4 @@ class TestValidationRetry:
         assert not result.all_passed
         assert len(fake.calls) == 3
         assert result.commands[0].reason_code == "VALIDATION_RETRY_EXHAUSTED"
+        assert result.commands[0].retry_count == 2
