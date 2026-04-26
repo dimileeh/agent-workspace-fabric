@@ -304,12 +304,12 @@ class WorkspaceControlService:
                 message="workspace PR monitor recovery requested",
             )
 
-        if not workspace.pr_url:
-            raise WorkspaceRemonitorMissingPrUrlError(workspace)
-
         current = WorkspaceStatus(workspace.status)
         if current not in _REMONITOR_ELIGIBLE_STATUSES:
             raise WorkspaceRemonitorStateError(workspace)
+
+        if not workspace.pr_url:
+            raise WorkspaceRemonitorMissingPrUrlError(workspace)
 
         operation = await operations.create(
             workspace_id=workspace_id,

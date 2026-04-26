@@ -83,10 +83,14 @@ async def _seed_monitoring_workspace(
                 to=WorkspaceStatus.monitoring_pr,
                 reason_code="SEED",
             )
-        elif final_status == WorkspaceStatus.completed:
+        elif final_status in {
+            WorkspaceStatus.completed,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+        }:
             await repo.transition(
                 workspace,
-                to=WorkspaceStatus.completed,
+                to=final_status,
                 reason_code="SEED",
             )
         else:
@@ -563,6 +567,45 @@ async def test_remonitor_rejects_incompatible_state_with_structured_conflict(
         "message": "Workspace is not in a state eligible for remonitor recovery.",
         "detail": {
             "status": WorkspaceStatus.completed.value,
+            "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+        },
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "final_status",
+    [
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
+        WorkspaceStatus.cancelled,
+    ],
+)
+async def test_remonitor_rejects_incompatible_state_before_missing_pr_url(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    final_status: WorkspaceStatus,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        with_pr_url=False,
+        final_status=final_status,
+    )
+    headers = {**_auth(monkeypatch), "Idempotency-Key": f"remonitor-{final_status}"}
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "operator recovery"},
+        headers=headers,
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "error_code": "WORKSPACE_STATE_NOT_REMONITORABLE",
+        "message": "Workspace is not in a state eligible for remonitor recovery.",
+        "detail": {
+            "status": final_status.value,
             "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
         },
     }
