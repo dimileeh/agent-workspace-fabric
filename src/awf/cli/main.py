@@ -59,6 +59,14 @@ def _api_token_headers(override: str | None) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
 
 
+def _api_token_option() -> Any:
+    return typer.Option(
+        None,
+        "--api-token",
+        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
+    )
+
+
 def _emit(payload: object, fmt: OutputFormat) -> None:
     if fmt == OutputFormat.json:
         typer.echo(json.dumps(payload, indent=2, default=str))
@@ -291,11 +299,7 @@ def workspace_events(
     workspace_id: str = typer.Argument(...),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
     event_type: str | None = typer.Option(None, "--event-type"),
-    api_token: str | None = typer.Option(
-        None,
-        "--api-token",
-        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
-    ),
+    api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
@@ -316,11 +320,7 @@ def workspace_events(
 @workspace_app.command("runtime")
 def workspace_runtime(
     workspace_id: str = typer.Argument(...),
-    api_token: str | None = typer.Option(
-        None,
-        "--api-token",
-        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
-    ),
+    api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
@@ -338,11 +338,7 @@ def workspace_runtime(
 def workspace_operations(
     workspace_id: str = typer.Argument(...),
     limit: int = typer.Option(50, "--limit", min=1, max=500),
-    api_token: str | None = typer.Option(
-        None,
-        "--api-token",
-        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
-    ),
+    api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
@@ -360,11 +356,7 @@ def workspace_operations(
 @workspace_app.command("logs")
 def workspace_logs(
     workspace_id: str = typer.Argument(...),
-    api_token: str | None = typer.Option(
-        None,
-        "--api-token",
-        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
-    ),
+    api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
@@ -384,11 +376,7 @@ def workspace_log(
     stream_id: str = typer.Argument(...),
     offset: int = typer.Option(0, "--offset", min=0),
     limit_bytes: int = typer.Option(65_536, "--limit-bytes", min=1, max=1_048_576),
-    api_token: str | None = typer.Option(
-        None,
-        "--api-token",
-        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
-    ),
+    api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
