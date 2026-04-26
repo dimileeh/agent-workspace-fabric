@@ -1,9 +1,9 @@
 """Async control-plane worker.
 
 Polls the DB for workspaces needing action and dispatches them to the
-Provisioner. Postgres-backed deployments claim schedulable rows with
-``SELECT FOR UPDATE SKIP LOCKED``; SQLite keeps the portable select path used
-by local tests.
+Provisioner. Postgres-backed deployments list schedulable candidate rows with
+``SELECT FOR UPDATE SKIP LOCKED``; provisioning and ready-execution handlers
+then claim selected rows by locking and transitioning them in one transaction.
 
 Split into two methods:
 
@@ -66,7 +66,7 @@ class ControlWorker:
         self._stopped.set()
 
     async def run_once(self) -> int:
-        """Claim + dispatch requested provisioning and workspace runtime tasks.
+        """List + dispatch requested provisioning and workspace runtime tasks.
 
         Returns the number of workspaces dispatched. A zero return is a signal
         for ``run_forever`` to sleep; non-zero means we may be throughput-bound
@@ -192,7 +192,7 @@ class ControlWorker:
             return []
 
         async with self._session_factory() as session:
-            return await WorkspaceRepository(session).claim_schedulable_ids(
+            return await WorkspaceRepository(session).list_schedulable_ids(
                 status=status,
                 limit=limit,
                 exclude_ids=exclude_ids,

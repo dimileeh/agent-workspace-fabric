@@ -232,10 +232,12 @@ class Provisioner:
 
         Returns None (rather than raising) if the workspace isn't in ``requested`` —
         another worker may have already claimed it. This makes the provisioner safe
-        to call at-least-once from the poll loop.
+        to call at-least-once from the poll loop. Postgres callers lock the row
+        before checking status so concurrent workers cannot both commit the
+        ``requested`` -> ``provisioning`` claim.
         """
         repo = WorkspaceRepository(session)
-        ws = await repo.get(workspace_id)
+        ws = await repo.get_for_update(workspace_id)
         if ws is None:
             _log.warning("provisioner.skip_unknown", workspace_id=workspace_id)
             return None

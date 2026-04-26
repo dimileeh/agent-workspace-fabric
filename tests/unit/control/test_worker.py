@@ -2,7 +2,7 @@
 
 We use the real Provisioner against real git + SQLite to validate the full
 pipeline, rather than mocking the provisioner. The worker's contract is
-primarily about claiming work off the DB in the right order and bounding
+primarily about listing work off the DB in the right order and bounding
 concurrency, so end-to-end is the most useful test.
 """
 
@@ -422,14 +422,14 @@ class TestRunOnceExecution:
             worker._execution_tasks.pop("busy", None)
 
     @pytest.mark.unit
-    async def test_schedulable_statuses_are_claimed_through_repository(
+    async def test_schedulable_statuses_are_listed_through_repository(
         self,
         monkeypatch: pytest.MonkeyPatch,
         session_factory: async_sessionmaker[AsyncSession],
     ) -> None:
-        claims: list[tuple[WorkspaceStatus, int, set[str]]] = []
+        queries: list[tuple[WorkspaceStatus, int, set[str]]] = []
 
-        async def _claim_schedulable_ids(
+        async def _list_schedulable_ids(
             self: WorkspaceRepository,
             *,
             status: WorkspaceStatus,
@@ -437,13 +437,13 @@ class TestRunOnceExecution:
             exclude_ids: set[str] | None = None,
         ) -> list[str]:
             del self
-            claims.append((status, limit, set(exclude_ids or set())))
+            queries.append((status, limit, set(exclude_ids or set())))
             return []
 
         monkeypatch.setattr(
             WorkspaceRepository,
-            "claim_schedulable_ids",
-            _claim_schedulable_ids,
+            "list_schedulable_ids",
+            _list_schedulable_ids,
             raising=False,
         )
 
@@ -459,7 +459,7 @@ class TestRunOnceExecution:
         )
 
         assert await worker.run_once() == 0
-        assert claims == [
+        assert queries == [
             (WorkspaceStatus.requested, 2, set()),
             (WorkspaceStatus.monitoring_pr, 4, set()),
             (WorkspaceStatus.ready, 4, set()),

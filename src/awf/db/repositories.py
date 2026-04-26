@@ -298,6 +298,14 @@ class WorkspaceRepository:
     async def get(self, workspace_id: str) -> Workspace | None:
         return await self._session.get(Workspace, workspace_id)
 
+    async def get_for_update(self, workspace_id: str) -> Workspace | None:
+        """Load one workspace with a row lock when the database supports it."""
+        stmt = select(Workspace).where(Workspace.id == workspace_id)
+        bind = self._session.get_bind()
+        if bind.dialect.name == "postgresql":
+            stmt = stmt.with_for_update(of=Workspace)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def exists(self, workspace_id: str) -> bool:
         stmt = select(Workspace.id).where(Workspace.id == workspace_id).limit(1)
         return (await self._session.execute(stmt)).scalar_one_or_none() is not None
@@ -409,19 +417,20 @@ class WorkspaceRepository:
         stmt = stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
-    async def claim_schedulable_ids(
+    async def list_schedulable_ids(
         self,
         *,
         status: WorkspaceStatus,
         limit: int,
         exclude_ids: set[str] | None = None,
     ) -> builtins.list[str]:
-        """Claim schedulable workspace IDs for one worker poll.
+        """Return candidate workspace IDs for one worker poll.
 
-        Postgres uses row-level locks with ``SKIP LOCKED`` so concurrent worker
-        processes skip rows another transaction has already selected. SQLite
-        does not support that locking mode, so tests and local DBs use the same
-        deterministic select without lock hints.
+        Postgres uses row-level locks with ``SKIP LOCKED`` to reduce duplicate
+        candidates while poll transactions overlap. For provisioning and ready
+        execution, the durable claim happens when the dispatcher reloads each
+        row with ``get_for_update()`` and performs the state transition in that
+        same transaction.
         """
         if limit <= 0:
             return []

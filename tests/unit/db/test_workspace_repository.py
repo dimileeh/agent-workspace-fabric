@@ -101,8 +101,11 @@ class _FakeScalarResult:
     def all(self) -> list[str]:
         return self._values
 
+    def scalar_one_or_none(self) -> str | None:
+        return self._values[0] if self._values else None
 
-class _RecordingClaimSession:
+
+class _RecordingSchedulerSession:
     def __init__(self, dialect_name: str, values: list[str] | None = None) -> None:
         self._bind = _FakeBind(dialect_name)
         self.values = list(values or [])
@@ -492,20 +495,20 @@ class TestOwnedPathConflictLookup:
             WorkspaceStatus.monitoring_pr,
         ],
     )
-    async def test_postgres_scheduler_claims_skip_locked_rows(
+    async def test_postgres_scheduler_lists_skip_locked_rows(
         self,
         status: WorkspaceStatus,
     ) -> None:
-        session = _RecordingClaimSession("postgresql", values=["ws_claimed"])
+        session = _RecordingSchedulerSession("postgresql", values=["ws_claimed"])
         repo = WorkspaceRepository(session)  # type: ignore[arg-type]
 
-        claimed = await repo.claim_schedulable_ids(
+        listed = await repo.list_schedulable_ids(
             status=status,
             limit=1,
             exclude_ids={"ws_active"},
         )
 
-        assert claimed == ["ws_claimed"]
+        assert listed == ["ws_claimed"]
         assert len(session.executed) == 1
         sql = str(
             session.executed[0].compile(  # type: ignore[attr-defined]
@@ -519,16 +522,16 @@ class TestOwnedPathConflictLookup:
         assert "workspaces.id NOT IN ('ws_active')" in sql
 
     @pytest.mark.unit
-    async def test_sqlite_scheduler_claims_use_portable_select(self) -> None:
-        session = _RecordingClaimSession("sqlite", values=["ws_claimed"])
+    async def test_sqlite_scheduler_lists_use_portable_select(self) -> None:
+        session = _RecordingSchedulerSession("sqlite", values=["ws_claimed"])
         repo = WorkspaceRepository(session)  # type: ignore[arg-type]
 
-        claimed = await repo.claim_schedulable_ids(
+        listed = await repo.list_schedulable_ids(
             status=WorkspaceStatus.requested,
             limit=1,
         )
 
-        assert claimed == ["ws_claimed"]
+        assert listed == ["ws_claimed"]
         assert len(session.executed) == 1
         sql = str(
             session.executed[0].compile(  # type: ignore[attr-defined]
@@ -538,6 +541,41 @@ class TestOwnedPathConflictLookup:
         )
         assert "FOR UPDATE" not in sql
         assert "SKIP LOCKED" not in sql
+
+    @pytest.mark.unit
+    async def test_postgres_get_for_update_locks_workspace_row(self) -> None:
+        session = _RecordingSchedulerSession("postgresql", values=["ws_locked"])
+        repo = WorkspaceRepository(session)  # type: ignore[arg-type]
+
+        locked = await repo.get_for_update("ws_locked")
+
+        assert locked == "ws_locked"
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" in sql
+        assert "workspaces.id = 'ws_locked'" in sql
+
+    @pytest.mark.unit
+    async def test_sqlite_get_for_update_uses_portable_select(self) -> None:
+        session = _RecordingSchedulerSession("sqlite", values=["ws_locked"])
+        repo = WorkspaceRepository(session)  # type: ignore[arg-type]
+
+        locked = await repo.get_for_update("ws_locked")
+
+        assert locked == "ws_locked"
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" not in sql
 
     @pytest.mark.unit
     async def test_postgres_conflict_lookup_lock_uses_transaction_advisory_lock(self) -> None:

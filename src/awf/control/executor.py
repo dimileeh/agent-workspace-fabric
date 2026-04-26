@@ -1023,9 +1023,10 @@ class WorkspaceExecutor:
         return defaults.get(agent)
 
     async def _claim_ready(self, workspace_id: str) -> Workspace | None:
+        """Atomically transition a ready workspace to running before execution."""
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
+            ws = await repo.get_for_update(workspace_id)
             if ws is None:
                 _log.warning("executor.skip_unknown", workspace_id=workspace_id)
                 return None
