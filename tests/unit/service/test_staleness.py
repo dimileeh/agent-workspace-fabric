@@ -538,7 +538,7 @@ class TestStalenessRefreshService:
         _workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
             factory,
             owned_paths=["src/awf/api/**"],
-            task_class="refactor_task",
+            task_class="docs_task",
         )
 
         async with factory() as session:
