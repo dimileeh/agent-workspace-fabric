@@ -1477,6 +1477,7 @@ def _sync_candidate_readiness(
     *,
     workspace: Workspace,
     attempt: TaskAttempt,
+    recompute_stale: bool = True,
 ) -> None:
     from awf.runtime.merge_eligibility import compute_stale_reason
 
@@ -1490,14 +1491,15 @@ def _sync_candidate_readiness(
     }
     not_canonical = not is_canonical
 
-    stale_reason, _ = compute_stale_reason(workspace)
-    # If there's an active stale reason, update it. If the reason clears, clear it.
-    if stale_reason is not None:
-        candidate.stale = True
-        candidate.stale_reason = stale_reason
-    elif stale_reason is None and candidate.stale_reason in ("validation_insufficient_tier",):
-        candidate.stale = False
-        candidate.stale_reason = None
+    if recompute_stale:
+        stale_reason, _ = compute_stale_reason(workspace)
+        # If there's an active stale reason, update it. If the reason clears, clear it.
+        if stale_reason is not None:
+            candidate.stale = True
+            candidate.stale_reason = stale_reason
+        elif stale_reason is None and candidate.stale_reason in ("validation_insufficient_tier",):
+            candidate.stale = False
+            candidate.stale_reason = None
 
     candidate.completed = is_completed
     candidate.failed_or_cancelled = failed_or_cancelled
