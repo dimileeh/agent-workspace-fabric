@@ -179,7 +179,6 @@ class ResourceSaturationSummary:
     admission: AdmissionSummary
 
 
-_KNOWN_FAILURE_REASONS = frozenset(reason.value for reason in FailureReason)
 _UNKNOWN_FAILURE_ACTION = FailureAction(
     retryable=False,
     recommended_action="Inspect workspace logs and classify the failure_reason before retrying.",
@@ -222,6 +221,17 @@ _FAILURE_ACTIONS: dict[str, FailureAction] = {
         recommended_action="Retry after checking service health probes and runtime logs.",
     ),
 }
+_KNOWN_FAILURE_REASONS = frozenset(reason.value for reason in FailureReason)
+
+
+def _validate_failure_action_coverage() -> None:
+    missing_actions = _KNOWN_FAILURE_REASONS.difference(_FAILURE_ACTIONS)
+    if missing_actions:
+        missing = ", ".join(sorted(missing_actions))
+        raise RuntimeError(f"Missing failure analysis actions for FailureReason values: {missing}")
+
+
+_validate_failure_action_coverage()
 
 
 async def summarize_workspace_reliability(
@@ -553,7 +563,9 @@ def _failure_reason_groups(reason_counts: dict[str, int]) -> list[FailureReasonG
 
 
 def _failure_action(failure_reason: str) -> FailureAction:
-    return _FAILURE_ACTIONS.get(failure_reason, _UNKNOWN_FAILURE_ACTION)
+    if failure_reason in _KNOWN_FAILURE_REASONS:
+        return _FAILURE_ACTIONS[failure_reason]
+    return _UNKNOWN_FAILURE_ACTION
 
 
 def _normalize_failure_reason(reason: object) -> str:

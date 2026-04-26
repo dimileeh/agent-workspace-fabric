@@ -87,6 +87,13 @@ def _disk_check(
 
 
 @pytest.mark.unit
+def test_failure_actions_cover_every_known_failure_reason() -> None:
+    from awf.service import metrics
+
+    assert set(metrics._FAILURE_ACTIONS) == {reason.value for reason in FailureReason}
+
+
+@pytest.mark.unit
 async def test_empty_db_returns_zero_workspace_reliability_summary(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
