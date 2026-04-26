@@ -225,8 +225,8 @@ export function ConsoleDashboard() {
       newWorkspaceId: result.data.new_workspace_id,
       operationId: result.data.operation_id,
     });
-    await loadOverview();
-  }, [loadOverview, selectedId]);
+    await Promise.all([loadOverview(), loadResourceSaturation()]);
+  }, [loadOverview, loadResourceSaturation, selectedId]);
 
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream) => {
