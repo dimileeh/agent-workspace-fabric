@@ -25,7 +25,7 @@ from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.models import Workspace, WorkspaceEvent
+from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
@@ -246,6 +246,123 @@ class TestRelationshipLoading:
         assert not [
             statement for statement in statements if "from validation_runs" in statement
         ]
+
+
+class TestValidationRunRepository:
+    @pytest.mark.unit
+    async def test_latest_by_workspace_ids_uses_window_query(
+        self,
+    ) -> None:
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = make_session_factory(engine)
+        async with factory() as s:
+            ws_repo = WorkspaceRepository(s)
+            first_workspace = await ws_repo.create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="main",
+                task_title="first",
+                task_prompt="run validation",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            second_workspace = await ws_repo.create(
+                repo_url="git@github.com:example/b.git",
+                branch_base="main",
+                task_title="second",
+                task_prompt="run validation",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            ignored_workspace = await ws_repo.create(
+                repo_url="git@github.com:example/c.git",
+                branch_base="main",
+                task_title="ignored",
+                task_prompt="run validation",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            validation_repo = ValidationRunRepository(s)
+            await validation_repo.start(
+                workspace_id=first_workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=[],
+                base_commit=None,
+                target_branch=None,
+                target_head_sha=None,
+                log_stream_refs={},
+                started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+            latest_first = await validation_repo.start(
+                workspace_id=first_workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=[],
+                base_commit=None,
+                target_branch=None,
+                target_head_sha=None,
+                log_stream_refs={},
+                started_at=datetime(2026, 1, 2, tzinfo=UTC),
+            )
+            latest_second = await validation_repo.start(
+                workspace_id=second_workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=[],
+                base_commit=None,
+                target_branch=None,
+                target_head_sha=None,
+                log_stream_refs={},
+                started_at=datetime(2026, 1, 3, tzinfo=UTC),
+            )
+            await validation_repo.start(
+                workspace_id=ignored_workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=[],
+                base_commit=None,
+                target_branch=None,
+                target_head_sha=None,
+                log_stream_refs={},
+                started_at=datetime(2026, 1, 4, tzinfo=UTC),
+            )
+            first_workspace_id = first_workspace.id
+            second_workspace_id = second_workspace.id
+            latest_first_id = latest_first.id
+            latest_second_id = latest_second.id
+            await s.commit()
+
+        statements: list[str] = []
+
+        def record_sql(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, parameters, context, executemany
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            async with factory() as s:
+                latest = await ValidationRunRepository(s).latest_by_workspace_ids(
+                    [first_workspace_id, second_workspace_id, first_workspace_id]
+                )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+            await engine.dispose()
+
+        assert set(latest) == {first_workspace_id, second_workspace_id}
+        assert latest[first_workspace_id].id == latest_first_id
+        assert latest[second_workspace_id].id == latest_second_id
+        assert len([obj for obj in latest.values() if isinstance(obj, ValidationRun)]) == 2
+        assert any("row_number() over" in statement for statement in statements)
 
 
 class TestMonitorPolicyMigration:

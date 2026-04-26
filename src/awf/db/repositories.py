@@ -649,19 +649,28 @@ class ValidationRunRepository:
         if not unique_workspace_ids:
             return {}
 
+        ranked_runs = (
+            select(
+                ValidationRun.id.label("validation_run_id"),
+                func.row_number()
+                .over(
+                    partition_by=ValidationRun.workspace_id,
+                    order_by=(
+                        ValidationRun.started_at.desc(),
+                        ValidationRun.id.desc(),
+                    ),
+                )
+                .label("run_rank"),
+            )
+            .where(ValidationRun.workspace_id.in_(unique_workspace_ids))
+            .subquery()
+        )
         stmt = (
             select(ValidationRun)
-            .where(ValidationRun.workspace_id.in_(unique_workspace_ids))
-            .order_by(
-                ValidationRun.workspace_id,
-                ValidationRun.started_at.desc(),
-                ValidationRun.id.desc(),
-            )
+            .join(ranked_runs, ValidationRun.id == ranked_runs.c.validation_run_id)
+            .where(ranked_runs.c.run_rank == 1)
         )
-        latest: dict[str, ValidationRun] = {}
-        for run in (await self._session.execute(stmt)).scalars():
-            latest.setdefault(run.workspace_id, run)
-        return latest
+        return {run.workspace_id: run for run in (await self._session.execute(stmt)).scalars()}
 
 
 class WorkspaceRepository:
