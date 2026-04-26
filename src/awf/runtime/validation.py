@@ -251,6 +251,10 @@ class ValidationRunner:
                     )
                     break
 
+                # 124: command timeout. > 128: killed by signal (e.g., 137 OOM kill).
+                # We treat most signal exits as potentially flaky infrastructure events,
+                # accepting the trade-off that deterministic failures like SIGILL or SIGABRT
+                # might be needlessly retried.
                 is_flaky = result.returncode == 124 or result.returncode > 128
                 if is_flaky and attempts < retry_budget:
                     attempts += 1
