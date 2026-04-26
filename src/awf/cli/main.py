@@ -16,12 +16,14 @@ import asyncio
 import json
 import os
 import sys
+import urllib.parse
 from enum import StrEnum
 from typing import Any
 
 import httpx
 import typer
 
+from awf.db.enums import OperationStatus, OperationType
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 app = typer.Typer(
@@ -49,6 +51,21 @@ _DEFAULT_BASE_URL = "http://localhost:8000"
 
 def _base_url(override: str | None) -> str:
     return override or os.environ.get("AWF_CLI_BASE_URL", _DEFAULT_BASE_URL)
+
+
+def _api_token_headers(override: str | None) -> dict[str, str]:
+    token = override if override is not None else os.environ.get("AWF_API_TOKEN")
+    if not token:
+        return {}
+    return {"Authorization": f"Bearer {token}"}
+
+
+def _api_token_option() -> Any:
+    return typer.Option(
+        None,
+        "--api-token",
+        help="Bearer token override; defaults to AWF_API_TOKEN when set.",
+    )
 
 
 def _emit(payload: object, fmt: OutputFormat) -> None:
@@ -274,6 +291,111 @@ def workspace_list(
         "/v1/workspaces",
         base_url=_base_url(base_url),
         params={"limit": limit},
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("events")
+def workspace_events(
+    workspace_id: str = typer.Argument(...),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    event_type: str | None = typer.Option(None, "--event-type"),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """List immutable events for one workspace."""
+    params: dict[str, Any] = {"limit": limit}
+    if event_type is not None:
+        params["event_type"] = event_type
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/events",
+        base_url=_base_url(base_url),
+        params=params,
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("runtime")
+def workspace_runtime(
+    workspace_id: str = typer.Argument(...),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Fetch runtime/container state for one workspace."""
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/runtime",
+        base_url=_base_url(base_url),
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("operations")
+def workspace_operations(
+    workspace_id: str = typer.Argument(...),
+    limit: int = typer.Option(50, "--limit", min=1, max=500),
+    status: OperationStatus | None = typer.Option(None, "--status"),
+    operation_type: OperationType | None = typer.Option(None, "--type"),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """List operations for one workspace."""
+    params: dict[str, Any] = {"limit": limit}
+    if status is not None:
+        params["status"] = status.value
+    if operation_type is not None:
+        params["type"] = operation_type.value
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/operations",
+        base_url=_base_url(base_url),
+        params=params,
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("logs")
+def workspace_logs(
+    workspace_id: str = typer.Argument(...),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """List durable log streams for one workspace."""
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/logs",
+        base_url=_base_url(base_url),
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
+@workspace_app.command("log")
+def workspace_log(
+    workspace_id: str = typer.Argument(...),
+    stream_id: str = typer.Argument(...),
+    offset: int = typer.Option(0, "--offset", min=0),
+    limit_bytes: int = typer.Option(65_536, "--limit-bytes", min=1, max=1_048_576),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Read a bounded durable log chunk for one stream."""
+    encoded_stream_id = urllib.parse.quote(stream_id, safe="")
+    response = _call(
+        "GET",
+        f"/v1/workspaces/{workspace_id}/logs/{encoded_stream_id}",
+        base_url=_base_url(base_url),
+        params={"offset": offset, "limit_bytes": limit_bytes},
+        headers=_api_token_headers(api_token),
     )
     _handle_response(response, fmt)
 

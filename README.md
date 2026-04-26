@@ -511,10 +511,26 @@ List workspaces:
 uv run --python 3.12 --extra dev awf workspace list --limit 25
 ```
 
+Inspect workspace observability data:
+
+```bash
+uv run --python 3.12 --extra dev awf workspace events ws_123 --limit 50
+uv run --python 3.12 --extra dev awf workspace events ws_123 --event-type workspace.created
+uv run --python 3.12 --extra dev awf workspace runtime ws_123
+uv run --python 3.12 --extra dev awf workspace operations ws_123 --limit 25
+uv run --python 3.12 --extra dev awf workspace logs ws_123
+uv run --python 3.12 --extra dev awf workspace log ws_123 agent.stdout --offset 0 --limit-bytes 65536
+```
+
+For protected observability endpoints, set `AWF_API_TOKEN` or pass
+`--api-token` on the command. The CLI sends it as a bearer token and never
+prints it.
+
 Pretty output:
 
 ```bash
 uv run --python 3.12 --extra dev awf workspace show ws_123 --format pretty
+uv run --python 3.12 --extra dev awf workspace events ws_123 --format pretty
 ```
 
 Preview profile resolution:
