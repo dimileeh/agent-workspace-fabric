@@ -70,6 +70,37 @@ export interface MergeCandidateReadiness {
   stale: boolean;
 }
 
+export type StaleReasonCode =
+  | "STALE_TARGET_ADVANCED"
+  | "STALE_OVERLAP"
+  | "STALE_DEPENDENCY"
+  | "STALE_BUILD_CONFIG"
+  | "STALE_SCHEMA";
+
+export type StaleReasonTrigger =
+  | "target_advanced"
+  | "path_overlap"
+  | "schema_changed"
+  | "dependency_changed"
+  | "build_config_changed";
+
+export type StaleReasonStatus = "active" | "resolved";
+
+export interface StaleReason {
+  id: string;
+  workspace_id: string;
+  candidate_id: string | null;
+  attempt_id: string | null;
+  task_id: string | null;
+  trigger_type: StaleReasonTrigger;
+  trigger_ref: string | null;
+  reason_code: StaleReasonCode;
+  explanation: string;
+  status: StaleReasonStatus;
+  detected_at: string;
+  resolved_at: string | null;
+}
+
 export interface MergeQueueItem {
   candidate_id: string | null;
   candidate_status: MergeCandidateStatus | null;
@@ -92,6 +123,7 @@ export interface MergeQueueItem {
   merge_blocker_reason: MergeBlockerReason;
   readiness: MergeCandidateReadiness | null;
   canonical: boolean;
+  stale_reasons: StaleReason[];
 }
 
 export interface Workspace {
