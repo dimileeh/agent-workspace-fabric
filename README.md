@@ -601,13 +601,16 @@ shelling out to the REST API:
 | `awf_get_workspace` | Fetch one workspace by id. |
 | `awf_list_workspaces` | List recent workspaces newest-first. |
 | `awf_wait_for_workspace` | Poll until a workspace reaches a terminal state or times out. |
+| `awf_get_workspace_runtime` | Fetch one workspace's compose/container runtime snapshot. |
+| `awf_list_workspace_operations` | List one workspace's active and completed operations newest-first. |
 | `awf_list_workspace_events` | List one workspace's immutable events newest-first, with optional event-type filtering. |
 | `awf_list_workspace_logs` | List indexed durable log streams for one workspace. |
 | `awf_read_workspace_log` | Read a bounded log chunk by stream id and byte offset. |
 
 The observability tools return `null` for a missing workspace or log stream
-rather than surfacing raw storage errors. MCP remains read-only beyond create;
-operator controls such as cancel/destroy stay on the authenticated REST API.
+rather than surfacing raw storage errors. Runtime and operation tools are
+read-only; operator controls such as cancel/destroy stay on the authenticated
+REST API.
 
 Example `awf_create_workspace_v2` arguments:
 
@@ -627,6 +630,20 @@ Example `awf_create_workspace_v2` arguments:
   "auto_merge": true,
   "initial_review_grace_period_seconds": null
 }
+```
+
+Example runtime and operation observability calls:
+
+`awf_get_workspace_runtime` arguments:
+
+```json
+{"workspace_id": "ws_abc123"}
+```
+
+`awf_list_workspace_operations` arguments:
+
+```json
+{"workspace_id": "ws_abc123", "limit": 25}
 ```
 
 ## Local Dogfood Runner
