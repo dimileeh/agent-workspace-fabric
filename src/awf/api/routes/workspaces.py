@@ -166,6 +166,8 @@ async def list_workspace_overview(
                 repo_url=ws.repo_url,
                 base_branch=ws.branch_base,
                 branch_name=ws.branch_name,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
                 agent=AgentRuntime(ws.agent),
                 status=WorkspaceStatus(ws.status),
                 current_phase=ws.status,
@@ -279,12 +281,15 @@ def _payloads_match_v2(existing: Workspace, payload: WorkspaceCreateV2Request) -
         if payload.workspace.profile is not None
         else None
     )
+    task_class = payload.task.task_class.value if payload.task.task_class is not None else None
     return (
         existing.repo_url == payload.repo.url
         and existing.branch_base == payload.repo.base_branch
         and existing.task_title == payload.task.title
         and existing.task_prompt == payload.task.prompt
         and existing.task_external_id == payload.task.external_id
+        and existing.task_class == task_class
+        and list(existing.owned_paths) == list(payload.task.owned_paths)
         and existing.auto_merge == payload.task.auto_merge
         and (
             existing.initial_review_grace_period_seconds

@@ -59,6 +59,25 @@ class TestCreate:
         assert ws.id.startswith("ws_")
         assert ws.auto_merge is True
         assert ws.initial_review_grace_period_seconds is None
+        assert ws.task_class is None
+        assert ws.owned_paths == []
+
+    @pytest.mark.unit
+    async def test_create_persists_policy_metadata(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/a.git",
+            branch_base="development",
+            task_title="trivial",
+            task_prompt="Add a docstring.",
+            agent="codex",
+            test_commands=["pytest"],
+            task_class="migration_task",
+            owned_paths=["migrations/**", "src/awf/db/**"],
+        )
+
+        assert ws.task_class == "migration_task"
+        assert ws.owned_paths == ["migrations/**", "src/awf/db/**"]
 
     @pytest.mark.unit
     async def test_create_emits_creation_event(self, session: AsyncSession) -> None:
@@ -139,6 +158,66 @@ class TestMonitorPolicyMigration:
             ).fetchone()
 
         assert row == (1, None)
+
+
+class TestTaskPolicyMetadataMigration:
+    @pytest.mark.unit
+    def test_policy_metadata_columns_backfill_existing_rows(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        repo_root = Path(__file__).resolve().parents[3]
+        db_path = tmp_path / "awf.db"
+        env = {
+            **os.environ,
+            "AWF_DATABASE_URL": f"sqlite+aiosqlite:///{db_path}",
+        }
+
+        def _alembic(*args: str) -> None:
+            subprocess.run(
+                [sys.executable, "-m", "alembic", "-c", "alembic.ini", *args],
+                cwd=repo_root,
+                env=env,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+
+        monkeypatch.chdir(repo_root)
+        _alembic("upgrade", "f6a1b2c3d4e5")
+
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                """
+                INSERT INTO workspaces (
+                    id, status, version, repo_url, branch_base,
+                    task_title, task_prompt, agent, test_commands,
+                    requires_database, created_at, updated_at
+                )
+                VALUES (
+                    'ws_old_policy_metadata', 'requested', 1, 'git@example.com:repo.git',
+                    'development', 'old row', 'do work', 'codex', '[]',
+                    0, '2026-04-25 00:00:00', '2026-04-25 00:00:00'
+                )
+                """
+            )
+            conn.commit()
+
+        _alembic("upgrade", "head")
+
+        with sqlite3.connect(db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT task_class, owned_paths
+                FROM workspaces
+                WHERE id = 'ws_old_policy_metadata'
+                """
+            ).fetchone()
+
+        assert row is not None
+        assert row[0] is None
+        assert row[1] == "[]"
 
 
 class TestIdempotency:

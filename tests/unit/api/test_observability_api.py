@@ -41,6 +41,26 @@ _BODY = {
 }
 
 
+_V2_POLICY_BODY = {
+    "repo": {
+        "url": "git@github.com:example/console.git",
+        "base_branch": "main",
+    },
+    "task": {
+        "title": "Add console data",
+        "prompt": "Expose useful workspace observability.",
+        "kind": "feature_branch_pr",
+        "agent": "codex",
+        "external_id": "TICKET-456",
+        "task_class": "test_task",
+        "owned_paths": ["src/awf/api/**", "tests/unit/api/**"],
+    },
+    "workspace": {"profile_ref": "auto", "profile": None},
+    "validation": {"commands": ["pytest -q"], "requested_tier": 1},
+    "resources": {},
+}
+
+
 @pytest.fixture(autouse=True)
 def _clear_settings_cache() -> None:
     get_settings.cache_clear()
@@ -50,6 +70,12 @@ def _clear_settings_cache() -> None:
 
 async def _create_workspace(client: AsyncClient, **overrides: object) -> str:
     response = await client.post("/v1/workspaces", json={**_BODY, **overrides})
+    assert response.status_code == 202
+    return str(response.json()["workspace_id"])
+
+
+async def _create_v2_policy_workspace(client: AsyncClient) -> str:
+    response = await client.post("/v2/workspaces", json=_V2_POLICY_BODY)
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
@@ -98,6 +124,29 @@ class TestConsoleViews:
         assert body["items"][0]["workspace_id"] == workspace_id
         assert body["items"][0]["repo_url"] == _BODY["repo_url"]
         assert body["items"][0]["agent"] == "codex"
+
+    @pytest.mark.unit
+    async def test_console_views_expose_policy_metadata(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        workspace_id = await _create_v2_policy_workspace(client)
+
+        tasks = await client.get("/v1/tasks")
+        overview = await client.get("/v1/workspaces/overview")
+
+        assert tasks.status_code == 200
+        task = tasks.json()["items"][0]
+        assert task["task_id"] == "TICKET-456"
+        assert task["workspace_id"] == workspace_id
+        assert task["task_class"] == "test_task"
+        assert task["owned_paths"] == ["src/awf/api/**", "tests/unit/api/**"]
+
+        assert overview.status_code == 200
+        item = overview.json()["items"][0]
+        assert item["workspace_id"] == workspace_id
+        assert item["task_class"] == "test_task"
+        assert item["owned_paths"] == ["src/awf/api/**", "tests/unit/api/**"]
 
     @pytest.mark.unit
     async def test_workspace_overview_exposes_last_event_and_active_operation(

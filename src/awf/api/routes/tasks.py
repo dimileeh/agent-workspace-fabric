@@ -37,6 +37,8 @@ async def list_tasks(
                 title=row.task_title,
                 repo_url=row.repo_url,
                 base_branch=row.branch_base,
+                task_class=row.task_class,
+                owned_paths=list(row.owned_paths),
                 agent=AgentRuntime(row.agent),
                 status=WorkspaceStatus(row.status),
                 pr_url=row.pr_url,

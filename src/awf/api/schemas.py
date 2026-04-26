@@ -12,8 +12,10 @@ from typing import Annotated, Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
+
+OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -53,6 +55,8 @@ class WorkspaceV2Task(BaseModel):
     kind: Annotated[str, Field(default="feature_branch_pr", max_length=32)]
     agent: AgentRuntime = Field(default=AgentRuntime.codex)
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
+    task_class: TaskClass | None = None
+    owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
     auto_merge: bool = True
     initial_review_grace_period_seconds: float | None = Field(
         default=None,
@@ -115,6 +119,8 @@ class WorkspaceResponse(BaseModel):
     task_title: str
     task_prompt: str
     task_external_id: str | None
+    task_class: TaskClass | None
+    owned_paths: list[str]
     auto_merge: bool
     initial_review_grace_period_seconds: float | None
 
@@ -185,6 +191,8 @@ class TaskResponse(BaseModel):
     title: str
     repo_url: str
     base_branch: str
+    task_class: TaskClass | None
+    owned_paths: list[str]
     agent: AgentRuntime
     status: WorkspaceStatus
     pr_url: str | None
@@ -206,6 +214,8 @@ class WorkspaceOverviewResponse(BaseModel):
     repo_url: str
     base_branch: str
     branch_name: str | None
+    task_class: TaskClass | None
+    owned_paths: list[str]
     agent: AgentRuntime
     status: WorkspaceStatus
     current_phase: str

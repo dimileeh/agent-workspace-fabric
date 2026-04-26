@@ -82,6 +82,7 @@ Implemented now:
 - Feature PR monitor with automated comment handling and auto-merge.
 - Release/sync PR monitor variants that keep workspaces alive until human merge.
 - Initial PR review grace period before auto-merge.
+- Durable v2 task policy metadata (`task_class`, `owned_paths`) for later lock scheduling.
 - Non-actionable bot status comment filtering.
 - `/v1/events` for workspace timelines.
 - Filterable `/v1/workspaces` list endpoint for future dashboard work.
@@ -381,6 +382,8 @@ curl -X POST http://localhost:8000/v2/workspaces \
       "prompt": "Build the requested feature and commit the result.",
       "kind": "feature_branch_pr",
       "agent": "codex",
+      "task_class": "refactor_task",
+      "owned_paths": ["src/**", "tests/**"],
       "auto_merge": true,
       "initial_review_grace_period_seconds": null
     },
@@ -410,6 +413,18 @@ feature monitor, which may merge after the gates pass. `auto_merge: false`
 routes to the manual/release monitor behavior: AWF posts the ready-for-human
 comment and keeps polling until a human merge is observed. Release/sync flows
 remain available through the compatibility dogfood scripts.
+
+The v2 task object also accepts policy metadata for future deterministic
+scheduling:
+
+- `task_class`: optional; one of `docs_task`, `test_task`, `refactor_task`,
+  `migration_task`, `dependency_task`, or `build_config_task`.
+- `owned_paths`: optional list of path globs/strings the task expects to own;
+  omitted values default to `[]`.
+
+AWF persists and returns these fields on workspace, task, overview, and MCP
+workspace create/get/list responses. This slice does not enforce locks or
+change scheduling behavior yet.
 
 Get one workspace:
 
@@ -637,6 +652,8 @@ Example `awf_create_workspace_v2` arguments:
   "task_title": "Implement feature",
   "task_prompt": "Build the requested feature and commit the result.",
   "task_kind": "feature_branch_pr",
+  "task_class": "docs_task",
+  "owned_paths": ["README.md", "docs/**"],
   "agent": "codex",
   "task_external_id": "AIRA-123",
   "profile_ref": "auto",
