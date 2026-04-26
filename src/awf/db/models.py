@@ -410,6 +410,7 @@ class MergeCandidate(Base):
     completed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     not_canonical: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     stale: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    stale_reason: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False

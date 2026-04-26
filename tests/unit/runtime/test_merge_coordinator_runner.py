@@ -174,6 +174,7 @@ class TestMergeCoordinatorRunner:
         sleep_fn: RecordedSleep,
         tmp_path: Path,
     ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
         coordinator = RecordingMergeCoordinator()
 
         # Recheck sees base drift and the recursive SyncBase path should
@@ -207,14 +208,14 @@ class TestMergeCoordinatorRunner:
 
         terminal = await runner._execute(
             action=Merge(),
-            workspace_id="ws_sync",
+            workspace_id=ws_id,
             repo_url=REPO_URL,
             repo=RepoRef.from_url(REPO_URL),
             pr_number=42,
             status=_status(),
             state=MonitorState(),
             base_branch="development",
-            remote_branch="awf/ws_sync",
+            remote_branch=f"awf/{ws_id}",
             compose_project="proj",
             compose_file=tmp_path / "compose.yml",
             monitor_log=None,

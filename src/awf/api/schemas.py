@@ -39,6 +39,7 @@ class MergeCandidateReadinessResponse(BaseModel):
     completed: bool
     not_canonical: bool
     stale: bool
+    stale_reason: str | None = None
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -384,6 +385,7 @@ class MergeQueueItemResponse(BaseModel):
     updated_at: datetime
     last_event: WorkspaceEventResponse | None
     merge_blocker_reason: MergeBlockerReason
+    required_next_action: str | None = None
     readiness: MergeCandidateReadinessResponse | None = None
     canonical: bool
     latest_validation: ValidationRunSummaryResponse | None = None

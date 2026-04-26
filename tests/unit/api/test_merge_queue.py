@@ -250,6 +250,7 @@ class TestMergeQueueList:
             "updated_at",
             "last_event",
             "merge_blocker_reason",
+            "required_next_action",
             "readiness",
             "canonical",
             "latest_validation",
@@ -280,6 +281,7 @@ class TestMergeQueueList:
             "completed": False,
             "not_canonical": False,
             "stale": False,
+            "stale_reason": None,
         }
         assert item["latest_validation"] is None
         assert newer_id not in {row["workspace_id"] for row in body["items"]}
@@ -481,6 +483,7 @@ class TestMergeQueueList:
             "completed": False,
             "not_canonical": False,
             "stale": False,
+            "stale_reason": None,
         }
         assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
 
