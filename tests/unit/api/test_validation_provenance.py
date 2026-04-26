@@ -54,6 +54,12 @@ async def _create_v2_profile_workspace(client: AsyncClient) -> str:
     return str(response.json()["workspace_id"])
 
 
+async def _create_v2_workspace_with_body(client: AsyncClient, body: dict) -> str:
+    response = await client.post("/v2/workspaces", json=body)
+    assert response.status_code == 202
+    return str(response.json()["workspace_id"])
+
+
 async def _create_v1_workspace(client: AsyncClient) -> str:
     response = await client.post("/v1/workspaces", json=_V1_BODY)
     assert response.status_code == 202
@@ -192,9 +198,7 @@ async def test_validation_provenance_groups_streams_and_resolves_profile_command
     body = response.json()
     assert body["next_cursor"] is None
     assert body["has_more"] is False
-    assert [
-        (item["phase"], item["command_index"], item["command"]) for item in body["items"]
-    ] == [
+    assert [(item["phase"], item["command_index"], item["command"]) for item in body["items"]] == [
         ("setup", 1, "uv sync"),
         ("validate", 1, "pytest -q"),
         ("validate", 2, "ruff check"),
@@ -214,6 +218,72 @@ async def test_validation_provenance_groups_streams_and_resolves_profile_command
     assert first["status"] == "succeeded"
     assert first["base_commit"] == "abc123def456"
     assert first["branch_name"] == "codex/validation-provenance"
+
+
+@pytest.mark.unit
+async def test_validation_provenance_resolves_profile_commands_by_phase_index(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v2_workspace_with_body(
+        client,
+        {
+            **_V2_PROFILE_BODY,
+            "workspace": {
+                "profile_ref": "auto",
+                "profile": {
+                    "name": "api-provenance-phase-index-test",
+                    "phases": {
+                        "setup": ["uv sync"],
+                        "pre_agent": ["python scripts/preflight.py"],
+                        "post_agent": ["ruff format --check"],
+                        "validate": ["pytest -q"],
+                    },
+                    "validation": {
+                        "healthchecks": [
+                            {
+                                "name": "api",
+                                "command": "curl -fsS http://localhost:8000/health",
+                            }
+                        ]
+                    },
+                },
+            },
+            "validation": {"commands": ["ruff check"], "requested_tier": 1},
+        },
+    )
+    for phase, base_stream_id in (
+        ("setup", "validation.01_setup"),
+        ("pre_agent", "validation.01_pre_agent"),
+        ("healthcheck", "validation.01_healthcheck"),
+        ("post_agent", "validation.01_post_agent"),
+        ("validate", "validation.01_validate"),
+        ("validate", "validation.02_validate"),
+    ):
+        await _create_stream_pair(
+            engine,
+            workspace_id=workspace_id,
+            base_stream_id=base_stream_id,
+            phase=phase,
+            stdout_bytes=1,
+            stdout_lines=1,
+            stderr_bytes=0,
+            stderr_lines=0,
+        )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    assert [
+        (item["phase"], item["command_index"], item["command"]) for item in response.json()["items"]
+    ] == [
+        ("setup", 1, "uv sync"),
+        ("pre_agent", 1, "python scripts/preflight.py"),
+        ("healthcheck", 1, "curl -fsS http://localhost:8000/health"),
+        ("post_agent", 1, "ruff format --check"),
+        ("validate", 1, "pytest -q"),
+        ("validate", 2, "ruff check"),
+    ]
 
 
 @pytest.mark.unit
@@ -281,9 +351,7 @@ async def test_validation_provenance_marks_failed_command_from_workspace_failure
     response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
 
     assert response.status_code == 200
-    assert [
-        (item["command"], item["status"]) for item in response.json()["items"]
-    ] == [
+    assert [(item["command"], item["status"]) for item in response.json()["items"]] == [
         ("pytest -q", "succeeded"),
         ("ruff check", "failed"),
     ]

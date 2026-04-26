@@ -159,8 +159,13 @@ class ValidationRunner:
 
         results: list[ValidationCommandResult] = []
         ordered = [*healthchecks, *commands]
+        phase_indices: dict[str, int] = {}
         for index, (phase, command) in enumerate(ordered, start=1):
-            label = f"cmd_{index:02d}" if legacy_command_labels else f"{index:02d}_{phase}"
+            if legacy_command_labels:
+                label = f"cmd_{index:02d}"
+            else:
+                phase_indices[phase] = phase_indices.get(phase, 0) + 1
+                label = f"{phase_indices[phase]:02d}_{phase}"
             result = await self._exec(
                 compose_project=compose_project,
                 compose_file=compose_file,

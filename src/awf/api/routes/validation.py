@@ -63,9 +63,7 @@ async def list_validation_provenance(
     streams = await WorkspaceLogStreamRepository(session).list_validation_for_workspace(
         workspace_id
     )
-    return ValidationProvenanceListResponse(
-        items=_build_validation_items(workspace, streams)
-    )
+    return ValidationProvenanceListResponse(items=_build_validation_items(workspace, streams))
 
 
 @dataclass
@@ -106,10 +104,7 @@ def _build_validation_items(
     streams: list[WorkspaceLogStream],
 ) -> list[ValidationProvenanceItemResponse]:
     command_lookup = _command_lookup(workspace)
-    records = [
-        _command_record(pair, command_lookup)
-        for pair in _group_streams(streams).values()
-    ]
+    records = [_command_record(pair, command_lookup) for pair in _group_streams(streams).values()]
     records.sort(key=lambda record: record.sort_key)
     failed_record = _failed_record(workspace, records)
     return [
@@ -213,25 +208,28 @@ def _command_lookup(workspace: Workspace) -> dict[tuple[str, int], str]:
     lookup: dict[tuple[str, int], str] = {}
     profile = _resolved_profile(workspace)
     if profile is not None:
-        for index, (phase, command) in enumerate(
-            profile.phases.commands_for(("setup", "pre_agent")),
-            start=1,
+        for phase_name in (
+            "setup",
+            "pre_agent",
+            "healthcheck",
+            "post_agent",
+            "validate",
+            "cleanup",
         ):
-            lookup.setdefault((_normalize_phase(phase), index), command.command)
+            phase_key = _normalize_phase(phase_name)
+            if phase_name == "healthcheck":
+                for index, healthcheck in enumerate(
+                    profile.validation.healthchecks,
+                    start=1,
+                ):
+                    lookup.setdefault((phase_key, index), healthcheck.command)
+                continue
 
-        index = 1
-        for healthcheck in profile.validation.healthchecks:
-            lookup.setdefault(("healthcheck", index), healthcheck.command)
-            index += 1
-        for phase, command in profile.phases.commands_for(("post_agent", "validate")):
-            lookup.setdefault((_normalize_phase(phase), index), command.command)
-            index += 1
-
-        for index, (phase, command) in enumerate(
-            profile.phases.commands_for(("cleanup",)),
-            start=1,
-        ):
-            lookup.setdefault((_normalize_phase(phase), index), command.command)
+            for index, (_, command) in enumerate(
+                profile.phases.commands_for((phase_name,)),
+                start=1,
+            ):
+                lookup.setdefault((phase_key, index), command.command)
 
     for index, test_command in enumerate(workspace.test_commands, start=1):
         lookup.setdefault(("validate", index), test_command)
