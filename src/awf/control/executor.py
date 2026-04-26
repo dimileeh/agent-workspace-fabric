@@ -44,7 +44,7 @@ from awf.control.validation_fix_cycle import (
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
-from awf.node.compose_manager import ComposeManager
+from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.logs import LogStore
@@ -724,6 +724,10 @@ class WorkspaceExecutor:
                 return
             persisted.pr_url = pr.url
             persisted.pr_number = _extract_pr_number(pr.url)
+            if persisted.task_kind == "feature_branch_pr" and not persisted.remote_push_branch:
+                persisted.remote_push_branch = (
+                    pr.branch or persisted.branch_name or f"awf/{workspace_id}"
+                )
             # Resolve which monitor (if any) to hand off to. Pre-constructed
             # ``pr_monitor`` wins (tests); otherwise the factory builds one
             # from the per-task adapter now that we have it.
@@ -789,6 +793,13 @@ class WorkspaceExecutor:
             )
             return
 
+        if not ws.remote_push_branch and ws.task_kind == "feature_branch_pr" and ws.branch_name:
+            await self._recover_feature_branch_remote_push_branch(
+                workspace_id=workspace_id,
+                remote_push_branch=ws.branch_name,
+            )
+            ws.remote_push_branch = ws.branch_name
+
         missing = _missing_monitor_recovery_metadata(ws)
         if missing:
             await self._mark_failed(
@@ -796,8 +807,7 @@ class WorkspaceExecutor:
                 from_status=WorkspaceStatus.monitoring_pr,
                 failure_reason=FailureReason.infrastructure_failure,
                 message=(
-                    "monitor recovery: missing required persisted metadata: "
-                    + ", ".join(missing)
+                    "monitor recovery: missing required persisted metadata: " + ", ".join(missing)
                 )[:2000],
                 reason_code="MONITOR_RECOVERY_METADATA_MISSING",
             )
@@ -807,6 +817,29 @@ class WorkspaceExecutor:
         compose_file_path = ws.compose_file_path
         assert compose_project is not None
         assert compose_file_path is not None
+
+        try:
+            await self._compose.ensure_project_up(
+                project_name=compose_project,
+                compose_file=Path(compose_file_path),
+                workspace_id=workspace_id,
+                wait=True,
+            )
+        except ComposeOperationError as exc:
+            _log.error(
+                "executor.resume_compose_up_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                stderr=exc.stderr[:1000],
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.monitoring_pr,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"monitor recovery: compose stack failed to start: {exc}"[:2000],
+                reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+            )
+            return
 
         monitor: _MonitorRunnerProto | None = self._pr_monitor
         try:
@@ -867,6 +900,33 @@ class WorkspaceExecutor:
     async def _load_workspace(self, workspace_id: str) -> Workspace | None:
         async with self._session_factory() as session:
             return await WorkspaceRepository(session).get(workspace_id)
+
+    async def _recover_feature_branch_remote_push_branch(
+        self,
+        *,
+        workspace_id: str,
+        remote_push_branch: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
+                return
+            if ws.remote_push_branch:
+                return
+            if ws.task_kind != "feature_branch_pr" or not ws.branch_name:
+                return
+            ws.remote_push_branch = remote_push_branch
+            await repo.add_event(
+                ws,
+                event_type="workspace.remote_push_branch_recovered",
+                reason_code="REMOTE_PUSH_BRANCH_RECOVERED",
+                payload={
+                    "remote_push_branch": remote_push_branch,
+                    "source": "branch_name",
+                },
+            )
+            await session.commit()
 
     def _defaults_for(self, agent: AgentRuntime) -> AgentDefaults | None:
         defaults = defaults_with_model_overrides(
@@ -953,7 +1013,9 @@ def _missing_monitor_recovery_metadata(ws: Workspace) -> list[str]:
     if not ws.pr_url:
         missing.append("pr_url")
     if not ws.remote_push_branch:
-        missing.append("remote_push_branch")
+        missing.append(
+            f"remote_push_branch (task_kind={ws.task_kind}, branch_name={ws.branch_name!r})"
+        )
     if not ws.compose_project_name:
         missing.append("compose_project_name")
     if not ws.compose_file_path:

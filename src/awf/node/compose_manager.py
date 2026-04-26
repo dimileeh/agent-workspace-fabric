@@ -267,6 +267,33 @@ class ComposeManager:
         await self._compose(spec.project_name(), paths.compose_file, args, operation="up")
         return paths
 
+    async def ensure_project_up(
+        self,
+        *,
+        project_name: str,
+        compose_file: Path,
+        workspace_id: str,
+        wait: bool = True,
+    ) -> None:
+        """Start an already-rendered compose project without re-rendering.
+
+        Used by PR-monitor resume: the workspace row already records the
+        compose project and compose.yml path that were active before the
+        service restart. Re-rendering from a profile at resume time risks
+        drifting from the stack the monitor originally owned.
+        """
+        args = ["up", "-d"]
+        if wait:
+            args.append("--wait")
+        _log.info(
+            "compose.ensure_project_up",
+            workspace_id=workspace_id,
+            project_name=project_name,
+            compose_file=str(compose_file),
+            wait=wait,
+        )
+        await self._compose(project_name, compose_file, args, operation="up")
+
     async def down(self, spec: WorkspaceComposeSpec, *, remove_volumes: bool = True) -> None:
         """Stop + remove the stack. Idempotent — absent projects are not errors."""
         paths = self._paths_for(spec)

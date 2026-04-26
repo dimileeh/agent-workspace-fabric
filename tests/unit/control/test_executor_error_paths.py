@@ -1094,7 +1094,9 @@ class TestPrMonitorResume:
             assert ws.events[-1].reason_code == "MONITOR_RECOVERY_METADATA_MISSING"
 
     @pytest.mark.unit
-    @pytest.mark.parametrize("task_kind", ["monitor_release_pr", "sync_release_pr", "sync_feature_pr"])
+    @pytest.mark.parametrize(
+        "task_kind", ["monitor_release_pr", "sync_release_pr", "sync_feature_pr"]
+    )
     async def test_sync_and_release_resume_fail_when_remote_push_branch_is_unknown(
         self,
         task_kind: str,

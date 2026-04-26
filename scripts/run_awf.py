@@ -371,6 +371,11 @@ def _agent_environment_with_host_auth(
         if name not in existing and source_env.get(name):
             merged.append((name, f"${{{name}}}"))
             existing.add(name)
+    if source_env.get("AWF_GITHUB_TOKEN"):
+        for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+            if name not in existing:
+                merged.append((name, "${AWF_GITHUB_TOKEN}"))
+                existing.add(name)
     return tuple(merged)
 
 
