@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import builtins
+from copy import deepcopy
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
@@ -17,10 +19,11 @@ from awf.api.schemas import (
     WorkspaceEventResponse,
     WorkspaceLogStreamResponse,
     WorkspaceResponse,
+    WorkspaceRetryResponse,
     WorkspaceRuntimeResponse,
 )
-from awf.db.enums import OperationStatus, OperationType
-from awf.db.models import Workspace
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Operation, Task, Workspace
 from awf.db.repositories import (
     OperationRepository,
     OwnedPathConflict,
@@ -49,6 +52,10 @@ class RuntimeInspection(Protocol):
 
 OWNED_PATH_CONFLICT_CODE = "WORKSPACE_OWNED_PATH_CONFLICT"
 OWNED_PATH_CONFLICT_MESSAGE = "Requested owned paths overlap an active workspace."
+RETRYABLE_WORKSPACE_STATUSES = (
+    WorkspaceStatus.failed,
+    WorkspaceStatus.cancelled,
+)
 
 
 class WorkspaceOwnedPathConflictError(Exception):
@@ -57,6 +64,53 @@ class WorkspaceOwnedPathConflictError(Exception):
         self.message = OWNED_PATH_CONFLICT_MESSAGE
         self.detail = owned_path_conflict_detail(conflicts)
         super().__init__(self.message)
+
+
+class WorkspaceRetryError(Exception):
+    error_code = "WORKSPACE_RETRY_ERROR"
+    message = "Workspace retry failed."
+    detail: dict[str, Any] | None
+
+    def __init__(
+        self,
+        message: str | None = None,
+        *,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        if message is not None:
+            self.message = message
+        self.detail = detail
+        super().__init__(self.message)
+
+
+class WorkspaceRetryNotFoundError(WorkspaceRetryError):
+    error_code = "WORKSPACE_NOT_FOUND"
+
+    def __init__(self, workspace_id: str) -> None:
+        super().__init__(f"No workspace with id {workspace_id}")
+
+
+class WorkspaceRetryNotAllowedError(WorkspaceRetryError):
+    error_code = "WORKSPACE_NOT_RETRYABLE"
+
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            "Only failed or cancelled workspaces can be retried.",
+            detail={
+                "status": workspace.status,
+                "retryable_statuses": [
+                    status.value for status in RETRYABLE_WORKSPACE_STATUSES
+                ],
+            },
+        )
+
+
+@dataclass(frozen=True)
+class WorkspaceRetryResult:
+    source_workspace_id: str
+    new_workspace: Workspace
+    operation: Operation
+    attempt_number: int
 
 
 class WorkspaceService:
@@ -100,6 +154,12 @@ class WorkspaceService:
             ws = await create_workspace_v2_row(s, req)
             await s.commit()
             return WorkspaceResponse.model_validate(ws)
+
+    async def retry_workspace(self, workspace_id: str) -> WorkspaceRetryResponse:
+        async with self._factory() as s:
+            result = await retry_workspace_row(s, workspace_id)
+            await s.commit()
+            return workspace_retry_response(result)
 
     async def get(self, workspace_id: str) -> WorkspaceResponse | None:
         async with self._factory() as s:
@@ -355,8 +415,8 @@ async def create_workspace_v2_row(
         test_commands=payload.validation.commands,
         requires_database=False,
         idempotency_key=idempotency_key,
+        task_kind=payload.task.kind,
     )
-    ws.task_kind = payload.task.kind
     task = await TaskRepository(session).create_or_get(
         repo_url=payload.repo.url,
         base_branch=payload.repo.base_branch,
@@ -372,6 +432,137 @@ async def create_workspace_v2_row(
     await TaskAttemptRepository(session).create_for_workspace(task=task, workspace=ws)
     await session.flush()
     return ws
+
+
+async def retry_workspace_row(
+    session: AsyncSession,
+    workspace_id: str,
+) -> WorkspaceRetryResult:
+    """Create a fresh requested workspace cloned from a failed/cancelled attempt."""
+    repo = WorkspaceRepository(session)
+    source = await repo.get_for_update(workspace_id)
+    if source is None:
+        raise WorkspaceRetryNotFoundError(workspace_id)
+
+    if WorkspaceStatus(source.status) not in RETRYABLE_WORKSPACE_STATUSES:
+        raise WorkspaceRetryNotAllowedError(source)
+
+    await repo.acquire_owned_path_conflict_lock(
+        repo_url=source.repo_url,
+        branch_base=source.branch_base,
+        owned_paths=list(source.owned_paths),
+    )
+    conflicts = await repo.find_active_owned_path_conflicts(
+        repo_url=source.repo_url,
+        branch_base=source.branch_base,
+        owned_paths=list(source.owned_paths),
+    )
+    if conflicts:
+        raise WorkspaceOwnedPathConflictError(conflicts)
+
+    retried = await repo.create(
+        repo_url=source.repo_url,
+        branch_base=source.branch_base,
+        task_title=source.task_title,
+        task_prompt=source.task_prompt,
+        task_external_id=source.task_external_id,
+        task_class=source.task_class,
+        owned_paths=list(source.owned_paths),
+        auto_merge=source.auto_merge,
+        initial_review_grace_period_seconds=(
+            source.initial_review_grace_period_seconds
+        ),
+        agent=source.agent,
+        env_profile=source.env_profile,
+        profile_ref=source.profile_ref,
+        requested_profile=deepcopy(source.requested_profile),
+        resolved_profile=deepcopy(source.resolved_profile),
+        test_commands=list(source.test_commands),
+        requires_database=source.requires_database,
+        idempotency_key=None,
+        task_kind=source.task_kind,
+        remote_push_branch=source.remote_push_branch,
+    )
+
+    task = await _retry_task_for_source(session, source)
+    attempt = await TaskAttemptRepository(session).create_for_workspace(
+        task=task,
+        workspace=retried,
+    )
+
+    operation_repo = OperationRepository(session)
+    operation = await operation_repo.create(
+        workspace_id=retried.id,
+        operation_type=OperationType.retry,
+        status=OperationStatus.running,
+        payload={"source_workspace_id": source.id},
+    )
+    event_payload = {
+        "source_workspace_id": source.id,
+        "new_workspace_id": retried.id,
+        "attempt_number": attempt.attempt_number,
+    }
+    await repo.add_event(
+        source,
+        event_type="workspace.retry_requested",
+        reason_code="RETRY_REQUESTED",
+        payload=event_payload,
+    )
+    await repo.add_event(
+        retried,
+        event_type="workspace.retry_created",
+        reason_code="RETRY_CREATED",
+        payload=event_payload,
+    )
+    await operation_repo.finish(
+        operation,
+        status=OperationStatus.succeeded,
+        result={
+            "new_workspace_id": retried.id,
+            "attempt_number": attempt.attempt_number,
+            "status": retried.status,
+        },
+    )
+    await session.flush()
+    return WorkspaceRetryResult(
+        source_workspace_id=source.id,
+        new_workspace=retried,
+        operation=operation,
+        attempt_number=attempt.attempt_number,
+    )
+
+
+async def _retry_task_for_source(session: AsyncSession, source: Workspace) -> Task:
+    attempt = await TaskAttemptRepository(session).get_by_workspace_id(source.id)
+    if attempt is not None:
+        task = await TaskRepository(session).get(attempt.task_id)
+        if task is not None:
+            return task
+
+    fallback_idempotency_key = f"retry-source-workspace:{source.id}"
+    return await TaskRepository(session).create_or_get(
+        repo_url=source.repo_url,
+        base_branch=source.branch_base,
+        title=source.task_title,
+        prompt=source.task_prompt,
+        external_id=source.task_external_id,
+        idempotency_key=fallback_idempotency_key,
+        task_class=source.task_class,
+        owned_paths=list(source.owned_paths),
+    )
+
+
+def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResponse:
+    new_workspace_id = result.new_workspace.id
+    return WorkspaceRetryResponse(
+        source_workspace_id=result.source_workspace_id,
+        new_workspace_id=new_workspace_id,
+        operation_id=result.operation.id,
+        status=WorkspaceStatus(result.new_workspace.status),
+        attempt_number=result.attempt_number,
+        status_url=f"/v1/workspaces/{new_workspace_id}",
+        events_url=f"/v1/workspaces/{new_workspace_id}/events",
+    )
 
 
 def owned_path_conflict_detail(conflicts: list[OwnedPathConflict]) -> dict[str, Any]:

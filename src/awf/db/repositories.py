@@ -280,6 +280,8 @@ class WorkspaceRepository:
         requested_profile: dict[str, Any] | None = None,
         resolved_profile: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
+        task_kind: str = "feature_branch_pr",
+        remote_push_branch: str | None = None,
     ) -> Workspace:
         """Create a new workspace in ``requested`` status and emit a creation event.
 
@@ -291,10 +293,12 @@ class WorkspaceRepository:
             version=1,
             repo_url=repo_url,
             branch_base=branch_base,
+            remote_push_branch=remote_push_branch,
             task_title=task_title,
             task_prompt=task_prompt,
             task_external_id=task_external_id,
             task_class=task_class,
+            task_kind=task_kind,
             owned_paths=list(owned_paths or []),
             auto_merge=auto_merge,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
