@@ -780,6 +780,7 @@ class ValidationRunRepository:
         finished_at: datetime | None = None,
         retry_count: int = 0,
         coverage: dict[str, Any] | None = None,
+        command_retries: list[int] | None = None,
     ) -> ValidationRun | None:
         run = await self.get(validation_run_id)
         if run is None:
@@ -792,6 +793,12 @@ class ValidationRunRepository:
             log_stream_refs = dict(run.log_stream_refs or {})
             log_stream_refs["coverage"] = dict(coverage)
             run.log_stream_refs = log_stream_refs
+        if command_retries is not None:
+            updated_commands = list(run.commands)
+            for i, rc in enumerate(command_retries):
+                if i < len(updated_commands):
+                    updated_commands[i] = dict(updated_commands[i], retry_count=rc)
+            run.commands = updated_commands
         await self._session.flush()
         return run
 
