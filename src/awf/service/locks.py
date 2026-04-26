@@ -25,7 +25,7 @@ class WorkspaceLock:
     repo_url: str
     branch_base: str
     task_class: str | None
-    owned_paths: list[str]
+    owned_paths: tuple[str, ...]
     pr_url: str | None
     created_at: datetime
     updated_at: datetime
@@ -167,7 +167,7 @@ def _workspace_lock(workspace: Workspace) -> WorkspaceLock:
         repo_url=workspace.repo_url,
         branch_base=workspace.branch_base,
         task_class=workspace.task_class,
-        owned_paths=list(workspace.owned_paths),
+        owned_paths=tuple(workspace.owned_paths),
         pr_url=workspace.pr_url,
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,

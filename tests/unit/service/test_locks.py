@@ -97,7 +97,8 @@ async def test_list_workspace_locks_defaults_to_active_non_terminal_workspaces(
     assert locks[0].repo_url == "git@github.com:example/app.git"
     assert locks[0].branch_base == "main"
     assert locks[0].task_class == "refactor_task"
-    assert locks[0].owned_paths == ["src/awf/service/**"]
+    assert locks[0].owned_paths == ("src/awf/service/**",)
+    assert isinstance(hash(locks[0]), int)
     assert locks[0].pr_url == "https://github.com/example/app/pull/2"
     assert locks[0].created_at == (now + timedelta(minutes=1)).replace(tzinfo=None)
     assert locks[0].updated_at == (now + timedelta(minutes=6)).replace(tzinfo=None)
