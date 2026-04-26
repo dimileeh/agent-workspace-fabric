@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
+import yaml
 
 from awf.common.config import DEFAULT_MIN_FREE_DISK_BYTES, Settings
 from awf.service.config import resolve_service_settings, service_config_payload
@@ -55,3 +57,34 @@ def test_min_free_disk_threshold_flows_from_settings_to_service_settings() -> No
     settings = resolve_service_settings(base, environ={"AWF_MIN_FREE_DISK_BYTES": "123456"})
 
     assert settings.min_free_disk_bytes == 123456
+
+
+@pytest.mark.unit
+def test_local_service_config_resolves_stable_worker_node_id_in_payload() -> None:
+    settings = resolve_service_settings(Settings(_env_file=None), environ={})
+    payload = service_config_payload(settings)
+
+    assert settings.node_id == "local"
+    assert payload["node_id"] == "local"
+
+
+@pytest.mark.unit
+def test_explicit_worker_node_id_is_preserved_for_non_local_multi_node_deployments() -> None:
+    base = Settings(_env_file=None, worker_node_id="prod-node-a")
+
+    settings = resolve_service_settings(
+        base,
+        environ={"AWF_WORKER_NODE_ID": "prod-node-a"},
+    )
+
+    assert settings.node_id == "prod-node-a"
+
+
+@pytest.mark.unit
+def test_local_service_compose_sets_stable_worker_node_id_for_control_plane_services() -> None:
+    compose_path = Path(__file__).resolve().parents[3] / "docker" / "compose" / "local-service.yml"
+    compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+
+    for service_name in ("api", "worker", "migrate"):
+        service = compose["services"][service_name]
+        assert service["environment"]["AWF_WORKER_NODE_ID"] == "local"
