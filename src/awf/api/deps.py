@@ -82,6 +82,11 @@ async def _ensure_live_session_factory(request: Request) -> async_sessionmaker[A
         return new_factory
 
 
+async def get_db_session_factory(request: Request) -> async_sessionmaker[AsyncSession]:
+    """Return the current per-app async session factory."""
+    return await _ensure_live_session_factory(request)
+
+
 async def get_db_session(request: Request) -> AsyncIterator[AsyncSession]:
     """Yield a per-request async DB session, committing on success and rolling back on error."""
     factory = await _ensure_live_session_factory(request)

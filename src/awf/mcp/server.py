@@ -232,6 +232,23 @@ def build_mcp_server(
         )
         return [row.model_dump(mode="json") for row in rows] if rows is not None else None
 
+    @mcp.tool(name="awf_get_workspace_runtime")
+    async def awf_get_workspace_runtime(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+    ) -> dict[str, Any] | None:
+        """Fetch compose/container runtime state for one workspace."""
+        result = await service.get_runtime(workspace_id)
+        return result.model_dump(mode="json") if result is not None else None
+
+    @mcp.tool(name="awf_list_workspace_operations")
+    async def awf_list_workspace_operations(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+        limit: int = Field(default=50, ge=1, le=500),
+    ) -> list[dict[str, Any]] | None:
+        """List one workspace's operations newest-first."""
+        rows = await service.list_operations(workspace_id, limit=limit)
+        return [row.model_dump(mode="json") for row in rows] if rows is not None else None
+
     @mcp.tool(name="awf_list_workspace_logs")
     async def awf_list_workspace_logs(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),

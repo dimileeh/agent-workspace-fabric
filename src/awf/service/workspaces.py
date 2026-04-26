@@ -4,26 +4,36 @@ from __future__ import annotations
 
 import builtins
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import (
+    OperationResponse,
+    RuntimeServiceResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
     WorkspaceEventResponse,
     WorkspaceLogStreamResponse,
     WorkspaceResponse,
+    WorkspaceRuntimeResponse,
 )
+from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    OperationRepository,
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
+from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.runtime.logs import read_log_chunk
+
+
+class RuntimeInspection(Protocol):
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot: ...
 
 
 class WorkspaceService:
@@ -34,9 +44,11 @@ class WorkspaceService:
         session_factory: async_sessionmaker[AsyncSession],
         *,
         log_root: Path | str | None = None,
+        runtime_inspector: RuntimeInspection | None = None,
     ) -> None:
         self._factory = session_factory
         self._log_root = Path(log_root).resolve() if log_root is not None else None
+        self._runtime_inspector = runtime_inspector or RuntimeInspector()
 
     async def create(self, req: WorkspaceCreateRequest) -> WorkspaceResponse:
         async with self._factory() as s:
@@ -69,6 +81,56 @@ class WorkspaceService:
         async with self._factory() as s:
             rows = await WorkspaceRepository(s).list(limit=limit)
             return [WorkspaceResponse.model_validate(r) for r in rows]
+
+    async def get_runtime(self, workspace_id: str) -> WorkspaceRuntimeResponse | None:
+        async with self._factory() as s:
+            workspace = await WorkspaceRepository(s).get(workspace_id)
+            if workspace is None:
+                return None
+            compose_project_name = workspace.compose_project_name
+
+        snapshot = await self._runtime_inspector.inspect(compose_project_name)
+        return WorkspaceRuntimeResponse(
+            workspace_id=workspace_id,
+            compose_project_name=compose_project_name,
+            stack_state=snapshot.stack_state,
+            services=[
+                RuntimeServiceResponse(
+                    name=s.name,
+                    container_id=s.container_id,
+                    image=s.image,
+                    state=s.state,
+                    status=s.status,
+                    health=s.health,
+                    ports=s.ports,
+                    started_at=s.started_at,
+                )
+                for s in snapshot.services
+            ],
+            logs_available=True,
+            control_available=True,
+            reason=snapshot.reason,
+        )
+
+    async def list_operations(
+        self,
+        workspace_id: str,
+        *,
+        status: OperationStatus | str | None = None,
+        operation_type: OperationType | str | None = None,
+        limit: int = 50,
+    ) -> builtins.list[OperationResponse] | None:
+        async with self._factory() as s:
+            workspace_repo = WorkspaceRepository(s)
+            if not await workspace_repo.exists(workspace_id):
+                return None
+            rows = await OperationRepository(s).list_for_workspace(
+                workspace_id,
+                status=status,
+                operation_type=operation_type,
+                limit=limit,
+            )
+            return [OperationResponse.model_validate(row) for row in rows]
 
     async def list_events(
         self,
