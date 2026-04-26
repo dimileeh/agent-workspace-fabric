@@ -32,6 +32,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
     assert "docker-compose-plugin" in dockerfile
     assert "COPY src ./src" in dockerfile
     assert "COPY migrations ./migrations" in dockerfile
+    assert "COPY docker/compose/workspace.base.yml.j2 ./docker/compose/workspace.base.yml.j2" in dockerfile
     assert "uv sync --frozen --extra dev" in dockerfile
 
     expected_work_dir = "${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}"

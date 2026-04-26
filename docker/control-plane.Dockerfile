@@ -26,6 +26,7 @@ WORKDIR /app
 
 COPY pyproject.toml uv.lock README.md alembic.ini ./
 COPY migrations ./migrations
+COPY docker/compose/workspace.base.yml.j2 ./docker/compose/workspace.base.yml.j2
 COPY src ./src
 
 RUN uv sync --frozen --extra dev
