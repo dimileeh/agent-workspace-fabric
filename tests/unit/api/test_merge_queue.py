@@ -7,11 +7,11 @@ from datetime import UTC, datetime
 
 import pytest
 from httpx import AsyncClient
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 
 
@@ -28,6 +28,7 @@ async def _create_queue_workspace(
     task_class: str | None = "test_task",
     owned_paths: list[str] | None = None,
     updated_at: datetime | None = None,
+    candidate_created_at: datetime | None = None,
 ) -> str:
     from awf.db.repositories import MergeCandidateRepository, TaskAttemptRepository, TaskRepository
 
@@ -69,13 +70,16 @@ async def _create_queue_workspace(
         if pr_url is not None:
             attempt.is_canonical_for_merge = True
             candidate_repo = MergeCandidateRepository(session)
-            await candidate_repo.create_or_update_open_for_attempt(
+            candidate = await candidate_repo.create_or_update_open_for_attempt(
                 task=task,
                 attempt=attempt,
                 workspace=workspace,
                 head_sha="head123",
                 base_sha="base123",
             )
+            if candidate_created_at is not None:
+                candidate.created_at = candidate_created_at
+                candidate.updated_at = candidate_created_at
             if status == WorkspaceStatus.completed:
                 await candidate_repo.mark_workspace_merged(workspace.id)
             elif status in {WorkspaceStatus.failed, WorkspaceStatus.cancelled}:
@@ -103,6 +107,18 @@ async def _attempt_id_for_workspace(engine: AsyncEngine, workspace_id: str) -> s
         attempt_id = result.scalar_one()
         assert isinstance(attempt_id, str)
         return attempt_id
+
+
+async def _add_monitor_recovery_operation(engine: AsyncEngine, workspace_id: str) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.pending,
+            payload={"source": "pr_monitor", "reason": "validation_insufficient_tier"},
+        )
+        await session.commit()
 
 
 async def _insert_validation_run(
@@ -256,6 +272,7 @@ class TestMergeQueueList:
             "required_next_action",
             "readiness",
             "canonical",
+            "queue_blockers",
             "latest_validation",
             "stale_reasons",
         }
@@ -275,6 +292,7 @@ class TestMergeQueueList:
         assert item["owned_paths"] == ["src/awf/api/**"]
         assert item["last_event"]["event_type"] == "merge_queue.test_marker"
         assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+        assert item["queue_blockers"] == []
         assert item["canonical"] is True
         assert item["readiness"] == {
             "ready": True,
@@ -489,6 +507,148 @@ class TestMergeQueueList:
             "stale_reason": None,
         }
         assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+
+    @pytest.mark.unit
+    async def test_exposes_older_candidate_blocker_details(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        older_id = await _create_queue_workspace(
+            engine,
+            title="Older queue candidate",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/61",
+            updated_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+            candidate_created_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        )
+        later_id = await _create_queue_workspace(
+            engine,
+            title="Later queue candidate",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/62",
+            branch_name="codex/later-queue",
+            updated_at=datetime(2026, 4, 21, 12, 0, tzinfo=UTC),
+            candidate_created_at=datetime(2026, 4, 20, 12, 5, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue", params={"limit": 20})
+
+        assert response.status_code == 200
+        items = {item["workspace_id"]: item for item in response.json()["items"]}
+        later = items[later_id]
+        older = items[older_id]
+        assert older["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+        assert older["queue_blockers"] == []
+        assert later["merge_blocker_reason"] == "waiting_for_older_candidate"
+        assert later["required_next_action"] == "wait_for_queue"
+        assert later["queue_blockers"] == [
+            {
+                "candidate_id": older["candidate_id"],
+                "workspace_id": older_id,
+                "attempt_id": older["attempt_id"],
+                "task_id": older["task_id"],
+                "title": "Older queue candidate",
+                "pr_url": "https://github.com/example/console/pull/61",
+                "pr_number": 61,
+                "status": WorkspaceStatus.monitoring_pr.value,
+                "blocker_state": "merge_eligible",
+                "reason_code": "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
+            }
+        ]
+
+    @pytest.mark.unit
+    async def test_exposes_monitor_owned_recovery_blocker_details(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        older_id = await _create_queue_workspace(
+            engine,
+            title="Older recovery candidate",
+            status=WorkspaceStatus.ready,
+            pr_url="https://github.com/example/console/pull/63",
+            updated_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+            candidate_created_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        )
+        await _add_monitor_recovery_operation(engine, older_id)
+        later_id = await _create_queue_workspace(
+            engine,
+            title="Later queue candidate",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/64",
+            branch_name="codex/later-queue",
+            updated_at=datetime(2026, 4, 21, 12, 0, tzinfo=UTC),
+            candidate_created_at=datetime(2026, 4, 20, 12, 5, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue", params={"limit": 20})
+
+        assert response.status_code == 200
+        items = {item["workspace_id"]: item for item in response.json()["items"]}
+        later = items[later_id]
+        older = items[older_id]
+        assert later["merge_blocker_reason"] == "waiting_for_older_candidate"
+        assert later["required_next_action"] == "wait_for_queue"
+        assert later["queue_blockers"] == [
+            {
+                "candidate_id": older["candidate_id"],
+                "workspace_id": older_id,
+                "attempt_id": older["attempt_id"],
+                "task_id": older["task_id"],
+                "title": "Older recovery candidate",
+                "pr_url": "https://github.com/example/console/pull/63",
+                "pr_number": 63,
+                "status": WorkspaceStatus.ready.value,
+                "blocker_state": "monitor_owned_recovery",
+                "reason_code": "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
+            }
+        ]
+
+    @pytest.mark.unit
+    async def test_loads_queue_blockers_without_per_candidate_queries(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        for index in range(3):
+            await _create_queue_workspace(
+                engine,
+                title=f"Queue candidate {index}",
+                status=WorkspaceStatus.monitoring_pr,
+                pr_url=f"https://github.com/example/console/pull/{70 + index}",
+                branch_name=f"codex/queue-{index}",
+                updated_at=datetime(2026, 4, 21 + index, 12, 0, tzinfo=UTC),
+                candidate_created_at=datetime(2026, 4, 20, 12, index, tzinfo=UTC),
+            )
+
+        statements: list[str] = []
+
+        def record_sql(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, parameters, context, executemany
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            response = await client.get("/v1/merge-queue", params={"limit": 20})
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+        assert response.status_code == 200
+        assert len(response.json()["items"]) == 3
+        assert not [
+            statement
+            for statement in statements
+            if "from merge_candidates" in statement
+            and "where merge_candidates.id = ?" in statement
+        ]
 
     @pytest.mark.unit
     async def test_exposes_latest_validation_provenance_and_freshness(

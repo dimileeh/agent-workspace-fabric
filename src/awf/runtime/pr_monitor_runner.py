@@ -74,6 +74,10 @@ from awf.runtime.pr_monitor import (
     decide,
 )
 from awf.service.gc import run_workspace_filesystem_gc
+from awf.service.merge_queue import (
+    MergeQueueBlocker,
+    list_merge_queue_blockers_for_workspace,
+)
 
 _log = get_logger(__name__)
 
@@ -590,7 +594,7 @@ class PullRequestMonitorRunner:
                         await OperationRepository(s).create(
                             workspace_id=workspace_id,
                             operation_type=req_action or "validate",
-                            payload={"reason": stale_reason},
+                            payload={"source": "pr_monitor", "reason": stale_reason},
                         )
                         await WorkspaceRepository(s).transition(
                             _ws,
@@ -619,6 +623,20 @@ class PullRequestMonitorRunner:
                 await self._deps.sleep(grace_wait_seconds)
                 return False
 
+            queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
+            if queue_blockers:
+                await self._wait_for_merge_queue(
+                    blockers=queue_blockers,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    base_branch=base_branch,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    monitor_log=monitor_log,
+                )
+                return False
+
             await self._record_merge_coordination_event(
                 "monitor.merge_critical_section_waiting",
                 monitor_log=monitor_log,
@@ -634,6 +652,7 @@ class PullRequestMonitorRunner:
             merge_blocker: GitHubClientError | None = None
             recheck_error: GitHubClientError | None = None
             merge_status = status
+            queue_blockers_after_lock: list[MergeQueueBlocker] = []
             async with self._merge_coordinator.serialized_merge(
                 repo_url=repo_url,
                 base_branch=base_branch,
@@ -687,12 +706,29 @@ class PullRequestMonitorRunner:
                             merge_status = checked_status
 
                 if recheck_error is None and fresh_action is None:
-                    try:
-                        merge_sha = await self._deps.gh.merge_pr(
-                            repo=repo, pr_number=pr_number
-                        )
-                    except GitHubClientError as exc:
-                        merge_blocker = exc
+                    queue_blockers_after_lock = (
+                        await self._merge_queue_blockers_for_workspace(workspace_id)
+                    )
+                    if not queue_blockers_after_lock:
+                        try:
+                            merge_sha = await self._deps.gh.merge_pr(
+                                repo=repo, pr_number=pr_number
+                            )
+                        except GitHubClientError as exc:
+                            merge_blocker = exc
+
+            if queue_blockers_after_lock:
+                await self._wait_for_merge_queue(
+                    blockers=queue_blockers_after_lock,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    base_branch=base_branch,
+                    pr_number=pr_number,
+                    status=merge_status,
+                    state=state,
+                    monitor_log=monitor_log,
+                )
+                return False
 
             if recheck_error is not None:
                 await self._terminate_failed(
@@ -798,6 +834,61 @@ class PullRequestMonitorRunner:
         }
         _log.info(event, **payload)
         await self._write_monitor_log(monitor_log, {"event": event, **payload})
+
+    async def _merge_queue_blockers_for_workspace(
+        self,
+        workspace_id: str,
+    ) -> list[MergeQueueBlocker]:
+        async with self._deps.session_factory() as s:
+            return await list_merge_queue_blockers_for_workspace(
+                s,
+                workspace_id=workspace_id,
+            )
+
+    async def _wait_for_merge_queue(
+        self,
+        *,
+        blockers: list[MergeQueueBlocker],
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+        pr_number: int,
+        status: PRStatus,
+        state: MonitorState,
+        monitor_log: WorkspaceLogSink | None,
+    ) -> None:
+        blocker = blockers[0]
+        payload = blocker.event_payload(repo_url=repo_url, base_branch=base_branch)
+        log_payload = {
+            "workspace_id": workspace_id,
+            "pr_number": pr_number,
+            "head_sha": status.head_sha[:10],
+            "blocker_count": len(blockers),
+            **payload,
+        }
+        _log.info("monitor.merge_queue_waiting", **log_payload)
+        await self._write_monitor_log(
+            monitor_log,
+            {"event": "monitor.merge_queue_waiting", **log_payload},
+        )
+
+        key = _merge_queue_wait_key(
+            head_sha=status.head_sha,
+            blocker_candidate_id=blocker.candidate_id,
+        )
+        if state.threads_addressed_ids.get(key) != "waiting":
+            await self._append_workspace_events(
+                workspace_id=workspace_id,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="workspace.merge_queue_waiting",
+                        reason_code=blocker.reason_code,
+                        payload=payload,
+                    )
+                ],
+            )
+            state.mark_addressed(key, "waiting")
+        await self._deps.sleep(self._config.poll_interval_seconds)
 
     async def _post_human_notification_once(
         self,
@@ -1807,6 +1898,10 @@ def _merge_rejection_reason(stderr: str) -> str:
 def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
     reason = blocker_reason or "ready-to-merge"
     return f"__awf_notify__:{head_sha}:{reason}"
+
+
+def _merge_queue_wait_key(*, head_sha: str, blocker_candidate_id: str) -> str:
+    return f"__awf_merge_queue_wait__:{head_sha}:{blocker_candidate_id}"
 
 
 def _initial_review_grace_started_key(pr_number: int) -> str:

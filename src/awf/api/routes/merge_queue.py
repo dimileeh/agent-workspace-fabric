@@ -7,7 +7,7 @@ import binascii
 import json
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Annotated
+from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from fastapi import status as fastapi_status
@@ -17,6 +17,8 @@ from awf.api.deps import get_db_session
 from awf.api.schemas import (
     MergeBlockerReason,
     MergeCandidateReadinessResponse,
+    MergeQueueBlockerResponse,
+    MergeQueueBlockerState,
     MergeQueueItemResponse,
     MergeQueueListResponse,
     StaleReasonResponse,
@@ -31,6 +33,10 @@ from awf.db.repositories import (
     StaleReasonRepository,
     ValidationRunRepository,
     WorkspaceRepository,
+)
+from awf.service.merge_queue import (
+    MergeQueueBlocker,
+    list_merge_queue_blockers_for_candidates,
 )
 
 router = APIRouter(prefix="/v1/merge-queue", tags=["merge-queue"])
@@ -94,6 +100,7 @@ async def list_merge_queue(
     )
 
     stale_reasons_by_candidate = await _load_active_stale_reasons(session, page_rows)
+    blockers_by_candidate = await _load_queue_blockers(session, page_rows)
 
     return MergeQueueListResponse(
         items=[
@@ -101,6 +108,7 @@ async def list_merge_queue(
                 row,
                 latest_validation_runs.get(_row_workspace(row).id),
                 stale_reasons_by_candidate,
+                blockers_by_candidate,
             )
             for row in page_rows
         ],
@@ -121,16 +129,29 @@ async def _load_active_stale_reasons(
     return await StaleReasonRepository(session).list_active_for_candidates(candidate_ids)
 
 
+async def _load_queue_blockers(
+    session: AsyncSession,
+    rows: list[MergeCandidate | Workspace],
+) -> dict[str, list[MergeQueueBlocker]]:
+    candidate_ids = [row.id for row in rows if isinstance(row, MergeCandidate)]
+    return await list_merge_queue_blockers_for_candidates(
+        session,
+        candidate_ids=candidate_ids,
+    )
+
+
 def _item_from_row(
     row: MergeCandidate | Workspace,
     latest_validation_run: ValidationRun | None,
     stale_reasons_by_candidate: dict[str, list[StaleReason]],
+    blockers_by_candidate: dict[str, list[MergeQueueBlocker]],
 ) -> MergeQueueItemResponse:
     if isinstance(row, MergeCandidate):
         return _item_from_candidate(
             row,
             latest_validation_run,
             stale_reasons=stale_reasons_by_candidate.get(row.id, []),
+            queue_blockers=blockers_by_candidate.get(row.id, []),
         )
     return _item_from_legacy_workspace(row, latest_validation_run)
 
@@ -140,10 +161,11 @@ def _item_from_candidate(
     latest_validation_run: ValidationRun | None,
     *,
     stale_reasons: list[StaleReason],
+    queue_blockers: list[MergeQueueBlocker],
 ) -> MergeQueueItemResponse:
     workspace = candidate.workspace
     latest_event = _latest_event(workspace.events)
-    reason, action = _merge_blocker_reason(candidate)
+    reason, action = _merge_blocker_reason(candidate, queue_blockers=queue_blockers)
     return MergeQueueItemResponse(
         candidate_id=candidate.id,
         candidate_status=candidate.status,
@@ -171,6 +193,7 @@ def _item_from_candidate(
         required_next_action=action,
         readiness=_readiness_from_candidate(candidate),
         canonical=candidate.attempt.is_canonical_for_merge,
+        queue_blockers=[_queue_blocker_response(blocker) for blocker in queue_blockers],
         latest_validation=_latest_validation_summary(
             latest_validation_run,
             current_target_head_sha=candidate.head_sha or workspace.monitor_last_commit_sha,
@@ -215,6 +238,7 @@ def _item_from_legacy_workspace(
         required_next_action=action,
         readiness=None,
         canonical=False,
+        queue_blockers=[],
         latest_validation=_latest_validation_summary(
             latest_validation_run,
             current_target_head_sha=workspace.monitor_last_commit_sha,
@@ -233,7 +257,26 @@ def _latest_event(events: list[WorkspaceEvent]) -> WorkspaceEvent | None:
     return events[-1] if events else None
 
 
-def _merge_blocker_reason(candidate: MergeCandidate) -> tuple[MergeBlockerReason, str | None]:
+def _queue_blocker_response(blocker: MergeQueueBlocker) -> MergeQueueBlockerResponse:
+    return MergeQueueBlockerResponse(
+        candidate_id=blocker.candidate_id,
+        workspace_id=blocker.workspace_id,
+        attempt_id=blocker.attempt_id,
+        task_id=blocker.task_id,
+        title=blocker.title,
+        pr_url=blocker.pr_url,
+        pr_number=blocker.pr_number,
+        status=WorkspaceStatus(blocker.status),
+        blocker_state=cast(MergeQueueBlockerState, blocker.blocker_state),
+        reason_code=blocker.reason_code,
+    )
+
+
+def _merge_blocker_reason(
+    candidate: MergeCandidate,
+    *,
+    queue_blockers: list[MergeQueueBlocker],
+) -> tuple[MergeBlockerReason, str | None]:
     if candidate.completed:
         return "completed", None
     if candidate.failed_or_cancelled:
@@ -248,6 +291,8 @@ def _merge_blocker_reason(candidate: MergeCandidate) -> tuple[MergeBlockerReason
         return "manual_merge_required", None
     if candidate.waiting_for_monitor:
         return "waiting_for_monitor", None
+    if queue_blockers:
+        return "waiting_for_older_candidate", "wait_for_queue"
     if candidate.ready:
         return "ready_to_merge_or_waiting_for_github", None
     return "workspace_not_terminal", None

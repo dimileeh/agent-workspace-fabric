@@ -419,8 +419,17 @@ class StalenessRefreshService:
         from awf.runtime.merge_eligibility import compute_stale_reason
 
         validation_reason, _ = compute_stale_reason(candidate.workspace)
+        existing_validation_reason = (
+            candidate.stale_reason
+            if candidate.stale_reason == "validation_insufficient_tier"
+            else None
+        )
         next_stale = stale or validation_reason is not None
-        next_stale_reason = validation_reason or ("stale" if stale else None)
+        next_stale_reason = (
+            validation_reason
+            or (existing_validation_reason if stale else None)
+            or ("stale" if stale else None)
+        )
         if candidate.stale != next_stale or candidate.stale_reason != next_stale_reason:
             candidate.stale = next_stale
             candidate.stale_reason = next_stale_reason
