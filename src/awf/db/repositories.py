@@ -1039,6 +1039,21 @@ class WorkspaceLogStreamRepository:
         )
         return list((await self._session.execute(stmt)).scalars())
 
+    async def list_validation_for_workspace(self, workspace_id: str) -> list[WorkspaceLogStream]:
+        stmt = (
+            select(WorkspaceLogStream)
+            .where(
+                WorkspaceLogStream.workspace_id == workspace_id,
+                or_(
+                    WorkspaceLogStream.source.in_(("validation", "setup")),
+                    WorkspaceLogStream.stream_id.like("validation.%"),
+                    WorkspaceLogStream.stream_id.like("setup.%"),
+                ),
+            )
+            .order_by(WorkspaceLogStream.opened_at, WorkspaceLogStream.stream_id)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
     async def append_metadata(
         self,
         *,

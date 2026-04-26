@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from awf.common.commands import FakeCommandRunner
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import ValidationRunner
 
 _COMPOSE_PROJECT = "awf_ws_val"
@@ -62,6 +63,48 @@ class TestHappyPath:
         assert stderr_path.read_text() == "one-stderr"
         assert stdout_path.parent.name == "ws_a"
         assert stdout_path.name == "cmd_01.stdout"
+
+    @pytest.mark.unit
+    async def test_profile_phase_artifacts_use_per_phase_indices(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="health ok")
+        fake.queue_result(returncode=0, stdout="format ok")
+        fake.queue_result(returncode=0, stdout="tests ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "phase-label-test",
+                "phases": {
+                    "post_agent": ["ruff format --check"],
+                    "validate": ["pytest -q"],
+                },
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://localhost:8000/health",
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_phase_labels",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("post_agent", "validate"),
+            run_healthchecks=True,
+        )
+
+        assert result.all_passed
+        assert [command.stdout_path.name for command in result.commands] == [
+            "01_healthcheck.stdout",
+            "01_post_agent.stdout",
+            "01_validate.stdout",
+        ]
 
 
 class TestFailureStopsEarly:
