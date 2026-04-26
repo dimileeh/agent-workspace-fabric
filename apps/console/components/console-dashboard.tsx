@@ -7,6 +7,8 @@ import {
   ArrowUp,
   Bot,
   Boxes,
+  ChevronDown,
+  ChevronUp,
   CheckCircle2,
   CircleDot,
   Clock3,
@@ -119,8 +121,9 @@ export function ConsoleDashboard() {
   const [agentFilter, setAgentFilter] = useState<string>("all");
   const [repoFilter, setRepoFilter] = useState("");
   const [searchText, setSearchText] = useState("");
-  const [sortKey, setSortKey] = useState<WorkspaceSortKey>("created_at");
+  const [sortKey, setSortKey] = useState<WorkspaceSortKey>("updated_at");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [resourceSaturation, setResourceSaturation] = useState<ResourceSaturationSummary | null>(null);
   const [resourceError, setResourceError] = useState<string | null>(null);
   const [mergeQueue, setMergeQueue] = useState<MergeQueueItem[]>([]);
@@ -574,6 +577,8 @@ export function ConsoleDashboard() {
             onSearchText={setSearchText}
             onSortKey={setSortKey}
             onSortDirection={setSortDirection}
+            expanded={filtersExpanded}
+            onToggleExpanded={() => setFiltersExpanded((current) => !current)}
           />
           <WorkspaceSelectionToolbar
             selectedCount={workspaceLogSelection.length}
@@ -745,6 +750,8 @@ function WorkspaceFilters({
   onSearchText,
   onSortKey,
   onSortDirection,
+  expanded,
+  onToggleExpanded,
 }: {
   statusFilter: string;
   agentFilter: string;
@@ -758,68 +765,97 @@ function WorkspaceFilters({
   onSearchText: (value: string) => void;
   onSortKey: (value: WorkspaceSortKey) => void;
   onSortDirection: (value: SortDirection) => void;
+  expanded: boolean;
+  onToggleExpanded: () => void;
 }) {
+  const activeFilters = workspaceFilterSummary({
+    agentFilter,
+    repoFilter,
+    searchText,
+    sortDirection,
+    sortKey,
+    statusFilter,
+  });
+
   return (
-    <div className="grid gap-3 border-b border-[var(--border)] p-3">
-      <label className="relative block">
-        <Search
-          className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
-          size={15}
-          aria-hidden
-        />
-        <input
-          value={searchText}
-          onChange={(event) => onSearchText(event.target.value)}
-          placeholder="Search workspaces"
-          className="h-9 w-full rounded-md border border-slate-300 bg-white pr-3 pl-8 text-sm"
-        />
-      </label>
-      <div className="grid grid-cols-2 gap-2">
-        <Select
-          label="Status"
-          value={statusFilter}
-          onChange={onStatusFilter}
-          options={["all", ...lifecycleStages, "failed", "cancelled", "destroying", "destroyed"]}
-        />
-        <Select
-          label="Agent"
-          value={agentFilter}
-          onChange={onAgentFilter}
-          options={["all", "codex", "claude_code", "gemini"]}
-        />
-      </div>
-      <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
-        <label htmlFor="workspace-sort-key" className="grid gap-1 text-[11px] font-medium text-slate-600">
-          Sort
-          <select
-            id="workspace-sort-key"
-            value={sortKey}
-            onChange={(event) => onSortKey(event.target.value as WorkspaceSortKey)}
-            className="h-8 rounded-md border border-slate-300 bg-white px-2 text-sm font-normal text-slate-900"
-          >
-            <option value="created_at">created date</option>
-            <option value="updated_at">updated date</option>
-          </select>
+    <div className="border-b border-[var(--border)]">
+      <button
+        type="button"
+        onClick={onToggleExpanded}
+        aria-expanded={expanded}
+        className="flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs text-slate-600 transition hover:bg-slate-50"
+      >
+        <span className="flex min-w-0 items-center gap-2">
+          <ListFilter size={14} aria-hidden />
+          <span className="font-semibold text-slate-900">Filters</span>
+          <span className="min-w-0 truncate">{activeFilters}</span>
+        </span>
+        <span className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border border-slate-300 bg-white px-2 text-[11px] text-slate-700">
+          {expanded ? <ChevronUp size={13} aria-hidden /> : <ChevronDown size={13} aria-hidden />}
+          {expanded ? "Hide" : "Show"}
+        </span>
+      </button>
+      <div className={expanded ? "grid gap-3 p-3 pt-1" : "hidden"}>
+        <label className="relative block">
+          <Search
+            className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"
+            size={15}
+            aria-hidden
+          />
+          <input
+            value={searchText}
+            onChange={(event) => onSearchText(event.target.value)}
+            placeholder="Search workspaces"
+            className="h-9 w-full rounded-md border border-slate-300 bg-white pr-3 pl-8 text-sm"
+          />
         </label>
-        <button
-          type="button"
-          onClick={() => onSortDirection(sortDirection === "desc" ? "asc" : "desc")}
-          className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-xs text-slate-800 transition hover:bg-slate-50"
-          title={sortDirection === "desc" ? "Descending" : "Ascending"}
-        >
-          {sortDirection === "desc" ? <ArrowDown size={13} aria-hidden /> : <ArrowUp size={13} aria-hidden />}
-          {sortDirection}
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <Select
+            label="Status"
+            value={statusFilter}
+            onChange={onStatusFilter}
+            options={["all", ...lifecycleStages, "failed", "cancelled", "destroying", "destroyed"]}
+          />
+          <Select
+            label="Agent"
+            value={agentFilter}
+            onChange={onAgentFilter}
+            options={["all", "codex", "claude_code", "gemini"]}
+          />
+        </div>
+        <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
+          <label htmlFor="workspace-sort-key" className="grid gap-1 text-[11px] font-medium text-slate-600">
+            Sort
+            <select
+              id="workspace-sort-key"
+              value={sortKey}
+              onChange={(event) => onSortKey(event.target.value as WorkspaceSortKey)}
+              className="h-8 rounded-md border border-slate-300 bg-white px-2 text-sm font-normal text-slate-900"
+            >
+              <option value="updated_at">updated date</option>
+              <option value="created_at">created date</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => onSortDirection(sortDirection === "desc" ? "asc" : "desc")}
+            className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-xs text-slate-800 transition hover:bg-slate-50"
+            title={sortDirection === "desc" ? "Descending" : "Ascending"}
+          >
+            {sortDirection === "desc" ? <ArrowDown size={13} aria-hidden /> : <ArrowUp size={13} aria-hidden />}
+            {sortDirection}
+          </button>
+        </div>
+        <label className="grid gap-1 text-[11px] font-medium text-slate-600">
+          Repo URL
+          <input
+            value={repoFilter}
+            onChange={(event) => onRepoFilter(event.target.value)}
+            placeholder="exact repo filter"
+            className="h-8 rounded-md border border-slate-300 bg-white px-2 text-sm font-normal text-slate-900"
+          />
+        </label>
       </div>
-      <label className="grid gap-1 text-[11px] font-medium text-slate-600">
-        Repo URL
-        <input
-          value={repoFilter}
-          onChange={(event) => onRepoFilter(event.target.value)}
-          placeholder="exact repo filter"
-          className="h-8 rounded-md border border-slate-300 bg-white px-2 text-sm font-normal text-slate-900"
-        />
-      </label>
     </div>
   );
 }
@@ -2316,6 +2352,37 @@ function mergeEvent(events: WorkspaceEvent[], event: WorkspaceEvent): WorkspaceE
     return events;
   }
   return [event, ...events].slice(0, 100);
+}
+
+function workspaceFilterSummary({
+  agentFilter,
+  repoFilter,
+  searchText,
+  sortDirection,
+  sortKey,
+  statusFilter,
+}: {
+  agentFilter: string;
+  repoFilter: string;
+  searchText: string;
+  sortDirection: SortDirection;
+  sortKey: WorkspaceSortKey;
+  statusFilter: string;
+}): string {
+  const parts = [`${sortKey === "updated_at" ? "updated" : "created"} date ${sortDirection}`];
+  if (statusFilter !== "all") {
+    parts.push(`status ${statusFilter}`);
+  }
+  if (agentFilter !== "all") {
+    parts.push(agentFilter);
+  }
+  if (searchText.trim()) {
+    parts.push(`search "${searchText.trim()}"`);
+  }
+  if (repoFilter.trim()) {
+    parts.push("repo filtered");
+  }
+  return parts.join(" · ");
 }
 
 function compareWorkspaceDates(

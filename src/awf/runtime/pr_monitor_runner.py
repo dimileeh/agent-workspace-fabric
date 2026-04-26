@@ -73,6 +73,7 @@ from awf.runtime.pr_monitor import (
     _is_bot_author,
     decide,
 )
+from awf.service.gc import run_workspace_filesystem_gc
 
 _log = get_logger(__name__)
 
@@ -138,6 +139,7 @@ class PullRequestMonitorRunner:
         self._runner_config = runner_config or MonitorRunnerConfig()
         self._merge_coordinator = merge_coordinator or DEFAULT_MERGE_COORDINATOR
         self._worktrees_root = worktrees_root
+        self._work_dir = _infer_service_work_dir(worktrees_root)
         # Orchestrator-facing JSON drops — one ``<ws_id>.defer-signal.json``
         # per terminal transition. Default layout matches ``run_awf.py``'s
         # ``<work_dir>/artifacts`` directory; since ``worktrees_root`` there
@@ -1414,11 +1416,20 @@ class PullRequestMonitorRunner:
         #
         # Best-effort: any error here is logged but never masks the
         # completion signal. The DB transition already landed above.
+        teardown_ok = True
         if compose_project and compose_file is not None:
-            await self._teardown_compose_stack(
+            teardown_ok = await self._teardown_compose_stack(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
+            )
+        if teardown_ok:
+            await self._gc_completed_workspace_filesystem(workspace_id)
+        else:
+            _log.warning(
+                "monitor.filesystem_gc_skipped",
+                workspace_id=workspace_id,
+                reason="compose_teardown_failed",
             )
 
     async def _teardown_compose_stack(
@@ -1427,7 +1438,7 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         compose_project: str,
         compose_file: Path,
-    ) -> None:
+    ) -> bool:
         """Run ``docker compose down --remove-orphans --volumes`` for a
         terminated workspace. Never raises a regular ``Exception``.
 
@@ -1470,7 +1481,7 @@ class PullRequestMonitorRunner:
                 compose_project=compose_project,
                 error=repr(exc)[:400],
             )
-            return
+            return False
 
         if r.ok:
             _log.info(
@@ -1478,16 +1489,52 @@ class PullRequestMonitorRunner:
                 workspace_id=workspace_id,
                 compose_project=compose_project,
             )
-        else:
-            # Compose may already be gone (operator tore it down
-            # manually, or an earlier teardown in a retry loop).
-            _log.warning(
-                "monitor.compose_teardown_failed",
+            return True
+        # Compose may already be gone (operator tore it down
+        # manually, or an earlier teardown in a retry loop).
+        _log.warning(
+            "monitor.compose_teardown_failed",
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            returncode=r.returncode,
+            stderr=(r.stderr or "")[:400],
+        )
+        return False
+
+    async def _gc_completed_workspace_filesystem(self, workspace_id: str) -> None:
+        """Remove local pressure directories for a successfully completed workspace.
+
+        The durable DB row, events, logs, and artifacts are intentionally kept.
+        """
+
+        try:
+            result = await run_workspace_filesystem_gc(
+                self._deps.session_factory,
+                work_dir=self._work_dir,
                 workspace_id=workspace_id,
-                compose_project=compose_project,
-                returncode=r.returncode,
-                stderr=(r.stderr or "")[:400],
+                execute=True,
             )
+        except Exception as exc:
+            _log.warning(
+                "monitor.filesystem_gc_raised",
+                workspace_id=workspace_id,
+                error=repr(exc)[:400],
+            )
+            return
+        if result.delete_errors:
+            _log.warning(
+                "monitor.filesystem_gc_failed",
+                workspace_id=workspace_id,
+                deleted_path_count=len(result.deleted_paths),
+                delete_errors=[error.to_dict() for error in result.delete_errors],
+            )
+            return
+        _log.info(
+            "monitor.filesystem_gc_ok",
+            workspace_id=workspace_id,
+            deleted_path_count=len(result.deleted_paths),
+            reclaimed_bytes=result.plan.total_estimated_bytes,
+        )
 
     async def _terminate_failed(
         self,
@@ -1646,6 +1693,12 @@ def _as_utc(value: datetime) -> datetime:
     if value.tzinfo is None:
         return value.replace(tzinfo=UTC)
     return value.astimezone(UTC)
+
+
+def _infer_service_work_dir(worktrees_root: Path) -> Path:
+    if worktrees_root.name == "worktrees" and worktrees_root.parent.name == "git":
+        return worktrees_root.parent.parent
+    return worktrees_root.parent
 
 
 def _stale_pending_check_warning_key(

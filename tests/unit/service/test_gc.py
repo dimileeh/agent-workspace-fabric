@@ -17,7 +17,11 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
-from awf.service.gc import plan_terminal_workspace_gc, run_terminal_workspace_gc
+from awf.service.gc import (
+    plan_terminal_workspace_gc,
+    run_terminal_workspace_gc,
+    run_workspace_filesystem_gc,
+)
 
 
 @pytest.fixture
@@ -316,3 +320,76 @@ async def test_execute_deletes_only_workspace_pressure_dirs_and_preserves_db_and
         streams = await WorkspaceLogStreamRepository(session).list_for_workspace(workspace_id)
         assert [stream.path for stream in streams] == [str(log_file)]
         assert (await session.execute(select(Workspace.id))).scalars().all() == [workspace_id]
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_deletes_only_requested_completed_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    target_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+    )
+    other_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        title="other completed workspace",
+    )
+    target_worktree = work_dir / "git" / "worktrees" / target_id
+    target_auth = work_dir / "auth" / target_id
+    other_worktree = work_dir / "git" / "worktrees" / other_id
+    _write(target_worktree / "repo.txt", "repo")
+    _write(target_auth / "codex" / "auth.json", "auth")
+    _write(other_worktree / "repo.txt", "other")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=target_id,
+        execute=True,
+        now=now,
+    )
+
+    assert result.dry_run is False
+    assert result.plan.candidates[0].workspace_id == target_id
+    assert not target_worktree.exists()
+    assert not target_auth.exists()
+    assert other_worktree.exists()
+
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, target_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.completed.value
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_ignores_active_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        now=now,
+    )
+
+    assert result.plan.candidates == []
+    assert result.deleted_paths == []
+    assert worktree.exists()

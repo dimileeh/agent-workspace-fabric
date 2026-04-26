@@ -296,6 +296,80 @@ async def run_terminal_workspace_gc(
             delete_errors=[],
         )
 
+    deleted_paths, delete_errors = _delete_gc_plan_paths(plan)
+    return WorkspaceGCResult(
+        plan=plan,
+        dry_run=False,
+        deleted_paths=deleted_paths,
+        delete_errors=delete_errors,
+    )
+
+
+async def run_workspace_filesystem_gc(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    work_dir: Path | str,
+    workspace_id: str,
+    execute: bool = False,
+    now: datetime | None = None,
+) -> WorkspaceGCResult:
+    """Plan or execute filesystem GC for one terminal workspace.
+
+    This is used by the PR monitor after a successful merge. It keeps the
+    durable workspace row, events, logs, and artifacts intact while removing
+    the checkout/auth/compose pressure directories for the single completed
+    workspace.
+    """
+
+    current_time = _to_utc(now or datetime.now(UTC))
+    normalized_work_dir = Path(work_dir).expanduser()
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+
+    candidates: list[WorkspaceGCCandidate] = []
+    include_statuses: tuple[str, ...] = ()
+    if workspace is not None:
+        include_statuses = (workspace.status,)
+        if (
+            workspace.status in TERMINAL_WORKSPACE_GC_STATUSES
+            and workspace.status not in PROTECTED_WORKSPACE_GC_STATUSES
+        ):
+            candidates.append(
+                _candidate_for_workspace(
+                    workspace,
+                    work_dir=normalized_work_dir,
+                    now=current_time,
+                )
+            )
+
+    plan = WorkspaceGCPlan(
+        work_dir=normalized_work_dir,
+        min_age_hours=0,
+        cutoff_at=current_time,
+        include_statuses=include_statuses,
+        exclude_statuses=(),
+        candidates=candidates,
+    )
+    if not execute:
+        return WorkspaceGCResult(
+            plan=plan,
+            dry_run=True,
+            deleted_paths=[],
+            delete_errors=[],
+        )
+
+    deleted_paths, delete_errors = _delete_gc_plan_paths(plan)
+    return WorkspaceGCResult(
+        plan=plan,
+        dry_run=False,
+        deleted_paths=deleted_paths,
+        delete_errors=delete_errors,
+    )
+
+
+def _delete_gc_plan_paths(
+    plan: WorkspaceGCPlan,
+) -> tuple[list[Path], list[WorkspaceGCDeleteError]]:
     deleted_paths: list[Path] = []
     delete_errors: list[WorkspaceGCDeleteError] = []
     for candidate in plan.candidates:
@@ -312,13 +386,7 @@ async def run_terminal_workspace_gc(
                         error=error,
                     )
                 )
-
-    return WorkspaceGCResult(
-        plan=plan,
-        dry_run=False,
-        deleted_paths=deleted_paths,
-        delete_errors=delete_errors,
-    )
+    return deleted_paths, delete_errors
 
 
 def _candidate_for_workspace(
