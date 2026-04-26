@@ -626,7 +626,7 @@ class StaleReasonRepository:
         self,
         *,
         workspace_id: str,
-        candidate_id: str | None,
+        candidate_id: str,
         attempt_id: str | None,
         task_id: str | None,
         findings: builtins.list[StaleReasonCreate],
@@ -637,12 +637,10 @@ class StaleReasonRepository:
         Idempotent: re-running with the same findings is a no-op (kept rows
         are not re-emitted as ``newly_added``).
         """
-        existing_active: builtins.list[StaleReason] = []
-        if candidate_id is not None:
-            existing_active = await self._list_for_candidate(
-                candidate_id,
-                status=self._ACTIVE,
-            )
+        existing_active = await self._list_for_candidate(
+            candidate_id,
+            status=self._ACTIVE,
+        )
         finding_keys = {(f.reason_code, f.trigger_type, f.trigger_ref) for f in findings}
         now = datetime.now(UTC)
 
