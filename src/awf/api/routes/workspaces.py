@@ -33,7 +33,7 @@ from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError
-from awf.service.workspaces import create_workspace_v2_row
+from awf.service.workspaces import WorkspaceOwnedPathConflictError, create_workspace_v2_row
 
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
 router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
@@ -118,6 +118,15 @@ async def create_workspace_v2(
             session,
             payload,
             idempotency_key=idempotency_key,
+        )
+    except WorkspaceOwnedPathConflictError as exc:
+        return JSONResponse(
+            status_code=status.HTTP_409_CONFLICT,
+            content=ErrorResponse(
+                error_code=exc.error_code,
+                message=exc.message,
+                detail=exc.detail,
+            ).model_dump(),
         )
     except ProfileResolutionError as exc:
         return JSONResponse(
