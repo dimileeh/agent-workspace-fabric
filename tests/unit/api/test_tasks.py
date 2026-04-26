@@ -259,6 +259,7 @@ class TestTaskList:
             "completed": False,
             "not_canonical": False,
             "stale": False,
+            "stale_reason": None,
         }
 
     @pytest.mark.unit

@@ -99,6 +99,7 @@ def _item_from_row(row: MergeCandidate | Workspace) -> MergeQueueItemResponse:
 def _item_from_candidate(candidate: MergeCandidate) -> MergeQueueItemResponse:
     workspace = candidate.workspace
     latest_event = _latest_event(workspace.events)
+    reason, action = _merge_blocker_reason(candidate)
     return MergeQueueItemResponse(
         candidate_id=candidate.id,
         candidate_status=candidate.status,
@@ -122,7 +123,8 @@ def _item_from_candidate(candidate: MergeCandidate) -> MergeQueueItemResponse:
             if latest_event is not None
             else None
         ),
-        merge_blocker_reason=_merge_blocker_reason(candidate),
+        merge_blocker_reason=reason,
+        required_next_action=action,
         readiness=_readiness_from_candidate(candidate),
         canonical=candidate.attempt.is_canonical_for_merge,
     )
@@ -133,6 +135,7 @@ def _item_from_legacy_workspace(workspace: Workspace) -> MergeQueueItemResponse:
     pr_url = workspace.pr_url
     if pr_url is None:  # pragma: no cover - filtered at repository boundary
         raise ValueError("legacy merge queue rows must have a PR URL")
+    reason, action = _merge_blocker_reason_from_workspace(workspace)
     return MergeQueueItemResponse(
         candidate_id=None,
         candidate_status=None,
@@ -156,7 +159,8 @@ def _item_from_legacy_workspace(workspace: Workspace) -> MergeQueueItemResponse:
             if latest_event is not None
             else None
         ),
-        merge_blocker_reason=_merge_blocker_reason_from_workspace(workspace),
+        merge_blocker_reason=reason,
+        required_next_action=action,
         readiness=None,
         canonical=False,
     )
@@ -172,37 +176,39 @@ def _latest_event(events: list[WorkspaceEvent]) -> WorkspaceEvent | None:
     return events[-1] if events else None
 
 
-def _merge_blocker_reason(candidate: MergeCandidate) -> MergeBlockerReason:
+def _merge_blocker_reason(candidate: MergeCandidate) -> tuple[MergeBlockerReason, str | None]:
     if candidate.completed:
-        return "completed"
+        return "completed", None
     if candidate.failed_or_cancelled:
-        return "failed_or_cancelled"
+        return "failed_or_cancelled", None
     if candidate.not_canonical:
-        return "not_canonical"
+        return "not_canonical", None
     if candidate.stale:
-        return "stale"
+        reason = candidate.stale_reason or "stale"
+        action = "rebase" if "validation" not in reason else "validate"
+        return reason, action
     if candidate.manual_merge_required:
-        return "manual_merge_required"
+        return "manual_merge_required", None
     if candidate.waiting_for_monitor:
-        return "waiting_for_monitor"
+        return "waiting_for_monitor", None
     if candidate.ready:
-        return "ready_to_merge_or_waiting_for_github"
-    return "workspace_not_terminal"
+        return "ready_to_merge_or_waiting_for_github", None
+    return "workspace_not_terminal", None
 
 
-def _merge_blocker_reason_from_workspace(workspace: Workspace) -> MergeBlockerReason:
+def _merge_blocker_reason_from_workspace(workspace: Workspace) -> tuple[MergeBlockerReason, str | None]:
     workspace_status = WorkspaceStatus(workspace.status)
     if workspace_status == WorkspaceStatus.monitoring_pr:
         if workspace.auto_merge:
-            return "ready_to_merge_or_waiting_for_github"
-        return "manual_merge_required"
+            return "ready_to_merge_or_waiting_for_github", None
+        return "manual_merge_required", None
     if workspace_status == WorkspaceStatus.pushing:
-        return "waiting_for_monitor"
+        return "waiting_for_monitor", None
     if workspace_status == WorkspaceStatus.completed:
-        return "completed"
+        return "completed", None
     if workspace_status in {WorkspaceStatus.failed, WorkspaceStatus.cancelled}:
-        return "failed_or_cancelled"
-    return "workspace_not_terminal"
+        return "failed_or_cancelled", None
+    return "workspace_not_terminal", None
 
 
 def _readiness_from_candidate(candidate: MergeCandidate) -> MergeCandidateReadinessResponse:
@@ -214,6 +220,7 @@ def _readiness_from_candidate(candidate: MergeCandidate) -> MergeCandidateReadin
         completed=candidate.completed,
         not_canonical=candidate.not_canonical,
         stale=candidate.stale,
+        stale_reason=candidate.stale_reason,
     )
 
 

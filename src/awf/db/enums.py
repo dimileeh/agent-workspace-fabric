@@ -61,6 +61,8 @@ class OperationType(StrEnum):
     start = "start"
     validate = "validate"
     push = "push"
+    refresh = "refresh"
+    rebase = "rebase"
     retry = "retry"
     cancel = "cancel"
     stop = "stop"
