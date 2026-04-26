@@ -539,13 +539,14 @@ async def _retry_task_for_source(session: AsyncSession, source: Workspace) -> Ta
         if task is not None:
             return task
 
+    fallback_idempotency_key = f"retry-source-workspace:{source.id}"
     return await TaskRepository(session).create_or_get(
         repo_url=source.repo_url,
         base_branch=source.branch_base,
         title=source.task_title,
         prompt=source.task_prompt,
         external_id=source.task_external_id,
-        idempotency_key=None,
+        idempotency_key=fallback_idempotency_key,
         task_class=source.task_class,
         owned_paths=list(source.owned_paths),
     )
