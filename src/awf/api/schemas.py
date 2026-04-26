@@ -16,7 +16,17 @@ from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 
 OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
-MergeBlockerReason = str
+MergeBlockerReason = Literal[
+    "ready_to_merge_or_waiting_for_github",
+    "manual_merge_required",
+    "waiting_for_monitor",
+    "workspace_not_terminal",
+    "completed",
+    "failed_or_cancelled",
+    "not_canonical",
+    "stale",
+    "validation_insufficient_tier",
+]
 MergeCandidateStatus = Literal["open", "merged", "closed"]
 
 
