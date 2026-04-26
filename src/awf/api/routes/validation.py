@@ -15,9 +15,13 @@ from awf.api.schemas import (
     ValidationProvenanceItemResponse,
     ValidationProvenanceListResponse,
     ValidationProvenanceStatus,
-    ValidationTier,
 )
-from awf.api.validation_runs import fresh_for_target
+from awf.api.validation_runs import (
+    _json_dict,
+    _validation_status,
+    _validation_tier,
+    fresh_for_target,
+)
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceLogStream
 from awf.db.repositories import (
@@ -187,7 +191,7 @@ def _build_persisted_validation_items(
                     stderr_line_count=stderr.line_count if stderr else 0,
                     opened_at=_ensure_utc(run.started_at),
                     closed_at=_ensure_utc(run.finished_at) if run.finished_at else None,
-                    status=_run_status(run.status),
+                    status=_validation_status(run.status),
                     reason_code=run.reason_code,
                     base_commit=run.base_commit,
                     branch_name=run.target_branch or workspace.branch_name,
@@ -249,30 +253,6 @@ def _command_index(command: dict[str, Any]) -> int:
 def _command_text(command: dict[str, Any]) -> str | None:
     value = command.get("command")
     return value if isinstance(value, str) else None
-
-
-def _run_status(value: str) -> ValidationProvenanceStatus:
-    if value == "running":
-        return "running"
-    if value == "succeeded":
-        return "succeeded"
-    if value == "failed":
-        return "failed"
-    return "unknown"
-
-
-def _validation_tier(value: int) -> ValidationTier:
-    if value == 2:
-        return 2
-    if value == 3:
-        return 3
-    return 1
-
-
-def _json_dict(value: object) -> dict[str, Any]:
-    if isinstance(value, dict):
-        return value
-    return {}
 
 
 def _group_streams(streams: list[WorkspaceLogStream]) -> dict[str, _StreamPair]:
