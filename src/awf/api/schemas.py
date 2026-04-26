@@ -8,7 +8,7 @@ REST + MCP stay in lockstep. Keep them narrow: business objects live in
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -16,6 +16,14 @@ from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 
 OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
+MergeBlockerReason = Literal[
+    "ready_to_merge_or_waiting_for_github",
+    "manual_merge_required",
+    "waiting_for_monitor",
+    "workspace_not_terminal",
+    "completed",
+    "failed_or_cancelled",
+]
 
 
 class WorkspaceCreateRequest(BaseModel):
@@ -244,6 +252,29 @@ class WorkspaceOverviewResponse(BaseModel):
 
 class WorkspaceOverviewListResponse(BaseModel):
     items: list[WorkspaceOverviewResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+
+
+class MergeQueueItemResponse(BaseModel):
+    workspace_id: str
+    title: str
+    repo_url: str
+    base_branch: str
+    branch_name: str | None
+    pr_url: str
+    status: WorkspaceStatus
+    auto_merge: bool
+    task_class: TaskClass | None
+    owned_paths: list[str]
+    created_at: datetime
+    updated_at: datetime
+    last_event: WorkspaceEventResponse | None
+    merge_blocker_reason: MergeBlockerReason
+
+
+class MergeQueueListResponse(BaseModel):
+    items: list[MergeQueueItemResponse]
     next_cursor: str | None = None
     has_more: bool = False
 
