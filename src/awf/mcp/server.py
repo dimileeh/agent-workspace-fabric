@@ -280,11 +280,11 @@ def build_mcp_server(
         ),
         remove_volumes: bool = Field(
             default=True,
-            description="Reserve REST-compatible intent to remove workspace volumes.",
+            description="Remove workspace volumes during compose cleanup.",
         ),
         remove_worktree: bool = Field(
             default=True,
-            description="Reserve REST-compatible intent to remove the workspace worktree.",
+            description="Remove the workspace git worktree during cleanup.",
         ),
     ) -> StructuredToolResult:
         """Operator control: destroy workspace resources; this is not shell access."""

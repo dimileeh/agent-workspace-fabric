@@ -32,6 +32,8 @@ class WorkspaceCleanerProtocol(Protocol):
         compose_project_name: str | None = None,
         compose_file_path: Path | None = None,
         worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
     ) -> list[str]: ...
 
 
@@ -245,6 +247,8 @@ class WorkspaceControlService:
                 Path(workspace.compose_file_path) if workspace.compose_file_path else None
             ),
             worktree_host_path=None,
+            remove_volumes=remove_volumes,
+            remove_worktree=remove_worktree,
         )
         if failures:
             workspace.failure_reason = "cleanup_failure"
