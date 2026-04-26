@@ -56,6 +56,7 @@ from awf.runtime.pr_monitor import (
     AbortReason,
     AddressComments,
     CheckFailure,
+    CheckTiming,
     Merge,
     MergeStateStatus,
     MonitorAction,
@@ -163,6 +164,71 @@ class PullRequestMonitorRunner:
             await sink.write(json.dumps(payload, default=str, sort_keys=True) + "\n")
         except Exception as exc:
             _log.warning("monitor.log_write_failed", error=str(exc)[:400])
+
+    async def _record_stale_pending_check_warnings(
+        self,
+        *,
+        workspace_id: str,
+        status: PRStatus,
+        state: MonitorState,
+        monitor_log: WorkspaceLogSink | None,
+    ) -> bool:
+        emitted = False
+        warnings = _stale_pending_check_warnings(
+            status,
+            now=datetime.now(UTC),
+            threshold_seconds=self._config.stale_pending_check_warning_seconds,
+        )
+        for warning in warnings:
+            key = _stale_pending_check_warning_key(
+                workspace_id=workspace_id,
+                head_sha=status.head_sha,
+                check_name=warning.check_name,
+                threshold_seconds=warning.threshold_seconds,
+                threshold_window=warning.threshold_window,
+            )
+            if state.threads_addressed_ids.get(key) == "emitted":
+                continue
+            state.mark_addressed(key, "emitted")
+            payload = warning.payload()
+            _log.warning("workspace.pending_check_stale", workspace_id=workspace_id, **payload)
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "workspace.pending_check_stale",
+                    "workspace_id": workspace_id,
+                    **payload,
+                },
+            )
+            await self._append_workspace_event(
+                workspace_id=workspace_id,
+                event_type="workspace.pending_check_stale",
+                reason_code="PENDING_CHECK_STALE",
+                payload=payload,
+            )
+            emitted = True
+        return emitted
+
+    async def _append_workspace_event(
+        self,
+        *,
+        workspace_id: str,
+        event_type: str,
+        reason_code: str | None,
+        payload: dict[str, object],
+    ) -> None:
+        async with self._deps.session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                return
+            await repo.add_event(
+                ws,
+                event_type=event_type,
+                reason_code=reason_code,
+                payload=payload,
+            )
+            await s.commit()
 
     # ── Entry point ────────────────────────────────────────────────────────
 
@@ -418,6 +484,14 @@ class PullRequestMonitorRunner:
             return True
 
         if isinstance(action, WaitForCI):
+            emitted_stale_warning = await self._record_stale_pending_check_warnings(
+                workspace_id=workspace_id,
+                status=status,
+                state=state,
+                monitor_log=monitor_log,
+            )
+            if emitted_stale_warning:
+                await self._persist_state(workspace_id, state)
             await self._deps.sleep(self._config.poll_interval_seconds)
             return False
 
@@ -1467,6 +1541,125 @@ def _with_ci_failures(status: PRStatus, failures: tuple[CheckFailure, ...]) -> P
     from dataclasses import replace
 
     return replace(status, ci_failures=failures)
+
+
+_PENDING_CHECK_STATUSES = frozenset(
+    {
+        "EXPECTED",
+        "IN_PROGRESS",
+        "PENDING",
+        "QUEUED",
+        "REQUESTED",
+        "WAITING",
+    }
+)
+_TERMINAL_CHECK_STATUSES = frozenset({"COMPLETED", "ERROR", "FAILURE", "SUCCESS"})
+_TERMINAL_CHECK_CONCLUSIONS = frozenset(
+    {
+        "ACTION_REQUIRED",
+        "CANCELLED",
+        "FAILURE",
+        "NEUTRAL",
+        "SKIPPED",
+        "STALE",
+        "SUCCESS",
+        "TIMED_OUT",
+    }
+)
+
+
+@dataclass(frozen=True)
+class _StalePendingCheckWarning:
+    check_name: str
+    age_seconds: int
+    head_sha: str
+    pr_number: int
+    threshold_seconds: float
+    threshold_window: int
+    check_status: str | None
+    check_conclusion: str | None
+    details_url: str | None
+
+    def payload(self) -> dict[str, object]:
+        return {
+            "check_name": self.check_name,
+            "age_seconds": self.age_seconds,
+            "head_sha": self.head_sha,
+            "pr_number": self.pr_number,
+            "threshold_seconds": self.threshold_seconds,
+            "threshold_window": self.threshold_window,
+            "check_status": self.check_status,
+            "check_conclusion": self.check_conclusion,
+            "details_url": self.details_url,
+        }
+
+
+def _stale_pending_check_warnings(
+    status: PRStatus,
+    *,
+    now: datetime,
+    threshold_seconds: float,
+) -> tuple[_StalePendingCheckWarning, ...]:
+    if threshold_seconds <= 0:
+        return ()
+    now_utc = _as_utc(now)
+    warnings: list[_StalePendingCheckWarning] = []
+    for check in status.checks:
+        if not _is_pending_check(check) or check.started_at is None:
+            continue
+        age_float = (now_utc - _as_utc(check.started_at)).total_seconds()
+        if age_float <= threshold_seconds:
+            continue
+        warnings.append(
+            _StalePendingCheckWarning(
+                check_name=check.name,
+                age_seconds=max(0, int(age_float)),
+                head_sha=status.head_sha,
+                pr_number=status.number,
+                threshold_seconds=threshold_seconds,
+                threshold_window=max(1, int(age_float // threshold_seconds)),
+                check_status=check.status,
+                check_conclusion=check.conclusion,
+                details_url=check.details_url,
+            )
+        )
+    return tuple(warnings)
+
+
+def _is_pending_check(check: CheckTiming) -> bool:
+    status = _normalized_check_value(check.status)
+    conclusion = _normalized_check_value(check.conclusion)
+    if status in _PENDING_CHECK_STATUSES:
+        return True
+    if status in _TERMINAL_CHECK_STATUSES:
+        return False
+    if conclusion in _TERMINAL_CHECK_CONCLUSIONS:
+        return False
+    return False
+
+
+def _normalized_check_value(value: str | None) -> str:
+    return (value or "").strip().upper()
+
+
+def _as_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
+
+
+def _stale_pending_check_warning_key(
+    *,
+    workspace_id: str,
+    head_sha: str,
+    check_name: str,
+    threshold_seconds: float,
+    threshold_window: int,
+) -> str:
+    return (
+        "__awf_pending_check_stale__:"
+        f"{workspace_id}:{head_sha}:{check_name}:{threshold_seconds:g}:{threshold_window}"
+    )
 
 
 def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:

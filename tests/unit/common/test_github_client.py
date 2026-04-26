@@ -53,11 +53,13 @@ class TestRepoRef:
 
 def _sample_pr_payload(
     *,
+    head_sha: str = "abc123",
     closed: bool = False,
     merged: bool = False,
     mergeable: str = "MERGEABLE",
     merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
+    check_contexts: list[dict] | None = None,
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
     comments: list[dict] | None = None,
@@ -69,7 +71,7 @@ def _sample_pr_payload(
                 "repository": {
                     "pullRequest": {
                         "number": 42,
-                        "headRefOid": "abc123",
+                        "headRefOid": head_sha,
                         "mergeable": mergeable,
                         "mergeStateStatus": merge_state_status,
                         "isDraft": False,
@@ -77,7 +79,16 @@ def _sample_pr_payload(
                         "merged": merged,
                         "baseRef": {"name": "development", "target": {"oid": "base0"}},
                         "commits": {
-                            "nodes": [{"commit": {"statusCheckRollup": {"state": check_state}}}]
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "statusCheckRollup": {
+                                            "state": check_state,
+                                            "contexts": {"nodes": check_contexts or []},
+                                        }
+                                    }
+                                }
+                            ]
                         },
                         "reviewThreads": {"nodes": threads or []},
                         "reviews": {"nodes": reviews or []},
@@ -143,6 +154,52 @@ class TestFetchPrStatus:
         assert c.comment_id == "9001"
         assert c.body_excerpt == "Summary with suggestions"
         assert c.blocks_merge is False
+
+    @pytest.mark.unit
+    async def test_parses_check_timing_metadata_from_rollup_contexts(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                check_state="PENDING",
+                check_contexts=[
+                    {
+                        "__typename": "CheckRun",
+                        "name": "Greptile",
+                        "status": "IN_PROGRESS",
+                        "conclusion": None,
+                        "startedAt": "2026-04-26T12:00:00Z",
+                        "completedAt": None,
+                        "detailsUrl": "https://checks.example/greptile",
+                    },
+                    {
+                        "__typename": "StatusContext",
+                        "context": "ci/build",
+                        "state": "PENDING",
+                        "targetUrl": "https://checks.example/build",
+                    },
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert len(status.checks) == 2
+        check_run = status.checks[0]
+        assert check_run.name == "Greptile"
+        assert check_run.status == "IN_PROGRESS"
+        assert check_run.conclusion is None
+        assert check_run.started_at is not None
+        assert check_run.started_at.isoformat() == "2026-04-26T12:00:00+00:00"
+        assert check_run.completed_at is None
+        assert check_run.details_url == "https://checks.example/greptile"
+
+        status_context = status.checks[1]
+        assert status_context.name == "ci/build"
+        assert status_context.status == "PENDING"
+        assert status_context.details_url == "https://checks.example/build"
 
     @pytest.mark.unit
     async def test_ignores_non_actionable_review_disabled_issue_comment(self) -> None:
