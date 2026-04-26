@@ -13,7 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from awf.api.app import configure_database, create_app
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import (
+    ResourceReservationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
 
@@ -23,7 +28,7 @@ async def _workspace(
     *,
     status: WorkspaceStatus,
     updated_at: datetime,
-) -> None:
+) -> str:
     factory = make_session_factory(engine)
     async with factory() as session:
         workspace = await WorkspaceRepository(session).create(
@@ -37,6 +42,58 @@ async def _workspace(
         workspace.status = status.value
         workspace.updated_at = updated_at
         await session.commit()
+        return workspace.id
+
+
+async def _workspace_with_reservation(
+    engine: AsyncEngine,
+    *,
+    status: WorkspaceStatus,
+    updated_at: datetime,
+    steady_cpu: float,
+    steady_memory_gb: float,
+    peak_cpu: float,
+    peak_memory_gb: float,
+) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/metrics-api.git",
+            branch_base="main",
+            task_title=f"{status.value} reserved workspace",
+            task_prompt="Collect workspace reliability metrics.",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = status.value
+        workspace.updated_at = updated_at
+        task = await TaskRepository(session).create_or_get(
+            repo_url=workspace.repo_url,
+            base_branch=workspace.branch_base,
+            title=workspace.task_title,
+            prompt=workspace.task_prompt,
+            external_id=None,
+            idempotency_key=f"metrics-api-reservation:{workspace.id}",
+            task_class=workspace.task_class,
+            owned_paths=list(workspace.owned_paths),
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
+        await ResourceReservationRepository(session).create(
+            workspace_id=workspace.id,
+            attempt_id=attempt.id,
+            node_id="local",
+            steady_cpu=steady_cpu,
+            steady_memory_gb=steady_memory_gb,
+            peak_cpu=peak_cpu,
+            peak_memory_gb=peak_memory_gb,
+            disk_mb=None,
+            phase="workspace_lifecycle",
+        )
+        await session.commit()
+        return workspace.id
 
 
 def _disk_check(
@@ -140,6 +197,56 @@ async def test_resource_saturation_endpoint_reports_local_capacity_inputs(
     assert body["admission"]["ok"] is True
     assert body["admission"]["status"] == "saturated"
     assert body["admission"]["reason"] == "WORKER_EXECUTION_CONCURRENCY_SATURATED"
+
+
+@pytest.mark.unit
+async def test_resource_saturation_endpoint_uses_persisted_active_reservations(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = metrics_app_and_client
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-metrics-work",
+        min_free_disk_bytes=700,
+        workspace_steady_cpu=3.0,
+        workspace_steady_memory_gb=10.0,
+        workspace_peak_cpu=6.0,
+        workspace_peak_memory_gb=16.0,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
+        provider_settings,
+        ok=True,
+    )
+    now = datetime.now(UTC)
+    await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.running,
+        updated_at=now - timedelta(minutes=5),
+        steady_cpu=4.0,
+        steady_memory_gb=12.0,
+        peak_cpu=8.0,
+        peak_memory_gb=24.0,
+    )
+    await _workspace(
+        engine,
+        status=WorkspaceStatus.ready,
+        updated_at=now - timedelta(minutes=4),
+    )
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["workspace_counts"]["active_total"] == 2
+    assert body["reserved_resources"] == {
+        "active_workspace_count": 2,
+        "steady_cpu": 7.0,
+        "steady_memory_gb": 22.0,
+        "peak_cpu": 14.0,
+        "peak_memory_gb": 40.0,
+    }
 
 
 @pytest.mark.unit

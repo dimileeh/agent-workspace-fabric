@@ -35,6 +35,9 @@ from sqlalchemy import (
     text,
     true,
 )
+from sqlalchemy import (
+    inspect as sa_inspect,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from awf.db.base import Base, _now
@@ -235,6 +238,18 @@ class Workspace(Base):
         lazy="selectin",
         uselist=False,
     )
+    queue_decisions: Mapped[list[QueueDecision]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="QueueDecision.decided_at",
+    )
+    resource_reservations: Mapped[list[ResourceReservation]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="ResourceReservation.reserved_at",
+    )
     merge_candidates: Mapped[list[MergeCandidate]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
@@ -247,6 +262,29 @@ class Workspace(Base):
         lazy="raise",
         order_by="ValidationRun.started_at",
     )
+
+    @property
+    def latest_queue_decision(self) -> dict[str, Any] | None:
+        if "queue_decisions" in sa_inspect(self).unloaded:
+            return None
+        if not self.queue_decisions:
+            return None
+        latest = max(self.queue_decisions, key=lambda item: (item.decided_at, item.id))
+        return _queue_decision_summary(latest)
+
+    @property
+    def active_resource_reservation(self) -> dict[str, Any] | None:
+        if "resource_reservations" in sa_inspect(self).unloaded:
+            return None
+        active = [
+            reservation
+            for reservation in self.resource_reservations
+            if reservation.released_at is None
+        ]
+        if not active:
+            return None
+        latest = max(active, key=lambda item: (item.reserved_at, item.id))
+        return _resource_reservation_summary(latest)
 
 
 class Task(Base):
@@ -361,11 +399,109 @@ class TaskAttempt(Base):
         lazy="selectin",
         uselist=False,
     )
+    queue_decisions: Mapped[list[QueueDecision]] = relationship(
+        back_populates="attempt",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="QueueDecision.decided_at",
+    )
+    resource_reservations: Mapped[list[ResourceReservation]] = relationship(
+        back_populates="attempt",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="ResourceReservation.reserved_at",
+    )
     validation_runs: Mapped[list[ValidationRun]] = relationship(
         back_populates="attempt",
         lazy="raise",
         order_by="ValidationRun.started_at",
     )
+
+
+class QueueDecision(Base):
+    """Durable scheduler admission and ordering decision for one attempt."""
+
+    __tablename__ = "queue_decisions"
+    __table_args__ = (
+        Index("ix_queue_decisions_workspace", "workspace_id"),
+        Index("ix_queue_decisions_attempt", "attempt_id"),
+        Index("ix_queue_decisions_task", "task_id"),
+        Index("ix_queue_decisions_decision", "decision"),
+        Index("ix_queue_decisions_decided_at", "decided_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=False
+    )
+    task_id: Mapped[str] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=False)
+
+    decision: Mapped[str] = mapped_column(String(16), nullable=False)
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    class_priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    computed_priority: Mapped[int] = mapped_column(Integer, nullable=False)
+    age_boost: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    retry_bonus: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    resource_summary: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
+    overlap_risk_summary: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
+    decided_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="queue_decisions")
+    attempt: Mapped[TaskAttempt] = relationship(back_populates="queue_decisions")
+    task: Mapped[Task] = relationship()
+
+
+class ResourceReservation(Base):
+    """Local node resource reservation for one workspace attempt."""
+
+    __tablename__ = "resource_reservations"
+    __table_args__ = (
+        Index("ix_resource_reservations_workspace", "workspace_id"),
+        Index("ix_resource_reservations_attempt", "attempt_id"),
+        Index("ix_resource_reservations_node_active", "node_id", "released_at"),
+        Index("ix_resource_reservations_reserved_at", "reserved_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    attempt_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=False
+    )
+
+    node_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    steady_cpu: Mapped[float] = mapped_column(Float, nullable=False)
+    steady_memory_gb: Mapped[float] = mapped_column(Float, nullable=False)
+    peak_cpu: Mapped[float] = mapped_column(Float, nullable=False)
+    peak_memory_gb: Mapped[float] = mapped_column(Float, nullable=False)
+    disk_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    phase: Mapped[str] = mapped_column(String(32), nullable=False)
+    reserved_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="resource_reservations")
+    attempt: Mapped[TaskAttempt] = relationship(back_populates="resource_reservations")
 
 
 class MergeCandidate(Base):
@@ -638,3 +774,33 @@ class WorkspaceLogStream(Base):
     closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 
     workspace: Mapped[Workspace] = relationship(back_populates="log_streams")
+
+
+def _queue_decision_summary(decision: QueueDecision) -> dict[str, Any]:
+    return {
+        "id": decision.id,
+        "decision": decision.decision,
+        "reason_code": decision.reason_code,
+        "class_priority": decision.class_priority,
+        "computed_priority": decision.computed_priority,
+        "age_boost": decision.age_boost,
+        "retry_bonus": decision.retry_bonus,
+        "resource_summary": decision.resource_summary,
+        "overlap_risk_summary": decision.overlap_risk_summary,
+        "decided_at": decision.decided_at,
+    }
+
+
+def _resource_reservation_summary(reservation: ResourceReservation) -> dict[str, Any]:
+    return {
+        "id": reservation.id,
+        "node_id": reservation.node_id,
+        "steady_cpu": reservation.steady_cpu,
+        "steady_memory_gb": reservation.steady_memory_gb,
+        "peak_cpu": reservation.peak_cpu,
+        "peak_memory_gb": reservation.peak_memory_gb,
+        "disk_mb": reservation.disk_mb,
+        "phase": reservation.phase,
+        "reserved_at": reservation.reserved_at,
+        "released_at": reservation.released_at,
+    }
