@@ -15,6 +15,23 @@ scripts". The attach script is itself idempotent (see the file-lock in
 ``scripts/attach_feature_pr_monitor.py``) so repeated invocations from
 concurrent watchdog instances can never double-spawn.
 
+NotifyHuman-aware skip
+----------------------
+
+Crash recovery is the watchdog's primary purpose, but a previous
+monitor may have exited intentionally — typically a release PR with
+``auto_merge=False`` whose only unresolved feedback is a deferred bot
+comment. In that case the runner writes a defer-signal artifact (see
+``pr_monitor_runner._write_defer_signal``) with ``terminal_action ==
+"NotifyHuman"`` and the PR's head_sha. Before respawning, the watchdog
+consults the latest such artifact for the PR: when the recorded
+terminal is ``NotifyHuman`` AND the head_sha hasn't moved, it skips
+the respawn (logging ``watchdog.skipped_notify_human_terminal``). New
+commits, any other terminal action, a missing artifact, or a corrupt
+artifact all fall through to respawn — the strict default is "respawn
+unless we have positive evidence the previous run handed control back
+to a human".
+
 Entry point: ``awf-watchdog start --work-dir <dir> --poll-seconds
 300``. See ``main()`` for the full invocation.
 """
@@ -442,7 +459,15 @@ def start(
         help="Max PRs fetched per repo via 'gh pr list --limit'. Raise if any repo has >200 open awf/ PRs.",
     ),
 ) -> None:
-    """Run the watchdog loop (blocks forever until SIGTERM/SIGINT)."""
+    """Run the watchdog loop (blocks forever until SIGTERM/SIGINT).
+
+    Per scan, each open ``awf/`` PR is respawned UNLESS either (a) a
+    matching ``run_awf.py`` process is already attached to its spec
+    file, or (b) the latest defer-signal artifact under
+    ``<work_dir>/artifacts/`` records ``terminal_action == "NotifyHuman"``
+    with the PR's current head_sha — in which case the watchdog stays
+    out of the way until a new commit (or a manual re-attach) arrives.
+    """
     config = WatchdogConfig(
         work_dir=work_dir,
         repos=list(repo) if repo else list(_DEFAULT_REPOS),
