@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.api.schemas import WorkspaceCreateV2Request
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
@@ -25,6 +26,39 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.unit
+async def test_workspace_service_round_trips_policy_metadata(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    request = WorkspaceCreateV2Request(
+        repo={"url": "git@github.com:example/service.git", "base_branch": "main"},
+        task={
+            "title": "Update dependency",
+            "prompt": "Bump the dependency and adjust tests.",
+            "agent": "codex",
+            "kind": "feature_branch_pr",
+            "task_class": "dependency_task",
+            "owned_paths": ["pyproject.toml", "uv.lock"],
+        },
+        workspace={"profile_ref": "auto", "profile": None},
+        validation={"commands": ["uv run pytest -q"], "requested_tier": 1},
+        resources={},
+    )
+
+    created = await service.create_v2(request)
+    fetched = await service.get(created.id)
+    listed = await service.list(limit=10)
+
+    assert created.task_class == "dependency_task"
+    assert created.owned_paths == ["pyproject.toml", "uv.lock"]
+    assert fetched is not None
+    assert fetched.task_class == "dependency_task"
+    assert fetched.owned_paths == ["pyproject.toml", "uv.lock"]
+    assert listed[0].task_class == "dependency_task"
+    assert listed[0].owned_paths == ["pyproject.toml", "uv.lock"]
 
 
 @pytest.mark.unit

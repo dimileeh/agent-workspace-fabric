@@ -14,12 +14,24 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
 
-from awf.common.commands import AsyncCommandRunner, CommandResult
+from awf.common.commands import (
+    COMMAND_IDLE_TIMEOUT_REASON,
+    COMMAND_TIMEOUT_REASON,
+    AsyncCommandRunner,
+    CommandResult,
+)
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
 from awf.runtime.logs import LogStore
 
 _log = get_logger(__name__)
+
+
+DEFAULT_AGENT_WALL_TIMEOUT_SECONDS = 7200.0
+"""Default maximum wall-clock duration for a single agent CLI run."""
+
+DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 900.0
+"""Default maximum stdout/stderr silence for a single agent CLI run."""
 
 
 _AUTH_FAILURE_MARKERS = (
@@ -117,11 +129,19 @@ class AgentAdapter(ABC):
         default_model: str | None = None,
         default_effort: str | None = None,
         log_store: LogStore | None = None,
+        agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
+        agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
     ) -> None:
+        if agent_wall_timeout_seconds <= 0:
+            raise ValueError("agent_wall_timeout_seconds must be positive")
+        if agent_idle_timeout_seconds <= 0:
+            raise ValueError("agent_idle_timeout_seconds must be positive")
         self._runner = runner
         self._default_model = default_model
         self._default_effort = default_effort
         self._log_store = log_store
+        self._agent_wall_timeout_seconds = agent_wall_timeout_seconds
+        self._agent_idle_timeout_seconds = agent_idle_timeout_seconds
 
     @property
     @abstractmethod
@@ -177,8 +197,11 @@ class AgentAdapter(ABC):
             "agent.run.start",
             agent=self.name.value,
             compose_project=compose_project,
+            workspace_id=workspace_id,
             model=model or self._default_model,
             effort=self._default_effort,
+            wall_timeout_seconds=self._agent_wall_timeout_seconds,
+            idle_timeout_seconds=self._agent_idle_timeout_seconds,
         )
         # Close stdin explicitly. Some CLIs (Codex in particular) read
         # "additional input" from stdin after argv parsing; if AWF is
@@ -195,14 +218,23 @@ class AgentAdapter(ABC):
 
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
-            if sinks is not None and run_streaming is not None:
+            if run_streaming is not None:
                 result = await run_streaming(
                     args,
                     input_bytes=b"",
-                    on_stdout=sinks.write_stdout,
-                    on_stderr=sinks.write_stderr,
+                    on_stdout=sinks.write_stdout if sinks is not None else None,
+                    on_stderr=sinks.write_stderr if sinks is not None else None,
+                    wall_timeout_seconds=self._agent_wall_timeout_seconds,
+                    idle_timeout_seconds=self._agent_idle_timeout_seconds,
                 )
             else:
+                _log.warning(
+                    "agent.run.watchdog_unavailable",
+                    agent=self.name.value,
+                    compose_project=compose_project,
+                    workspace_id=workspace_id,
+                    reason="runner does not support run_streaming",
+                )
                 result = await self._runner.run(args, input_bytes=b"")
                 if sinks is not None:
                     await sinks.write_stdout(result.stdout)
@@ -212,17 +244,35 @@ class AgentAdapter(ABC):
                 await sinks.close()
 
         if not result.ok:
+            reason_code = _failure_reason_for_result(result)
+            log_event = (
+                "agent.run.timeout"
+                if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}
+                else "agent.run.failed"
+            )
+            _log.warning(
+                log_event,
+                agent=self.name.value,
+                compose_project=compose_project,
+                workspace_id=workspace_id,
+                returncode=result.returncode,
+                reason_code=reason_code,
+                stdout_bytes=len(result.stdout),
+                stderr_bytes=len(result.stderr),
+            )
             raise AgentRunError(
                 agent=self.name,
                 result=result,
-                reason_code=_failure_reason_for_result(result),
+                reason_code=reason_code,
             )
 
         _log.info(
             "agent.run.ok",
             agent=self.name.value,
             compose_project=compose_project,
+            workspace_id=workspace_id,
             stdout_bytes=len(result.stdout),
+            stderr_bytes=len(result.stderr),
         )
         return AgentRunResult(
             returncode=result.returncode,
@@ -259,6 +309,8 @@ def get_adapter(
     default_effort: str | None = None,
     defaults: AgentDefaults | None = None,
     log_store: LogStore | None = None,
+    agent_wall_timeout_seconds: float = DEFAULT_AGENT_WALL_TIMEOUT_SECONDS,
+    agent_idle_timeout_seconds: float = DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS,
 ) -> AgentAdapter:
     """Instantiate the adapter for the given runtime.
 
@@ -274,10 +326,16 @@ def get_adapter(
         default_model=default_model,
         default_effort=default_effort,
         log_store=log_store,
+        agent_wall_timeout_seconds=agent_wall_timeout_seconds,
+        agent_idle_timeout_seconds=agent_idle_timeout_seconds,
     )
 
 
 def _failure_reason_for_result(result: CommandResult) -> str:
+    if result.reason_code == COMMAND_TIMEOUT_REASON:
+        return "AGENT_TIMEOUT"
+    if result.reason_code == COMMAND_IDLE_TIMEOUT_REASON:
+        return "AGENT_IDLE_TIMEOUT"
     output = f"{result.stderr}\n{result.stdout}".lower()
     if any(marker in output for marker in _AUTH_FAILURE_MARKERS):
         return "AGENT_AUTH_FAILED"

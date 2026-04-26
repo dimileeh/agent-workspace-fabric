@@ -119,6 +119,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             # first uses Workspace.compose_file_path persisted by the
             # provisioner, so this is only a legacy-row fallback.
             compose_projects_root=work_dir / "compose",
+            agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
+            agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
         ),
         pr_monitor_factory=_pr_monitor_factory,
         log_store=log_store,

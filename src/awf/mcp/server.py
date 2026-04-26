@@ -18,8 +18,13 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 
-from awf.api.schemas import ErrorResponse, WorkspaceCreateRequest, WorkspaceCreateV2Request
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.api.schemas import (
+    ErrorResponse,
+    OwnedPath,
+    WorkspaceCreateRequest,
+    WorkspaceCreateV2Request,
+)
+from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.workspaces import WorkspaceService
 
@@ -110,6 +115,15 @@ def build_mcp_server(
         task_external_id: str | None = Field(
             default=None, description="Optional caller-side task ID for correlation."
         ),
+        task_class: TaskClass | None = Field(
+            default=None,
+            description="Optional PRD policy class for later scheduling/locking work.",
+        ),
+        owned_paths: list[OwnedPath] = Field(
+            default_factory=list,
+            max_length=128,
+            description="Optional path globs/strings the task expects to own.",
+        ),
         profile_ref: str | None = Field(
             default="auto",
             description="Workspace profile reference, e.g. auto, python, node, aira.",
@@ -148,6 +162,8 @@ def build_mcp_server(
                 "kind": task_kind,
                 "agent": agent,
                 "external_id": task_external_id,
+                "task_class": task_class,
+                "owned_paths": owned_paths,
                 "auto_merge": auto_merge,
                 "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
             },
