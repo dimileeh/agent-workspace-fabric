@@ -348,6 +348,33 @@ class TestWorkspaceObservability:
         assert mock.call_args.kwargs["headers"] == {"Authorization": "Bearer cli-secret"}
 
     @pytest.mark.unit
+    def test_log_encodes_stream_id_path_segment(self) -> None:
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "stream_id": "namespace/agent.stdout?tail#chunk",
+                "offset": 0,
+                "data": "tail",
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "log",
+                    "ws_obs",
+                    "namespace/agent.stdout?tail#chunk",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args[0] == (
+            "GET",
+            "http://localhost:8000/v1/workspaces/ws_obs/logs/namespace%2Fagent.stdout%3Ftail%23chunk",
+        )
+
+    @pytest.mark.unit
     def test_non_json_upstream_errors_are_printed_as_text(self) -> None:
         response = _mock_response(status_code=502, text="upstream failed")
         response.json.side_effect = ValueError("not json")

@@ -16,6 +16,7 @@ import asyncio
 import json
 import os
 import sys
+import urllib.parse
 from enum import StrEnum
 from typing import Any
 
@@ -392,9 +393,10 @@ def workspace_log(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
     """Read a bounded durable log chunk for one stream."""
+    encoded_stream_id = urllib.parse.quote(stream_id, safe="")
     response = _call(
         "GET",
-        f"/v1/workspaces/{workspace_id}/logs/{stream_id}",
+        f"/v1/workspaces/{workspace_id}/logs/{encoded_stream_id}",
         base_url=_base_url(base_url),
         params={"offset": offset, "limit_bytes": limit_bytes},
         headers=_api_token_headers(api_token),
