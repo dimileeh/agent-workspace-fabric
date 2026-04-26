@@ -178,6 +178,14 @@ class Workspace(Base):
     )
     """Wall-clock start of the monitor phase, for wall-clock-cap arithmetic."""
 
+    monitor_claimed_by: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    """Ephemeral service-worker owner currently resuming the PR monitor."""
+
+    monitor_claim_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    """Lease expiry for ``monitor_claimed_by`` so crashed workers do not wedge recovery."""
+
     # Idempotency
     idempotency_key: Mapped[str | None] = mapped_column(String(128), nullable=True)
 

@@ -3,7 +3,9 @@
 Polls the DB for workspaces needing action and dispatches them to the
 Provisioner. Postgres-backed deployments list schedulable candidate rows with
 ``SELECT FOR UPDATE SKIP LOCKED``; provisioning and ready-execution handlers
-then claim selected rows by locking and transitioning them in one transaction.
+then claim selected rows with conditional status transitions. PR monitor
+recovery uses a short DB-backed lease so multiple workers do not resume the
+same monitor concurrently.
 
 Split into two methods:
 
@@ -15,7 +17,9 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import uuid
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Protocol
 
@@ -36,6 +40,7 @@ class WorkerConfig:
     poll_interval_seconds: float = 1.0
     max_concurrent_provisions: int = 3
     max_concurrent_executions: int = 3
+    monitor_claim_lease_seconds: float = 300.0
 
 
 class WorkspaceExecutorProtocol(Protocol):
@@ -60,6 +65,7 @@ class ControlWorker:
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
+        self._worker_id = f"control-worker-{uuid.uuid4().hex}"
 
     def request_stop(self) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -100,6 +106,10 @@ class ControlWorker:
                     expected=WorkspaceStatus.monitoring_pr,
                     action="resume_pr_monitor",
                 )
+                monitoring_ids = await self._claim_monitoring_pr_ids(
+                    monitoring_ids,
+                    limit=execution_slots,
+                )
                 dispatched_ids.update(
                     self._dispatch_monitor_resumes(monitoring_ids, limit=execution_slots)
                 )
@@ -124,7 +134,11 @@ class ControlWorker:
     async def wait_for_execution_tasks(self) -> None:
         """Wait for ready execution or monitor-resume tasks started by this worker."""
         while self._execution_tasks:
-            await asyncio.gather(*tuple(self._execution_tasks.values()))
+            tasks = tuple(self._execution_tasks.values())
+            await asyncio.gather(*tasks)
+            for workspace_id, task in list(self._execution_tasks.items()):
+                if task.done():
+                    self._execution_tasks.pop(workspace_id, None)
 
     async def run_forever(self) -> None:
         while not self._stopped.is_set():
@@ -258,7 +272,7 @@ class ControlWorker:
                 continue
 
             task = asyncio.create_task(
-                self._safely_resume_pr_monitor(workspace_id),
+                self._safely_resume_claimed_pr_monitor(workspace_id),
                 name=f"awf-monitor-{workspace_id}",
             )
             self._execution_tasks[workspace_id] = task
@@ -298,3 +312,89 @@ class ControlWorker:
             # dispatch still must not take the service worker down if a single
             # workspace hits an unexpected runtime error.
             _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
+
+    async def _claim_monitoring_pr_ids(self, workspace_ids: list[str], *, limit: int) -> list[str]:
+        claimed: list[str] = []
+        for workspace_id in workspace_ids:
+            if len(claimed) >= limit:
+                break
+            if workspace_id in self._execution_tasks:
+                continue
+            if await self._claim_monitoring_pr(workspace_id):
+                claimed.append(workspace_id)
+        return claimed
+
+    async def _claim_monitoring_pr(self, workspace_id: str) -> bool:
+        now = datetime.now(UTC)
+        lease_expires_at = now + timedelta(seconds=self._config.monitor_claim_lease_seconds)
+        async with self._session_factory() as session:
+            claimed = await WorkspaceRepository(session).claim_monitoring_pr(
+                workspace_id,
+                owner_id=self._worker_id,
+                lease_expires_at=lease_expires_at,
+                now=now,
+            )
+            await session.commit()
+            return claimed
+
+    async def _safely_resume_claimed_pr_monitor(self, workspace_id: str) -> None:
+        heartbeat = asyncio.create_task(
+            self._refresh_monitoring_pr_claim_loop(workspace_id),
+            name=f"awf-monitor-claim-{workspace_id}",
+        )
+        try:
+            await self._safely_resume_pr_monitor(workspace_id)
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+            await self._release_monitoring_pr_claim(workspace_id)
+
+    async def _refresh_monitoring_pr_claim_loop(self, workspace_id: str) -> None:
+        interval = max(1.0, min(60.0, self._config.monitor_claim_lease_seconds / 3))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                refreshed = await self._refresh_monitoring_pr_claim(workspace_id)
+            except Exception:
+                _log.exception(
+                    "worker.monitor_claim_refresh_failed",
+                    workspace_id=workspace_id,
+                    worker_id=self._worker_id,
+                )
+                return
+            if not refreshed:
+                _log.warning(
+                    "worker.monitor_claim_lost",
+                    workspace_id=workspace_id,
+                    worker_id=self._worker_id,
+                )
+                return
+
+    async def _refresh_monitoring_pr_claim(self, workspace_id: str) -> bool:
+        lease_expires_at = datetime.now(UTC) + timedelta(
+            seconds=self._config.monitor_claim_lease_seconds
+        )
+        async with self._session_factory() as session:
+            refreshed = await WorkspaceRepository(session).refresh_monitoring_pr_claim(
+                workspace_id,
+                owner_id=self._worker_id,
+                lease_expires_at=lease_expires_at,
+            )
+            await session.commit()
+            return refreshed
+
+    async def _release_monitoring_pr_claim(self, workspace_id: str) -> None:
+        try:
+            async with self._session_factory() as session:
+                await WorkspaceRepository(session).release_monitoring_pr_claim(
+                    workspace_id,
+                    owner_id=self._worker_id,
+                )
+                await session.commit()
+        except Exception:
+            _log.exception(
+                "worker.monitor_claim_release_failed",
+                workspace_id=workspace_id,
+                worker_id=self._worker_id,
+            )

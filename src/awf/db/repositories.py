@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from sqlalchemy import and_, func, select, text
+from sqlalchemy import and_, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import Select
@@ -447,9 +447,9 @@ class WorkspaceRepository:
 
         Postgres uses row-level locks with ``SKIP LOCKED`` to reduce duplicate
         candidates while poll transactions overlap. For provisioning and ready
-        execution, the durable claim happens when the dispatcher reloads each
-        row with ``get_for_update()`` and performs the state transition in that
-        same transaction.
+        execution, the durable claim happens through ``transition_if_current()``.
+        For monitor recovery, active claim leases are filtered out before
+        limiting so claimed rows do not block later unclaimed rows.
         """
         if limit <= 0:
             return []
@@ -459,6 +459,7 @@ class WorkspaceRepository:
             limit=limit,
             exclude_ids=exclude_ids,
             skip_locked=self._dialect_name == "postgresql",
+            claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
@@ -501,6 +502,134 @@ class WorkspaceRepository:
         )
         return workspace
 
+    async def transition_if_current(
+        self,
+        workspace_id: str,
+        *,
+        from_status: WorkspaceStatus,
+        to: WorkspaceStatus,
+        reason_code: str,
+    ) -> Workspace | None:
+        """Atomically transition a row only if it is still in ``from_status``."""
+        WorkspaceStateMachine.assert_transition(from_status, to)
+
+        now = datetime.now(UTC)
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == from_status.value,
+            )
+            .values(
+                status=to.value,
+                version=Workspace.version + 1,
+                updated_at=now,
+            )
+            .returning(Workspace.id)
+        )
+        if result.scalar_one_or_none() is None:
+            return None
+
+        workspace = await self.get(workspace_id)
+        if workspace is None:  # pragma: no cover - row was just updated in this txn
+            return None
+
+        attempt = await TaskAttemptRepository(
+            self._session,
+            dialect_name=self._dialect_name,
+        ).get_by_workspace_id(workspace.id)
+        if attempt is not None:
+            attempt.status = to.value
+        if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
+            workspace.monitor_started_at = now
+
+        workspace.events.append(
+            WorkspaceEvent(
+                id=new_event_id(),
+                event_type="workspace.state_changed",
+                old_state=from_status.value,
+                new_state=to.value,
+                reason_code=reason_code,
+            )
+        )
+        await self._session.flush()
+        return workspace
+
+    async def claim_monitoring_pr(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+        now: datetime | None = None,
+    ) -> bool:
+        """Claim a monitor-recovery workspace unless another lease is active."""
+        cutoff = now or datetime.now(UTC)
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == WorkspaceStatus.monitoring_pr.value,
+                or_(
+                    Workspace.monitor_claim_expires_at.is_(None),
+                    Workspace.monitor_claim_expires_at <= cutoff,
+                    Workspace.monitor_claimed_by == owner_id,
+                ),
+            )
+            .values(
+                monitor_claimed_by=owner_id,
+                monitor_claim_expires_at=lease_expires_at,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def refresh_monitoring_pr_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+        lease_expires_at: datetime,
+    ) -> bool:
+        """Extend this worker's active monitor-recovery lease."""
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == WorkspaceStatus.monitoring_pr.value,
+                Workspace.monitor_claimed_by == owner_id,
+            )
+            .values(
+                monitor_claim_expires_at=lease_expires_at,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+        )
+        return result.scalar_one_or_none() is not None
+
+    async def release_monitoring_pr_claim(
+        self,
+        workspace_id: str,
+        *,
+        owner_id: str,
+    ) -> bool:
+        """Release this worker's monitor-recovery lease, if it still owns it."""
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.monitor_claimed_by == owner_id,
+            )
+            .values(
+                monitor_claimed_by=None,
+                monitor_claim_expires_at=None,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def add_event(
         self,
         workspace: Workspace,
@@ -529,8 +658,16 @@ def _schedulable_workspace_ids_stmt(
     limit: int,
     exclude_ids: set[str] | None = None,
     skip_locked: bool,
+    claim_cutoff: datetime | None = None,
 ) -> Select[tuple[str]]:
     stmt = select(Workspace.id).where(Workspace.status == status.value)
+    if status == WorkspaceStatus.monitoring_pr and claim_cutoff is not None:
+        stmt = stmt.where(
+            or_(
+                Workspace.monitor_claim_expires_at.is_(None),
+                Workspace.monitor_claim_expires_at <= claim_cutoff,
+            )
+        )
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
     stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc()).limit(limit)

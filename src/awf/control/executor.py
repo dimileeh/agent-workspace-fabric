@@ -1026,21 +1026,26 @@ class WorkspaceExecutor:
         """Atomically transition a ready workspace to running before execution."""
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
-            ws = await repo.get_for_update(workspace_id)
-            if ws is None:
+            ws = await repo.transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus.ready,
+                to=WorkspaceStatus.running,
+                reason_code="EXECUTOR_CLAIMED",
+            )
+            if ws is not None:
+                await session.commit()
+                return ws
+
+            current = await repo.get(workspace_id)
+            if current is None:
                 _log.warning("executor.skip_unknown", workspace_id=workspace_id)
                 return None
-            if ws.status != WorkspaceStatus.ready.value:
-                _log.info(
-                    "executor.skip_not_ready",
-                    workspace_id=workspace_id,
-                    status=ws.status,
-                )
-                return None
-            await repo.transition(ws, to=WorkspaceStatus.running, reason_code="EXECUTOR_CLAIMED")
-            await session.commit()
-            # Return a detached snapshot (session closes).
-            return ws
+            _log.info(
+                "executor.skip_not_ready",
+                workspace_id=workspace_id,
+                status=current.status,
+            )
+            return None
 
     async def _recheck_status(
         self,

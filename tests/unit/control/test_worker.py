@@ -606,6 +606,136 @@ class TestRunOnceExecution:
         await worker.wait_for_execution_tasks()
         assert set(executor.calls) == {first_id, second_id}
 
+    @pytest.mark.unit
+    async def test_concurrent_workers_do_not_claim_same_requested_workspace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(session_factory, origin_repo, "race-requested")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls: list[str] = []
+
+        class _ClaimingProvisioner:
+            async def provision(self, workspace_id: str) -> None:
+                async with session_factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.transition_if_current(
+                        workspace_id,
+                        from_status=WorkspaceStatus.requested,
+                        to=WorkspaceStatus.provisioning,
+                        reason_code="TEST_CLAIM",
+                    )
+                    if ws is None:
+                        return
+                    await s.commit()
+
+                calls.append(workspace_id)
+                started.set()
+                await release.wait()
+
+                async with session_factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    if ws.status != WorkspaceStatus.provisioning.value:
+                        return
+                    ws.branch_name = f"awf/{workspace_id}"
+                    ws.base_commit = "c" * 40
+                    ws.compose_project_name = f"awf_{workspace_id}"
+                    ws.compose_file_path = f"/tmp/awf/{workspace_id}/compose.yml"
+                    await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="TEST_READY")
+                    await s.commit()
+
+        provisioner = _ClaimingProvisioner()
+        worker_a = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+        worker_b = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        runs = [
+            asyncio.create_task(worker_a.run_once()),
+            asyncio.create_task(worker_b.run_once()),
+        ]
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+        release.set()
+        await asyncio.wait_for(asyncio.gather(*runs), timeout=0.5)
+
+        assert calls == [requested_id]
+
+    @pytest.mark.unit
+    async def test_concurrent_workers_do_not_claim_same_ready_workspace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(session_factory, origin_repo, "race-ready")
+        started = asyncio.Event()
+        release = asyncio.Event()
+        calls: list[str] = []
+
+        class _ClaimingExecutor:
+            async def execute(self, workspace_id: str) -> None:
+                async with session_factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.transition_if_current(
+                        workspace_id,
+                        from_status=WorkspaceStatus.ready,
+                        to=WorkspaceStatus.running,
+                        reason_code="TEST_EXECUTOR_CLAIMED",
+                    )
+                    if ws is None:
+                        return
+                    await s.commit()
+
+                calls.append(workspace_id)
+                started.set()
+                await release.wait()
+
+            async def resume_pr_monitor(self, workspace_id: str) -> None:
+                raise AssertionError(f"unexpected monitor resume for {workspace_id}")
+
+        executor = _ClaimingExecutor()
+        worker_a = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker_b = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        await asyncio.gather(worker_a.run_once(), worker_b.run_once())
+        await asyncio.wait_for(started.wait(), timeout=0.2)
+        release.set()
+        await asyncio.wait_for(
+            asyncio.gather(
+                worker_a.wait_for_execution_tasks(), worker_b.wait_for_execution_tasks()
+            ),
+            timeout=0.5,
+        )
+
+        assert calls == [ready_id]
+
 
 class TestRunOnceMonitorRecovery:
     @pytest.mark.unit
@@ -761,3 +891,66 @@ class TestRunOnceMonitorRecovery:
 
         release_monitor.set()
         await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=0.2)
+
+    @pytest.mark.unit
+    async def test_concurrent_workers_do_not_claim_same_monitoring_pr_workspace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(session_factory, origin_repo, "race-monitor")
+        monitor_started = asyncio.Event()
+        release_monitor = asyncio.Event()
+
+        class _BlockingExecutor(_RecordingExecutor):
+            async def resume_pr_monitor(self, workspace_id: str) -> None:
+                self.resume_calls.append(workspace_id)
+                monitor_started.set()
+                await release_monitor.wait()
+
+        executor = _BlockingExecutor()
+        worker_a = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=1,
+            ),
+        )
+        worker_b = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        dispatched = await asyncio.gather(worker_a.run_once(), worker_b.run_once())
+        await asyncio.wait_for(monitor_started.wait(), timeout=0.2)
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.monitor_claimed_by is not None
+            assert ws.monitor_claim_expires_at is not None
+
+        release_monitor.set()
+        await asyncio.wait_for(
+            asyncio.gather(
+                worker_a.wait_for_execution_tasks(), worker_b.wait_for_execution_tasks()
+            ),
+            timeout=0.5,
+        )
+
+        assert sorted(dispatched) == [0, 1]
+        assert executor.resume_calls == [monitor_id]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.monitor_claimed_by is None
+            assert ws.monitor_claim_expires_at is None

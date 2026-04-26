@@ -232,26 +232,31 @@ class Provisioner:
 
         Returns None (rather than raising) if the workspace isn't in ``requested`` —
         another worker may have already claimed it. This makes the provisioner safe
-        to call at-least-once from the poll loop. Postgres callers lock the row
-        before checking status so concurrent workers cannot both commit the
-        ``requested`` -> ``provisioning`` claim.
+        to call at-least-once from the poll loop. The claim is a conditional
+        ``requested`` -> ``provisioning`` transition, so concurrent workers cannot
+        both commit it.
         """
         repo = WorkspaceRepository(session)
-        ws = await repo.get_for_update(workspace_id)
-        if ws is None:
+        ws = await repo.transition_if_current(
+            workspace_id,
+            from_status=WorkspaceStatus.requested,
+            to=WorkspaceStatus.provisioning,
+            reason_code="WORKER_CLAIMED",
+        )
+        if ws is not None:
+            await session.commit()
+            return ws
+
+        current = await repo.get(workspace_id)
+        if current is None:
             _log.warning("provisioner.skip_unknown", workspace_id=workspace_id)
             return None
-        if ws.status != WorkspaceStatus.requested.value:
-            _log.info(
-                "provisioner.skip_not_requested",
-                workspace_id=workspace_id,
-                status=ws.status,
-            )
-            return None
-
-        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="WORKER_CLAIMED")
-        await session.commit()
-        return ws
+        _log.info(
+            "provisioner.skip_not_requested",
+            workspace_id=workspace_id,
+            status=current.status,
+        )
+        return None
 
     async def _mark_failed(
         self,
