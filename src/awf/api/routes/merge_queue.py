@@ -185,7 +185,7 @@ def _merge_blocker_reason(candidate: MergeCandidate) -> tuple[MergeBlockerReason
         return "not_canonical", None
     if candidate.stale:
         reason = candidate.stale_reason or "stale"
-        action = "rebase" if "validation" not in reason else "validate"
+        action = "validate" if reason == "validation_insufficient_tier" else "rebase"
         return "stale", action
     if candidate.manual_merge_required:
         return "manual_merge_required", None
