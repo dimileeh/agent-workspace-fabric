@@ -18,6 +18,7 @@ from awf.service.metrics import (
     DEFAULT_SUMMARY_WINDOW_HOURS,
     MAX_SUMMARY_WINDOW_HOURS,
     MIN_SUMMARY_WINDOW_HOURS,
+    summarize_failure_analysis_for_session,
     summarize_resource_saturation_for_session,
     summarize_workspace_reliability_for_session,
 )
@@ -48,6 +49,49 @@ class WorkspaceReliabilitySummaryResponse(BaseModel):
     cancelled_count: int
     destroyed_count: int
     cleanup_failure_count: int
+
+
+class FailureReasonGroupResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    failure_reason: str
+    count: int
+    retryable: bool
+    recommended_action: str
+
+
+class FailedWorkspaceExampleResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    workspace_id: str
+    title: str
+    repo_url: str
+    branch_base: str
+    agent: str
+    status: str
+    failure_reason: str
+    failure_message: str | None
+    pr_url: str | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class FailureAnalysisSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    generated_at: datetime
+    window_start: datetime
+    since_hours: int
+    total_failed_workspaces: int
+    failure_groups: list[FailureReasonGroupResponse] = Field(
+        description=(
+            "Failed workspace counts grouped by normalized failure_reason, with deterministic "
+            "retry guidance for each failure class."
+        ),
+    )
+    latest_examples: list[FailedWorkspaceExampleResponse] = Field(
+        description="Most recently updated failed workspaces in the requested window.",
+    )
 
 
 class WorkspaceSaturationCountsResponse(BaseModel):
@@ -161,6 +205,27 @@ class ResourceSaturationSummaryResponse(BaseModel):
     admission: AdmissionSummaryResponse = Field(
         description="Actionable summary explaining whether new workspace admission is blocked.",
     )
+
+
+@router.get(
+    "/failures/summary",
+    response_model=FailureAnalysisSummaryResponse,
+)
+async def get_failure_analysis_summary(
+    since_hours: Annotated[
+        int,
+        Query(
+            ge=MIN_SUMMARY_WINDOW_HOURS,
+            le=MAX_SUMMARY_WINDOW_HOURS,
+        ),
+    ] = DEFAULT_SUMMARY_WINDOW_HOURS,
+    session: AsyncSession = Depends(get_db_session),
+) -> FailureAnalysisSummaryResponse:
+    summary = await summarize_failure_analysis_for_session(
+        session,
+        since_hours=since_hours,
+    )
+    return FailureAnalysisSummaryResponse.model_validate(summary)
 
 
 @router.get(
