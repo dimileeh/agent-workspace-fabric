@@ -60,6 +60,7 @@ const mergeQueueLimit = 20;
 
 type WorkspaceSortKey = "created_at" | "updated_at";
 type SortDirection = "asc" | "desc";
+type MergeQueueStatus = "loading" | "success" | "error";
 
 type DetailState = {
   workspace: Workspace | null;
@@ -123,7 +124,7 @@ export function ConsoleDashboard() {
   const [resourceError, setResourceError] = useState<string | null>(null);
   const [mergeQueue, setMergeQueue] = useState<MergeQueueItem[]>([]);
   const [mergeQueueHasMore, setMergeQueueHasMore] = useState(false);
-  const [mergeQueueLoaded, setMergeQueueLoaded] = useState(false);
+  const [mergeQueueStatus, setMergeQueueStatus] = useState<MergeQueueStatus>("loading");
   const [mergeQueueError, setMergeQueueError] = useState<string | null>(null);
   const [retryState, setRetryState] = useState<RetryActionState>({ status: "idle" });
   const [apiState, setApiState] = useState<"checking" | "ok" | "error">("checking");
@@ -178,14 +179,15 @@ export function ConsoleDashboard() {
 
   const loadMergeQueue = useCallback(async () => {
     const result = await apiGet<ListEnvelope<MergeQueueItem>>(`/api/awf/merge-queue?limit=${mergeQueueLimit}`);
-    setMergeQueueLoaded(true);
     if (!result.ok) {
       setMergeQueueError(result.message);
+      setMergeQueueStatus("error");
       return;
     }
     setMergeQueueError(null);
     setMergeQueue(result.data.items);
     setMergeQueueHasMore(result.data.has_more);
+    setMergeQueueStatus("success");
   }, []);
 
   const loadWorkspace = useCallback(async (workspaceId: string) => {
@@ -571,7 +573,7 @@ export function ConsoleDashboard() {
             <MergeQueuePanel
               items={mergeQueue}
               hasMore={mergeQueueHasMore}
-              loaded={mergeQueueLoaded}
+              status={mergeQueueStatus}
               error={mergeQueueError}
             />
           </div>
@@ -1100,15 +1102,23 @@ function ResourceCapacityPanel({
 function MergeQueuePanel({
   items,
   hasMore,
-  loaded,
+  status,
   error,
 }: {
   items: MergeQueueItem[];
   hasMore: boolean;
-  loaded: boolean;
+  status: MergeQueueStatus;
   error: string | null;
 }) {
   const hasSnapshot = items.length > 0;
+  const isLoading = status === "loading";
+  const isError = status === "error";
+  const summary =
+    isLoading && !hasSnapshot
+      ? "loading"
+      : isError && !hasSnapshot
+        ? "error"
+        : `${items.length}${hasMore ? "+" : ""} candidate${items.length === 1 ? "" : "s"}`;
 
   return (
     <Panel
@@ -1116,16 +1126,16 @@ function MergeQueuePanel({
       icon={<GitPullRequest size={16} aria-hidden />}
       action={
         <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-[11px] text-slate-600">
-          {loaded ? `${items.length}${hasMore ? "+" : ""} candidate${items.length === 1 ? "" : "s"}` : "loading"}
+          {summary}
         </span>
       }
     >
-      {!loaded && !hasSnapshot ? (
+      {isLoading && !hasSnapshot ? (
         <MutedLine>Merge queue snapshot loading.</MutedLine>
+      ) : isError && !hasSnapshot ? (
+        <MutedLine>Unable to load merge queue: {error}</MutedLine>
       ) : !hasSnapshot ? (
-        <MutedLine>
-          {error ? `Unable to load merge queue: ${error}` : "No PR-backed merge candidates are queued."}
-        </MutedLine>
+        <MutedLine>No PR-backed merge candidates are queued.</MutedLine>
       ) : (
         <div className="grid gap-2">
           {error ? (
