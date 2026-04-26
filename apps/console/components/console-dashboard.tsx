@@ -40,6 +40,8 @@ import type {
   AwfStreamFrame,
   ListEnvelope,
   Operation,
+  ConcurrencyLane,
+  ResourceSaturationSummary,
   RuntimeService,
   Workspace,
   WorkspaceEvent,
@@ -47,6 +49,7 @@ import type {
   WorkspaceLogStream,
   WorkspaceOverview,
   WorkspaceRuntime,
+  WorkspaceRetryResponse,
   WorkspaceStatus,
 } from "@/lib/types";
 
@@ -82,6 +85,12 @@ type LogWorkspaceTarget = Pick<
   "workspace_id" | "title" | "repo_url" | "base_branch" | "agent" | "status" | "pr_url"
 >;
 
+type RetryActionState =
+  | { status: "idle" }
+  | { status: "submitting" }
+  | { status: "success"; newWorkspaceId: string; operationId: string }
+  | { status: "error"; message: string };
+
 const emptyDetail: DetailState = {
   workspace: null,
   runtime: null,
@@ -108,6 +117,9 @@ export function ConsoleDashboard() {
   const [searchText, setSearchText] = useState("");
   const [sortKey, setSortKey] = useState<WorkspaceSortKey>("created_at");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
+  const [resourceSaturation, setResourceSaturation] = useState<ResourceSaturationSummary | null>(null);
+  const [resourceError, setResourceError] = useState<string | null>(null);
+  const [retryState, setRetryState] = useState<RetryActionState>({ status: "idle" });
   const [apiState, setApiState] = useState<"checking" | "ok" | "error">("checking");
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -148,6 +160,16 @@ export function ConsoleDashboard() {
     );
   }, [overviewPath]);
 
+  const loadResourceSaturation = useCallback(async () => {
+    const result = await apiGet<ResourceSaturationSummary>("/api/awf/metrics/resources/saturation");
+    if (!result.ok) {
+      setResourceError(result.message);
+      return;
+    }
+    setResourceError(null);
+    setResourceSaturation(result.data);
+  }, []);
+
   const loadWorkspace = useCallback(async (workspaceId: string) => {
     const [workspace, runtime, events, operations, streams] = await Promise.all([
       apiGet<Workspace>(`/api/awf/workspaces/${workspaceId}`),
@@ -185,6 +207,26 @@ export function ConsoleDashboard() {
       });
     }
   }, []);
+
+  const retrySelectedWorkspace = useCallback(async () => {
+    if (!selectedId) {
+      return;
+    }
+    setRetryState({ status: "submitting" });
+    const result = await apiPost<WorkspaceRetryResponse>(
+      `/api/awf/workspaces/${encodeURIComponent(selectedId)}/retry`,
+    );
+    if (!result.ok) {
+      setRetryState({ status: "error", message: retryErrorMessage(result) });
+      return;
+    }
+    setRetryState({
+      status: "success",
+      newWorkspaceId: result.data.new_workspace_id,
+      operationId: result.data.operation_id,
+    });
+    await Promise.all([loadOverview(), loadResourceSaturation()]);
+  }, [loadOverview, loadResourceSaturation, selectedId]);
 
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream) => {
@@ -254,10 +296,17 @@ export function ConsoleDashboard() {
   }, [loadOverview]);
 
   useEffect(() => {
+    void loadResourceSaturation();
+    const interval = window.setInterval(() => void loadResourceSaturation(), pollMs);
+    return () => window.clearInterval(interval);
+  }, [loadResourceSaturation]);
+
+  useEffect(() => {
     setDetail(emptyDetail);
     setSelectedStreams([]);
     setLogEntries([]);
     setStreamOffsets({});
+    setRetryState({ status: "idle" });
   }, [selectedId]);
 
   useEffect(() => {
@@ -448,7 +497,12 @@ export function ConsoleDashboard() {
         streamState={streamState}
         lastRefresh={lastRefresh}
         selectedId={selectedId}
-        onRefresh={() => startTransition(() => void loadOverview())}
+        onRefresh={() =>
+          startTransition(() => {
+            void loadOverview();
+            void loadResourceSaturation();
+          })
+        }
         isPending={isPending}
       />
 
@@ -487,10 +541,18 @@ export function ConsoleDashboard() {
 
         <section className="min-w-0">
           {error ? <ErrorBanner message={error} /> : null}
+          <div className="p-4 pb-0">
+            <ResourceCapacityPanel saturation={resourceSaturation} error={resourceError} />
+          </div>
           {selectedId && selectedOverview ? (
             <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(420px,0.9fr)]">
               <div className="grid min-w-0 gap-4">
-                <WorkspaceSummary overview={selectedOverview} workspace={detail.workspace} />
+                <WorkspaceSummary
+                  overview={selectedOverview}
+                  workspace={detail.workspace}
+                  retryState={retryState}
+                  onRetry={retrySelectedWorkspace}
+                />
                 <LifecycleRail status={selectedOverview.status} />
                 <RuntimePanel runtime={detail.runtime} />
                 <OperationsPanel operations={detail.operations} />
@@ -849,15 +911,40 @@ function WorkspaceList({
 function WorkspaceSummary({
   overview,
   workspace,
+  retryState,
+  onRetry,
 }: {
   overview: WorkspaceOverview;
   workspace: Workspace | null;
+  retryState: RetryActionState;
+  onRetry: () => void;
 }) {
+  const canRetry = overview.status === "failed" || overview.status === "cancelled";
+
   return (
     <Panel
       title="Workspace"
       icon={<Activity size={16} aria-hidden />}
-      action={overview.pr_url ? <ExternalAnchor href={overview.pr_url} label="PR" /> : null}
+      action={
+        <div className="flex items-center gap-2">
+          {canRetry ? (
+            <button
+              type="button"
+              onClick={onRetry}
+              disabled={retryState.status === "submitting"}
+              className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-3 text-xs text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <RefreshCw
+                size={13}
+                className={retryState.status === "submitting" ? "animate-spin" : ""}
+                aria-hidden
+              />
+              Retry
+            </button>
+          ) : null}
+          {overview.pr_url ? <ExternalAnchor href={overview.pr_url} label="PR" /> : null}
+        </div>
+      }
     >
       <div className="grid gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
@@ -882,8 +969,149 @@ function WorkspaceSummary({
             <div className="mt-1 text-red-800">{overview.failure_message ?? "No details."}</div>
           </div>
         ) : null}
+        {retryState.status === "success" ? (
+          <div className="rounded-md border border-emerald-200 bg-emerald-50 p-3 text-sm text-emerald-900">
+            Retry queued as{" "}
+            <span className="mono font-semibold">{retryState.newWorkspaceId}</span>
+            <span className="text-emerald-800"> / operation </span>
+            <span className="mono">{compactId(retryState.operationId, 10)}</span>
+          </div>
+        ) : null}
+        {retryState.status === "error" ? (
+          <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
+            {retryState.message}
+          </div>
+        ) : null}
       </div>
     </Panel>
+  );
+}
+
+function ResourceCapacityPanel({
+  saturation,
+  error,
+}: {
+  saturation: ResourceSaturationSummary | null;
+  error: string | null;
+}) {
+  return (
+    <Panel title="Resource / Capacity" icon={<Server size={16} aria-hidden />}>
+      {!saturation ? (
+        <MutedLine>{error ? `Unable to load capacity: ${error}` : "Capacity snapshot loading."}</MutedLine>
+      ) : (
+        <div className="grid gap-3">
+          {error ? (
+            <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
+              Showing last capacity snapshot. Refresh failed: {error}
+            </div>
+          ) : null}
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <Fact label="Active" value={`${saturation.workspace_counts.active_total} workspaces`} />
+            <Fact
+              label="Reserved CPU"
+              value={`${formatScalar(saturation.reserved_resources.steady_cpu)} steady / ${formatScalar(
+                saturation.reserved_resources.peak_cpu,
+              )} peak`}
+            />
+            <Fact
+              label="Reserved memory"
+              value={`${formatGb(saturation.reserved_resources.steady_memory_gb)} steady / ${formatGb(
+                saturation.reserved_resources.peak_memory_gb,
+              )} peak`}
+            />
+            <Fact
+              label="Disk free"
+              value={`${bytes(saturation.disk.free_bytes)} / ${formatPercent(saturation.disk.percent_free)}`}
+            />
+          </div>
+          <StatusCountStrip counts={saturation.workspace_counts} />
+          <div className="grid gap-2 md:grid-cols-2">
+            <LaneMeter label="Provision" lane={saturation.concurrency.provision} />
+            <LaneMeter label="Execution" lane={saturation.concurrency.execution} />
+          </div>
+          <div className="grid gap-2 md:grid-cols-2">
+            <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(saturation.disk.ok ? "good" : "bad")}`}>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold">Disk {saturation.disk.status}</span>
+                <span className="mono">{saturation.disk.reason}</span>
+              </div>
+              <div className="mt-1 text-slate-600">
+                threshold {bytes(saturation.disk.threshold_bytes)} / checked {saturation.disk.checked_path}
+              </div>
+            </div>
+            <div
+              className={`rounded-md border px-3 py-2 text-xs ${toneClass(
+                saturation.admission.ok
+                  ? saturation.admission.status === "saturated"
+                    ? "warn"
+                    : "good"
+                  : "bad",
+              )}`}
+            >
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-semibold">Admission {saturation.admission.status}</span>
+                <span className="mono">{saturation.admission.reason}</span>
+              </div>
+              {saturation.admission.detail ? (
+                <div className="mt-1 text-slate-600">{saturation.admission.detail}</div>
+              ) : null}
+            </div>
+          </div>
+          <div className="text-[11px] text-slate-500">
+            generated {relativeTime(saturation.generated_at)}
+          </div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
+  const items: [string, number][] = [
+    ["requested", counts.requested],
+    ["provisioning", counts.provisioning],
+    ["ready", counts.ready],
+    ["running", counts.running],
+    ["validating", counts.validating],
+    ["pushing", counts.pushing],
+    ["pr", counts.monitoring_pr],
+    ["destroying", counts.destroying],
+  ];
+
+  return (
+    <div className="grid grid-cols-2 gap-1 text-xs sm:grid-cols-4 xl:grid-cols-8">
+      {items.map(([label, value]) => (
+        <div key={label} className="min-w-0 rounded-md border border-slate-200 bg-slate-50 px-2 py-1.5">
+          <div className="truncate text-[10px] font-medium text-slate-500">{label}</div>
+          <div className="mono text-sm text-slate-950">{value}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
+  const hasFiniteLimit = lane.limit > 0;
+  const fill = hasFiniteLimit ? Math.min(100, Math.max(0, (lane.in_use / lane.limit) * 100)) : 0;
+  const saturated = hasFiniteLimit && lane.in_use >= lane.limit;
+  const limitLabel = hasFiniteLimit ? `${lane.in_use}/${lane.limit}` : `${lane.in_use} active`;
+
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-semibold text-slate-900">{label}</span>
+        <span className={saturated ? "font-semibold text-amber-800" : "text-slate-600"}>
+          {hasFiniteLimit ? `${limitLabel} in use` : `${limitLabel} / no limit`}
+        </span>
+      </div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-slate-200">
+        <div className={saturated ? "h-full bg-amber-500" : "h-full bg-blue-500"} style={{ width: `${fill}%` }} />
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-slate-600">
+        <span>{lane.queued} queued</span>
+        <span>{lane.available} available</span>
+      </div>
+    </div>
   );
 }
 
@@ -1733,36 +1961,33 @@ function Td({
   return <td className={`px-3 py-2 align-top ${className}`}>{children}</td>;
 }
 
+function retryErrorMessage(result: Extract<ApiEnvelope<unknown>, { ok: false }>): string {
+  const code = result.errorCode ? `${result.errorCode}: ` : "";
+  return `${code}${result.message} Confirm the workspace is still failed or cancelled, resolve any reported lock conflict, then retry.`;
+}
+
+function formatScalar(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "0";
+  }
+  return value.toLocaleString(undefined, { maximumFractionDigits: 1 });
+}
+
+function formatGb(value: number): string {
+  return `${formatScalar(value)} GB`;
+}
+
+function formatPercent(value: number): string {
+  if (!Number.isFinite(value)) {
+    return "0%";
+  }
+  return `${value.toFixed(1)}%`;
+}
+
 async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
   try {
     const response = await fetch(path, { cache: "no-store" });
-    const text = await response.text();
-    const body = parseJsonOrNull(text);
-    if (!response.ok) {
-      const errorBody = body as
-        | { detail?: { error_code?: string; message?: string }; message?: string; error_code?: string }
-        | null;
-      return {
-        ok: false,
-        status: response.status,
-        message:
-          errorBody?.detail?.message ||
-          errorBody?.message ||
-          text ||
-          `Request failed with HTTP ${response.status}.`,
-        errorCode: errorBody?.detail?.error_code || errorBody?.error_code,
-        detail: body ?? text,
-      };
-    }
-    if (body === null && text) {
-      return {
-        ok: false,
-        status: response.status,
-        message: text,
-        detail: text,
-      };
-    }
-    return { ok: true, data: body as T };
+    return await parseApiResponse<T>(response);
   } catch (error) {
     return {
       ok: false,
@@ -1772,14 +1997,60 @@ async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
   }
 }
 
-function parseJsonOrNull(text: string): unknown | null {
+async function apiPost<T>(path: string): Promise<ApiEnvelope<T>> {
+  try {
+    const response = await fetch(path, { method: "POST", cache: "no-store" });
+    return await parseApiResponse<T>(response);
+  } catch (error) {
+    return {
+      ok: false,
+      status: 0,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
+async function parseApiResponse<T>(response: Response): Promise<ApiEnvelope<T>> {
+  const text = await response.text();
+  const parsed = parseJson(text);
+  const body = parsed.ok ? parsed.value : null;
+  if (!response.ok) {
+    const errorBody = body as
+      | { detail?: { error_code?: string; message?: string }; message?: string; error_code?: string }
+      | null;
+    return {
+      ok: false,
+      status: response.status,
+      message:
+        errorBody?.detail?.message ||
+        errorBody?.message ||
+        text ||
+        `Request failed with HTTP ${response.status}.`,
+      errorCode: errorBody?.detail?.error_code || errorBody?.error_code,
+      detail: body ?? text,
+    };
+  }
+  if (!parsed.ok) {
+    return {
+      ok: false,
+      status: response.status,
+      message: text,
+      detail: text,
+    };
+  }
+  return { ok: true, data: body as T };
+}
+
+type ParsedJson = { ok: true; value: unknown | null } | { ok: false };
+
+function parseJson(text: string): ParsedJson {
   if (!text) {
-    return null;
+    return { ok: true, value: null };
   }
   try {
-    return JSON.parse(text) as unknown;
+    return { ok: true, value: JSON.parse(text) as unknown };
   } catch {
-    return null;
+    return { ok: false };
   }
 }
 
