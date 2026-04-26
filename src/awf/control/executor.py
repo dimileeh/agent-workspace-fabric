@@ -753,7 +753,103 @@ class WorkspaceExecutor:
             pr_url=pr.url,
         )
 
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        """Resume the PR monitor for a workspace already in ``monitoring_pr``.
+
+        This is the service-worker restart path. It intentionally skips setup,
+        agent execution, validation, push, and PR creation; those have already
+        happened before the workspace entered ``monitoring_pr``.
+        """
+        ws = await self._load_workspace(workspace_id)
+        if ws is None:
+            _log.warning("executor.resume_skip_unknown", workspace_id=workspace_id)
+            return
+        if ws.status != WorkspaceStatus.monitoring_pr.value:
+            _log.info(
+                "executor.resume_skip_not_monitoring_pr",
+                workspace_id=workspace_id,
+                status=ws.status,
+            )
+            return
+
+        missing = _missing_monitor_recovery_metadata(ws)
+        if missing:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.monitoring_pr,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=(
+                    "monitor recovery: missing required persisted metadata: "
+                    + ", ".join(missing)
+                )[:2000],
+                reason_code="MONITOR_RECOVERY_METADATA_MISSING",
+            )
+            return
+
+        compose_project = ws.compose_project_name
+        compose_file_path = ws.compose_file_path
+        assert compose_project is not None
+        assert compose_file_path is not None
+
+        monitor: _MonitorRunnerProto | None = self._pr_monitor
+        try:
+            if monitor is None and self._pr_monitor_factory is not None:
+                agent = AgentRuntime(ws.agent)
+                defaults = self._defaults_for(agent)
+                adapter = get_adapter(
+                    agent,
+                    runner=self._runner,
+                    defaults=defaults,
+                    log_store=self._log_store,
+                )
+                profile = _profile_for_workspace(
+                    ws,
+                    worktree_path=self._config.worktrees_root / workspace_id,
+                )
+                monitor = _call_pr_monitor_factory(
+                    self._pr_monitor_factory,
+                    adapter=adapter,
+                    profile=profile,
+                    workspace=ws,
+                )
+        except Exception as exc:
+            _log.exception("executor.pr_monitor_resume_build_failed", workspace_id=workspace_id)
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.monitoring_pr,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"monitor recovery: failed to build PR monitor: {exc!r}"[:2000],
+                reason_code="MONITOR_RECOVERY_FAILED",
+            )
+            return
+
+        if monitor is None:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.monitoring_pr,
+                failure_reason=FailureReason.infrastructure_failure,
+                message="monitor recovery: no PR monitor configured",
+                reason_code="MONITOR_RECOVERY_FAILED",
+            )
+            return
+
+        _log.info(
+            "executor.resume_pr_monitor",
+            workspace_id=workspace_id,
+            pr_url=ws.pr_url,
+            pr_number=ws.pr_number,
+        )
+        await monitor.run(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=Path(compose_file_path),
+        )
+
     # ── Internals ──────────────────────────────────────────────────────────
+
+    async def _load_workspace(self, workspace_id: str) -> Workspace | None:
+        async with self._session_factory() as session:
+            return await WorkspaceRepository(session).get(workspace_id)
 
     def _defaults_for(self, agent: AgentRuntime) -> AgentDefaults | None:
         defaults = defaults_with_model_overrides(
@@ -797,6 +893,7 @@ class WorkspaceExecutor:
         from_status: WorkspaceStatus,
         failure_reason: FailureReason,
         message: str,
+        reason_code: str | None = None,
     ) -> None:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -811,7 +908,7 @@ class WorkspaceExecutor:
             await repo.transition(
                 ws,
                 to=WorkspaceStatus.failed,
-                reason_code=failure_reason.value.upper(),
+                reason_code=reason_code or failure_reason.value.upper(),
             )
             await session.commit()
 
@@ -830,6 +927,21 @@ def _extract_pr_number(pr_url: str) -> int | None:
     """
     match = _PR_NUMBER_RE.search(pr_url)
     return int(match.group(1)) if match else None
+
+
+def _missing_monitor_recovery_metadata(ws: Workspace) -> list[str]:
+    missing: list[str] = []
+    if ws.pr_number is None:
+        missing.append("pr_number")
+    if not ws.pr_url:
+        missing.append("pr_url")
+    if not ws.remote_push_branch:
+        missing.append("remote_push_branch")
+    if not ws.compose_project_name:
+        missing.append("compose_project_name")
+    if not ws.compose_file_path:
+        missing.append("compose_file_path")
+    return missing
 
 
 def _call_pr_monitor_factory(

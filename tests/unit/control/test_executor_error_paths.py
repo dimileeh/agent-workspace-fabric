@@ -21,6 +21,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.control.executor as executor_module
@@ -32,6 +33,7 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
+from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import ValidationRunner
 
@@ -109,6 +111,49 @@ async def _seed_ready(
         if auto_merge is not None:
             ws.auto_merge = auto_merge
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await s.commit()
+        return ws.id
+
+
+async def _seed_monitoring_pr(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    pr_number: int | None = 42,
+    pr_url: str | None = "https://github.com/x/y/pull/42",
+    remote_push_branch: str | None = "awf/x",
+    compose_project_name: str | None = "awf_x",
+    compose_file_path: str | None = "/tmp/awf/x/compose.yml",
+    resolved_profile: dict[str, Any] | None = None,
+    auto_merge: bool = True,
+    initial_review_grace_period_seconds: float | None = None,
+) -> str:
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url="git@github.com:x/y.git",
+            branch_base="development",
+            task_title="monitor-resume",
+            task_prompt="p",
+            agent="codex",
+            test_commands=["pytest -q"],
+            requires_database=False,
+            resolved_profile=resolved_profile,
+            auto_merge=auto_merge,
+            initial_review_grace_period_seconds=initial_review_grace_period_seconds,
+        )
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = "awf/x"
+        ws.remote_push_branch = remote_push_branch
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = compose_project_name
+        ws.compose_file_path = compose_file_path
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        ws.pr_url = pr_url
+        ws.pr_number = pr_number
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
         await s.commit()
         return ws.id
 
@@ -716,3 +761,160 @@ class TestPrMonitorFactoryPath:
         assert len(factory_workspaces) == 1
         assert factory_workspaces[0].id == ws_id
         assert factory_workspaces[0].auto_merge is False
+
+
+class TestPrMonitorResume:
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_logs_unknown_workspace(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake, factory, tmp_path)
+
+        with structlog.testing.capture_logs() as captured:
+            await executor.resume_pr_monitor("ws_never_existed")
+
+        assert fake.calls == []
+        assert any(
+            event.get("event") == "executor.resume_skip_unknown"
+            and event.get("workspace_id") == "ws_never_existed"
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_logs_unexpected_status(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+
+        def _monitor_factory(*_args: Any) -> object:
+            raise AssertionError("monitor factory must not run for non-monitoring workspaces")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        with structlog.testing.capture_logs() as captured:
+            await executor.resume_pr_monitor(ws_id)
+
+        assert fake.calls == []
+        assert any(
+            event.get("event") == "executor.resume_skip_not_monitoring_pr"
+            and event.get("workspace_id") == ws_id
+            and event.get("status") == WorkspaceStatus.ready.value
+            for event in captured
+        )
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_uses_persisted_workspace_metadata(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        compose_file = tmp_path / "persisted-compose" / "compose.yml"
+        resolved_profile = WorkspaceProfile(
+            name="persisted",
+            monitor=ProfileMonitor(initial_review_grace_period_seconds=321),
+        ).model_dump(mode="json")
+        factory_calls: list[dict[str, Any]] = []
+        monitor_calls: list[dict[str, Any]] = []
+
+        class _FakeMonitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                monitor_calls.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "compose_project": compose_project,
+                        "compose_file": compose_file,
+                    }
+                )
+
+        def _monitor_factory(adapter: Any, profile: Any, workspace: Any) -> _FakeMonitor:
+            factory_calls.append(
+                {
+                    "adapter": adapter,
+                    "profile_name": profile.name,
+                    "profile_grace": profile.monitor.initial_review_grace_period_seconds,
+                    "auto_merge": workspace.auto_merge,
+                    "workspace_grace": workspace.initial_review_grace_period_seconds,
+                    "pr_number": workspace.pr_number,
+                    "pr_url": workspace.pr_url,
+                    "remote_push_branch": workspace.remote_push_branch,
+                }
+            )
+            return _FakeMonitor()
+
+        ws_id = await _seed_monitoring_pr(
+            factory,
+            pr_number=77,
+            pr_url="https://github.com/x/y/pull/77",
+            remote_push_branch="awf/persisted",
+            compose_project_name="persisted_project",
+            compose_file_path=str(compose_file),
+            resolved_profile=resolved_profile,
+            auto_merge=False,
+            initial_review_grace_period_seconds=12.5,
+        )
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert fake.calls == []
+        assert len(factory_calls) == 1
+        assert factory_calls[0]["profile_name"] == "persisted"
+        assert factory_calls[0]["profile_grace"] == 321
+        assert factory_calls[0]["auto_merge"] is False
+        assert factory_calls[0]["workspace_grace"] == 12.5
+        assert factory_calls[0]["pr_number"] == 77
+        assert factory_calls[0]["pr_url"] == "https://github.com/x/y/pull/77"
+        assert factory_calls[0]["remote_push_branch"] == "awf/persisted"
+        assert monitor_calls == [
+            {
+                "workspace_id": ws_id,
+                "compose_project": "persisted_project",
+                "compose_file": compose_file,
+            }
+        ]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "field",
+        [
+            "pr_number",
+            "pr_url",
+            "remote_push_branch",
+            "compose_project_name",
+            "compose_file_path",
+        ],
+    )
+    async def test_missing_monitor_recovery_metadata_fails_cleanly(
+        self,
+        field: str,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        kwargs: dict[str, Any] = {field: None}
+        ws_id = await _seed_monitoring_pr(factory, **kwargs)
+
+        def _monitor_factory(*_args: Any) -> object:
+            raise AssertionError("monitor factory must not run for invalid recovery rows")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_monitor_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert field in (ws.failure_message or "")
+            assert "monitor recovery" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "MONITOR_RECOVERY_METADATA_MISSING"

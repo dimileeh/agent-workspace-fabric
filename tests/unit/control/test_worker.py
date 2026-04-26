@@ -108,6 +108,40 @@ async def _create_ready(
         return ws.id
 
 
+async def _create_monitoring_pr(
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    *,
+    pr_number: int = 123,
+) -> str:
+    async with session_factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url=str(origin),
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.remote_push_branch = ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
+        ws.pr_url = f"https://github.com/example/repo/pull/{pr_number}"
+        ws.pr_number = pr_number
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        await s.commit()
+        return ws.id
+
+
 class _TransitioningProvisioner:
     def __init__(self, session_factory: async_sessionmaker[AsyncSession]) -> None:
         self._session_factory = session_factory
@@ -131,9 +165,13 @@ class _TransitioningProvisioner:
 class _RecordingExecutor:
     def __init__(self) -> None:
         self.calls: list[str] = []
+        self.resume_calls: list[str] = []
 
     async def execute(self, workspace_id: str) -> None:
         self.calls.append(workspace_id)
+
+    async def resume_pr_monitor(self, workspace_id: str) -> None:
+        self.resume_calls.append(workspace_id)
 
 
 class TestRunOnce:
@@ -309,6 +347,85 @@ class TestRunOnceExecution:
         assert set(executor.calls) == set(ready_ids[:3])
 
     @pytest.mark.unit
+    async def test_execution_queries_are_limited_to_available_slots(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=3,
+            ),
+        )
+        release = asyncio.Event()
+
+        async def _busy() -> None:
+            await release.wait()
+
+        active_task = asyncio.create_task(_busy())
+        worker._execution_tasks["busy"] = active_task
+
+        limits: dict[str, int | None] = {}
+        exclusions: dict[str, set[str]] = {}
+
+        async def _list_monitoring_pr(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            limits["monitoring"] = limit
+            exclusions["monitoring"] = set(exclude_ids or set())
+            return []
+
+        async def _list_ready(
+            *,
+            limit: int | None = None,
+            exclude_ids: set[str] | None = None,
+        ) -> list[str]:
+            limits["ready"] = limit
+            exclusions["ready"] = set(exclude_ids or set())
+            return []
+
+        worker._list_monitoring_pr = _list_monitoring_pr  # type: ignore[method-assign]
+        worker._list_ready = _list_ready  # type: ignore[method-assign]
+
+        try:
+            assert await worker.run_once() == 0
+            assert limits == {"monitoring": 2, "ready": 2}
+            assert exclusions == {"monitoring": {"busy"}, "ready": {"busy"}}
+        finally:
+            release.set()
+            await asyncio.wait_for(active_task, timeout=0.2)
+            worker._execution_tasks.pop("busy", None)
+
+    @pytest.mark.unit
+    async def test_monitor_query_excludes_active_ids_before_limiting(
+        self,
+        worker: ControlWorker,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_ids = [
+            await _create_monitoring_pr(
+                session_factory,
+                origin_repo,
+                f"needs-monitor-resume-{i}",
+                pr_number=100 + i,
+            )
+            for i in range(3)
+        ]
+
+        assert await worker._list_monitoring_pr(
+            limit=2,
+            exclude_ids={monitor_ids[0]},
+        ) == monitor_ids[1:]
+
+    @pytest.mark.unit
     async def test_ready_workspace_is_noop_when_no_executor_is_wired(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -390,3 +507,121 @@ class TestRunOnceExecution:
         assert await worker.run_once() == 2
         await worker.wait_for_execution_tasks()
         assert set(executor.calls) == {first_id, second_id}
+
+
+class TestRunOnceMonitorRecovery:
+    @pytest.mark.unit
+    async def test_fresh_worker_resumes_monitoring_pr_workspace(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory, origin_repo, "needs-monitor-resume"
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=3),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
+        assert executor.resume_calls == [monitor_id]
+
+    @pytest.mark.unit
+    async def test_monitor_resume_and_ready_execution_share_execution_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory, origin_repo, "needs-monitor-resume"
+        )
+        ready_id = await _create_ready(session_factory, origin_repo, "already-ready")
+        monitor_started = asyncio.Event()
+        release_monitor = asyncio.Event()
+
+        class _BlockingExecutor(_RecordingExecutor):
+            async def resume_pr_monitor(self, workspace_id: str) -> None:
+                self.resume_calls.append(workspace_id)
+                monitor_started.set()
+                await release_monitor.wait()
+                async with session_factory() as s:
+                    repo = WorkspaceRepository(s)
+                    ws = await repo.get(workspace_id)
+                    assert ws is not None
+                    await repo.transition(
+                        ws, to=WorkspaceStatus.completed, reason_code="TEST_MONITOR_DONE"
+                    )
+                    await s.commit()
+
+        executor = _BlockingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await asyncio.wait_for(worker.run_once(), timeout=0.2) == 1
+        await asyncio.wait_for(monitor_started.wait(), timeout=0.2)
+        assert executor.resume_calls == [monitor_id]
+        assert executor.calls == []
+
+        assert await asyncio.wait_for(worker.run_once(), timeout=0.2) == 0
+        assert executor.calls == []
+
+        release_monitor.set()
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=0.2)
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+        assert executor.calls == [ready_id]
+
+    @pytest.mark.unit
+    async def test_monitor_resume_does_not_duplicate_active_task(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory, origin_repo, "needs-monitor-resume"
+        )
+        monitor_started = asyncio.Event()
+        release_monitor = asyncio.Event()
+
+        class _BlockingExecutor(_RecordingExecutor):
+            async def resume_pr_monitor(self, workspace_id: str) -> None:
+                self.resume_calls.append(workspace_id)
+                monitor_started.set()
+                await release_monitor.wait()
+
+        executor = _BlockingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=1,
+                max_concurrent_executions=2,
+            ),
+        )
+
+        assert await asyncio.wait_for(worker.run_once(), timeout=0.2) == 1
+        await asyncio.wait_for(monitor_started.wait(), timeout=0.2)
+
+        assert await asyncio.wait_for(worker.run_once(), timeout=0.2) == 0
+        assert executor.resume_calls == [monitor_id]
+
+        release_monitor.set()
+        await asyncio.wait_for(worker.wait_for_execution_tasks(), timeout=0.2)
