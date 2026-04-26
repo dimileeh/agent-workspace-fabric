@@ -89,11 +89,13 @@ class RecordedSleep:
 
 def pr_payload(
     *,
+    head_sha: str = "abc1234567890def",
     closed: bool = False,
     merged: bool = False,
     mergeable: str = "MERGEABLE",
     merge_state_status: str = "CLEAN",
     check_state: str = "SUCCESS",
+    check_contexts: list[dict] | None = None,
     threads: list[dict] | None = None,
     reviews: list[dict] | None = None,
     comments: list[dict] | None = None,
@@ -104,7 +106,7 @@ def pr_payload(
                 "repository": {
                     "pullRequest": {
                         "number": 42,
-                        "headRefOid": "abc1234567890def",
+                        "headRefOid": head_sha,
                         "mergeable": mergeable,
                         "mergeStateStatus": merge_state_status,
                         "isDraft": False,
@@ -112,7 +114,16 @@ def pr_payload(
                         "merged": merged,
                         "baseRef": {"name": "development", "target": {"oid": "base0"}},
                         "commits": {
-                            "nodes": [{"commit": {"statusCheckRollup": {"state": check_state}}}]
+                            "nodes": [
+                                {
+                                    "commit": {
+                                        "statusCheckRollup": {
+                                            "state": check_state,
+                                            "contexts": {"nodes": check_contexts or []},
+                                        }
+                                    }
+                                }
+                            ]
                         },
                         "reviewThreads": {"nodes": threads or []},
                         "reviews": {"nodes": reviews or []},
@@ -211,6 +222,8 @@ def make_runner(
     auto_merge: bool = True,
     pre_merge_settle_seconds: float = 0,
     initial_review_grace_period_seconds: float = 0,
+    stale_pending_check_warning_seconds: float = 900,
+    max_outer_iterations: int = 20,
     artifacts_root: Path | None = None,
     log_store: LogStore | None = None,
     merge_coordinator: object | None = None,
@@ -226,8 +239,12 @@ def make_runner(
             settle_interval_seconds=30,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
             pre_merge_settle_seconds=pre_merge_settle_seconds,
+            stale_pending_check_warning_seconds=stale_pending_check_warning_seconds,
         ),
-        "runner_config": MonitorRunnerConfig(max_outer_iterations=20, max_fix_cycle_passes=3),
+        "runner_config": MonitorRunnerConfig(
+            max_outer_iterations=max_outer_iterations,
+            max_fix_cycle_passes=3,
+        ),
         "sleep": sleep_fn,
         "worktrees_root": worktrees_root,
         "log_store": log_store,

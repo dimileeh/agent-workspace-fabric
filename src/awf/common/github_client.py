@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import re
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from awf.common.commands import AsyncCommandRunner
@@ -33,6 +34,7 @@ from awf.common.logging import get_logger
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckState,
+    CheckTiming,
     MergeableState,
     MergeStateStatus,
     PRStatus,
@@ -73,7 +75,28 @@ query($owner: String!, $repo: String!, $number: Int!) {
       commits(last: 1) {
         nodes {
           commit {
-            statusCheckRollup { state }
+            statusCheckRollup {
+              state
+              contexts(first: 100) {
+                nodes {
+                  __typename
+                  ... on CheckRun {
+                    name
+                    status
+                    conclusion
+                    startedAt
+                    completedAt
+                    detailsUrl
+                  }
+                  ... on StatusContext {
+                    context
+                    state
+                    targetUrl
+                  }
+                }
+                pageInfo { hasNextPage }
+              }
+            }
           }
         }
       }
@@ -184,6 +207,14 @@ class GitHubClient:
         rollup = _dig(pr, "commits", "nodes", 0, "commit", "statusCheckRollup")
         check_state_str = (rollup or {}).get("state") or "PENDING"
         check_state = _parse_check_state(check_state_str)
+        checks = _parse_check_contexts(rollup)
+        if _dig(rollup, "contexts", "pageInfo", "hasNextPage") is True:
+            _log.warning(
+                "github.check_contexts_truncated",
+                repo=repo.slug(),
+                pr_number=pr_number,
+                fetched_contexts_limit=100,
+            )
 
         # ── Mergeable ──────────────────────────────────────────────────
         mergeable = _parse_mergeable(pr.get("mergeable"))
@@ -276,6 +307,7 @@ class GitHubClient:
             base_behind_count=base_behind_count,
             merge_state_status=merge_state_status,
             ci_failures=(),  # populated by fetch_failing_check_logs if needed
+            checks=checks,
             closed=bool(pr.get("closed")),
             merged=bool(pr.get("merged")),
         )
@@ -501,6 +533,63 @@ def _parse_check_state(value: str) -> CheckState:
     if upper == "PENDING" or upper == "EXPECTED":
         return CheckState.PENDING
     return CheckState.NEUTRAL
+
+
+def _parse_check_contexts(rollup: Any) -> tuple[CheckTiming, ...]:
+    checks: list[CheckTiming] = []
+    for node in _dig(rollup, "contexts", "nodes") or []:
+        if not isinstance(node, dict):
+            continue
+        typename = node.get("__typename")
+        if typename == "StatusContext":
+            name = _clean_optional_str(node.get("context"))
+            if name is None:
+                continue
+            checks.append(
+                CheckTiming(
+                    name=name,
+                    status=_clean_optional_str(node.get("state")),
+                    details_url=_clean_optional_str(node.get("targetUrl")),
+                )
+            )
+            continue
+
+        name = _clean_optional_str(node.get("name") or node.get("context"))
+        if name is None:
+            continue
+        checks.append(
+            CheckTiming(
+                name=name,
+                status=_clean_optional_str(node.get("status") or node.get("state")),
+                conclusion=_clean_optional_str(node.get("conclusion")),
+                started_at=_parse_github_datetime(node.get("startedAt")),
+                completed_at=_parse_github_datetime(node.get("completedAt")),
+                details_url=_clean_optional_str(node.get("detailsUrl") or node.get("targetUrl")),
+            )
+        )
+    return tuple(checks)
+
+
+def _clean_optional_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    return text or None
+
+
+def _parse_github_datetime(value: Any) -> datetime | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    raw = value.strip()
+    if raw.endswith("Z"):
+        raw = f"{raw[:-1]}+00:00"
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _parse_mergeable(value: Any) -> MergeableState:
