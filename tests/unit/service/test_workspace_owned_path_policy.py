@@ -144,19 +144,28 @@ async def test_create_v2_allows_overlap_and_records_risk_event(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
-    "task_class",
-    ["refactor_task", "docs_task", "test_task"],
+    ("task_class", "existing_path", "requested_path"),
+    [
+        ("refactor_task", "src/awf/api/**", "src/awf/api/routes/workspaces.py"),
+        ("docs_task", "docs/**", "docs/owned-path-policy.md"),
+        ("test_task", "tests/unit/**", "tests/unit/service/test_workspaces.py"),
+        ("migration_task", "migrations/**", "migrations/202604260001_add_index.sql"),
+        ("dependency_task", "pyproject.toml", "pyproject.toml"),
+        ("build_config_task", "Dockerfile", "Dockerfile"),
+    ],
 )
-async def test_create_v2_overlap_is_advisory_for_refactor_docs_and_test_tasks(
+async def test_create_v2_overlap_is_advisory_for_all_current_task_classes(
     factory: async_sessionmaker[AsyncSession],
     task_class: str,
+    existing_path: str,
+    requested_path: str,
 ) -> None:
     service = WorkspaceService(factory)
     existing = await service.create_v2(
         _request(
             title=f"existing {task_class}",
             task_class=task_class,
-            owned_paths=["src/awf/api/**"],
+            owned_paths=[existing_path],
         )
     )
 
@@ -164,7 +173,7 @@ async def test_create_v2_overlap_is_advisory_for_refactor_docs_and_test_tasks(
         _request(
             title=f"new {task_class}",
             task_class=task_class,
-            owned_paths=["src/awf/api/routes/workspaces.py"],
+            owned_paths=[requested_path],
         )
     )
     events = await service.list_events(
@@ -172,7 +181,7 @@ async def test_create_v2_overlap_is_advisory_for_refactor_docs_and_test_tasks(
         event_type="workspace.owned_path_overlap_risk",
     )
 
-    assert created.owned_paths == ["src/awf/api/routes/workspaces.py"]
+    assert created.owned_paths == [requested_path]
     assert events is not None
     assert events[0].payload is not None
     assert events[0].payload["workspace_ids"] == [existing.id]
