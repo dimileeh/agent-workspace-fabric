@@ -30,6 +30,7 @@ from awf.common.ids import (
     new_workspace_id,
 )
 from awf.control.state_machine import WorkspaceStateMachine
+from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import (
     Operation,
@@ -56,6 +57,25 @@ class OwnedPathConflict:
     workspace_id: str
     existing_path: str
     requested_path: str
+
+
+def _resolve_session_dialect_name(
+    session: AsyncSession,
+    dialect_name: str | None,
+) -> str | None:
+    if dialect_name is not None:
+        return dialect_name
+
+    info_value = session.info.get(SESSION_DIALECT_NAME_KEY)
+    if isinstance(info_value, str):
+        return info_value
+
+    bind = getattr(session, "bind", None)
+    if bind is None:
+        return None
+    dialect = getattr(bind, "dialect", None)
+    name = getattr(dialect, "name", None)
+    return name if isinstance(name, str) else None
 
 
 class TaskRepository:
@@ -128,8 +148,9 @@ class TaskRepository:
 class TaskAttemptRepository:
     """CRUD helpers for task-attempt rows."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
     async def create_for_workspace(
         self,
@@ -164,8 +185,7 @@ class TaskAttemptRepository:
         return attempt
 
     async def _lock_attempt_number_sequence(self, task_id: str) -> None:
-        bind = self._session.get_bind()
-        if bind.dialect.name != "postgresql":
+        if self._dialect_name != "postgresql":
             return
 
         await self._session.execute(self._attempt_number_sequence_lock_stmt(task_id))
@@ -228,8 +248,9 @@ class WorkspaceRepository:
     of work. Do not reuse across request boundaries.
     """
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
     async def create(
         self,
@@ -301,8 +322,7 @@ class WorkspaceRepository:
     async def get_for_update(self, workspace_id: str) -> Workspace | None:
         """Load one workspace with a row lock when the database supports it."""
         stmt = select(Workspace).where(Workspace.id == workspace_id)
-        bind = self._session.get_bind()
-        if bind.dialect.name == "postgresql":
+        if self._dialect_name == "postgresql":
             stmt = stmt.with_for_update(of=Workspace)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
@@ -325,8 +345,7 @@ class WorkspaceRepository:
         if not any(_normalize_owned_path(path) != "" for path in owned_paths):
             return
 
-        bind = self._session.get_bind()
-        if bind.dialect.name != "postgresql":
+        if self._dialect_name != "postgresql":
             return
 
         lock_key = _owned_path_conflict_advisory_lock_key(
@@ -435,12 +454,11 @@ class WorkspaceRepository:
         if limit <= 0:
             return []
 
-        bind = self._session.get_bind()
         stmt = _schedulable_workspace_ids_stmt(
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
-            skip_locked=bind.dialect.name == "postgresql",
+            skip_locked=self._dialect_name == "postgresql",
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
@@ -463,7 +481,10 @@ class WorkspaceRepository:
         old_state = workspace.status
         workspace.status = to.value
         workspace.version += 1
-        attempt = await TaskAttemptRepository(self._session).get_by_workspace_id(workspace.id)
+        attempt = await TaskAttemptRepository(
+            self._session,
+            dialect_name=self._dialect_name,
+        ).get_by_workspace_id(workspace.id)
         if attempt is not None:
             attempt.status = to.value
         if to == WorkspaceStatus.monitoring_pr and workspace.monitor_started_at is None:
