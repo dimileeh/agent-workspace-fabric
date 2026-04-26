@@ -64,32 +64,33 @@ async def _count_rows(session: AsyncSession, statement: Any) -> int:
     return int((await session.execute(statement)).scalar_one())
 
 
-class FakeCleaner:
-    calls: list[dict[str, object]] = []
+def _fake_cleaner_factory(calls: list[dict[str, object]]) -> type:
+    class FakeCleaner:
+        async def cleanup(
+            self,
+            *,
+            workspace_id: str,
+            repo_url: str,
+            remove_volumes: bool,
+            remove_worktree: bool,
+            compose_project_name: str | None = None,
+            compose_file_path: Path | None = None,
+            worktree_host_path: Path | None = None,
+        ) -> list[str]:
+            calls.append(
+                {
+                    "workspace_id": workspace_id,
+                    "repo_url": repo_url,
+                    "compose_project_name": compose_project_name,
+                    "compose_file_path": compose_file_path,
+                    "worktree_host_path": worktree_host_path,
+                    "remove_volumes": remove_volumes,
+                    "remove_worktree": remove_worktree,
+                }
+            )
+            return []
 
-    async def cleanup(
-        self,
-        *,
-        workspace_id: str,
-        repo_url: str,
-        remove_volumes: bool,
-        remove_worktree: bool,
-        compose_project_name: str | None = None,
-        compose_file_path: Path | None = None,
-        worktree_host_path: Path | None = None,
-    ) -> list[str]:
-        self.calls.append(
-            {
-                "workspace_id": workspace_id,
-                "repo_url": repo_url,
-                "compose_project_name": compose_project_name,
-                "compose_file_path": compose_file_path,
-                "worktree_host_path": worktree_host_path,
-                "remove_volumes": remove_volumes,
-                "remove_worktree": remove_worktree,
-            }
-        )
-        return []
+    return FakeCleaner
 
 
 @pytest.mark.unit
@@ -126,8 +127,8 @@ async def test_replay_same_key_returns_same_operation_without_duplicate_rows(
         stop_calls.append(compose_project_name)
 
     monkeypatch.setattr(controls_route, "_stop_project", fake_stop)
-    FakeCleaner.calls = []
-    monkeypatch.setattr(controls_route, "_cleaner", FakeCleaner)
+    cleaner_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(controls_route, "_cleaner", _fake_cleaner_factory(cleaner_calls))
     headers = {**_auth(monkeypatch), "Idempotency-Key": f"{action}-same-key"}
 
     first = await _call_control(client, workspace_id, action, headers=headers)
@@ -142,7 +143,7 @@ async def test_replay_same_key_returns_same_operation_without_duplicate_rows(
     if action in {"cancel", "stop"}:
         assert len(stop_calls) == 1
     if action == "destroy":
-        assert len(FakeCleaner.calls) == 1
+        assert len(cleaner_calls) == 1
 
 
 @pytest.mark.unit
@@ -154,8 +155,8 @@ async def test_same_key_with_different_payload_returns_idempotency_conflict(
 ) -> None:
     workspace_id = await _create_workspace(client)
     monkeypatch.setattr(controls_route, "_stop_project", _noop_stop)
-    FakeCleaner.calls = []
-    monkeypatch.setattr(controls_route, "_cleaner", FakeCleaner)
+    cleaner_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(controls_route, "_cleaner", _fake_cleaner_factory(cleaner_calls))
     headers = {**_auth(monkeypatch), "Idempotency-Key": f"{action}-conflict-key"}
 
     first = await _call_control(client, workspace_id, action, headers=headers)
@@ -187,8 +188,8 @@ async def test_same_key_with_different_if_match_returns_idempotency_conflict(
         stop_calls.append(compose_project_name)
 
     monkeypatch.setattr(controls_route, "_stop_project", fake_stop)
-    FakeCleaner.calls = []
-    monkeypatch.setattr(controls_route, "_cleaner", FakeCleaner)
+    cleaner_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(controls_route, "_cleaner", _fake_cleaner_factory(cleaner_calls))
     headers = {
         **_auth(monkeypatch),
         "Idempotency-Key": f"{action}-if-match-conflict",
@@ -212,7 +213,7 @@ async def test_same_key_with_different_if_match_returns_idempotency_conflict(
     if action in {"cancel", "stop"}:
         assert len(stop_calls) == 1
     if action == "destroy":
-        assert len(FakeCleaner.calls) == 1
+        assert len(cleaner_calls) == 1
 
 
 @pytest.mark.unit
@@ -231,8 +232,8 @@ async def test_stale_if_match_rejects_without_mutating(
         stop_calls.append(compose_project_name)
 
     monkeypatch.setattr(controls_route, "_stop_project", fake_stop)
-    FakeCleaner.calls = []
-    monkeypatch.setattr(controls_route, "_cleaner", FakeCleaner)
+    cleaner_calls: list[dict[str, object]] = []
+    monkeypatch.setattr(controls_route, "_cleaner", _fake_cleaner_factory(cleaner_calls))
     headers = {
         **_auth(monkeypatch),
         "Idempotency-Key": f"{action}-stale-version",
@@ -250,7 +251,7 @@ async def test_stale_if_match_rejects_without_mutating(
     }
     assert after_counts == before_counts
     assert stop_calls == []
-    assert FakeCleaner.calls == []
+    assert cleaner_calls == []
 
 
 async def _call_control(
