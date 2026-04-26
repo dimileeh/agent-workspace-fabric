@@ -402,6 +402,33 @@ class TestMergeQueueList:
         assert [item["workspace_id"] for item in response.json()["items"]] == [expected_id]
 
     @pytest.mark.unit
+    async def test_docs_task_scope_violation_exposes_scope_resolution_action(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Docs task with code scope",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/27",
+            task_class="docs_task",
+            owned_paths=["docs/**", "src/config.py"],
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "resolve_task_scope"
+        assert item["readiness"]["ready"] is False
+        assert item["readiness"]["stale"] is True
+        assert item["readiness"]["stale_reason"] == "docs_task_scope_violation"
+
+    @pytest.mark.unit
     async def test_reports_has_more_and_accepts_next_cursor(
         self,
         client: AsyncClient,

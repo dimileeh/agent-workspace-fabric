@@ -5,6 +5,9 @@ from sqlalchemy import inspect
 from awf.db.enums import TaskClass
 from awf.db.models import Workspace
 
+DOCS_TASK_SCOPE_VIOLATION_STALE_REASON = "docs_task_scope_violation"
+VALIDATION_INSUFFICIENT_TIER_STALE_REASON = "validation_insufficient_tier"
+
 
 def _task_class_tier(task_class: str | None) -> int:
     if task_class == TaskClass.migration_task.value:
@@ -61,6 +64,6 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
             actual_tier = max(actual_tier, op_tier)
 
     if actual_tier < required_tier:
-        return "validation_insufficient_tier", "validate"
+        return VALIDATION_INSUFFICIENT_TIER_STALE_REASON, "validate"
 
     return None, None

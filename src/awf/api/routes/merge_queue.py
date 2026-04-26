@@ -43,6 +43,10 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceRepository,
 )
+from awf.runtime.merge_eligibility import (
+    DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
+    VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+)
 from awf.service.merge_queue import (
     MergeQueueBlocker,
     list_merge_queue_blockers_for_candidates,
@@ -320,7 +324,7 @@ def _merge_blocker_reason(
         return "policy_blocked", "resolve_policy_findings"
     if candidate.stale:
         reason = candidate.stale_reason or "stale"
-        action = "validate" if reason == "validation_insufficient_tier" else "rebase"
+        action = _required_stale_action(reason)
         return "stale", action
     if candidate.manual_merge_required:
         return "manual_merge_required", None
@@ -331,6 +335,14 @@ def _merge_blocker_reason(
     if candidate.ready:
         return "ready_to_merge_or_waiting_for_github", None
     return "workspace_not_terminal", None
+
+
+def _required_stale_action(reason: str) -> str:
+    if reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON:
+        return "validate"
+    if reason == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON:
+        return "resolve_task_scope"
+    return "rebase"
 
 
 def _merge_blocker_reason_from_workspace(workspace: Workspace) -> tuple[MergeBlockerReason, str | None]:

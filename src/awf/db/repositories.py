@@ -55,6 +55,7 @@ from awf.db.models import (
     WorkspaceEvent,
     WorkspaceLogStream,
 )
+from awf.runtime.merge_eligibility import DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
 
 ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.requested.value,
@@ -621,7 +622,6 @@ class MergeCandidateRepository:
             candidate.merged_at = None
 
         sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
-        _seed_initial_scope_validation_staleness(candidate, workspace=workspace)
         await self._session.flush()
         return candidate
 
@@ -1862,7 +1862,10 @@ def sync_candidate_readiness(
     sync_validation_staleness: bool = True,
     recompute_stale: bool | None = None,
 ) -> None:
-    from awf.runtime.merge_eligibility import compute_stale_reason
+    from awf.runtime.merge_eligibility import (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        compute_stale_reason,
+    )
 
     if recompute_stale is not None:
         sync_validation_staleness = recompute_stale
@@ -1878,12 +1881,19 @@ def sync_candidate_readiness(
     not_canonical = not is_canonical
 
     if sync_validation_staleness:
+        scope_stale_reason = _initial_scope_stale_reason(workspace)
         stale_reason, _ = compute_stale_reason(workspace)
         # If there's an active stale reason, update it. If the reason clears, clear it.
-        if stale_reason is not None:
+        if scope_stale_reason is not None:
+            candidate.stale = True
+            candidate.stale_reason = scope_stale_reason
+        elif stale_reason is not None:
             candidate.stale = True
             candidate.stale_reason = stale_reason
-        elif stale_reason is None and candidate.stale_reason in ("validation_insufficient_tier",):
+        elif candidate.stale_reason in (
+            VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+            DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
+        ):
             candidate.stale = False
             candidate.stale_reason = None
 
@@ -1918,21 +1928,12 @@ def sync_candidate_readiness(
         candidate.failed_or_cancelled = False
 
 
-def _seed_initial_scope_validation_staleness(
-    candidate: MergeCandidate,
-    *,
-    workspace: Workspace,
-) -> None:
-    if candidate.stale:
-        return
+def _initial_scope_stale_reason(workspace: Workspace) -> str | None:
     if workspace.task_class != TaskClass.docs_task.value:
-        return
+        return None
     if not _claims_non_docs_path(workspace.owned_paths):
-        return
-    candidate.stale = True
-    candidate.stale_reason = "validation_insufficient_tier"
-    candidate.ready = False
-    candidate.manual_merge_required = False
+        return None
+    return DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
 
 
 def _claims_non_docs_path(owned_paths: list[str] | tuple[str, ...]) -> bool:
