@@ -469,28 +469,19 @@ class ResourceReservationRepository:
         *,
         released_at: datetime | None = None,
     ) -> builtins.list[ResourceReservation]:
-        rows = await self._active_for_workspace_update(workspace_id)
-        if not rows:
-            return []
         release_time = released_at or datetime.now(UTC)
-        for row in rows:
-            row.released_at = release_time
-        await self._session.flush()
-        return rows
-
-    async def _active_for_workspace_update(
-        self,
-        workspace_id: str,
-    ) -> builtins.list[ResourceReservation]:
-        stmt = (
-            select(ResourceReservation)
+        result = await self._session.execute(
+            update(ResourceReservation)
             .where(
                 ResourceReservation.workspace_id == workspace_id,
                 ResourceReservation.released_at.is_(None),
             )
-            .order_by(ResourceReservation.reserved_at.asc(), ResourceReservation.id.asc())
+            .values(released_at=release_time)
+            .returning(ResourceReservation)
         )
-        return list((await self._session.execute(stmt)).scalars())
+        rows = list(result.scalars())
+        rows.sort(key=lambda row: (row.reserved_at, row.id))
+        return rows
 
 
 class MergeCandidateRepository:

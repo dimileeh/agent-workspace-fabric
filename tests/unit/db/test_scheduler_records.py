@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.base import Base
@@ -155,3 +156,55 @@ async def test_resource_reservation_repository_tracks_active_and_released_rows(
     assert rows[0].reserved_at == reserved_at
     assert rows[0].released_at == released_at
     assert await ResourceReservationRepository(session).active_for_workspace(workspace_id) is None
+
+
+@pytest.mark.unit
+async def test_resource_reservation_release_uses_single_update_returning(
+    session: AsyncSession,
+) -> None:
+    workspace_id, _task_id, attempt_id = await _attempt(session)
+    reserved_at = datetime(2026, 4, 26, 13, 0, tzinfo=UTC)
+    released_at = datetime(2026, 4, 26, 14, 0, tzinfo=UTC)
+
+    reservation = await ResourceReservationRepository(session).create(
+        workspace_id=workspace_id,
+        attempt_id=attempt_id,
+        node_id="local",
+        steady_cpu=4.0,
+        steady_memory_gb=12.0,
+        peak_cpu=8.0,
+        peak_memory_gb=24.0,
+        disk_mb=4096,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    await session.commit()
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    engine = session.bind
+    assert engine is not None
+    event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+    try:
+        released = await ResourceReservationRepository(session).release_active_for_workspace(
+            workspace_id,
+            released_at=released_at,
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    assert [row.id for row in released] == [reservation.id]
+    assert len(statements) == 1
+    assert statements[0].startswith("update resource_reservations ")
+    assert " returning " in statements[0]
