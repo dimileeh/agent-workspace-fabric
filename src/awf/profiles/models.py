@@ -137,6 +137,7 @@ class ProfileValidation(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=1, le=14400)
     requested_tier: int = Field(default=1, ge=1, le=3)
     coverage: ProfileCoverage = Field(default_factory=ProfileCoverage)
+    retry_budget: int = Field(default=0, ge=0, le=10)
 
 
 class ProfileMonitor(BaseModel):

@@ -294,6 +294,7 @@ class TestHappyPath:
                     "stdout": "validation.01_validate.stdout",
                     "stderr": "validation.01_validate.stderr",
                 },
+                "retry_count": 0,
             },
             {
                 "phase": "validate",
@@ -303,6 +304,7 @@ class TestHappyPath:
                     "stdout": "validation.02_validate.stdout",
                     "stderr": "validation.02_validate.stderr",
                 },
+                "retry_count": 0,
             },
         ]
         assert run["base_commit"] == "a" * 40
