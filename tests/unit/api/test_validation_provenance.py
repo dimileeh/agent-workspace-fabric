@@ -318,6 +318,33 @@ async def test_validation_provenance_marks_open_streams_running_and_uses_request
 
 
 @pytest.mark.unit
+async def test_validation_provenance_marks_open_streams_failed_for_failed_workspace(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace_with_commands(client, ["ruff check"])
+    await _mark_workspace_validation_failed(engine, workspace_id)
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.cmd_01",
+        phase="validate",
+        stdout_bytes=12,
+        stdout_lines=1,
+        stderr_bytes=7,
+        stderr_lines=1,
+        closed=False,
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["status"] == "failed"
+    assert item["closed_at"] is None
+
+
+@pytest.mark.unit
 async def test_validation_provenance_marks_failed_command_from_workspace_failure(
     client: AsyncClient,
     engine: AsyncEngine,

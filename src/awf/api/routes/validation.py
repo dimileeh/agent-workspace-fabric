@@ -271,6 +271,8 @@ def _record_status(
     failed_record: _CommandRecord | None,
 ) -> ValidationProvenanceStatus:
     if _closed_at(record.pair) is None:
+        if workspace.status == WorkspaceStatus.failed.value:
+            return "failed"
         return "running"
     if workspace.status in _SUCCESS_WORKSPACE_STATUSES:
         return "succeeded"
