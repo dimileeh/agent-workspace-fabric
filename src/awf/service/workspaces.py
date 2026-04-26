@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import (
     OperationResponse,
+    OwnedPathOverlapResponse,
     RuntimeServiceResponse,
     WorkspaceControlResponse,
     WorkspaceCreateRequest,
@@ -21,12 +22,13 @@ from awf.api.schemas import (
     WorkspaceResponse,
     WorkspaceRetryResponse,
     WorkspaceRuntimeResponse,
+    WorkspaceWarningResponse,
 )
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     OperationRepository,
-    OwnedPathConflict,
+    OwnedPathOverlap,
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceEventRepository,
@@ -50,20 +52,16 @@ class RuntimeInspection(Protocol):
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot: ...
 
 
-OWNED_PATH_CONFLICT_CODE = "WORKSPACE_OWNED_PATH_CONFLICT"
-OWNED_PATH_CONFLICT_MESSAGE = "Requested owned paths overlap an active workspace."
+OWNED_PATH_OVERLAP_RISK_CODE = "OWNED_PATH_OVERLAP_RISK"
+OWNED_PATH_OVERLAP_RISK_EVENT_TYPE = "workspace.owned_path_overlap_risk"
+OWNED_PATH_OVERLAP_RISK_MESSAGE = (
+    "Owned paths overlap active workspaces; this may require rebase "
+    "or conflict resolution."
+)
 RETRYABLE_WORKSPACE_STATUSES = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
 )
-
-
-class WorkspaceOwnedPathConflictError(Exception):
-    def __init__(self, conflicts: list[OwnedPathConflict]) -> None:
-        self.error_code = OWNED_PATH_CONFLICT_CODE
-        self.message = OWNED_PATH_CONFLICT_MESSAGE
-        self.detail = owned_path_conflict_detail(conflicts)
-        super().__init__(self.message)
 
 
 class WorkspaceRetryError(Exception):
@@ -379,18 +377,11 @@ async def create_workspace_v2_row(
 ) -> Workspace:
     """Persist one v2 workspace request without committing the session."""
     repo = WorkspaceRepository(session)
-    await repo.acquire_owned_path_conflict_lock(
+    overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,
         owned_paths=payload.task.owned_paths,
     )
-    conflicts = await repo.find_active_owned_path_conflicts(
-        repo_url=payload.repo.url,
-        branch_base=payload.repo.base_branch,
-        owned_paths=payload.task.owned_paths,
-    )
-    if conflicts:
-        raise WorkspaceOwnedPathConflictError(conflicts)
 
     requested_profile, resolved_profile = v2_profile_snapshots(payload)
     ws = await repo.create(
@@ -430,6 +421,7 @@ async def create_workspace_v2_row(
         owned_paths=payload.task.owned_paths,
     )
     await TaskAttemptRepository(session).create_for_workspace(task=task, workspace=ws)
+    await _record_owned_path_overlap_risk(repo, ws, overlaps)
     await session.flush()
     return ws
 
@@ -447,18 +439,11 @@ async def retry_workspace_row(
     if WorkspaceStatus(source.status) not in RETRYABLE_WORKSPACE_STATUSES:
         raise WorkspaceRetryNotAllowedError(source)
 
-    await repo.acquire_owned_path_conflict_lock(
+    overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=source.repo_url,
         branch_base=source.branch_base,
         owned_paths=list(source.owned_paths),
     )
-    conflicts = await repo.find_active_owned_path_conflicts(
-        repo_url=source.repo_url,
-        branch_base=source.branch_base,
-        owned_paths=list(source.owned_paths),
-    )
-    if conflicts:
-        raise WorkspaceOwnedPathConflictError(conflicts)
 
     retried = await repo.create(
         repo_url=source.repo_url,
@@ -518,6 +503,7 @@ async def retry_workspace_row(
         reason_code="RETRY_CREATED",
         payload=event_payload,
     )
+    await _record_owned_path_overlap_risk(repo, retried, overlaps)
     await operation_repo.finish(
         operation,
         status=OperationStatus.succeeded,
@@ -575,23 +561,86 @@ def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResp
     )
 
 
-def owned_path_conflict_detail(conflicts: list[OwnedPathConflict]) -> dict[str, Any]:
+async def _record_owned_path_overlap_risk(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    overlaps: list[OwnedPathOverlap],
+) -> None:
+    if not overlaps:
+        return
+    await repo.add_event(
+        workspace,
+        event_type=OWNED_PATH_OVERLAP_RISK_EVENT_TYPE,
+        reason_code=OWNED_PATH_OVERLAP_RISK_CODE,
+        payload=owned_path_overlap_warning_payload(overlaps),
+    )
+
+
+def owned_path_overlap_warning_payload(overlaps: list[OwnedPathOverlap]) -> dict[str, Any]:
     workspace_ids: dict[str, None] = {}
-    conflict_items: list[dict[str, str]] = []
-    for conflict in conflicts:
-        if conflict.workspace_id not in workspace_ids:
-            workspace_ids[conflict.workspace_id] = None
-        conflict_items.append(
+    overlap_items: list[dict[str, str]] = []
+    for overlap in overlaps:
+        if overlap.workspace_id not in workspace_ids:
+            workspace_ids[overlap.workspace_id] = None
+        overlap_items.append(
             {
-                "workspace_id": conflict.workspace_id,
-                "existing_path": conflict.existing_path,
-                "requested_path": conflict.requested_path,
+                "workspace_id": overlap.workspace_id,
+                "existing_path": overlap.existing_path,
+                "requested_path": overlap.requested_path,
             }
         )
     return {
+        "warning_code": OWNED_PATH_OVERLAP_RISK_CODE,
+        "message": OWNED_PATH_OVERLAP_RISK_MESSAGE,
         "workspace_ids": list(workspace_ids),
-        "conflicts": conflict_items,
+        "overlaps": overlap_items,
     }
+
+
+def owned_path_overlap_warnings(workspace: Workspace) -> list[WorkspaceWarningResponse]:
+    warnings: list[WorkspaceWarningResponse] = []
+    for event in workspace.events:
+        if event.event_type != OWNED_PATH_OVERLAP_RISK_EVENT_TYPE:
+            continue
+        payload = event.payload
+        if payload is None:
+            continue
+        warnings.append(_owned_path_overlap_warning_response(payload))
+    return warnings
+
+
+def _owned_path_overlap_warning_response(
+    payload: dict[str, Any],
+) -> WorkspaceWarningResponse:
+    overlaps = payload.get("overlaps")
+    workspace_ids = payload.get("workspace_ids")
+    return WorkspaceWarningResponse(
+        warning_code=str(payload.get("warning_code", OWNED_PATH_OVERLAP_RISK_CODE)),
+        message=str(payload.get("message", OWNED_PATH_OVERLAP_RISK_MESSAGE)),
+        workspace_ids=[
+            workspace_id
+            for workspace_id in workspace_ids
+            if isinstance(workspace_id, str)
+        ]
+        if isinstance(workspace_ids, list)
+        else [],
+        overlaps=[
+            OwnedPathOverlapResponse(
+                workspace_id=str(item["workspace_id"]),
+                existing_path=str(item["existing_path"]),
+                requested_path=str(item["requested_path"]),
+            )
+            for item in overlaps
+            if (
+                isinstance(item, dict)
+                and "workspace_id" in item
+                and "existing_path" in item
+                and "requested_path" in item
+            )
+        ]
+        if isinstance(overlaps, list)
+        else [],
+    )
 
 
 def v2_profile_snapshots(

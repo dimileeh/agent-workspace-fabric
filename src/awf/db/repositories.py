@@ -11,13 +11,12 @@ SQLAlchemy calls everywhere. Rules:
 from __future__ import annotations
 
 import builtins
-import hashlib
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import Select
@@ -45,7 +44,7 @@ from awf.db.models import (
     WorkspaceLogStream,
 )
 
-ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
+ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.requested.value,
     WorkspaceStatus.provisioning.value,
     WorkspaceStatus.ready.value,
@@ -57,7 +56,7 @@ ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
 
 
 @dataclass(frozen=True)
-class OwnedPathConflict:
+class OwnedPathOverlap:
     workspace_id: str
     existing_path: str
     requested_path: str
@@ -647,36 +646,13 @@ class WorkspaceRepository:
         stmt = select(Workspace).where(Workspace.idempotency_key == key)
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
-    async def acquire_owned_path_conflict_lock(
+    async def find_active_owned_path_overlaps(
         self,
         *,
         repo_url: str,
         branch_base: str,
         owned_paths: list[str],
-    ) -> None:
-        """Serialize owned-path admission for one repo/base transaction on Postgres."""
-        if not any(_normalize_owned_path(path) != "" for path in owned_paths):
-            return
-
-        if self._dialect_name != "postgresql":
-            return
-
-        lock_key = _owned_path_conflict_advisory_lock_key(
-            repo_url=repo_url,
-            branch_base=branch_base,
-        )
-        await self._session.execute(
-            text("SELECT pg_advisory_xact_lock(:lock_key)"),
-            {"lock_key": lock_key},
-        )
-
-    async def find_active_owned_path_conflicts(
-        self,
-        *,
-        repo_url: str,
-        branch_base: str,
-        owned_paths: list[str],
-    ) -> list[OwnedPathConflict]:
+    ) -> list[OwnedPathOverlap]:
         requested_paths = [
             path for path in owned_paths if _normalize_owned_path(path) != ""
         ]
@@ -688,26 +664,26 @@ class WorkspaceRepository:
             .where(
                 Workspace.repo_url == repo_url,
                 Workspace.branch_base == branch_base,
-                Workspace.status.in_(ACTIVE_OWNED_PATH_CONFLICT_STATUSES),
+                Workspace.status.in_(ACTIVE_OWNED_PATH_OVERLAP_STATUSES),
             )
             .order_by(Workspace.created_at.asc(), Workspace.id.asc())
         )
         rows = list((await self._session.execute(stmt)).scalars())
-        conflicts: list[OwnedPathConflict] = []
+        overlaps: list[OwnedPathOverlap] = []
         for workspace in rows:
             for existing_path in workspace.owned_paths:
                 if _normalize_owned_path(existing_path) == "":
                     continue
                 for requested_path in requested_paths:
                     if _owned_paths_overlap(existing_path, requested_path):
-                        conflicts.append(
-                            OwnedPathConflict(
+                        overlaps.append(
+                            OwnedPathOverlap(
                                 workspace_id=workspace.id,
                                 existing_path=existing_path,
                                 requested_path=requested_path,
                             )
                         )
-        return conflicts
+        return overlaps
 
     async def list(
         self,
@@ -1249,14 +1225,8 @@ def _owned_paths_overlap(left: str, right: str) -> bool:
     return False
 
 
-def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -> int:
-    digest = hashlib.sha256(
-        f"awf:owned-path-conflicts\x00{repo_url}\x00{branch_base}".encode()
-    ).digest()
-    unsigned = int.from_bytes(digest[:8], byteorder="big", signed=False)
-    if unsigned >= 1 << 63:
-        return unsigned - (1 << 64)
-    return unsigned
+def owned_paths_overlap(left: str, right: str) -> bool:
+    return _owned_paths_overlap(left, right)
 
 
 def _normalize_owned_path(path: str) -> str:

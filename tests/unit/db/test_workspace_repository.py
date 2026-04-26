@@ -66,19 +66,6 @@ async def _create_policy_workspace(
     return workspace
 
 
-class _RecordingSession:
-    def __init__(self, dialect_name: str) -> None:
-        del dialect_name
-        self.executed: list[tuple[str, dict[str, object]]] = []
-
-    async def execute(
-        self,
-        statement: object,
-        parameters: dict[str, object] | None = None,
-    ) -> None:
-        self.executed.append((str(statement), dict(parameters or {})))
-
-
 class _FakeScalarResult:
     def __init__(self, values: list[str]) -> None:
         self._values = values
@@ -471,7 +458,7 @@ class TestListWorkspaces:
         assert [row.id for row in listed] == sorted((row.id for row in rows), reverse=True)
 
 
-class TestOwnedPathConflictLookup:
+class TestOwnedPathOverlapLookup:
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "status",
@@ -584,79 +571,38 @@ class TestOwnedPathConflictLookup:
         assert "SKIP LOCKED" in sql
 
     @pytest.mark.unit
-    async def test_postgres_conflict_lookup_lock_uses_transaction_advisory_lock(self) -> None:
-        session = _RecordingSession("postgresql")
-        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
-
-        await repo.acquire_owned_path_conflict_lock(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["src/awf/api/**"],
-        )
-
-        assert len(session.executed) == 1
-        sql, parameters = session.executed[0]
-        assert "pg_advisory_xact_lock" in sql
-        assert isinstance(parameters["lock_key"], int)
-
     @pytest.mark.unit
-    async def test_conflict_lookup_lock_is_noop_without_postgres_or_owned_paths(self) -> None:
-        sqlite_session = _RecordingSession("sqlite")
-        sqlite_repo = WorkspaceRepository(sqlite_session, dialect_name="sqlite")  # type: ignore[arg-type]
-
-        await sqlite_repo.acquire_owned_path_conflict_lock(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=["src/awf/api/**"],
-        )
-
-        postgres_session = _RecordingSession("postgresql")
-        postgres_repo = WorkspaceRepository(
-            postgres_session,
-            dialect_name="postgresql",
-        )  # type: ignore[arg-type]
-
-        await postgres_repo.acquire_owned_path_conflict_lock(
-            repo_url="git@github.com:example/app.git",
-            branch_base="development",
-            owned_paths=[" ", "./"],
-        )
-
-        assert sqlite_session.executed == []
-        assert postgres_session.executed == []
-
-    @pytest.mark.unit
-    async def test_empty_requested_owned_paths_do_not_conflict(
+    async def test_empty_requested_owned_paths_do_not_report_overlap(
         self, session: AsyncSession
     ) -> None:
         repo = WorkspaceRepository(session)
         await _create_policy_workspace(session, repo, owned_paths=["src/awf/api/**"])
 
-        conflicts = await repo.find_active_owned_path_conflicts(
+        overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
             owned_paths=[],
         )
 
-        assert conflicts == []
+        assert overlaps == []
 
     @pytest.mark.unit
-    async def test_non_overlapping_owned_paths_do_not_conflict(
+    async def test_non_overlapping_owned_paths_do_not_report_overlap(
         self, session: AsyncSession
     ) -> None:
         repo = WorkspaceRepository(session)
         await _create_policy_workspace(session, repo, owned_paths=["src/awf/api/**"])
 
-        conflicts = await repo.find_active_owned_path_conflicts(
+        overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
             owned_paths=["docs/**"],
         )
 
-        assert conflicts == []
+        assert overlaps == []
 
     @pytest.mark.unit
-    async def test_same_paths_on_different_repo_or_base_branch_do_not_conflict(
+    async def test_same_paths_on_different_repo_or_base_branch_do_not_report_overlap(
         self, session: AsyncSession
     ) -> None:
         repo = WorkspaceRepository(session)
@@ -675,13 +621,13 @@ class TestOwnedPathConflictLookup:
             owned_paths=["src/awf/api/**"],
         )
 
-        conflicts = await repo.find_active_owned_path_conflicts(
+        overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
             owned_paths=["src/awf/api/routes/workspaces.py"],
         )
 
-        assert conflicts == []
+        assert overlaps == []
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -694,7 +640,7 @@ class TestOwnedPathConflictLookup:
             WorkspaceStatus.destroyed,
         ],
     )
-    async def test_terminal_and_teardown_statuses_do_not_conflict(
+    async def test_terminal_and_teardown_statuses_do_not_report_overlap(
         self,
         session: AsyncSession,
         status: WorkspaceStatus,
@@ -707,13 +653,13 @@ class TestOwnedPathConflictLookup:
             status=status,
         )
 
-        conflicts = await repo.find_active_owned_path_conflicts(
+        overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
             owned_paths=["src/awf/api/routes/workspaces.py"],
         )
 
-        assert conflicts == []
+        assert overlaps == []
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -766,7 +712,7 @@ class TestOwnedPathConflictLookup:
             ),
         ],
     )
-    async def test_active_exact_ancestor_and_wildcard_paths_conflict(
+    async def test_active_exact_ancestor_and_wildcard_paths_report_overlap(
         self,
         session: AsyncSession,
         status: WorkspaceStatus,
@@ -781,16 +727,16 @@ class TestOwnedPathConflictLookup:
             status=status,
         )
 
-        conflicts = await repo.find_active_owned_path_conflicts(
+        overlaps = await repo.find_active_owned_path_overlaps(
             repo_url="git@github.com:example/app.git",
             branch_base="development",
             owned_paths=[requested_path],
         )
 
-        assert len(conflicts) == 1
-        assert conflicts[0].workspace_id == existing.id
-        assert conflicts[0].existing_path == existing_path
-        assert conflicts[0].requested_path == requested_path
+        assert len(overlaps) == 1
+        assert overlaps[0].workspace_id == existing.id
+        assert overlaps[0].existing_path == existing_path
+        assert overlaps[0].requested_path == requested_path
 
 
 class TestTransition:

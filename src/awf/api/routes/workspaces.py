@@ -31,6 +31,7 @@ from awf.api.schemas import (
     WorkspaceOverviewResponse,
     WorkspaceResponse,
     WorkspaceRetryResponse,
+    WorkspaceWarningResponse,
 )
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
@@ -39,11 +40,11 @@ from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.workspaces import (
-    WorkspaceOwnedPathConflictError,
     WorkspaceRetryError,
     WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
     create_workspace_v2_row,
+    owned_path_overlap_warnings,
     retry_workspace_row,
     workspace_retry_response,
 )
@@ -130,7 +131,13 @@ async def create_workspace_v2(
                         ),
                     ).model_dump(),
                 )
-            return _accepted(existing.id, existing.status, existing.version, existing.created_at)
+            return _accepted(
+                existing.id,
+                existing.status,
+                existing.version,
+                existing.created_at,
+                warnings=owned_path_overlap_warnings(existing),
+            )
 
     disk_check = await _workspace_admission_disk_check(request, settings)
     if not disk_check.ok:
@@ -142,15 +149,6 @@ async def create_workspace_v2(
             payload,
             idempotency_key=idempotency_key,
         )
-    except WorkspaceOwnedPathConflictError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content=ErrorResponse(
-                error_code=exc.error_code,
-                message=exc.message,
-                detail=exc.detail,
-            ).model_dump(),
-        )
     except ProfileResolutionError as exc:
         return JSONResponse(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
@@ -160,7 +158,13 @@ async def create_workspace_v2(
             ).model_dump(),
         )
 
-    return _accepted(ws.id, ws.status, ws.version, ws.created_at)
+    return _accepted(
+        ws.id,
+        ws.status,
+        ws.version,
+        ws.created_at,
+        warnings=owned_path_overlap_warnings(ws),
+    )
 
 
 async def _workspace_admission_disk_check(request: Request, settings: Settings) -> DiskCheck:
@@ -300,15 +304,6 @@ async def retry_workspace(
 ) -> WorkspaceRetryResponse | JSONResponse:
     try:
         result = await retry_workspace_row(session, workspace_id)
-    except WorkspaceOwnedPathConflictError as exc:
-        return JSONResponse(
-            status_code=status.HTTP_409_CONFLICT,
-            content=ErrorResponse(
-                error_code=exc.error_code,
-                message=exc.message,
-                detail=exc.detail,
-            ).model_dump(),
-        )
     except WorkspaceRetryError as exc:
         return _retry_error_response(exc)
 
@@ -349,7 +344,12 @@ async def list_workspaces(
 
 
 def _accepted(
-    ws_id: str, status_value: str, version: int, created_at: datetime
+    ws_id: str,
+    status_value: str,
+    version: int,
+    created_at: datetime,
+    *,
+    warnings: list[WorkspaceWarningResponse] | None = None,
 ) -> WorkspaceAcceptedResponse:
     return WorkspaceAcceptedResponse(
         workspace_id=ws_id,
@@ -358,6 +358,7 @@ def _accepted(
         status_url=f"/v1/workspaces/{ws_id}",
         events_url=f"/v1/workspaces/{ws_id}/events",
         accepted_at=created_at,
+        warnings=list(warnings or []),
     )
 
 

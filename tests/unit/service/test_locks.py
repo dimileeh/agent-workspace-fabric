@@ -1,4 +1,4 @@
-"""Read-only lock reservation service tests."""
+"""Read-only owned-path reservation service tests."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ async def _workspace(
             repo_url=repo_url,
             branch_base=branch_base,
             task_title=title,
-            task_prompt="Expose lock reservations to operators.",
+            task_prompt="Expose owned-path reservations to operators.",
             task_class=task_class,
             owned_paths=list(owned_paths or []),
             agent="codex",

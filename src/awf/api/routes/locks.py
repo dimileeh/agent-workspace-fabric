@@ -1,4 +1,4 @@
-"""Lock reservation visibility endpoints."""
+"""Owned-path reservation and overlap-risk visibility endpoints."""
 
 from __future__ import annotations
 

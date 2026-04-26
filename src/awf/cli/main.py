@@ -38,7 +38,7 @@ app = typer.Typer(
 workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy).")
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
-locks_app = typer.Typer(help="Lock reservation visibility.")
+locks_app = typer.Typer(help="Owned-path reservation and overlap-risk visibility.")
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
 app.add_typer(service_app, name="service")
@@ -413,7 +413,7 @@ def locks_list(
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
 ) -> None:
-    """List workspace lock reservations."""
+    """List workspace owned-path reservations and overlap risks."""
     params: dict[str, Any] = {"limit": limit}
     if repo_url is not None:
         params["repo_url"] = repo_url

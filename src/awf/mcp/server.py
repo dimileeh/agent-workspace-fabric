@@ -123,7 +123,7 @@ def build_mcp_server(
         ),
         task_class: TaskClass | None = Field(
             default=None,
-            description="Optional PRD policy class for later scheduling/locking work.",
+            description="Optional PRD policy class for scheduling and overlap-risk policy.",
         ),
         owned_paths: list[OwnedPath] = Field(
             default_factory=list,

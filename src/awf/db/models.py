@@ -90,8 +90,9 @@ class Workspace(Base):
     )
     """Caller-declared path globs/strings the task expects to own.
 
-    This slice persists and exposes the contract only; lock scheduling consumes
-    these paths in a later policy-enforcement slice.
+    Owned paths are coordination hints and stale-detection inputs. They are not
+    exclusive code locks, and overlapping owned paths do not block workspace
+    admission by themselves.
     """
 
     auto_merge: Mapped[bool] = mapped_column(

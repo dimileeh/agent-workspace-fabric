@@ -1,4 +1,4 @@
-"""Lock reservation API tests."""
+"""Owned-path reservation API tests."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _v2_body(
         "repo": {"url": repo_url, "base_branch": base_branch},
         "task": {
             "title": title,
-            "prompt": "Expose lock reservations.",
+            "prompt": "Expose owned-path reservations.",
             "agent": "codex",
             "kind": "feature_branch_pr",
             "task_class": task_class,
