@@ -15,6 +15,7 @@ from __future__ import annotations
 import os
 import shutil
 import subprocess
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -86,6 +87,23 @@ def _exec_agent(
         timeout=timeout,
         check=check,
     )
+
+
+def _exec_agent_cleanup(
+    *,
+    project_name: str,
+    compose_file: Path,
+    command: str,
+    timeout: int = 60,
+) -> None:
+    with suppress(subprocess.TimeoutExpired):
+        _exec_agent(
+            project_name=project_name,
+            compose_file=compose_file,
+            command=command,
+            timeout=timeout,
+            check=False,
+        )
 
 
 def _build_agent_image(tmp_path: Path, workspace_id: str, seed_compose_file: Path) -> str:
@@ -198,21 +216,19 @@ async def test_dind_agent_can_run_project_compose_and_reach_service(tmp_path: Pa
 
     finally:
         if paths is not None:
-            _exec_agent(
+            _exec_agent_cleanup(
                 project_name=project_name,
                 compose_file=paths.compose_file,
                 command=(
                     f"docker compose -f {inner_compose} "
                     f"--project-name {inner_project} down -v --remove-orphans"
                 ),
-                check=False,
             )
         if paths is not None:
-            _exec_agent(
+            _exec_agent_cleanup(
                 project_name=project_name,
                 compose_file=paths.compose_file,
                 command=f"rm -rf {inner_workspace}",
-                check=False,
             )
         try:
             await manager.down(spec)
