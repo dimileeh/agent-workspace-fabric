@@ -22,6 +22,7 @@ from awf.node.git_manager import GitManager
 
 ProjectStopper = Callable[[str | None], Awaitable[None]]
 CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
+_REMONITOR_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 
 
 class WorkspaceCleanerProtocol(Protocol):
@@ -651,6 +652,3 @@ def _is_active(status_value: WorkspaceStatus) -> bool:
         WorkspaceStatus.pushing,
         WorkspaceStatus.monitoring_pr,
     }
-
-
-_REMONITOR_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
