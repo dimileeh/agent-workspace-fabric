@@ -21,9 +21,8 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
 
     rebase_time = None
     for op in operations:
-        if op.type == "rebase" and op.status == "succeeded":
-            if rebase_time is None or op.created_at > rebase_time:
-                rebase_time = op.created_at
+        if op.type == "rebase" and op.status == "succeeded" and (rebase_time is None or op.created_at > rebase_time):
+            rebase_time = op.created_at
 
     has_rebased = rebase_time is not None
 
@@ -32,7 +31,7 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
         required_tier = max(required_tier, 2)
 
     actual_tier = 1
-    
+
     default_op_tier = 1
     if workspace.resolved_profile and "validation" in workspace.resolved_profile:
         default_op_tier = workspace.resolved_profile["validation"].get("requested_tier", 1)
@@ -45,10 +44,10 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
                     op_tier = op.payload["requested_tier"]
                 elif isinstance(op.payload.get("validation"), dict) and isinstance(op.payload["validation"].get("requested_tier"), int):
                     op_tier = op.payload["validation"]["requested_tier"]
-            
+
             if rebase_time and op.created_at > rebase_time:
                 op_tier = max(op_tier, 2)
-                
+
             actual_tier = max(actual_tier, op_tier)
 
     if actual_tier < required_tier:

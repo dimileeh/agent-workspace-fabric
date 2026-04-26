@@ -50,3 +50,32 @@ def test_raw_looking_secret_values():
     with pytest.raises(ValidationError, match="raw secret value"):
         WorkspaceProfile.model_validate({"name": "test", "secrets": [{"name": "s1", "target": "/etc/s1", "ref": "sk-1234567890abcdef"}]})
 
+@pytest.mark.unit
+def test_profile_security_serialization():
+    profile = WorkspaceProfile.model_validate({
+        "name": "test",
+        "secrets": [
+            {
+                "name": "API_KEY",
+                "target": "API_KEY",
+                "kind": "env",
+                "required": True,
+                "provider": "aws",
+                "ref": "my-secret-id",
+            }
+        ],
+        "security": {
+            "egress": {
+                "mode": "allowlist",
+                "allowlist": ["api.github.com", "crates.io"],
+            }
+        },
+    })
+    dumped = profile.model_dump(mode="json")
+    assert "secrets" in dumped
+    assert len(dumped["secrets"]) == 1
+    assert dumped["secrets"][0]["name"] == "API_KEY"
+    assert dumped["secrets"][0]["provider"] == "aws"
+    assert "security" in dumped
+    assert dumped["security"]["egress"]["mode"] == "allowlist"
+    assert dumped["security"]["egress"]["allowlist"] == ["api.github.com", "crates.io"]
