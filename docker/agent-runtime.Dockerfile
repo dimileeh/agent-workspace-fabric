@@ -70,6 +70,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # ── Stage 2: Docker CLI + Compose plugin ──────────────────────────────────
+ARG DOCKER_CE_CLI_VERSION=5:29.4.1-1~debian.12~bookworm
+ARG DOCKER_COMPOSE_PLUGIN_VERSION=5.1.3-1~debian.12~bookworm
 RUN install -m 0755 -d /etc/apt/keyrings \
     && curl -fsSL https://download.docker.com/linux/debian/gpg \
       -o /etc/apt/keyrings/docker.asc \
@@ -79,8 +81,8 @@ RUN install -m 0755 -d /etc/apt/keyrings \
       > /etc/apt/sources.list.d/docker.list \
     && apt-get update \
     && apt-get install -y --no-install-recommends \
-        docker-ce-cli \
-        docker-compose-plugin \
+        "docker-ce-cli=${DOCKER_CE_CLI_VERSION}" \
+        "docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_VERSION}" \
     && rm -rf /var/lib/apt/lists/* \
     && docker --version \
     && docker compose version

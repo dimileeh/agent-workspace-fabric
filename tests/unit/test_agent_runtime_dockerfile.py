@@ -25,7 +25,8 @@ def test_agent_runtime_installs_docker_cli_from_official_apt_repository() -> Non
 
     assert "download.docker.com/linux/debian" in dockerfile
     assert "docker.asc" in dockerfile
-    assert "docker-ce-cli" in dockerfile
+    assert "ARG DOCKER_CE_CLI_VERSION=" in dockerfile
+    assert '"docker-ce-cli=${DOCKER_CE_CLI_VERSION}"' in dockerfile
     assert "docker --version" in dockerfile
 
 
@@ -33,7 +34,8 @@ def test_agent_runtime_installs_docker_cli_from_official_apt_repository() -> Non
 def test_agent_runtime_installs_docker_compose_plugin() -> None:
     dockerfile = _agent_runtime_dockerfile()
 
-    assert "docker-compose-plugin" in dockerfile
+    assert "ARG DOCKER_COMPOSE_PLUGIN_VERSION=" in dockerfile
+    assert '"docker-compose-plugin=${DOCKER_COMPOSE_PLUGIN_VERSION}"' in dockerfile
     assert "docker compose version" in dockerfile
 
 
