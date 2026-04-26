@@ -19,6 +19,7 @@ import inspect
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Protocol
 
@@ -140,14 +141,24 @@ class WorkspaceExecutor:
         self._pr_monitor_factory = pr_monitor_factory
         self._log_store = log_store
 
-    async def execute(self, workspace_id: str) -> None:
+    async def execute(
+        self,
+        workspace_id: str,
+        *,
+        execution_owner_id: str | None = None,
+        execution_lease_expires_at: datetime | None = None,
+    ) -> None:
         """Drive a ``ready`` workspace to ``completed`` (or ``failed``).
 
         The function is idempotent in the sense that it refuses to run on a
         workspace that is not currently in ``ready`` — useful when a poll
         loop races with a manual invocation.
         """
-        ws = await self._claim_ready(workspace_id)
+        ws = await self._claim_ready(
+            workspace_id,
+            execution_owner_id=execution_owner_id,
+            execution_lease_expires_at=execution_lease_expires_at,
+        )
         if ws is None:
             return
         if not await self._recheck_status(
@@ -1022,7 +1033,13 @@ class WorkspaceExecutor:
         )
         return defaults.get(agent)
 
-    async def _claim_ready(self, workspace_id: str) -> Workspace | None:
+    async def _claim_ready(
+        self,
+        workspace_id: str,
+        *,
+        execution_owner_id: str | None = None,
+        execution_lease_expires_at: datetime | None = None,
+    ) -> Workspace | None:
         """Atomically transition a ready workspace to running before execution."""
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -1033,6 +1050,8 @@ class WorkspaceExecutor:
                 reason_code="EXECUTOR_CLAIMED",
             )
             if ws is not None:
+                ws.execution_claimed_by = execution_owner_id
+                ws.execution_claim_expires_at = execution_lease_expires_at
                 await session.commit()
                 return ws
 

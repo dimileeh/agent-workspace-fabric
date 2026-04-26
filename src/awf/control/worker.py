@@ -3,9 +3,9 @@
 Polls the DB for workspaces needing action and dispatches them to the
 Provisioner. Postgres-backed deployments list schedulable candidate rows with
 ``SELECT FOR UPDATE SKIP LOCKED``; provisioning and ready-execution handlers
-then claim selected rows with conditional status transitions. PR monitor
-recovery uses a short DB-backed lease so multiple workers do not resume the
-same monitor concurrently.
+then claim selected rows with conditional status transitions. Active execution
+and PR monitor recovery use short DB-backed leases so multiple workers do not
+resume the same runtime task concurrently.
 
 Split into two methods:
 
@@ -24,7 +24,7 @@ from functools import partial
 from time import monotonic
 from typing import Any, Protocol
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
@@ -51,6 +51,7 @@ class WorkerConfig:
     max_concurrent_provisions: int = 3
     max_concurrent_executions: int = 3
     monitor_claim_lease_seconds: float = 300.0
+    execution_claim_lease_seconds: float = 300.0
     stale_active_execution_scan_interval_seconds: float = 300.0
     node_id: str | None = None
 
@@ -63,7 +64,14 @@ class _ActiveExecutionCandidate:
 
 
 class WorkspaceExecutorProtocol(Protocol):
-    async def execute(self, workspace_id: str) -> None: ...
+    async def execute(
+        self,
+        workspace_id: str,
+        *,
+        execution_owner_id: str | None = None,
+        execution_lease_expires_at: datetime | None = None,
+    ) -> None: ...
+
     async def resume_pr_monitor(self, workspace_id: str) -> None: ...
 
 
@@ -294,10 +302,12 @@ class ControlWorker:
         exclude_ids: set[str],
     ) -> list[_ActiveExecutionCandidate]:
         active_status_values = [status.value for status in _ACTIVE_EXECUTION_STATUSES]
+        claim_cutoff = datetime.now(UTC)
         stmt = (
             select(Workspace.id, Workspace.status, Workspace.compose_project_name)
             .where(Workspace.status.in_(active_status_values))
             .where(Workspace.node_id == self._config.node_id)
+            .where(_stale_execution_claim_filter(claim_cutoff))
             .order_by(Workspace.created_at.asc(), Workspace.id.asc())
         )
         if exclude_ids:
@@ -356,6 +366,8 @@ class ControlWorker:
             ws = await repo.get(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
                 return
+            if not _execution_claim_is_stale(ws, datetime.now(UTC)):
+                return
             if await self._has_stale_active_execution_event(session, candidate.workspace_id):
                 return
 
@@ -404,9 +416,12 @@ class ControlWorker:
                 from_status=candidate.status,
                 to=WorkspaceStatus.failed,
                 reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+                extra_conditions=(_stale_execution_claim_filter(datetime.now(UTC)),),
             )
             if ws is None:
                 return
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
             ws.failure_reason = FailureReason.infrastructure_failure.value
             ws.failure_message = message[:2048]
             await session.commit()
@@ -433,7 +448,7 @@ class ControlWorker:
                 continue
 
             task = asyncio.create_task(
-                self._safely_execute(workspace_id),
+                self._safely_execute_claimed(workspace_id),
                 name=f"awf-execute-{workspace_id}",
             )
             self._execution_tasks[workspace_id] = task
@@ -473,12 +488,29 @@ class ControlWorker:
         if self._executor is None:
             return
         try:
-            await self._executor.execute(workspace_id)
+            await self._executor.execute(
+                workspace_id,
+                execution_owner_id=self._worker_id,
+                execution_lease_expires_at=self._execution_claim_expires_at(),
+            )
         except Exception:
             # WorkspaceExecutor.execute() owns state transitions, including
             # skip-if-no-longer-ready semantics. The worker must keep polling
             # even if one execution path crashes before it can mark a failure.
             _log.exception("worker.execute_failed", workspace_id=workspace_id)
+
+    async def _safely_execute_claimed(self, workspace_id: str) -> None:
+        heartbeat = asyncio.create_task(
+            self._refresh_execution_claim_loop(workspace_id),
+            name=f"awf-execution-claim-{workspace_id}",
+        )
+        try:
+            await self._safely_execute(workspace_id)
+        finally:
+            heartbeat.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await heartbeat
+            await self._release_execution_claim(workspace_id)
 
     async def _safely_resume_pr_monitor(self, workspace_id: str) -> None:
         if self._executor is None:
@@ -549,6 +581,27 @@ class ControlWorker:
                 )
                 return
 
+    async def _refresh_execution_claim_loop(self, workspace_id: str) -> None:
+        interval = max(1.0, min(60.0, self._config.execution_claim_lease_seconds / 3))
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                refreshed = await self._refresh_execution_claim(workspace_id)
+            except Exception:
+                _log.exception(
+                    "worker.execution_claim_refresh_failed",
+                    workspace_id=workspace_id,
+                    worker_id=self._worker_id,
+                )
+                return
+            if not refreshed:
+                _log.warning(
+                    "worker.execution_claim_lost",
+                    workspace_id=workspace_id,
+                    worker_id=self._worker_id,
+                )
+                return
+
     async def _refresh_monitoring_pr_claim(self, workspace_id: str) -> bool:
         lease_expires_at = datetime.now(UTC) + timedelta(
             seconds=self._config.monitor_claim_lease_seconds
@@ -561,6 +614,34 @@ class ControlWorker:
             )
             await session.commit()
             return refreshed
+
+    def _execution_claim_expires_at(self) -> datetime:
+        return datetime.now(UTC) + timedelta(seconds=self._config.execution_claim_lease_seconds)
+
+    async def _refresh_execution_claim(self, workspace_id: str) -> bool:
+        async with self._session_factory() as session:
+            refreshed = await WorkspaceRepository(session).refresh_execution_claim(
+                workspace_id,
+                owner_id=self._worker_id,
+                lease_expires_at=self._execution_claim_expires_at(),
+            )
+            await session.commit()
+            return refreshed
+
+    async def _release_execution_claim(self, workspace_id: str) -> None:
+        try:
+            async with self._session_factory() as session:
+                await WorkspaceRepository(session).release_execution_claim(
+                    workspace_id,
+                    owner_id=self._worker_id,
+                )
+                await session.commit()
+        except Exception:
+            _log.exception(
+                "worker.execution_claim_release_failed",
+                workspace_id=workspace_id,
+                worker_id=self._worker_id,
+            )
 
     async def _release_monitoring_pr_claim(self, workspace_id: str) -> None:
         try:
@@ -576,6 +657,24 @@ class ControlWorker:
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
+
+
+def _stale_execution_claim_filter(claim_cutoff: datetime) -> Any:
+    return or_(
+        Workspace.execution_claimed_by.is_(None),
+        Workspace.execution_claim_expires_at.is_(None),
+        Workspace.execution_claim_expires_at <= claim_cutoff,
+    )
+
+
+def _execution_claim_is_stale(workspace: Workspace, claim_cutoff: datetime) -> bool:
+    if workspace.execution_claimed_by is None or workspace.execution_claim_expires_at is None:
+        return True
+
+    expires_at = workspace.execution_claim_expires_at
+    if expires_at.tzinfo is None and claim_cutoff.tzinfo is not None:
+        claim_cutoff = claim_cutoff.replace(tzinfo=None)
+    return expires_at <= claim_cutoff
 
 
 def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:

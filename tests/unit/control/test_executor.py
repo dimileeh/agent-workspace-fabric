@@ -8,6 +8,7 @@ since each call is distinguishable by its argv.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -122,6 +123,29 @@ async def _seed_ready_workspace(
 
 
 class TestHappyPath:
+    @pytest.mark.unit
+    async def test_claim_ready_persists_execution_claim(
+        self,
+        executor: WorkspaceExecutor,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        lease_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+
+        ws = await executor._claim_ready(
+            ws_id,
+            execution_owner_id="worker-a",
+            execution_lease_expires_at=lease_expires_at,
+        )
+
+        assert ws is not None
+        async with factory() as s:
+            persisted = await WorkspaceRepository(s).get(ws_id)
+            assert persisted is not None
+            assert persisted.status == WorkspaceStatus.running.value
+            assert persisted.execution_claimed_by == "worker-a"
+            assert persisted.execution_claim_expires_at == lease_expires_at.replace(tzinfo=None)
+
     @pytest.mark.unit
     async def test_drives_ready_to_completed_and_records_pr_url(
         self,
