@@ -44,6 +44,7 @@ class Workspace(Base):
     __table_args__ = (
         UniqueConstraint("idempotency_key", name="uq_workspaces_idempotency_key"),
         Index("ix_workspaces_status", "status"),
+        Index("ix_workspaces_status_updated_at", "status", "updated_at"),
         Index("ix_workspaces_created_at", "created_at"),
     )
 

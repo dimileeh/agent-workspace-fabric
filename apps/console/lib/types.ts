@@ -270,3 +270,27 @@ export type AwfStreamFrame =
     }
   | { type: "heartbeat"; workspace_id: string }
   | { type: "error"; error_code: string; message: string };
+
+export interface FailureExample {
+  workspace_id: string;
+  title: string;
+  repo_url: string;
+  agent: string;
+  timestamp: string;
+  failure_reason: string;
+  failure_message: string;
+  pr_url: string | null;
+}
+
+export interface FailureTaxonomyCount {
+  reason: string;
+  count: number;
+}
+
+export interface FailureSummaryResponse {
+  total_failures: number;
+  window_hours: number;
+  taxonomy: FailureTaxonomyCount[];
+  latest_examples: FailureExample[];
+}
+
