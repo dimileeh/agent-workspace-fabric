@@ -18,7 +18,12 @@ from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field
 
-from awf.api.schemas import ErrorResponse, WorkspaceCreateRequest, WorkspaceCreateV2Request
+from awf.api.schemas import (
+    ErrorResponse,
+    OwnedPath,
+    WorkspaceCreateRequest,
+    WorkspaceCreateV2Request,
+)
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.workspaces import WorkspaceService
@@ -114,7 +119,7 @@ def build_mcp_server(
             default=None,
             description="Optional PRD policy class for later scheduling/locking work.",
         ),
-        owned_paths: list[str] = Field(
+        owned_paths: list[OwnedPath] = Field(
             default_factory=list,
             max_length=128,
             description="Optional path globs/strings the task expects to own.",

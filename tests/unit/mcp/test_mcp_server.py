@@ -68,9 +68,7 @@ async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
 
 class TestToolRegistration:
     @pytest.mark.unit
-    async def test_existing_and_observability_tools_registered(
-        self, mcp
-    ) -> None:  # type: ignore[no-untyped-def]
+    async def test_existing_and_observability_tools_registered(self, mcp) -> None:  # type: ignore[no-untyped-def]
         tools = await mcp.list_tools()
         names = {t.name for t in tools}
         assert {
@@ -87,6 +85,19 @@ class TestToolRegistration:
             "awf_list_workspace_logs",
             "awf_read_workspace_log",
         } <= names
+
+    @pytest.mark.unit
+    async def test_create_workspace_v2_owned_paths_declares_item_constraints(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        tools = await mcp.list_tools()
+        create_v2 = next(tool for tool in tools if tool.name == "awf_create_workspace_v2")
+        owned_paths = create_v2.inputSchema["properties"]["owned_paths"]
+
+        assert owned_paths["maxItems"] == 128
+        assert owned_paths["items"] == {
+            "maxLength": 512,
+            "minLength": 1,
+            "type": "string",
+        }
 
 
 class TestCreateWorkspace:
@@ -159,9 +170,9 @@ class TestCreateWorkspaceV2:
         assert ws.requested_profile["name"] == "inline-python"
         assert ws.resolved_profile is not None
         assert ws.resolved_profile["validation"]["requested_tier"] == 2
-        assert [
-            item["command"] for item in ws.resolved_profile["phases"]["validate"]
-        ] == ["uv run pytest tests/unit -q"]
+        assert [item["command"] for item in ws.resolved_profile["phases"]["validate"]] == [
+            "uv run pytest tests/unit -q"
+        ]
         assert ws.test_commands == ["uv run pytest tests/unit -q"]
         assert ws.auto_merge is False
         assert ws.initial_review_grace_period_seconds == 12.5
@@ -381,9 +392,7 @@ class TestWorkspaceEvents:
         assert [event["payload"] for event in events] == [{"phase": "validation"}]
 
     @pytest.mark.unit
-    async def test_missing_workspace_events_return_none(
-        self, mcp
-    ) -> None:  # type: ignore[no-untyped-def]
+    async def test_missing_workspace_events_return_none(self, mcp) -> None:  # type: ignore[no-untyped-def]
         result = await _call(
             mcp,
             "awf_list_workspace_events",
