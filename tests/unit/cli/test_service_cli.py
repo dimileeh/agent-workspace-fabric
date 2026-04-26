@@ -11,8 +11,10 @@ from typing import Any
 
 import httpx
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from awf.cli import main as cli_main
 from awf.cli.main import app
 from awf.common.config import Settings
 
@@ -133,6 +135,21 @@ def test_service_logs_follow_streams_without_capturing_subprocess_output(
             {"check": False, "capture_output": False, "text": True},
         )
     ]
+
+
+@pytest.mark.unit
+def test_service_logs_follow_keyboard_interrupt_exits_cleanly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(subprocess, "run", _run)
+
+    with pytest.raises(typer.Exit) as exc_info:
+        cli_main.service_logs(tail=100, service=[], follow=True)
+
+    assert exc_info.value.exit_code == 130
 
 
 @pytest.mark.unit

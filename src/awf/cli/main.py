@@ -180,6 +180,8 @@ def service_logs(
 
     try:
         result = run_service_logs(services=service, tail=tail, follow=follow)
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
     except ServiceLogsError as exc:
         typer.echo(
             f"error: docker compose logs failed (exit {exc.returncode}): {exc.detail}",
