@@ -42,9 +42,53 @@ _V2_MINIMAL_BODY = {
 }
 
 
+def _v2_body(
+    *,
+    repo_url: str = "git@github.com:example/app.git",
+    base_branch: str = "development",
+    title: str = "Owned path policy test",
+    owned_paths: list[str] | None = None,
+) -> dict[str, object]:
+    task = {
+        **_V2_MINIMAL_BODY["task"],
+        "title": title,
+    }
+    if owned_paths is not None:
+        task["owned_paths"] = owned_paths
+    return {
+        **_V2_MINIMAL_BODY,
+        "repo": {
+            "url": repo_url,
+            "base_branch": base_branch,
+        },
+        "task": task,
+    }
+
+
 async def _create_workspace(client: AsyncClient, **overrides: object) -> str:
     body = {**_MINIMAL_BODY, **overrides}
     response = await client.post("/v1/workspaces", json=body)
+    assert response.status_code == 202
+    return str(response.json()["workspace_id"])
+
+
+async def _create_v2_workspace(
+    client: AsyncClient,
+    *,
+    repo_url: str = "git@github.com:example/app.git",
+    base_branch: str = "development",
+    title: str = "Owned path policy test",
+    owned_paths: list[str] | None = None,
+) -> str:
+    response = await client.post(
+        "/v2/workspaces",
+        json=_v2_body(
+            repo_url=repo_url,
+            base_branch=base_branch,
+            title=title,
+            owned_paths=owned_paths,
+        ),
+    )
     assert response.status_code == 202
     return str(response.json()["workspace_id"])
 
@@ -61,6 +105,20 @@ async def _transition_workspace(
         assert ws is not None
         for target in targets:
             await repo.transition(ws, to=target, reason_code="TEST")
+        await session.commit()
+
+
+async def _set_workspace_status(
+    engine: AsyncEngine,
+    workspace_id: str,
+    status: WorkspaceStatus,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        ws.status = status.value
         await session.commit()
 
 
@@ -278,6 +336,150 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert first.status_code == 202
         assert replay.status_code == 409
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
+class TestCreateWorkspaceV2OwnedPathPolicy:
+    @pytest.mark.unit
+    async def test_no_requested_owned_paths_do_not_block(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        await _create_v2_workspace(
+            client,
+            title="existing",
+            owned_paths=["src/awf/api/**"],
+        )
+
+        response = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(title="new without owned paths", owned_paths=[]),
+        )
+
+        assert response.status_code == 202
+
+    @pytest.mark.unit
+    async def test_non_overlapping_owned_paths_are_allowed(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        await _create_v2_workspace(
+            client,
+            title="existing",
+            owned_paths=["src/awf/api/**"],
+        )
+
+        response = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(title="docs", owned_paths=["docs/**"]),
+        )
+
+        assert response.status_code == 202
+
+    @pytest.mark.unit
+    async def test_same_paths_on_different_repo_or_base_branch_are_allowed(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        await _create_v2_workspace(
+            client,
+            repo_url="git@github.com:example/other.git",
+            base_branch="development",
+            title="other repo",
+            owned_paths=["src/awf/api/**"],
+        )
+        await _create_v2_workspace(
+            client,
+            repo_url="git@github.com:example/app.git",
+            base_branch="main",
+            title="other base",
+            owned_paths=["src/awf/api/**"],
+        )
+
+        response = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(owned_paths=["src/awf/api/routes/workspaces.py"]),
+        )
+
+        assert response.status_code == 202
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "existing_status",
+        [
+            WorkspaceStatus.completed,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+            WorkspaceStatus.destroying,
+            WorkspaceStatus.destroyed,
+        ],
+    )
+    async def test_terminal_and_teardown_statuses_do_not_block(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        existing_status: WorkspaceStatus,
+    ) -> None:
+        existing_id = await _create_v2_workspace(
+            client,
+            title=f"existing {existing_status.value}",
+            owned_paths=["src/awf/api/**"],
+        )
+        await _set_workspace_status(engine, existing_id, existing_status)
+
+        response = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(
+                title=f"new after {existing_status.value}",
+                owned_paths=["src/awf/api/routes/workspaces.py"],
+            ),
+        )
+
+        assert response.status_code == 202
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("existing_path", "requested_path"),
+        [
+            (
+                "src/awf/api/routes/workspaces.py",
+                "src/awf/api/routes/workspaces.py",
+            ),
+            ("src/awf/api", "src/awf/api/routes/workspaces.py"),
+            ("src/awf/api/**", "src/awf/api/routes/workspaces.py"),
+        ],
+    )
+    async def test_active_exact_ancestor_and_wildcard_conflicts_return_409(
+        self,
+        client: AsyncClient,
+        existing_path: str,
+        requested_path: str,
+    ) -> None:
+        existing_id = await _create_v2_workspace(
+            client,
+            title=f"existing {existing_path}",
+            owned_paths=[existing_path],
+        )
+
+        response = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(
+                title=f"new {requested_path}",
+                owned_paths=[requested_path],
+            ),
+        )
+
+        assert response.status_code == 409
+        body = response.json()
+        assert body["error_code"] == "WORKSPACE_OWNED_PATH_CONFLICT"
+        assert body["message"] == "Requested owned paths overlap an active workspace."
+        assert body["detail"]["workspace_ids"] == [existing_id]
+        assert body["detail"]["conflicts"] == [
+            {
+                "workspace_id": existing_id,
+                "existing_path": existing_path,
+                "requested_path": requested_path,
+            }
+        ]
 
 
 class TestIdempotency:
