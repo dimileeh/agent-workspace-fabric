@@ -7,6 +7,11 @@ awf:
   runtime:
     environment:
       PYTHONUNBUFFERED: "1"
+  validation:
+    requested_tier: 1
+    coverage:
+      minimum_percent: 99
+      enforce: true
   phases:
     setup:
       - command: uv sync --extra dev

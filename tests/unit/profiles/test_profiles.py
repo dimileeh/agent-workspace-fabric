@@ -40,6 +40,18 @@ def test_profile_schema_accepts_monitor_initial_review_grace() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_accepts_validation_coverage_policy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "awf-self",
+            "validation": {"coverage": {"minimum_percent": 99}},
+        }
+    )
+
+    assert profile.validation.coverage.minimum_percent == 99
+
+
+@pytest.mark.unit
 def test_profile_schema_rejects_service_without_image_or_build() -> None:
     with pytest.raises(ValidationError):
         WorkspaceProfile.model_validate(

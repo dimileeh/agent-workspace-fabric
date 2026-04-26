@@ -101,6 +101,20 @@ class ProfileHealthCheck(BaseModel):
     timeout_seconds: int = Field(default=60, ge=1, le=3600)
 
 
+class ProfileCoverage(BaseModel):
+    """Repository coverage policy expected from validation.
+
+    The phase commands still decide how coverage is measured. This profile
+    field records the required threshold so schedulers, prompts, and future
+    merge policy can treat coverage as an explicit contract instead of prose.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    minimum_percent: float = Field(default=0.0, ge=0.0, le=100.0)
+    enforce: bool = True
+
+
 class ProfileValidation(BaseModel):
     """Validation policy details beyond phase commands."""
 
@@ -110,6 +124,7 @@ class ProfileValidation(BaseModel):
     artifact_paths: list[str] = Field(default_factory=list)
     timeout_seconds: int | None = Field(default=None, ge=1, le=14400)
     requested_tier: int = Field(default=1, ge=1, le=3)
+    coverage: ProfileCoverage = Field(default_factory=ProfileCoverage)
 
 
 class ProfileMonitor(BaseModel):

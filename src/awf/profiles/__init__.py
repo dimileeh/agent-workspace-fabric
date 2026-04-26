@@ -8,6 +8,7 @@ validation phases, and project-specific environment.
 from awf.profiles.models import (
     DockerMode,
     ProfileCommand,
+    ProfileCoverage,
     ProfileDocker,
     ProfileMonitor,
     ProfilePhaseSet,
@@ -21,6 +22,7 @@ from awf.profiles.resolver import ProfileResolver, resolve_workspace_profile
 __all__ = [
     "DockerMode",
     "ProfileCommand",
+    "ProfileCoverage",
     "ProfileDocker",
     "ProfileMonitor",
     "ProfilePhaseSet",
