@@ -14,6 +14,8 @@ from awf.service.controls import (
     WorkspaceControlError,
     WorkspaceControlService,
     WorkspaceNotFoundError,
+    WorkspaceRemonitorMissingPrUrlError,
+    WorkspaceRemonitorStateError,
     default_cleaner,
     stop_project_containers,
 )
@@ -64,6 +66,25 @@ async def stop_workspace(
         raise _http_error(exc) from exc
 
 
+@router.post("/remonitor", response_model=WorkspaceControlResponse)
+async def remonitor_workspace(
+    workspace_id: str,
+    payload: WorkspaceControlRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceControlResponse:
+    try:
+        return await _controls(session).remonitor_workspace(
+            workspace_id,
+            reason=payload.reason,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
+        )
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete("", response_model=WorkspaceControlResponse)
 async def destroy_workspace(
     workspace_id: str,
@@ -98,9 +119,16 @@ def _controls(session: AsyncSession) -> WorkspaceControlService:
 def _http_error(exc: WorkspaceControlError) -> HTTPException:
     if isinstance(exc, WorkspaceNotFoundError):
         status_code = status.HTTP_404_NOT_FOUND
+    elif isinstance(exc, WorkspaceRemonitorMissingPrUrlError):
+        status_code = status.HTTP_400_BAD_REQUEST
     elif isinstance(
         exc,
-        (ActiveWorkspaceDestroyError, IdempotencyConflictError, VersionConflictError),
+        (
+            ActiveWorkspaceDestroyError,
+            IdempotencyConflictError,
+            VersionConflictError,
+            WorkspaceRemonitorStateError,
+        ),
     ):
         status_code = status.HTTP_409_CONFLICT
     else:  # pragma: no cover - future control error subclasses

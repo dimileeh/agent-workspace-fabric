@@ -650,6 +650,7 @@ class WorkspaceExecutor:
                 validation_run_id,
                 status="succeeded" if val_result.all_passed else "failed",
                 reason_code=_validation_run_reason_code(val_result),
+                coverage=_validation_run_coverage_metadata(val_result),
             )
             if val_result.all_passed:
                 successful_validation_run_id = validation_run_id
@@ -659,6 +660,7 @@ class WorkspaceExecutor:
                     validation_run_id=validation_run_id,
                     requested_tier=validation_tier,
                     reason_code="VALIDATION_OK",
+                    coverage=_validation_run_coverage_metadata(val_result),
                 )
                 if pass_number > 0:
                     _log.info(
@@ -676,9 +678,7 @@ class WorkspaceExecutor:
                 fix_pass=pass_number,
                 max_fix_passes=max_fix_passes,
             )
-            last_failure_message = (
-                f"validation failed: {first_fail.command}" if first_fail else "validation failed"
-            )
+            last_failure_message = _validation_failure_message(val_result)
 
             if pass_number >= max_fix_passes or first_fail is None:
                 # Exhausted our budget (or no failure details to anchor a
@@ -689,6 +689,7 @@ class WorkspaceExecutor:
                     validation_run_id=validation_run_id,
                     requested_tier=validation_tier,
                     reason_code=_validation_run_reason_code(val_result),
+                    coverage=_validation_run_coverage_metadata(val_result),
                     error_message=last_failure_message,
                 )
                 await self._mark_failed(
@@ -1310,6 +1311,7 @@ class WorkspaceExecutor:
         requested_tier: int,
         reason_code: str | None,
         error_message: str | None = None,
+        coverage: dict[str, object] | None = None,
     ) -> None:
         async with self._session_factory() as session:
             repo = OperationRepository(session)
@@ -1330,6 +1332,8 @@ class WorkspaceExecutor:
                 "requested_tier": requested_tier,
                 "reason_code": reason_code,
             }
+            if coverage is not None:
+                result["coverage"] = coverage
             for operation in [*pending, *running]:
                 payload = dict(operation.payload or {})
                 payload.setdefault("requested_tier", requested_tier)
@@ -1349,6 +1353,7 @@ class WorkspaceExecutor:
         *,
         status: str,
         reason_code: str | None,
+        coverage: dict[str, object] | None = None,
     ) -> None:
         async with self._session_factory() as session:
             await ValidationRunRepository(session).finish(
@@ -1356,6 +1361,7 @@ class WorkspaceExecutor:
                 status=status,
                 reason_code=reason_code,
                 finished_at=datetime.now(UTC),
+                coverage=coverage,
             )
             await session.commit()
 
@@ -1480,7 +1486,8 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
 def _validation_command_count(ws: Workspace) -> int:
     if ws.resolved_profile:
         profile = WorkspaceProfile.model_validate(ws.resolved_profile)
-        return len(profile.phases.post_agent) + len(profile.phases.validate_commands)
+        coverage_count = 1 if profile.validation.coverage.command is not None else 0
+        return len(profile.phases.post_agent) + len(profile.phases.validate_commands) + coverage_count
     return len(ws.test_commands)
 
 
@@ -1498,6 +1505,8 @@ def _validation_run_command_records(
     ordered.extend(
         (phase, command.command) for phase, command in profile.phases.commands_for(phase_names)
     )
+    if "validate" in phase_names and profile.validation.coverage.command is not None:
+        ordered.append(("coverage", profile.validation.coverage.command.command))
 
     records: list[dict[str, Any]] = []
     phase_indices: dict[str, int] = {}
@@ -1556,7 +1565,34 @@ def _validation_run_log_stream_refs(
 def _validation_run_reason_code(result: ValidationResult) -> str:
     if result.all_passed:
         return "VALIDATION_OK"
+    if result.coverage is not None and not result.coverage.ok:
+        return result.coverage.reason_code
     first_failure = result.first_failure
     if first_failure is None:
         return "VALIDATION_FAILED"
     return first_failure.reason_code
+
+
+def _validation_run_coverage_metadata(result: ValidationResult) -> dict[str, object] | None:
+    if result.coverage is None:
+        return None
+    return result.coverage.as_metadata()
+
+
+def _validation_failure_message(result: ValidationResult) -> str:
+    coverage = result.coverage
+    if coverage is not None and not coverage.ok:
+        if coverage.reason_code == "COVERAGE_BELOW_THRESHOLD" and coverage.percent is not None:
+            return (
+                "validation failed: coverage "
+                f"{coverage.percent:.1f}% is below required {coverage.minimum_percent:.1f}%"
+            )
+        if coverage.reason_code == "COVERAGE_NOT_FOUND":
+            return "validation failed: coverage output was not found"
+        if coverage.reason_code == "COVERAGE_COMMAND_FAILED":
+            return "validation failed: coverage command failed"
+        if coverage.reason_code == "COVERAGE_PROVIDER_UNSUPPORTED":
+            return f"validation failed: unsupported coverage provider {coverage.provider}"
+
+    first_fail = result.first_failure
+    return f"validation failed: {first_fail.command}" if first_fail else "validation failed"

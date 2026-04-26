@@ -21,6 +21,7 @@ from awf.api.validation_runs import (
     _validation_status,
     _validation_tier,
     fresh_for_target,
+    validation_coverage_fields,
 )
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceLogStream
@@ -43,7 +44,8 @@ _PHASE_ORDER = {
     "healthcheck": 2,
     "post_agent": 3,
     "validate": 4,
-    "cleanup": 5,
+    "coverage": 5,
+    "cleanup": 6,
     "unknown": 99,
 }
 _SUCCESS_WORKSPACE_STATUSES = {
@@ -205,6 +207,7 @@ def _build_persisted_validation_items(
                         validation_target_head_sha=run.target_head_sha,
                         current_target_head_sha=current_target_head_sha,
                     ),
+                    **validation_coverage_fields(run),
                 )
             )
     return items
@@ -338,9 +341,15 @@ def _command_lookup(workspace: Workspace) -> dict[tuple[str, int], str]:
             "healthcheck",
             "post_agent",
             "validate",
+            "coverage",
             "cleanup",
         ):
             phase_key = _normalize_phase(phase_name)
+            if phase_name == "coverage":
+                coverage_command = profile.validation.coverage.command
+                if coverage_command is not None:
+                    lookup.setdefault((phase_key, 1), coverage_command.command)
+                continue
             if phase_name == "healthcheck":
                 for index, healthcheck in enumerate(
                     profile.validation.healthchecks,

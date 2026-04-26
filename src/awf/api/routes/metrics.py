@@ -52,6 +52,15 @@ class WorkspaceReliabilitySummaryResponse(BaseModel):
     cancelled_count: int
     destroyed_count: int
     cleanup_failure_count: int
+    stuck_count: int = Field(
+        description="Active workspaces beyond 2x configured SLA without a fresh explanatory reason code.",
+    )
+    actionable_reason_count: int = Field(
+        description="Count of failed/cancelled/destroying workspaces in the window with an actionable reason code.",
+    )
+    unactionable_reason_count: int = Field(
+        description="Count of failed/cancelled/destroying workspaces in the window without an actionable reason code.",
+    )
 
 
 class FailureReasonGroupResponse(BaseModel):
@@ -252,10 +261,12 @@ async def get_workspace_reliability_summary(
             le=MAX_SUMMARY_WINDOW_HOURS,
         ),
     ] = DEFAULT_SUMMARY_WINDOW_HOURS,
+    settings: Settings = Depends(get_settings),
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceReliabilitySummaryResponse:
     summary = await summarize_workspace_reliability_for_session(
         session,
+        settings=settings,
         since_hours=since_hours,
     )
     return WorkspaceReliabilitySummaryResponse.model_validate(summary)

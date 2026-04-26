@@ -368,3 +368,21 @@ export interface FailureSummaryResponse {
   taxonomy: FailureTaxonomyCount[];
   latest_examples: FailureExample[];
 }
+
+export interface WorkspaceReliabilitySummary {
+  generated_at: string;
+  window_start: string;
+  since_hours: number;
+  status_counts: Record<string, number>;
+  failure_reason_counts: Record<string, number>;
+  active_count: number;
+  destroying_count: number;
+  completed_count: number;
+  failed_count: number;
+  cancelled_count: number;
+  destroyed_count: number;
+  cleanup_failure_count: number;
+  stuck_count: number;
+  actionable_reason_count: number;
+  unactionable_reason_count: number;
+}
