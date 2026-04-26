@@ -213,6 +213,7 @@ def make_runner(
     initial_review_grace_period_seconds: float = 0,
     artifacts_root: Path | None = None,
     log_store: LogStore | None = None,
+    merge_coordinator: object | None = None,
 ) -> PullRequestMonitorRunner:
     kwargs: dict = {
         "session_factory": factory,
@@ -233,4 +234,6 @@ def make_runner(
     }
     if artifacts_root is not None:
         kwargs["artifacts_root"] = artifacts_root
+    if merge_coordinator is not None:
+        kwargs["merge_coordinator"] = merge_coordinator
     return PullRequestMonitorRunner(**kwargs)
