@@ -283,15 +283,13 @@ class ValidationRunner:
                 phase="coverage",
                 timeout_seconds=coverage.command.timeout_seconds,
             )
-            output = (
-                command_result.stdout_path.read_text(encoding="utf-8", errors="replace")
-                + "\n"
-                + command_result.stderr_path.read_text(encoding="utf-8", errors="replace")
-            )
+            coverage_outputs = [command_result]
         else:
-            output = _combined_command_output(results)
+            coverage_outputs = results
 
-        percent = _parse_python_coverage_percent(output)
+        percent = _parse_python_coverage_percent_from_files(
+            _coverage_output_paths(coverage_outputs)
+        )
         reason_code = _coverage_reason_code(
             percent=percent,
             minimum_percent=coverage.minimum_percent,
@@ -444,24 +442,28 @@ def _coverage_requested(coverage: ProfileCoverage) -> bool:
     return coverage.command is not None or coverage.minimum_percent > 0
 
 
-def _combined_command_output(results: list[ValidationCommandResult]) -> str:
-    parts: list[str] = []
+def _coverage_output_paths(results: list[ValidationCommandResult]) -> list[Path]:
+    paths: list[Path] = []
     for result in results:
-        parts.append(result.stdout_path.read_text(encoding="utf-8", errors="replace"))
-        parts.append(result.stderr_path.read_text(encoding="utf-8", errors="replace"))
-    return "\n".join(parts)
+        paths.extend((result.stdout_path, result.stderr_path))
+    return paths
 
 
-def _parse_python_coverage_percent(output: str) -> float | None:
-    matches = list(_COVERAGE_TOTAL_RE.finditer(output))
-    if matches:
-        return float(matches[-1].group("percent"))
+def _parse_python_coverage_percent_from_files(paths: list[Path]) -> float | None:
+    total_percent: float | None = None
+    summary_percent: float | None = None
+    for path in paths:
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                total_match = _COVERAGE_TOTAL_RE.search(line)
+                if total_match:
+                    total_percent = float(total_match.group("percent"))
+                    continue
+                summary_match = _COVERAGE_SUMMARY_RE.search(line)
+                if summary_match:
+                    summary_percent = float(summary_match.group("percent"))
 
-    summary_matches = list(_COVERAGE_SUMMARY_RE.finditer(output))
-    if summary_matches:
-        return float(summary_matches[-1].group("percent"))
-
-    return None
+    return total_percent if total_percent is not None else summary_percent
 
 
 def _coverage_reason_code(

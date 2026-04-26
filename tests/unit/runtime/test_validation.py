@@ -226,6 +226,51 @@ class TestCoverageEnforcement:
         assert result.first_failure.phase == "coverage"
         assert result.first_failure.reason_code == "COVERAGE_BELOW_THRESHOLD"
 
+    @pytest.mark.unit
+    async def test_coverage_without_command_streams_artifacts_instead_of_eager_reads(
+        self,
+        runner: tuple[FakeCommandRunner, ValidationRunner],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "Name        Stmts   Miss  Cover\n"
+                "-------------------------------\n"
+                "TOTAL         100      4    96%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-from-validation-artifacts",
+                "phases": {"validate": ["pytest --cov=awf --cov-report=term"]},
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 90,
+                        "enforce": True,
+                    }
+                },
+            }
+        )
+
+        def fail_read_text(self: Path, *args: object, **kwargs: object) -> str:
+            raise AssertionError(f"coverage parser eagerly read {self}")
+
+        monkeypatch.setattr(Path, "read_text", fail_read_text)
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_coverage_streaming_parse",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+        )
+
+        assert result.all_passed
+        assert result.coverage is not None
+        assert result.coverage.percent == 96
+
 
 class TestMigration:
     @pytest.mark.unit
