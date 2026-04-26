@@ -14,6 +14,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceControlResponse
@@ -61,7 +62,10 @@ async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
     primitive / None / list returns. This helper normalises to the underlying
     value so tests can assert against it directly.
     """
-    _, payload = await mcp.call_tool(name, args)
+    result = await mcp.call_tool(name, args)
+    if isinstance(result, CallToolResult):
+        return result.structuredContent
+    _, payload = result
     if isinstance(payload, dict) and list(payload.keys()) == ["result"]:
         return payload["result"]
     return payload
@@ -194,9 +198,7 @@ class _RecordingControlService:
         *,
         reason: str | None,
     ) -> WorkspaceControlResponse:
-        self.calls.append(
-            ("stop", {"workspace_id": workspace_id, "reason": reason})
-        )
+        self.calls.append(("stop", {"workspace_id": workspace_id, "reason": reason}))
         return WorkspaceControlResponse(
             workspace_id=workspace_id,
             operation_id="op_stop",

@@ -12,7 +12,8 @@ cleanly when they show up alongside other MCP servers.
 
 from __future__ import annotations
 
-from typing import Any, cast
+import json
+from typing import Annotated, Any
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
@@ -28,6 +29,8 @@ from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.controls import WorkspaceControlError
 from awf.service.workspaces import WorkspaceService
+
+StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
 
 # ── MCP tool registration ─────────────────────────────────────────────────
 
@@ -155,7 +158,7 @@ def build_mcp_server(
             le=86400,
             description="Optional monitor grace override before auto-merge.",
         ),
-    ) -> dict[str, Any]:
+    ) -> StructuredToolResult:
         """Create a new AWF workspace using the clean v2 contract."""
         req = WorkspaceCreateV2Request(
             repo={"url": repo_url, "base_branch": base_branch},
@@ -177,15 +180,8 @@ def build_mcp_server(
             ws = await service.create_v2(req)
         except ProfileResolutionError as exc:
             error = ErrorResponse(error_code="INVALID_PROFILE", message=str(exc))
-            return cast(
-                dict[str, Any],
-                CallToolResult(
-                    content=[TextContent(type="text", text=error.model_dump_json())],
-                    structuredContent=error.model_dump(mode="json"),
-                    isError=True,
-                ),
-            )
-        return ws.model_dump(mode="json")
+            return _tool_result(error.model_dump(mode="json"), is_error=True)
+        return _tool_result(ws.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_workspace")
     async def awf_get_workspace(
@@ -248,7 +244,7 @@ def build_mcp_server(
             default=True,
             description="Also stop the workspace compose stack after requesting cancellation.",
         ),
-    ) -> dict[str, Any]:
+    ) -> StructuredToolResult:
         """Operator control: cancel a workspace; this is not shell access."""
         try:
             result = await service.cancel_workspace(
@@ -258,7 +254,7 @@ def build_mcp_server(
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
-        return result.model_dump(mode="json")
+        return _tool_result(result.model_dump(mode="json"))
 
     @mcp.tool(name="awf_stop_workspace")
     async def awf_stop_workspace(
@@ -267,13 +263,13 @@ def build_mcp_server(
             default=None,
             description="Optional operator reason to record with the stop request.",
         ),
-    ) -> dict[str, Any]:
+    ) -> StructuredToolResult:
         """Operator control: stop a workspace stack; this is not shell access."""
         try:
             result = await service.stop_workspace(workspace_id, reason=reason)
         except WorkspaceControlError as exc:
             return _tool_error(exc)
-        return result.model_dump(mode="json")
+        return _tool_result(result.model_dump(mode="json"))
 
     @mcp.tool(name="awf_destroy_workspace")
     async def awf_destroy_workspace(
@@ -290,7 +286,7 @@ def build_mcp_server(
             default=True,
             description="Reserve REST-compatible intent to remove the workspace worktree.",
         ),
-    ) -> dict[str, Any]:
+    ) -> StructuredToolResult:
         """Operator control: destroy workspace resources; this is not shell access."""
         try:
             result = await service.destroy_workspace(
@@ -301,7 +297,7 @@ def build_mcp_server(
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
-        return result.model_dump(mode="json")
+        return _tool_result(result.model_dump(mode="json"))
 
     @mcp.tool(name="awf_list_workspace_events")
     async def awf_list_workspace_events(
@@ -365,13 +361,14 @@ def build_mcp_server(
     return mcp
 
 
-def _tool_error(exc: WorkspaceControlError) -> dict[str, Any]:
+def _tool_error(exc: WorkspaceControlError) -> CallToolResult:
     error = ErrorResponse(error_code=exc.error_code, message=exc.message)
-    return cast(
-        dict[str, Any],
-        CallToolResult(
-            content=[TextContent(type="text", text=error.model_dump_json())],
-            structuredContent=error.model_dump(mode="json"),
-            isError=True,
-        ),
+    return _tool_result(error.model_dump(mode="json"), is_error=True)
+
+
+def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+    return CallToolResult(
+        content=[TextContent(type="text", text=json.dumps(payload, indent=2))],
+        structuredContent=payload,
+        isError=is_error,
     )
