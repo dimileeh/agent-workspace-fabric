@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 import httpx
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.session import make_engine
@@ -44,6 +44,7 @@ _TERMINAL_WORKSPACE_STATUSES = frozenset(
         WorkspaceStatus.destroyed.value,
     }
 )
+_KNOWN_WORKSPACE_STATUSES = sorted(_ACTIVE_WORKSPACE_STATUSES | _TERMINAL_WORKSPACE_STATUSES)
 
 CheckPayload = dict[str, object]
 DbProbe = Callable[[str], Awaitable[CheckPayload]]
@@ -424,9 +425,14 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
     """
 
     engine = make_engine(database_url)
+    stmt = text("SELECT id, status FROM workspaces WHERE status IN :statuses").bindparams(
+        bindparam("statuses", expanding=True)
+    )
     try:
         async with engine.connect() as conn:
-            rows = (await conn.execute(text("SELECT id, status FROM workspaces"))).all()
+            rows = (
+                await conn.execute(stmt, {"statuses": _KNOWN_WORKSPACE_STATUSES})
+            ).all()
     except Exception:
         return WorkspaceIdView(
             active_ids=frozenset(),
