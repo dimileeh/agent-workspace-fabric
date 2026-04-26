@@ -536,9 +536,10 @@ with `AWF_HOST_WORK_DIR=/absolute/path`.
 The worker also needs host-visible credential paths so workspace stacks can bind
 the same auth into agent containers. Local service mode mounts only the known
 credential paths under `${AWF_HOST_HOME:-${HOME}}` into the API and worker
-containers, rather than mounting the whole home directory. Set `AWF_HOST_HOME`
-if the shell running Docker Compose does not expose the operator home as
-`${HOME}`.
+containers, rather than mounting the whole home directory. It also forwards
+Docker Desktop's `/run/host-services/ssh-auth.sock` so service-worker Git
+operations can use the operator's loaded SSH keys. Set `AWF_HOST_HOME` if the
+shell running Docker Compose does not expose the operator home as `${HOME}`.
 
 The worker reuses the per-workspace Compose file and project created during
 provisioning. It does not launch a second stack for agent execution,

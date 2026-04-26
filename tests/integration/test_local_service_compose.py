@@ -51,6 +51,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert "../..:/app" not in volumes
         assert f"{expected_host_home}:{expected_host_home}:ro" not in volumes
         assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
+        assert "/run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock" in volumes
         assert f"{expected_work_dir}:{expected_work_dir}" in volumes
         assert expected_auth_mounts.issubset(set(volumes))
         environment = services[service_name]["environment"]
@@ -63,6 +64,7 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert (
             environment["GOOGLE_APPLICATION_CREDENTIALS"] == "${GOOGLE_APPLICATION_CREDENTIALS:-}"
         )
+        assert environment["SSH_AUTH_SOCK"] == "/run/host-services/ssh-auth.sock"
 
     assert "awf-work" not in data.get("volumes", {})
     migrate_command = services["migrate"]["command"]

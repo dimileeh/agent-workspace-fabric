@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import socket
 from dataclasses import dataclass
 from pathlib import Path
@@ -132,6 +133,8 @@ def _service_git_environment(host_home: Path) -> dict[str, str]:
     """Git/SSH environment for service-worker host repository operations."""
 
     env = {"HOME": str(host_home)}
+    if ssh_auth_sock := os.environ.get("SSH_AUTH_SOCK"):
+        env["SSH_AUTH_SOCK"] = ssh_auth_sock
     gitconfig = host_home / ".gitconfig"
     if gitconfig.is_file():
         env["GIT_CONFIG_GLOBAL"] = str(gitconfig)

@@ -8,6 +8,7 @@ x-awf-service: &awf-service
   working_dir: /app
   volumes:
     - /var/run/docker.sock:/var/run/docker.sock
+    - /run/host-services/ssh-auth.sock:/run/host-services/ssh-auth.sock
     - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
     - ${AWF_HOST_HOME:-${HOME}}/.config/gh:${AWF_HOST_HOME:-${HOME}}/.config/gh:ro
     - ${AWF_HOST_HOME:-${HOME}}/.config/gcloud:${AWF_HOST_HOME:-${HOME}}/.config/gcloud:ro
@@ -34,6 +35,7 @@ x-awf-service: &awf-service
     AWF_WORKER_POLL_INTERVAL_SECONDS: "1.0"
     AWF_WORKER_MAX_CONCURRENT_PROVISIONS: "3"
     AWF_WORKER_MAX_CONCURRENT_EXECUTIONS: "3"
+    SSH_AUTH_SOCK: /run/host-services/ssh-auth.sock
 
 services:
   postgres:

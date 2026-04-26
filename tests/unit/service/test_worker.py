@@ -153,6 +153,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
     monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _WorkspaceExecutor)
     monkeypatch.setattr(worker_mod, "ControlWorker", _ControlWorker)
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
 
     def _build_feature_monitor(**kwargs: object) -> object:
         created["feature_monitor_kwargs"] = kwargs
@@ -236,3 +237,15 @@ def test_service_git_environment_uses_mounted_host_home(tmp_path: Path) -> None:
     assert env["GIT_CONFIG_GLOBAL"] == str(host_home / ".gitconfig")
     assert str(known_hosts) in env["GIT_SSH_COMMAND"]
     assert "StrictHostKeyChecking=accept-new" in env["GIT_SSH_COMMAND"]
+
+
+@pytest.mark.unit
+def test_service_git_environment_forwards_ssh_agent_socket(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/run/host-services/ssh-auth.sock")
+
+    env = worker_mod._service_git_environment(tmp_path / "host-home")
+
+    assert env["SSH_AUTH_SOCK"] == "/run/host-services/ssh-auth.sock"
