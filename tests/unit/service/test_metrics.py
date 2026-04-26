@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from awf.common.config import Settings
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.service.disk import DiskCheck
 
 
 @pytest.fixture
@@ -44,6 +47,28 @@ async def _workspace(
 
 def _zero_status_counts() -> dict[str, int]:
     return {status.value: 0 for status in WorkspaceStatus}
+
+
+def _disk_check(
+    *,
+    ok: bool = True,
+    free_bytes: int = 900,
+    threshold_bytes: int = 400,
+    reason: str = "SUFFICIENT_DISK",
+) -> DiskCheck:
+    return DiskCheck(
+        path="/tmp/awf-work",
+        checked_path="/tmp",
+        total_bytes=1000,
+        used_bytes=1000 - free_bytes,
+        free_bytes=free_bytes,
+        percent_free=round(free_bytes / 1000 * 100, 2),
+        threshold_bytes=threshold_bytes,
+        ok=ok,
+        status="ok" if ok else "fail",
+        reason=reason,
+        detail=None if ok else "Free disk is below the configured admission threshold.",
+    )
 
 
 @pytest.mark.unit
@@ -188,3 +213,190 @@ async def test_current_counts_include_workspaces_outside_updated_at_window(
     assert summary.status_counts == _zero_status_counts()
     assert summary.active_count == 2
     assert summary.destroying_count == 1
+
+
+@pytest.mark.unit
+async def test_resource_saturation_reports_active_counts_and_configured_defaults(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_max_concurrent_provisions=2,
+        worker_max_concurrent_executions=4,
+        workspace_steady_cpu=2.5,
+        workspace_steady_memory_gb=8.0,
+        workspace_peak_cpu=5.0,
+        workspace_peak_memory_gb=14.0,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    for status in (
+        WorkspaceStatus.requested,
+        WorkspaceStatus.provisioning,
+        WorkspaceStatus.ready,
+        WorkspaceStatus.running,
+        WorkspaceStatus.validating,
+        WorkspaceStatus.pushing,
+        WorkspaceStatus.monitoring_pr,
+        WorkspaceStatus.destroying,
+        WorkspaceStatus.completed,
+    ):
+        await _workspace(session_factory, status=status, updated_at=now)
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.generated_at == now
+    assert summary.workspace_counts.active_total == 8
+    assert summary.workspace_counts.requested == 1
+    assert summary.workspace_counts.provisioning == 1
+    assert summary.workspace_counts.ready == 1
+    assert summary.workspace_counts.running == 1
+    assert summary.workspace_counts.validating == 1
+    assert summary.workspace_counts.pushing == 1
+    assert summary.workspace_counts.monitoring_pr == 1
+    assert summary.workspace_counts.destroying == 1
+    assert summary.workspace_counts.by_status[WorkspaceStatus.completed.value] == 1
+    assert summary.worker.max_concurrent_provisions == 2
+    assert summary.worker.max_concurrent_executions == 4
+    assert summary.resource_defaults.steady_cpu == 2.5
+    assert summary.resource_defaults.steady_memory_gb == 8.0
+    assert summary.resource_defaults.peak_cpu == 5.0
+    assert summary.resource_defaults.peak_memory_gb == 14.0
+    assert summary.reserved_resources.active_workspace_count == 8
+    assert summary.reserved_resources.steady_cpu == 20.0
+    assert summary.reserved_resources.steady_memory_gb == 64.0
+    assert summary.reserved_resources.peak_cpu == 40.0
+    assert summary.reserved_resources.peak_memory_gb == 112.0
+    assert summary.concurrency.provision.in_use == 1
+    assert summary.concurrency.provision.queued == 1
+    assert summary.concurrency.provision.available == 1
+    assert summary.concurrency.execution.in_use == 4
+    assert summary.concurrency.execution.queued == 1
+    assert summary.concurrency.execution.available == 0
+    assert summary.disk.reason == "SUFFICIENT_DISK"
+    assert summary.admission.ok is True
+    assert summary.admission.status == "saturated"
+    assert summary.admission.reason == "WORKER_EXECUTION_CONCURRENCY_SATURATED"
+
+
+@pytest.mark.unit
+async def test_resource_saturation_admission_reports_both_saturated_concurrency_lanes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_max_concurrent_provisions=1,
+        worker_max_concurrent_executions=1,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(session_factory, status=WorkspaceStatus.provisioning, updated_at=now)
+    await _workspace(session_factory, status=WorkspaceStatus.running, updated_at=now)
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.concurrency.provision.available == 0
+    assert summary.concurrency.execution.available == 0
+    assert summary.admission.ok is True
+    assert summary.admission.status == "saturated"
+    assert summary.admission.reason == "WORKER_PROVISION_AND_EXECUTION_CONCURRENCY_SATURATED"
+    assert summary.admission.detail is not None
+    assert "Provisioning and execution workers" in summary.admission.detail
+
+
+@pytest.mark.unit
+async def test_resource_saturation_admission_blocks_on_disk_pressure(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_max_concurrent_provisions=3,
+        worker_max_concurrent_executions=3,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(
+            ok=False,
+            free_bytes=100,
+            threshold_bytes=400,
+            reason="INSUFFICIENT_DISK",
+        ),
+        now=now,
+    )
+
+    assert summary.workspace_counts.active_total == 0
+    assert summary.disk.ok is False
+    assert summary.disk.reason == "INSUFFICIENT_DISK"
+    assert summary.admission.ok is False
+    assert summary.admission.status == "blocked"
+    assert summary.admission.reason == "INSUFFICIENT_DISK"
+    assert summary.admission.detail is not None
+
+
+@pytest.mark.unit
+async def test_resource_saturation_runs_fallback_disk_check_in_thread(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import awf.service.metrics as metrics_mod
+    from awf.service.metrics import summarize_resource_saturation
+
+    class _Usage:
+        total = 1000
+        used = 100
+        free = 900
+
+    def fake_disk_usage(_path: object) -> _Usage:
+        return _Usage()
+
+    to_thread_calls: list[tuple[Callable[..., Any], tuple[Any, ...], dict[str, Any]]] = []
+
+    async def fake_to_thread(
+        func: Callable[..., Any],
+        /,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        to_thread_calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(metrics_mod.asyncio, "to_thread", fake_to_thread)
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        min_free_disk_bytes=400,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_usage=fake_disk_usage,
+    )
+
+    assert summary.disk.reason == "SUFFICIENT_DISK"
+    assert len(to_thread_calls) == 1
+    func, args, kwargs = to_thread_calls[0]
+    assert func is metrics_mod.check_disk_space
+    assert args == (settings.work_dir,)
+    assert kwargs["min_free_bytes"] == settings.min_free_disk_bytes
+    assert kwargs["disk_usage"] is fake_disk_usage

@@ -53,7 +53,7 @@ class ProfileResolver:
 
         if profile is None and profile_ref and profile_ref != "auto":
             considered.append(f"registry:{profile_ref}")
-            profile = get_builtin_profile(profile_ref)
+            profile = get_builtin_profile(profile_ref, worktree_path=worktree_path)
             if profile is None:
                 raise ProfileResolutionError(f"unknown workspace profile_ref: {profile_ref}")
             reason = f"central registry profile {profile_ref}"

@@ -80,11 +80,90 @@ def test_repo_profile_beats_registry(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("profile_ref", "setup_command", "validate_commands"),
+    [
+        ("go", "go mod download", ["go test ./..."]),
+        ("rust", "cargo fetch", ["cargo test --all-targets"]),
+        (
+            "java",
+            "mvn -B -DskipTests dependency:go-offline",
+            ["mvn -B test"],
+        ),
+        (
+            "cpp",
+            "cmake -S . -B build",
+            ["cmake --build build", "ctest --test-dir build --output-on-failure"],
+        ),
+    ],
+)
+def test_language_profiles_can_be_selected_from_registry(
+    profile_ref: str, setup_command: str, validate_commands: list[str]
+) -> None:
+    result = ProfileResolver().resolve(worktree_path=None, profile_ref=profile_ref)
+    assert result.profile.name == profile_ref
+    assert result.profile.confidence == "medium"
+    assert result.profile.phases.setup[0].command == setup_command
+    assert [c.command for c in result.profile.phases.validate_commands] == validate_commands
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("marker", "contents", "setup_command", "validate_command"),
+    [
+        (
+            "mvnw",
+            "#!/bin/sh\n",
+            "./mvnw -B -DskipTests dependency:go-offline",
+            "./mvnw -B test",
+        ),
+        (
+            "build.gradle",
+            "plugins { id 'java' }\n",
+            "gradle --no-daemon dependencies",
+            "gradle --no-daemon test",
+        ),
+        (
+            "gradlew",
+            "#!/bin/sh\n",
+            "./gradlew --no-daemon dependencies",
+            "./gradlew --no-daemon test",
+        ),
+    ],
+)
+def test_explicit_java_registry_profile_uses_detected_build_tool(
+    tmp_path: Path,
+    marker: str,
+    contents: str,
+    setup_command: str,
+    validate_command: str,
+) -> None:
+    (tmp_path / marker).write_text(contents, encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="java")
+
+    assert result.reason == "central registry profile java"
+    assert result.profile.name == "java"
+    assert result.profile.source == "builtin:java"
+    assert result.profile.phases.setup[0].command == setup_command
+    assert [c.command for c in result.profile.phases.validate_commands] == [validate_command]
+
+
+@pytest.mark.unit
 def test_auto_detection_prefers_docker_compose(tmp_path: Path) -> None:
     (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
     assert result.profile.name == "docker-compose"
     assert result.profile.docker.mode == DockerMode.dind
+
+
+@pytest.mark.unit
+def test_auto_detection_keeps_docker_compose_ahead_of_language_profiles(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+    (tmp_path / "go.mod").write_text("module example.com/app\n", encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "docker-compose"
 
 
 @pytest.mark.unit
@@ -97,6 +176,151 @@ def test_auto_detection_detects_nextjs(tmp_path: Path) -> None:
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
     assert result.profile.name == "nextjs"
     assert result.profile.phases.setup[0].command == "pnpm install --frozen-lockfile"
+
+
+@pytest.mark.unit
+def test_auto_detection_keeps_nextjs_ahead_of_language_profiles(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"dependencies": {"next": "latest"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "app"\n', encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "nextjs"
+
+
+@pytest.mark.unit
+def test_auto_detection_keeps_node_ahead_of_language_profiles(tmp_path: Path) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"test": "vitest"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / "go.mod").write_text("module example.com/app\n", encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "node"
+
+
+@pytest.mark.unit
+def test_auto_detection_keeps_python_ahead_of_language_profiles(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "app"\n', encoding="utf-8")
+    (tmp_path / "CMakeLists.txt").write_text("project(app)\n", encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "python"
+
+
+@pytest.mark.unit
+def test_auto_detection_keeps_aira_ahead_of_language_profiles(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_text(
+        '[project]\nname = "aira-agent"\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "app"\n', encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "aira"
+
+
+@pytest.mark.unit
+def test_auto_detection_detects_go(tmp_path: Path) -> None:
+    (tmp_path / "go.mod").write_text("module example.com/app\n", encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "go"
+    assert result.profile.source == "detector:go"
+    assert result.profile.phases.setup[0].command == "go mod download"
+    assert [c.command for c in result.profile.phases.validate_commands] == ["go test ./..."]
+
+
+@pytest.mark.unit
+def test_auto_detection_detects_rust(tmp_path: Path) -> None:
+    (tmp_path / "Cargo.toml").write_text('[package]\nname = "app"\n', encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "rust"
+    assert result.profile.source == "detector:rust"
+    assert result.profile.phases.setup[0].command == "cargo fetch"
+    assert [c.command for c in result.profile.phases.validate_commands] == [
+        "cargo test --all-targets"
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("marker", "contents", "setup_command", "validate_command"),
+    [
+        (
+            "mvnw",
+            "#!/bin/sh\n",
+            "./mvnw -B -DskipTests dependency:go-offline",
+            "./mvnw -B test",
+        ),
+        (
+            "pom.xml",
+            "<project></project>\n",
+            "mvn -B -DskipTests dependency:go-offline",
+            "mvn -B test",
+        ),
+        (
+            "build.gradle",
+            "plugins { id 'java' }\n",
+            "gradle --no-daemon dependencies",
+            "gradle --no-daemon test",
+        ),
+        (
+            "gradlew",
+            "#!/bin/sh\n",
+            "./gradlew --no-daemon dependencies",
+            "./gradlew --no-daemon test",
+        ),
+    ],
+)
+def test_auto_detection_detects_java(
+    tmp_path: Path,
+    marker: str,
+    contents: str,
+    setup_command: str,
+    validate_command: str,
+) -> None:
+    (tmp_path / marker).write_text(contents, encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "java"
+    assert result.profile.source == "detector:java"
+    assert result.profile.phases.setup[0].command == setup_command
+    assert [c.command for c in result.profile.phases.validate_commands] == [validate_command]
+
+
+@pytest.mark.unit
+def test_auto_detection_prefers_maven_wrapper_over_plain_maven(tmp_path: Path) -> None:
+    (tmp_path / "mvnw").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "pom.xml").write_text("<project></project>\n", encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "java"
+    assert result.profile.source == "detector:java"
+    assert result.profile.phases.setup[0].command == "./mvnw -B -DskipTests dependency:go-offline"
+    assert [c.command for c in result.profile.phases.validate_commands] == ["./mvnw -B test"]
+
+
+@pytest.mark.unit
+def test_auto_detection_prefers_gradle_wrapper_over_plain_maven(tmp_path: Path) -> None:
+    (tmp_path / "gradlew").write_text("#!/bin/sh\n", encoding="utf-8")
+    (tmp_path / "pom.xml").write_text("<project></project>\n", encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "java"
+    assert result.profile.source == "detector:java"
+    assert result.profile.phases.setup[0].command == "./gradlew --no-daemon dependencies"
+    assert [c.command for c in result.profile.phases.validate_commands] == [
+        "./gradlew --no-daemon test"
+    ]
+
+
+@pytest.mark.unit
+def test_auto_detection_detects_cpp(tmp_path: Path) -> None:
+    (tmp_path / "CMakeLists.txt").write_text("project(app)\n", encoding="utf-8")
+    result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+    assert result.profile.name == "cpp"
+    assert result.profile.source == "detector:cpp"
+    assert result.profile.phases.setup[0].command == "cmake -S . -B build"
+    assert [c.command for c in result.profile.phases.validate_commands] == [
+        "cmake --build build",
+        "ctest --test-dir build --output-on-failure",
+    ]
 
 
 @pytest.mark.unit
