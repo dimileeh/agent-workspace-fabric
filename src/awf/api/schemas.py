@@ -381,6 +381,10 @@ class ValidationRunSummaryResponse(BaseModel):
     log_stream_refs: dict[str, Any] = Field(default_factory=dict)
     fresh_for_target: bool | None = None
     retry_count: int = 0
+    coverage_percent: float | None = None
+    coverage_minimum_percent: float | None = None
+    coverage_status: str | None = None
+    coverage_reason_code: str | None = None
 
 
 StaleReasonStatus = Literal["active", "resolved"]
@@ -556,6 +560,10 @@ class ValidationProvenanceItemResponse(BaseModel):
     log_stream_refs: dict[str, Any] = Field(default_factory=dict)
     fresh_for_target: bool | None = None
     retry_count: int = 0
+    coverage_percent: float | None = None
+    coverage_minimum_percent: float | None = None
+    coverage_status: str | None = None
+    coverage_reason_code: str | None = None
 
 
 class ValidationProvenanceListResponse(BaseModel):

@@ -221,6 +221,62 @@ class TestWorkspaceRetry:
         )
 
 
+class TestWorkspaceRemonitor:
+    @pytest.mark.unit
+    def test_posts_remonitor_request_with_sensitive_control_headers(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setenv("AWF_API_TOKEN", "env-secret")
+        response = _mock_response(
+            status_code=200,
+            payload={
+                "workspace_id": "ws_monitor",
+                "operation_id": "op_remonitor",
+                "status": "monitoring_pr",
+                "message": "workspace PR monitor recovery requested",
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "remonitor",
+                    "ws_monitor",
+                    "--reason",
+                    "operator recovery",
+                    "--idempotency-key",
+                    "remonitor-cli-key",
+                    "--if-match",
+                    "7",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert "op_remonitor" in result.stdout
+        assert "env-secret" not in result.stdout
+        assert "env-secret" not in result.stderr
+        assert mock.call_args[0] == (
+            "POST",
+            "http://localhost:8000/v1/workspaces/ws_monitor/remonitor",
+        )
+        assert mock.call_args.kwargs["json"] == {"reason": "operator recovery"}
+        assert mock.call_args.kwargs["headers"] == {
+            "Authorization": "Bearer env-secret",
+            "Idempotency-Key": "remonitor-cli-key",
+            "If-Match": "7",
+        }
+
+    @pytest.mark.unit
+    def test_remonitor_cli_requires_idempotency_key_before_http_call(self) -> None:
+        with patch("awf.cli.main.httpx.request") as mock:
+            result = _runner.invoke(app, ["workspace", "remonitor", "ws_monitor"])
+
+        assert result.exit_code != 0
+        mock.assert_not_called()
+
+
 class TestWorkspaceList:
     @pytest.mark.unit
     def test_passes_limit_as_query_param(self) -> None:

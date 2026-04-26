@@ -403,6 +403,45 @@ async def test_validation_provenance_prefers_persisted_validation_runs(
 
 
 @pytest.mark.unit
+async def test_validation_provenance_reports_persisted_coverage_policy(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _mark_workspace_validation_failed(
+        engine,
+        workspace_id,
+        message="validation failed: coverage 98.4% is below required 99.0%",
+    )
+    await _insert_validation_run(
+        engine,
+        run_id="vr_222222222222222222222222",
+        workspace_id=workspace_id,
+        status="failed",
+        reason_code="COVERAGE_BELOW_THRESHOLD",
+        log_stream_refs={
+            "coverage": {
+                "provider": "python",
+                "percent": 98.4,
+                "minimum_percent": 99.0,
+                "enforce": True,
+                "status": "failed",
+                "reason_code": "COVERAGE_BELOW_THRESHOLD",
+            }
+        },
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["coverage_percent"] == 98.4
+    assert item["coverage_minimum_percent"] == 99.0
+    assert item["coverage_status"] == "failed"
+    assert item["coverage_reason_code"] == "COVERAGE_BELOW_THRESHOLD"
+
+
+@pytest.mark.unit
 async def test_validation_provenance_resolves_profile_commands_by_phase_index(
     client: AsyncClient,
     engine: AsyncEngine,

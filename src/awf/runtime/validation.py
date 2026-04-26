@@ -14,14 +14,15 @@ callers that pass raw command strings. New code should call
 from __future__ import annotations
 
 import asyncio
+import re
 import shlex
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.logging import get_logger
-from awf.profiles.models import ProfileCommand, WorkspaceProfile
+from awf.profiles.models import ProfileCommand, ProfileCoverage, WorkspaceProfile
 from awf.runtime.logs import LogStore
 
 _log = get_logger(__name__)
@@ -30,6 +31,10 @@ _log = get_logger(__name__)
 # created during setup is picked up automatically by later Python commands.
 _VENV_ACTIVATE_PREAMBLE = (
     "[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; "
+)
+_COVERAGE_TOTAL_RE = re.compile(r"(?im)^\s*TOTAL\b.*?(?P<percent>\d+(?:\.\d+)?)%\s*$")
+_COVERAGE_SUMMARY_RE = re.compile(
+    r"(?i)\b(?:total\s+coverage|coverage)\D+(?P<percent>\d+(?:\.\d+)?)%"
 )
 
 
@@ -46,10 +51,40 @@ class ValidationCommandResult:
     reason_code: str = "COMMAND_FAILED"
     stream_ids: dict[str, str | None] = field(default_factory=dict)
     retry_count: int = 0
+    policy_failed: bool = False
 
     @property
     def ok(self) -> bool:
-        return self.returncode == 0
+        return self.returncode == 0 and not self.policy_failed
+
+
+@dataclass(frozen=True)
+class ValidationCoverageResult:
+    """Coverage measurement parsed from an explicit provider command."""
+
+    provider: str
+    percent: float | None
+    minimum_percent: float
+    enforce: bool
+    status: str
+    reason_code: str
+    command_result: ValidationCommandResult | None = None
+
+    @property
+    def ok(self) -> bool:
+        return self.status != "failed"
+
+    def as_metadata(self) -> dict[str, object]:
+        metadata: dict[str, object] = {
+            "provider": self.provider,
+            "minimum_percent": float(self.minimum_percent),
+            "enforce": self.enforce,
+            "status": self.status,
+            "reason_code": self.reason_code,
+        }
+        if self.percent is not None:
+            metadata["percent"] = float(self.percent)
+        return metadata
 
 
 @dataclass(frozen=True)
@@ -58,10 +93,13 @@ class ValidationResult:
 
     migration: ValidationCommandResult | None = None
     commands: list[ValidationCommandResult] = field(default_factory=list)
+    coverage: ValidationCoverageResult | None = None
 
     @property
     def all_passed(self) -> bool:
         if self.migration is not None and not self.migration.ok:
+            return False
+        if self.coverage is not None and not self.coverage.ok:
             return False
         return all(c.ok for c in self.commands)
 
@@ -73,7 +111,12 @@ class ValidationResult:
     def first_failure(self) -> ValidationCommandResult | None:
         if self.migration is not None and not self.migration.ok:
             return self.migration
-        return next((c for c in self.commands if not c.ok), None)
+        first_command_failure = next((c for c in self.commands if not c.ok), None)
+        if first_command_failure is not None:
+            return first_command_failure
+        if self.coverage is not None and not self.coverage.ok:
+            return self.coverage.command_result
+        return None
 
 
 class ValidationRunner:
@@ -121,6 +164,7 @@ class ValidationRunner:
             commands=commands,
             healthchecks=[],
             legacy_command_labels=True,
+            coverage=None,
         )
 
     async def run_profile_phases(
@@ -135,6 +179,7 @@ class ValidationRunner:
     ) -> ValidationResult:
         """Run the selected profile phases in order."""
         healthchecks = profile.validation.healthchecks if run_healthchecks else []
+        coverage = profile.validation.coverage if "validate" in set(phase_names) else None
         return await self._run_commands(
             workspace_id=workspace_id,
             compose_project=compose_project,
@@ -149,6 +194,7 @@ class ValidationRunner:
             ],
             legacy_command_labels=False,
             retry_budget=profile.validation.retry_budget,
+            coverage=coverage,
         )
 
     async def _run_commands(
@@ -161,6 +207,7 @@ class ValidationRunner:
         healthchecks: list[tuple[str, ProfileCommand]],
         legacy_command_labels: bool,
         retry_budget: int = 0,
+        coverage: ProfileCoverage | None,
     ) -> ValidationResult:
         workspace_artifacts = self._artifacts_dir / workspace_id
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
@@ -254,7 +301,95 @@ class ValidationRunner:
                 )
                 return ValidationResult(commands=results)
 
-        return ValidationResult(commands=results)
+        coverage_result: ValidationCoverageResult | None = None
+        if coverage is not None and _coverage_requested(coverage):
+            coverage_result = await self._collect_coverage(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                coverage=coverage,
+                artifacts_dir=workspace_artifacts,
+                results=results,
+                phase_indices=phase_indices,
+            )
+
+        return ValidationResult(commands=results, coverage=coverage_result)
+
+    async def _collect_coverage(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        coverage: ProfileCoverage,
+        artifacts_dir: Path,
+        results: list[ValidationCommandResult],
+        phase_indices: dict[str, int],
+    ) -> ValidationCoverageResult:
+        if coverage.provider != "python":
+            return ValidationCoverageResult(
+                provider=coverage.provider,
+                percent=None,
+                minimum_percent=coverage.minimum_percent,
+                enforce=coverage.enforce,
+                status="failed" if coverage.enforce else "unsupported",
+                reason_code="COVERAGE_PROVIDER_UNSUPPORTED",
+            )
+
+        command_result: ValidationCommandResult | None = None
+        if coverage.command is not None:
+            phase_indices["coverage"] = phase_indices.get("coverage", 0) + 1
+            label = f"{phase_indices['coverage']:02d}_coverage"
+            command_result = await self._exec(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                cli_args=["sh", "-lc", _VENV_ACTIVATE_PREAMBLE + coverage.command.command],
+                label=label,
+                artifacts_dir=artifacts_dir,
+                phase="coverage",
+                timeout_seconds=coverage.command.timeout_seconds,
+            )
+            coverage_outputs = [command_result]
+        else:
+            coverage_outputs = results
+
+        percent = _parse_python_coverage_percent_from_files(
+            _coverage_output_paths(coverage_outputs)
+        )
+        reason_code = _coverage_reason_code(
+            percent=percent,
+            minimum_percent=coverage.minimum_percent,
+            command_result=command_result,
+        )
+        status = _coverage_status(reason_code=reason_code, enforce=coverage.enforce)
+        policy_failed = status == "failed"
+        if command_result is not None:
+            command_result = replace(
+                command_result,
+                reason_code=reason_code,
+                policy_failed=policy_failed,
+            )
+            results.append(command_result)
+
+        _log.info(
+            "validation.coverage_collected",
+            workspace_id=workspace_id,
+            provider=coverage.provider,
+            percent=percent,
+            minimum_percent=coverage.minimum_percent,
+            enforce=coverage.enforce,
+            reason_code=reason_code,
+            status=status,
+        )
+        return ValidationCoverageResult(
+            provider=coverage.provider,
+            percent=percent,
+            minimum_percent=coverage.minimum_percent,
+            enforce=coverage.enforce,
+            status=status,
+            reason_code=reason_code,
+            command_result=command_result,
+        )
 
     async def _exec(
         self,
@@ -372,3 +507,56 @@ def _display_command(cli_args: list[str]) -> str:
         return shell_cmd
     return " ".join(shlex.quote(a) for a in cli_args)
 
+
+
+def _coverage_requested(coverage: ProfileCoverage) -> bool:
+    return coverage.command is not None or coverage.minimum_percent > 0
+
+
+def _coverage_output_paths(results: list[ValidationCommandResult]) -> list[Path]:
+    paths: list[Path] = []
+    for result in results:
+        paths.extend((result.stdout_path, result.stderr_path))
+    return paths
+
+
+def _parse_python_coverage_percent_from_files(paths: list[Path]) -> float | None:
+    total_percent: float | None = None
+    summary_percent: float | None = None
+    for path in paths:
+        with path.open("r", encoding="utf-8", errors="replace") as stream:
+            for line in stream:
+                total_match = _COVERAGE_TOTAL_RE.search(line)
+                if total_match:
+                    total_percent = float(total_match.group("percent"))
+                    continue
+                summary_match = _COVERAGE_SUMMARY_RE.search(line)
+                if summary_match:
+                    summary_percent = float(summary_match.group("percent"))
+
+    return total_percent if total_percent is not None else summary_percent
+
+
+def _coverage_reason_code(
+    *,
+    percent: float | None,
+    minimum_percent: float,
+    command_result: ValidationCommandResult | None,
+) -> str:
+    if percent is None:
+        if command_result is not None and command_result.returncode != 0:
+            return "COVERAGE_COMMAND_FAILED"
+        return "COVERAGE_NOT_FOUND"
+    if percent < minimum_percent:
+        return "COVERAGE_BELOW_THRESHOLD"
+    if command_result is not None and command_result.returncode != 0:
+        return "COVERAGE_COMMAND_FAILED"
+    return "COVERAGE_OK"
+
+
+def _coverage_status(*, reason_code: str, enforce: bool) -> str:
+    if reason_code == "COVERAGE_OK":
+        return "passed"
+    if enforce:
+        return "failed"
+    return "reported"

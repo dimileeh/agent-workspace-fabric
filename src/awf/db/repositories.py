@@ -779,6 +779,7 @@ class ValidationRunRepository:
         reason_code: str | None,
         finished_at: datetime | None = None,
         retry_count: int = 0,
+        coverage: dict[str, Any] | None = None,
     ) -> ValidationRun | None:
         run = await self.get(validation_run_id)
         if run is None:
@@ -787,6 +788,10 @@ class ValidationRunRepository:
         run.reason_code = reason_code
         run.retry_count = retry_count
         run.finished_at = finished_at or datetime.now(UTC)
+        if coverage is not None:
+            log_stream_refs = dict(run.log_stream_refs or {})
+            log_stream_refs["coverage"] = dict(coverage)
+            run.log_stream_refs = log_stream_refs
         await self._session.flush()
         return run
 

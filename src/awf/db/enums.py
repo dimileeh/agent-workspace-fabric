@@ -66,6 +66,7 @@ class OperationType(StrEnum):
     retry = "retry"
     cancel = "cancel"
     stop = "stop"
+    remonitor = "remonitor"
     destroy = "destroy"
 
 

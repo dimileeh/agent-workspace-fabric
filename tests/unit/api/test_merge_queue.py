@@ -114,7 +114,19 @@ async def _insert_validation_run(
     target_head_sha: str,
     status: str = "succeeded",
     finished_at: datetime = datetime(2026, 4, 26, 12, 5, tzinfo=UTC),
+    coverage: dict[str, object] | None = None,
 ) -> None:
+    log_stream_refs: dict[str, object] = {
+        "commands": [
+            {
+                "stdout": "validation.01_validate.stdout",
+                "stderr": "validation.01_validate.stderr",
+            }
+        ]
+    }
+    if coverage is not None:
+        log_stream_refs["coverage"] = coverage
+
     factory = make_session_factory(engine)
     async with factory() as session:
         await session.execute(
@@ -176,16 +188,7 @@ async def _insert_validation_run(
                 ),
                 "started_at": datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
                 "finished_at": finished_at,
-                "log_stream_refs": json.dumps(
-                    {
-                        "commands": [
-                            {
-                                "stdout": "validation.01_validate.stdout",
-                                "stderr": "validation.01_validate.stderr",
-                            }
-                        ]
-                    }
-                ),
+                "log_stream_refs": json.dumps(log_stream_refs),
             },
         )
         await session.commit()
@@ -539,4 +542,55 @@ class TestMergeQueueList:
             },
             "fresh_for_target": False,
             "retry_count": 0,
+            "coverage_percent": None,
+            "coverage_minimum_percent": None,
+            "coverage_status": None,
+            "coverage_reason_code": None,
         }
+
+    @pytest.mark.unit
+    async def test_latest_validation_summary_exposes_coverage_policy(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Coverage provenance",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/23",
+            branch_name="codex/merge-queue",
+            updated_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        )
+        attempt_id = await _attempt_id_for_workspace(engine, workspace_id)
+        await _insert_validation_run(
+            engine,
+            run_id="vr_232323232323232323232323",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="head123",
+            status="failed",
+            coverage={
+                "provider": "python",
+                "percent": 98.4,
+                "minimum_percent": 99.0,
+                "enforce": True,
+                "status": "failed",
+                "reason_code": "COVERAGE_BELOW_THRESHOLD",
+            },
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["latest_validation"] is not None
+        assert item["latest_validation"]["coverage_percent"] == 98.4
+        assert item["latest_validation"]["coverage_minimum_percent"] == 99.0
+        assert item["latest_validation"]["coverage_status"] == "failed"
+        assert (
+            item["latest_validation"]["coverage_reason_code"]
+            == "COVERAGE_BELOW_THRESHOLD"
+        )
