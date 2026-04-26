@@ -248,3 +248,41 @@ async def test_list_workspace_locks_includes_overlap_risk_metadata(
             "requested_path": "src/awf/service/**",
         },
     )
+
+
+@pytest.mark.unit
+async def test_list_workspace_locks_offloads_overlap_risk_calculation(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import locks as locks_service
+
+    offloaded = False
+
+    async def fake_to_thread(function, /, *args, **kwargs):
+        nonlocal offloaded
+        offloaded = True
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(locks_service.asyncio, "to_thread", fake_to_thread)
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        title="Existing 1",
+        owned_paths=["src/awf/service/**"],
+        status=WorkspaceStatus.running,
+        created_at=now,
+    )
+    await _workspace(
+        session_factory,
+        title="Overlap 2",
+        owned_paths=["src/awf/service/locks.py"],
+        status=WorkspaceStatus.requested,
+        created_at=now + timedelta(minutes=1),
+    )
+
+    locks = await locks_service.list_workspace_locks(session_factory)
+
+    assert offloaded is True
+    assert any(lock.overlap_risks for lock in locks)
