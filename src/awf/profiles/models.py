@@ -282,10 +282,6 @@ class WorkspaceProfile(BaseModel):
             update={"phases": self.phases.model_copy(update={"validate_commands": phase_commands})},
         )
 
-    @model_validator(mode="after")
-    def _validate_profile_consistency(self) -> WorkspaceProfile:
-        # Check inconsistent settings between services / egress etc. if needed
-        return self
 
 
 class ProfileResolution(BaseModel):
