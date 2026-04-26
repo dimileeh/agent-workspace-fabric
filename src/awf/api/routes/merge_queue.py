@@ -101,7 +101,7 @@ def _item_from_workspace(workspace: Workspace) -> MergeQueueItemResponse:
 
 
 def _latest_event(events: list[WorkspaceEvent]) -> WorkspaceEvent | None:
-    return max(events, key=lambda event: event.occurred_at, default=None)
+    return events[-1] if events else None
 
 
 def _merge_blocker_reason(workspace: Workspace) -> MergeBlockerReason:
