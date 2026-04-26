@@ -114,7 +114,7 @@ class TaskKind(StrEnum):
 
 
 class TaskClass(StrEnum):
-    """PRD task policy class used by future scheduling and lock enforcement."""
+    """PRD task policy class used by scheduling, validation, and overlap risk."""
 
     docs_task = "docs_task"
     test_task = "test_task"

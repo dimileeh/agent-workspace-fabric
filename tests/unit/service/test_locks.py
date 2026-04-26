@@ -1,4 +1,4 @@
-"""Read-only lock reservation service tests."""
+"""Read-only owned-path reservation service tests."""
 
 from __future__ import annotations
 
@@ -36,7 +36,7 @@ async def _workspace(
             repo_url=repo_url,
             branch_base=branch_base,
             task_title=title,
-            task_prompt="Expose lock reservations to operators.",
+            task_prompt="Expose owned-path reservations to operators.",
             task_class=task_class,
             owned_paths=list(owned_paths or []),
             agent="codex",
@@ -205,3 +205,84 @@ async def test_list_workspace_lock_page_reports_more_rows_and_uses_next_cursor(
     assert [lock.workspace_id for lock in second_page.items] == [oldest_id]
     assert second_page.has_more is False
     assert second_page.next_cursor is None
+
+
+@pytest.mark.unit
+async def test_list_workspace_locks_includes_overlap_risk_metadata(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.locks import WorkspaceLockOverlapRisk, list_workspace_locks
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    existing_id = await _workspace(
+        session_factory,
+        title="Existing 1",
+        task_class="refactor_task",
+        owned_paths=["src/awf/service/**"],
+        status=WorkspaceStatus.running,
+        created_at=now,
+    )
+    overlapping_id = await _workspace(
+        session_factory,
+        title="Overlap 2",
+        task_class="docs_task",
+        owned_paths=["src/awf/service/workspaces.py"],
+        status=WorkspaceStatus.requested,
+        created_at=now + timedelta(minutes=1),
+    )
+
+    locks = await list_workspace_locks(session_factory)
+    by_id = {lock.workspace_id: lock for lock in locks}
+
+    assert by_id[overlapping_id].overlap_risks == (
+        WorkspaceLockOverlapRisk(
+            overlapping_workspace_id=existing_id,
+            overlapping_owned_path="src/awf/service/**",
+            owned_path="src/awf/service/workspaces.py",
+        ),
+    )
+    assert by_id[existing_id].overlap_risks == (
+        WorkspaceLockOverlapRisk(
+            overlapping_workspace_id=overlapping_id,
+            overlapping_owned_path="src/awf/service/workspaces.py",
+            owned_path="src/awf/service/**",
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_list_workspace_locks_offloads_overlap_risk_calculation(
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import locks as locks_service
+
+    offloaded = False
+
+    async def fake_to_thread(function, /, *args, **kwargs):
+        nonlocal offloaded
+        offloaded = True
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(locks_service.asyncio, "to_thread", fake_to_thread)
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        title="Existing 1",
+        owned_paths=["src/awf/service/**"],
+        status=WorkspaceStatus.running,
+        created_at=now,
+    )
+    await _workspace(
+        session_factory,
+        title="Overlap 2",
+        owned_paths=["src/awf/service/locks.py"],
+        status=WorkspaceStatus.requested,
+        created_at=now + timedelta(minutes=1),
+    )
+
+    locks = await locks_service.list_workspace_locks(session_factory)
+
+    assert offloaded is True
+    assert any(lock.overlap_risks for lock in locks)

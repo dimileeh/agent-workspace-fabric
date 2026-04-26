@@ -12,7 +12,7 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.service.workspaces import WorkspaceOwnedPathConflictError, WorkspaceService
+from awf.service.workspaces import WorkspaceService
 
 
 @pytest.fixture
@@ -31,70 +31,25 @@ def _request(
     repo_url: str = "git@github.com:example/service.git",
     base_branch: str = "development",
     title: str = "Owned path policy",
+    task_class: str | None = None,
     owned_paths: list[str] | None = None,
 ) -> WorkspaceCreateV2Request:
+    task = {
+        "title": title,
+        "prompt": "Do policy-sensitive work.",
+        "agent": "codex",
+        "kind": "feature_branch_pr",
+        "owned_paths": list(owned_paths or []),
+    }
+    if task_class is not None:
+        task["task_class"] = task_class
     return WorkspaceCreateV2Request(
         repo={"url": repo_url, "base_branch": base_branch},
-        task={
-            "title": title,
-            "prompt": "Do policy-sensitive work.",
-            "agent": "codex",
-            "kind": "feature_branch_pr",
-            "owned_paths": list(owned_paths or []),
-        },
+        task=task,
         workspace={"profile_ref": "auto", "profile": None},
         validation={"commands": ["pytest -q"], "requested_tier": 1},
         resources={},
     )
-
-
-@pytest.mark.unit
-async def test_create_v2_acquires_conflict_lock_before_lookup(
-    factory: async_sessionmaker[AsyncSession],
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    order: list[str] = []
-    original_lock = WorkspaceRepository.acquire_owned_path_conflict_lock
-    original_lookup = WorkspaceRepository.find_active_owned_path_conflicts
-
-    async def lock_spy(
-        self: WorkspaceRepository,
-        *,
-        repo_url: str,
-        branch_base: str,
-        owned_paths: list[str],
-    ) -> None:
-        order.append("lock")
-        await original_lock(
-            self,
-            repo_url=repo_url,
-            branch_base=branch_base,
-            owned_paths=owned_paths,
-        )
-
-    async def lookup_spy(
-        self: WorkspaceRepository,
-        *,
-        repo_url: str,
-        branch_base: str,
-        owned_paths: list[str],
-    ):
-        order.append("lookup")
-        return await original_lookup(
-            self,
-            repo_url=repo_url,
-            branch_base=branch_base,
-            owned_paths=owned_paths,
-        )
-
-    monkeypatch.setattr(WorkspaceRepository, "acquire_owned_path_conflict_lock", lock_spy)
-    monkeypatch.setattr(WorkspaceRepository, "find_active_owned_path_conflicts", lookup_spy)
-
-    service = WorkspaceService(factory)
-
-    await service.create_v2(_request(title="new", owned_paths=["src/awf/api/**"]))
-
-    assert order[:2] == ["lock", "lookup"]
 
 
 @pytest.mark.unit
@@ -142,24 +97,42 @@ async def test_create_v2_ignores_terminal_and_teardown_conflicts(
 
 
 @pytest.mark.unit
-async def test_create_v2_rejects_conflicts_with_useful_detail(
+async def test_create_v2_allows_overlap_and_records_risk_event(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     service = WorkspaceService(factory)
     existing = await service.create_v2(
-        _request(title="existing", owned_paths=["src/awf/service/**"])
+        _request(
+            title="existing",
+            task_class="refactor_task",
+            owned_paths=["src/awf/service/**"],
+        )
     )
 
-    with pytest.raises(WorkspaceOwnedPathConflictError) as exc_info:
-        await service.create_v2(
-            _request(title="new", owned_paths=["src/awf/service/workspaces.py"])
+    created = await service.create_v2(
+        _request(
+            title="new",
+            task_class="docs_task",
+            owned_paths=["src/awf/service/workspaces.py"],
         )
+    )
+    events = await service.list_events(
+        created.id,
+        event_type="workspace.owned_path_overlap_risk",
+    )
 
-    assert exc_info.value.error_code == "WORKSPACE_OWNED_PATH_CONFLICT"
-    assert exc_info.value.message == "Requested owned paths overlap an active workspace."
-    assert exc_info.value.detail == {
+    assert created.owned_paths == ["src/awf/service/workspaces.py"]
+    assert events is not None
+    assert len(events) == 1
+    assert events[0].reason_code == "OWNED_PATH_OVERLAP_RISK"
+    assert events[0].payload == {
+        "warning_code": "OWNED_PATH_OVERLAP_RISK",
+        "message": (
+            "Owned paths overlap active workspaces; this may require rebase "
+            "or conflict resolution."
+        ),
         "workspace_ids": [existing.id],
-        "conflicts": [
+        "overlaps": [
             {
                 "workspace_id": existing.id,
                 "existing_path": "src/awf/service/**",
@@ -167,3 +140,48 @@ async def test_create_v2_rejects_conflicts_with_useful_detail(
             }
         ],
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("task_class", "existing_path", "requested_path"),
+    [
+        ("refactor_task", "src/awf/api/**", "src/awf/api/routes/workspaces.py"),
+        ("docs_task", "docs/**", "docs/owned-path-policy.md"),
+        ("test_task", "tests/unit/**", "tests/unit/service/test_workspaces.py"),
+        ("migration_task", "migrations/**", "migrations/202604260001_add_index.sql"),
+        ("dependency_task", "pyproject.toml", "pyproject.toml"),
+        ("build_config_task", "Dockerfile", "Dockerfile"),
+    ],
+)
+async def test_create_v2_overlap_is_advisory_for_all_current_task_classes(
+    factory: async_sessionmaker[AsyncSession],
+    task_class: str,
+    existing_path: str,
+    requested_path: str,
+) -> None:
+    service = WorkspaceService(factory)
+    existing = await service.create_v2(
+        _request(
+            title=f"existing {task_class}",
+            task_class=task_class,
+            owned_paths=[existing_path],
+        )
+    )
+
+    created = await service.create_v2(
+        _request(
+            title=f"new {task_class}",
+            task_class=task_class,
+            owned_paths=[requested_path],
+        )
+    )
+    events = await service.list_events(
+        created.id,
+        event_type="workspace.owned_path_overlap_risk",
+    )
+
+    assert created.owned_paths == [requested_path]
+    assert events is not None
+    assert events[0].payload is not None
+    assert events[0].payload["workspace_ids"] == [existing.id]

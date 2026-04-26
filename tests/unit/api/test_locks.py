@@ -1,4 +1,4 @@
-"""Lock reservation API tests."""
+"""Owned-path reservation API tests."""
 
 from __future__ import annotations
 
@@ -23,7 +23,7 @@ def _v2_body(
         "repo": {"url": repo_url, "base_branch": base_branch},
         "task": {
             "title": title,
-            "prompt": "Expose lock reservations.",
+            "prompt": "Expose owned-path reservations.",
             "agent": "codex",
             "kind": "feature_branch_pr",
             "task_class": task_class,
@@ -206,3 +206,45 @@ async def test_get_locks_reports_has_more_and_accepts_next_cursor(
         second_body["items"][0]["workspace_id"],
     }
     assert returned_ids == {first_id, second_id}
+
+
+@pytest.mark.unit
+async def test_get_locks_exposes_owned_path_overlap_risks(
+    client: AsyncClient,
+) -> None:
+    existing_id = await _create_lock_workspace(
+        client,
+        title="Existing refactor",
+        task_class="refactor_task",
+        owned_paths=["src/awf/api/**"],
+    )
+    overlapping_response = await client.post(
+        "/v2/workspaces",
+        json=_v2_body(
+            title="Overlapping docs",
+            task_class="docs_task",
+            owned_paths=["src/awf/api/routes/workspaces.py"],
+        ),
+    )
+
+    assert overlapping_response.status_code == 202
+    overlapping_id = str(overlapping_response.json()["workspace_id"])
+
+    response = await client.get("/v1/locks")
+
+    assert response.status_code == 200
+    items = {item["workspace_id"]: item for item in response.json()["items"]}
+    assert items[overlapping_id]["overlap_risks"] == [
+        {
+            "overlapping_workspace_id": existing_id,
+            "overlapping_owned_path": "src/awf/api/**",
+            "owned_path": "src/awf/api/routes/workspaces.py",
+        }
+    ]
+    assert items[existing_id]["overlap_risks"] == [
+        {
+            "overlapping_workspace_id": overlapping_id,
+            "overlapping_owned_path": "src/awf/api/routes/workspaces.py",
+            "owned_path": "src/awf/api/**",
+        }
+    ]

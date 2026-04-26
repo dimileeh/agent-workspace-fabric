@@ -6,7 +6,7 @@ Dmitri's primary constraint on shipping aira features is **parallel agent throug
 
 **AWF (Aira Agent Workspace Fabric)** is a standalone execution service that any orchestrator (OpenClaw agents via skill, aira-agent's own supervisor, a human-triggered CLI, etc.) can call to run one coding task end-to-end in an isolated Docker workspace: check out source, launch a **coding CLI** (Codex / Claude Code / Gemini) inside the container with the repo mounted, run tests (with sidecar services like Postgres + Alembic migrations as the repo profile requires), and submit a PR against the development branch. The distinction matters: **AWF is called by orchestrators; the actual code-writing is done by the coding CLI inside the container.**
 
-This MVP intentionally ships the "developer-in-a-box" primitive only. The stale-detection / auto-rebase / merge-queue / task-class lock machinery from the full AWF v2.2 PRD is explicitly deferred to Phase 1.5, pending evidence from real parallel runs about which conflicts actually happen in practice.
+This MVP intentionally ships the "developer-in-a-box" primitive only. Owned paths are stored as coordination hints and stale-detection inputs; overlapping owned paths are admitted and surfaced as overlap-risk warnings. The stale-detection / auto-rebase / merge-queue / explicit exclusive-lock machinery from the full AWF v2.2 PRD is explicitly deferred to Phase 1.5, pending evidence from real parallel runs about which conflicts actually happen in practice.
 
 ### Design decisions (confirmed with Dmitri 2026-04-21)
 
@@ -20,8 +20,8 @@ This MVP intentionally ships the "developer-in-a-box" primitive only. The stale-
 - Stale detection on target-branch advance
 - Auto-rebase / rebase orchestration
 - Merge queue / canonical-attempt governance
-- Task-class lock matrix (docs/test/refactor/migration/dependency/build_config)
-- Overlap detection
+- Task-class exclusive resource lock matrix (docs/test/refactor/migration/dependency/build_config)
+- Merge-time overlap resolution beyond advisory owned-path risk events
 - Three-tier validation (MVP has one tier: task-local validation inside the workspace)
 - Post-merge confidence validation
 - Multi-node execution / node-agent federation (MVP is single-host Docker)
@@ -246,7 +246,7 @@ pytest tests/integration/ -v                # spins real Postgres via testcontai
 
 **Parallelism smoke test:**
 1. Submit 3 workspaces simultaneously (same repo, different tasks, different file scopes)
-2. Verify all 3 reach `ready` within 30s without lock contention
+2. Verify all 3 reach `ready` within 30s; overlapping owned paths may produce advisory risk warnings but must not block admission
 3. Verify all 3 produce separate PRs
 4. Verify cleanup of all 3 leaves no orphaned containers or volumes
 
@@ -267,7 +267,7 @@ Once the MVP is in daily use for Aira dev, collect data on which conflicts actua
 Build the Phase 1.5 pieces *targeted at observed incidents*, not at the PRD's full list. Likely subset:
 - Stale detection + auto-rebase on target advance (if stale branches show up often)
 - Lightweight merge queue for the `development` branch (if overlapping merges become the babysitting pain)
-- Task-class lock matrix (only for the classes that actually cause trouble, probably migrations + dependency updates)
+- Explicit exclusive resource locks (only for classes/resources that actually need serialization; do not promote ordinary owned-path overlap into blocking by default)
 
 Do NOT build:
 - Three-tier validation unless Tier 1 alone proves insufficient

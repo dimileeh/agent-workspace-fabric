@@ -1,4 +1,4 @@
-"""Lock reservation CLI tests."""
+"""Owned-path reservation CLI tests."""
 
 from __future__ import annotations
 

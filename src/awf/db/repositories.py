@@ -50,7 +50,7 @@ from awf.db.models import (
     WorkspaceLogStream,
 )
 
-ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
+ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.requested.value,
     WorkspaceStatus.provisioning.value,
     WorkspaceStatus.ready.value,
@@ -59,6 +59,16 @@ ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.pushing.value,
     WorkspaceStatus.monitoring_pr.value,
 )
+ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
+    ACTIVE_OWNED_PATH_OVERLAP_STATUSES
+)
+
+
+@dataclass(frozen=True)
+class OwnedPathOverlap:
+    workspace_id: str
+    existing_path: str
+    requested_path: str
 
 
 @dataclass(frozen=True)
@@ -955,7 +965,30 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
     ) -> list[OwnedPathConflict]:
-        requested_paths = [path for path in owned_paths if _normalize_owned_path(path) != ""]
+        overlaps = await self.find_active_owned_path_overlaps(
+            repo_url=repo_url,
+            branch_base=branch_base,
+            owned_paths=owned_paths,
+        )
+        return [
+            OwnedPathConflict(
+                workspace_id=overlap.workspace_id,
+                existing_path=overlap.existing_path,
+                requested_path=overlap.requested_path,
+            )
+            for overlap in overlaps
+        ]
+
+    async def find_active_owned_path_overlaps(
+        self,
+        *,
+        repo_url: str,
+        branch_base: str,
+        owned_paths: list[str],
+    ) -> list[OwnedPathOverlap]:
+        requested_paths = [
+            path for path in owned_paths if _normalize_owned_path(path) != ""
+        ]
         if not requested_paths:
             return []
 
@@ -964,26 +997,26 @@ class WorkspaceRepository:
             .where(
                 Workspace.repo_url == repo_url,
                 Workspace.branch_base == branch_base,
-                Workspace.status.in_(ACTIVE_OWNED_PATH_CONFLICT_STATUSES),
+                Workspace.status.in_(ACTIVE_OWNED_PATH_OVERLAP_STATUSES),
             )
             .order_by(Workspace.created_at.asc(), Workspace.id.asc())
         )
         rows = list((await self._session.execute(stmt)).scalars())
-        conflicts: list[OwnedPathConflict] = []
+        overlaps: list[OwnedPathOverlap] = []
         for workspace in rows:
             for existing_path in workspace.owned_paths:
                 if _normalize_owned_path(existing_path) == "":
                     continue
                 for requested_path in requested_paths:
                     if _owned_paths_overlap(existing_path, requested_path):
-                        conflicts.append(
-                            OwnedPathConflict(
+                        overlaps.append(
+                            OwnedPathOverlap(
                                 workspace_id=workspace.id,
                                 existing_path=existing_path,
                                 requested_path=requested_path,
                             )
                         )
-        return conflicts
+        return overlaps
 
     async def list(
         self,
@@ -1546,6 +1579,10 @@ def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -
     if unsigned >= 1 << 63:
         return unsigned - (1 << 64)
     return unsigned
+
+
+def owned_paths_overlap(left: str, right: str) -> bool:
+    return _owned_paths_overlap(left, right)
 
 
 def _normalize_owned_path(path: str) -> str:

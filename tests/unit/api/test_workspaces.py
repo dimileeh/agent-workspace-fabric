@@ -53,12 +53,15 @@ def _v2_body(
     repo_url: str = "git@github.com:example/app.git",
     base_branch: str = "development",
     title: str = "Owned path policy test",
+    task_class: str | None = None,
     owned_paths: list[str] | None = None,
 ) -> dict[str, object]:
     task = {
         **_V2_MINIMAL_BODY["task"],
         "title": title,
     }
+    if task_class is not None:
+        task["task_class"] = task_class
     if owned_paths is not None:
         task["owned_paths"] = owned_paths
     return {
@@ -84,6 +87,7 @@ async def _create_v2_workspace(
     repo_url: str = "git@github.com:example/app.git",
     base_branch: str = "development",
     title: str = "Owned path policy test",
+    task_class: str | None = None,
     owned_paths: list[str] | None = None,
 ) -> str:
     response = await client.post(
@@ -92,6 +96,7 @@ async def _create_v2_workspace(
             repo_url=repo_url,
             base_branch=base_branch,
             title=title,
+            task_class=task_class,
             owned_paths=owned_paths,
         ),
     )
@@ -583,7 +588,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
             ("src/awf/api/**", "src/awf/api/routes/workspaces.py"),
         ],
     )
-    async def test_active_exact_ancestor_and_wildcard_conflicts_return_409(
+    async def test_active_exact_ancestor_and_wildcard_overlaps_return_202_warning(
         self,
         client: AsyncClient,
         existing_path: str,
@@ -592,6 +597,7 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         existing_id = await _create_v2_workspace(
             client,
             title=f"existing {existing_path}",
+            task_class="refactor_task",
             owned_paths=[existing_path],
         )
 
@@ -599,22 +605,79 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
             "/v2/workspaces",
             json=_v2_body(
                 title=f"new {requested_path}",
+                task_class="docs_task",
                 owned_paths=[requested_path],
             ),
         )
 
-        assert response.status_code == 409
+        assert response.status_code == 202
         body = response.json()
-        assert body["error_code"] == "WORKSPACE_OWNED_PATH_CONFLICT"
-        assert body["message"] == "Requested owned paths overlap an active workspace."
-        assert body["detail"]["workspace_ids"] == [existing_id]
-        assert body["detail"]["conflicts"] == [
+        assert body["warnings"] == [
+            {
+                "warning_code": "OWNED_PATH_OVERLAP_RISK",
+                "message": (
+                    "Owned paths overlap active workspaces; this may require rebase "
+                    "or conflict resolution."
+                ),
+                "workspace_ids": [existing_id],
+                "overlaps": [
+                    {
+                        "workspace_id": existing_id,
+                        "existing_path": existing_path,
+                        "requested_path": requested_path,
+                    }
+                ],
+            }
+        ]
+
+        events = await client.get(
+            f"/v1/workspaces/{body['workspace_id']}/events",
+            params={"event_type": "workspace.owned_path_overlap_risk"},
+        )
+
+        assert events.status_code == 200
+        event_items = events.json()["items"]
+        assert len(event_items) == 1
+        assert event_items[0]["reason_code"] == "OWNED_PATH_OVERLAP_RISK"
+        assert event_items[0]["payload"]["workspace_ids"] == [existing_id]
+        assert event_items[0]["payload"]["overlaps"] == [
             {
                 "workspace_id": existing_id,
                 "existing_path": existing_path,
                 "requested_path": requested_path,
             }
         ]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "task_class",
+        ["migration_task", "dependency_task", "build_config_task"],
+    )
+    async def test_high_risk_task_class_owned_path_overlap_is_advisory_without_exclusive_lock(
+        self,
+        client: AsyncClient,
+        task_class: str,
+    ) -> None:
+        existing_id = await _create_v2_workspace(
+            client,
+            title=f"existing {task_class}",
+            task_class=task_class,
+            owned_paths=["migrations/**"],
+        )
+
+        response = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(
+                title=f"new {task_class}",
+                task_class=task_class,
+                owned_paths=["migrations/202604260001_add_index.sql"],
+            ),
+        )
+
+        assert response.status_code == 202
+        body = response.json()
+        assert body["warnings"][0]["warning_code"] == "OWNED_PATH_OVERLAP_RISK"
+        assert body["warnings"][0]["workspace_ids"] == [existing_id]
 
 
 class TestIdempotency:
