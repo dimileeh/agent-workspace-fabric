@@ -790,6 +790,7 @@ class WorkspaceExecutor:
                 base_branch=ws.branch_base,
                 title=pr_title,
                 body=pr_body,
+                existing_pr_url=ws.pr_url,
             )
         except PullRequestError as exc:
             _log.error(
@@ -831,6 +832,7 @@ class WorkspaceExecutor:
                 )
                 await session.commit()
                 return
+            had_existing_pr_url = bool(persisted.pr_url)
             persisted.pr_url = pr.url
             persisted.pr_number = _extract_pr_number(pr.url)
             if pr.head_sha:
@@ -855,14 +857,18 @@ class WorkspaceExecutor:
                 # Hand off to the monitor — it will transition to completed
                 # (on merge) or failed (on abort / cap / close).
                 await repo.transition(
-                    persisted, to=WorkspaceStatus.monitoring_pr, reason_code="PR_OPENED"
+                    persisted,
+                    to=WorkspaceStatus.monitoring_pr,
+                    reason_code="PR_UPDATED" if had_existing_pr_url else "PR_OPENED",
                 )
                 await session.commit()
             else:
                 # No monitor wired (legacy executor path / unit-test shim) —
                 # preserve the original ``pushing → completed`` contract.
                 await repo.transition(
-                    persisted, to=WorkspaceStatus.completed, reason_code="PR_OPENED"
+                    persisted,
+                    to=WorkspaceStatus.completed,
+                    reason_code="PR_UPDATED" if had_existing_pr_url else "PR_OPENED",
                 )
                 await session.commit()
 

@@ -1,11 +1,12 @@
-"""Pull-request creator — pushes the feature branch and opens a PR via ``gh``.
+"""Pull-request creator — pushes the feature branch and opens or reuses a PR via ``gh``.
 
 Two responsibilities:
 
 1. ``git -C <worktree> push -u origin <branch>`` — uploads the commits the
    coding CLI just made to the remote.
 2. ``gh pr create --base <base> --head <branch> --title ... --body ...`` —
-   opens the PR on GitHub. We capture stdout which contains the PR URL.
+   opens the PR on GitHub when one does not already exist. We capture stdout
+   which contains the PR URL.
 
 We shell out to the ``gh`` CLI (not the GitHub REST API directly) because:
 - ``gh`` already handles auth via stored tokens / keyrings / env vars, so
@@ -83,6 +84,7 @@ class PullRequestCreator:
         base_branch: str,
         title: str,
         body: str,
+        existing_pr_url: str | None = None,
     ) -> PullRequestResult:
         # Step 0: capture the worktree's view of the branch state so we
         # can diagnose post-validation push failures. T39 (ws_eb8c2bd5)
@@ -131,6 +133,10 @@ class PullRequestCreator:
             raise PullRequestError(
                 operation="git push", returncode=push.returncode, stderr=push.stderr
             )
+
+        if existing_pr_url:
+            _log.info("pr.reused", branch=branch_name, url=existing_pr_url)
+            return PullRequestResult(url=existing_pr_url, branch=branch_name, head_sha=head_sha)
 
         # Step 2: open the PR. gh reads auth from ~/.config/gh by default.
         pr = await self._runner.run(
