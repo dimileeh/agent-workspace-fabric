@@ -10,8 +10,8 @@ from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
-from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 
 
@@ -28,6 +28,7 @@ async def _create_queue_workspace(
     task_class: str | None = "test_task",
     owned_paths: list[str] | None = None,
     updated_at: datetime | None = None,
+    candidate_created_at: datetime | None = None,
 ) -> str:
     from awf.db.repositories import MergeCandidateRepository, TaskAttemptRepository, TaskRepository
 
@@ -69,13 +70,16 @@ async def _create_queue_workspace(
         if pr_url is not None:
             attempt.is_canonical_for_merge = True
             candidate_repo = MergeCandidateRepository(session)
-            await candidate_repo.create_or_update_open_for_attempt(
+            candidate = await candidate_repo.create_or_update_open_for_attempt(
                 task=task,
                 attempt=attempt,
                 workspace=workspace,
                 head_sha="head123",
                 base_sha="base123",
             )
+            if candidate_created_at is not None:
+                candidate.created_at = candidate_created_at
+                candidate.updated_at = candidate_created_at
             if status == WorkspaceStatus.completed:
                 await candidate_repo.mark_workspace_merged(workspace.id)
             elif status in {WorkspaceStatus.failed, WorkspaceStatus.cancelled}:
@@ -103,6 +107,18 @@ async def _attempt_id_for_workspace(engine: AsyncEngine, workspace_id: str) -> s
         attempt_id = result.scalar_one()
         assert isinstance(attempt_id, str)
         return attempt_id
+
+
+async def _add_monitor_recovery_operation(engine: AsyncEngine, workspace_id: str) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.pending,
+            payload={"source": "pr_monitor", "reason": "validation_insufficient_tier"},
+        )
+        await session.commit()
 
 
 async def _insert_validation_run(
@@ -504,6 +520,7 @@ class TestMergeQueueList:
             status=WorkspaceStatus.monitoring_pr,
             pr_url="https://github.com/example/console/pull/61",
             updated_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+            candidate_created_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
         )
         later_id = await _create_queue_workspace(
             engine,
@@ -512,6 +529,7 @@ class TestMergeQueueList:
             pr_url="https://github.com/example/console/pull/62",
             branch_name="codex/later-queue",
             updated_at=datetime(2026, 4, 21, 12, 0, tzinfo=UTC),
+            candidate_created_at=datetime(2026, 4, 20, 12, 5, tzinfo=UTC),
         )
 
         response = await client.get("/v1/merge-queue", params={"limit": 20})
@@ -535,6 +553,54 @@ class TestMergeQueueList:
                 "pr_number": 61,
                 "status": WorkspaceStatus.monitoring_pr.value,
                 "blocker_state": "merge_eligible",
+                "reason_code": "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
+            }
+        ]
+
+    @pytest.mark.unit
+    async def test_exposes_monitor_owned_recovery_blocker_details(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        older_id = await _create_queue_workspace(
+            engine,
+            title="Older recovery candidate",
+            status=WorkspaceStatus.ready,
+            pr_url="https://github.com/example/console/pull/63",
+            updated_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+            candidate_created_at=datetime(2026, 4, 20, 12, 0, tzinfo=UTC),
+        )
+        await _add_monitor_recovery_operation(engine, older_id)
+        later_id = await _create_queue_workspace(
+            engine,
+            title="Later queue candidate",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/64",
+            branch_name="codex/later-queue",
+            updated_at=datetime(2026, 4, 21, 12, 0, tzinfo=UTC),
+            candidate_created_at=datetime(2026, 4, 20, 12, 5, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue", params={"limit": 20})
+
+        assert response.status_code == 200
+        items = {item["workspace_id"]: item for item in response.json()["items"]}
+        later = items[later_id]
+        older = items[older_id]
+        assert later["merge_blocker_reason"] == "waiting_for_older_candidate"
+        assert later["required_next_action"] == "wait_for_queue"
+        assert later["queue_blockers"] == [
+            {
+                "candidate_id": older["candidate_id"],
+                "workspace_id": older_id,
+                "attempt_id": older["attempt_id"],
+                "task_id": older["task_id"],
+                "title": "Older recovery candidate",
+                "pr_url": "https://github.com/example/console/pull/63",
+                "pr_number": 63,
+                "status": WorkspaceStatus.ready.value,
+                "blocker_state": "monitor_owned_recovery",
                 "reason_code": "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
             }
         ]

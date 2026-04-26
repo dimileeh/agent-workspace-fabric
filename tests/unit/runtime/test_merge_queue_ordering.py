@@ -209,15 +209,17 @@ async def test_monitor_waits_for_older_candidate_without_notify_human(
 
 
 @pytest.mark.unit
-async def test_monitor_merges_once_older_candidate_is_closed(
+@pytest.mark.parametrize("clearing_state", ["merged", "closed", "non_canonical"])
+async def test_monitor_merges_once_older_candidate_stops_blocking(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
     sleep_fn: RecordedSleep,
     tmp_path: Path,
+    clearing_state: str,
 ) -> None:
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
+    older_workspace_id, older_attempt_id, _older_candidate_id = await _seed_monitoring_candidate(
         factory,
         title="Older candidate",
         pr_number=201,
@@ -230,10 +232,21 @@ async def test_monitor_merges_once_older_candidate_is_closed(
         created_at=now + timedelta(minutes=5),
     )
     async with factory() as session:
-        await MergeCandidateRepository(session).close_open_for_workspace(
-            older_workspace_id,
-            close_reason="TEST_CLOSED",
-        )
+        candidate_repo = MergeCandidateRepository(session)
+        if clearing_state == "merged":
+            await candidate_repo.mark_workspace_merged(older_workspace_id)
+        elif clearing_state == "closed":
+            await candidate_repo.close_open_for_workspace(
+                older_workspace_id,
+                close_reason="TEST_CLOSED",
+            )
+        else:
+            attempt = await TaskAttemptRepository(session).get_by_workspace_id(
+                older_workspace_id,
+            )
+            assert attempt is not None
+            assert attempt.id == older_attempt_id
+            attempt.is_canonical_for_merge = False
         await session.commit()
 
     cmd.queue_result(returncode=0)  # gh pr merge

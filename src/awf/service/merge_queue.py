@@ -194,7 +194,7 @@ def _is_monitor_recovery_operation(operation: Operation) -> bool:
     payload = operation.payload
     if not isinstance(payload, dict):
         return False
-    return payload.get("source") == "pr_monitor" or isinstance(payload.get("reason"), str)
+    return payload.get("source") == "pr_monitor"
 
 
 def _workspace_status(workspace: Workspace) -> WorkspaceStatus | None:

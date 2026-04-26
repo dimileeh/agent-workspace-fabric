@@ -144,6 +144,42 @@ async def test_older_open_candidate_blocks_later_same_repo_base_candidate(
 
 
 @pytest.mark.unit
+async def test_non_monitor_recovery_operation_does_not_block_later_candidate(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    async with factory() as session:
+        older_workspace_id, _older_attempt_id, _older_candidate_id = await _seed_candidate(
+            session,
+            title="Older manual recovery",
+            pr_number=13,
+            created_at=now,
+            status=WorkspaceStatus.ready,
+        )
+        _later_workspace_id, _later_attempt_id, later_candidate_id = await _seed_candidate(
+            session,
+            title="Later candidate",
+            pr_number=14,
+            created_at=now + timedelta(minutes=5),
+        )
+        await OperationRepository(session).create(
+            workspace_id=older_workspace_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.pending,
+            payload={"source": "operator", "reason": "manual_validation"},
+        )
+        await session.commit()
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id=later_candidate_id,
+        )
+
+    assert blockers == []
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("clearing_state", ["merged", "closed", "non_canonical"])
 async def test_blocker_clears_when_older_candidate_is_not_open_canonical(
     factory: async_sessionmaker[AsyncSession],
