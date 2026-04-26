@@ -88,6 +88,56 @@ class TestInProcessMergeCoordinator:
         await asyncio.gather(first_task, second_task)
 
     @pytest.mark.unit
+    async def test_prunes_lock_entry_when_merge_lane_is_idle(self) -> None:
+        coordinator = InProcessMergeCoordinator()
+
+        async with coordinator.serialized_merge(
+            repo_url=REPO_URL,
+            base_branch="development",
+        ):
+            pass
+
+        loop_locks = coordinator._locks_by_loop[asyncio.get_running_loop()]
+
+        assert loop_locks == {}
+
+    @pytest.mark.unit
+    async def test_retains_lock_entry_while_task_waits(self) -> None:
+        coordinator = InProcessMergeCoordinator()
+        first_entered = asyncio.Event()
+        release_first = asyncio.Event()
+
+        async def first() -> None:
+            async with coordinator.serialized_merge(
+                repo_url=REPO_URL,
+                base_branch="development",
+            ):
+                first_entered.set()
+                await release_first.wait()
+
+        async def second() -> None:
+            await first_entered.wait()
+            async with coordinator.serialized_merge(
+                repo_url=REPO_URL,
+                base_branch="development",
+            ):
+                pass
+
+        first_task = asyncio.create_task(first())
+        second_task = asyncio.create_task(second())
+        await first_entered.wait()
+        await asyncio.sleep(0)
+
+        loop_locks = coordinator._locks_by_loop[asyncio.get_running_loop()]
+
+        assert len(loop_locks) == 1
+
+        release_first.set()
+        await asyncio.gather(first_task, second_task)
+
+        assert loop_locks == {}
+
+    @pytest.mark.unit
     def test_reuses_coordinator_across_event_loops_after_contention(self) -> None:
         coordinator = InProcessMergeCoordinator()
 
