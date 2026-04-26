@@ -21,18 +21,27 @@ import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
-from awf.db.enums import WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.node.provisioner import Provisioner
+from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 
 _log = get_logger(__name__)
+
+_ACTIVE_EXECUTION_STATUSES: tuple[WorkspaceStatus, ...] = (
+    WorkspaceStatus.running,
+    WorkspaceStatus.validating,
+    WorkspaceStatus.pushing,
+)
+_STALE_ACTIVE_EXECUTION_REASON_CODE = "STALE_ACTIVE_EXECUTION"
+_STALE_ACTIVE_EXECUTION_EVENT_TYPE = "workspace.stale_active_execution_detected"
 
 
 @dataclass(frozen=True)
@@ -43,9 +52,20 @@ class WorkerConfig:
     monitor_claim_lease_seconds: float = 300.0
 
 
+@dataclass(frozen=True)
+class _ActiveExecutionCandidate:
+    workspace_id: str
+    status: WorkspaceStatus
+    compose_project_name: str | None
+
+
 class WorkspaceExecutorProtocol(Protocol):
     async def execute(self, workspace_id: str) -> None: ...
     async def resume_pr_monitor(self, workspace_id: str) -> None: ...
+
+
+class RuntimeInspectorProtocol(Protocol):
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot: ...
 
 
 class ControlWorker:
@@ -57,11 +77,13 @@ class ControlWorker:
         session_factory: async_sessionmaker[AsyncSession],
         provisioner: Provisioner,
         executor: WorkspaceExecutorProtocol | None = None,
+        runtime_inspector: RuntimeInspectorProtocol | None = None,
         config: WorkerConfig,
     ) -> None:
         self._session_factory = session_factory
         self._provisioner = provisioner
         self._executor = executor
+        self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
@@ -79,6 +101,9 @@ class ControlWorker:
         and should immediately loop again.
         """
         dispatched_ids: set[str] = set()
+
+        if self._executor is not None:
+            await self._recover_stale_active_executions()
 
         requested_ids = await self._list_requested()
         requested_ids = await self._filter_current_status(
@@ -243,6 +268,145 @@ class ControlWorker:
             )
         return current_ids
 
+    async def _recover_stale_active_executions(self) -> None:
+        candidates = await self._list_stale_active_execution_candidates(
+            exclude_ids=set(self._execution_tasks)
+        )
+        for candidate in candidates:
+            await self._recover_stale_active_execution(candidate)
+
+    async def _list_stale_active_execution_candidates(
+        self,
+        *,
+        exclude_ids: set[str],
+    ) -> list[_ActiveExecutionCandidate]:
+        active_status_values = [status.value for status in _ACTIVE_EXECUTION_STATUSES]
+        stmt = (
+            select(Workspace.id, Workspace.status, Workspace.compose_project_name)
+            .where(Workspace.status.in_(active_status_values))
+            .order_by(Workspace.created_at.asc(), Workspace.id.asc())
+        )
+        if exclude_ids:
+            stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
+
+        async with self._session_factory() as session:
+            result = await session.execute(stmt)
+            rows = result.all()
+
+        return [
+            _ActiveExecutionCandidate(
+                workspace_id=row[0],
+                status=WorkspaceStatus(row[1]),
+                compose_project_name=row[2],
+            )
+            for row in rows
+        ]
+
+    async def _recover_stale_active_execution(
+        self,
+        candidate: _ActiveExecutionCandidate,
+    ) -> None:
+        try:
+            snapshot = await self._runtime_inspector.inspect(candidate.compose_project_name)
+        except Exception as exc:  # pragma: no cover - defensive around Docker tooling
+            _log.exception(
+                "worker.stale_active_execution_inspect_failed",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                compose_project_name=candidate.compose_project_name,
+            )
+            snapshot = RuntimeSnapshot(
+                stack_state="unavailable",
+                reason=f"runtime inspection failed: {exc}",
+            )
+
+        if candidate.compose_project_name and snapshot.stack_state == "running":
+            await self._record_stale_active_execution_detected(candidate, snapshot)
+            return
+
+        await self._fail_stale_active_execution(candidate, snapshot)
+
+    async def _record_stale_active_execution_detected(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        snapshot: RuntimeSnapshot,
+    ) -> None:
+        payload = {
+            "compose_project_name": candidate.compose_project_name,
+            "workspace_status": candidate.status.value,
+            "runtime": _runtime_snapshot_payload(snapshot),
+        }
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return
+            if await self._has_stale_active_execution_event(session, candidate.workspace_id):
+                return
+
+            await repo.add_event(
+                ws,
+                event_type=_STALE_ACTIVE_EXECUTION_EVENT_TYPE,
+                reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+                payload=payload,
+            )
+            await session.commit()
+
+        _log.warning(
+            _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            compose_project_name=candidate.compose_project_name,
+            runtime=payload["runtime"],
+        )
+
+    async def _has_stale_active_execution_event(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+    ) -> bool:
+        stmt = (
+            select(WorkspaceEvent.id)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == _STALE_ACTIVE_EXECUTION_EVENT_TYPE,
+                WorkspaceEvent.reason_code == _STALE_ACTIVE_EXECUTION_REASON_CODE,
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none() is not None
+
+    async def _fail_stale_active_execution(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        snapshot: RuntimeSnapshot,
+    ) -> None:
+        message = _stale_active_execution_failure_message(candidate, snapshot)
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                candidate.workspace_id,
+                from_status=candidate.status,
+                to=WorkspaceStatus.failed,
+                reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+            )
+            if ws is None:
+                return
+            ws.failure_reason = FailureReason.infrastructure_failure.value
+            ws.failure_message = message[:2048]
+            await session.commit()
+
+        _log.error(
+            "worker.stale_active_execution_failed",
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            compose_project_name=candidate.compose_project_name,
+            runtime_state=snapshot.stack_state,
+            runtime_reason=snapshot.reason,
+            reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
+        )
+
     def _available_execution_slots(self) -> int:
         return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
 
@@ -398,3 +562,44 @@ class ControlWorker:
                 workspace_id=workspace_id,
                 worker_id=self._worker_id,
             )
+
+
+def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:
+    return {
+        "stack_state": snapshot.stack_state,
+        "reason": snapshot.reason,
+        "services": [
+            {
+                "name": service.name,
+                "container_id": service.container_id,
+                "image": service.image,
+                "state": service.state,
+                "status": service.status,
+                "health": service.health,
+                "ports": list(service.ports),
+                "started_at": service.started_at,
+            }
+            for service in snapshot.services
+        ],
+    }
+
+
+def _stale_active_execution_failure_message(
+    candidate: _ActiveExecutionCandidate,
+    snapshot: RuntimeSnapshot,
+) -> str:
+    if not candidate.compose_project_name:
+        runtime_detail = "no compose project is persisted for the workspace"
+    else:
+        runtime_detail = f"compose runtime state is {snapshot.stack_state}"
+        if snapshot.reason:
+            runtime_detail = f"{runtime_detail}: {snapshot.reason.strip()}"
+
+    return (
+        "active execution was lost after a service or Docker restart. "
+        f"The workspace is still marked {candidate.status.value!r}, but this worker has "
+        f"no in-process execution task and {runtime_detail}. "
+        "AWF marked the workspace failed without cleanup; logs, the worktree, and any "
+        "surviving files were preserved for inspection. Inspect the workspace, then "
+        "cancel and redispatch the task when ready."
+    )
