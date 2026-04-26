@@ -546,6 +546,64 @@ class WorkspaceEvent(Base):
     workspace: Mapped[Workspace] = relationship(back_populates="events")
 
 
+class StaleReason(Base):
+    """One structured staleness finding against a candidate / workspace.
+
+    Stale-detection produces these rows whenever the refresh service finds
+    the candidate's validation base is no longer fresh against the target
+    branch. ``status='active'`` rows drive the ``MergeCandidate.stale``
+    flag and the merge-queue ``stale`` blocker reason; rows are flipped
+    to ``status='resolved'`` (with ``resolved_at`` set) when a later
+    refresh shows the trigger no longer applies — the historical record
+    is preserved so console clients can show a timeline.
+    """
+
+    __tablename__ = "stale_reasons"
+    __table_args__ = (
+        Index("ix_stale_reasons_workspace", "workspace_id"),
+        Index("ix_stale_reasons_candidate", "candidate_id"),
+        Index("ix_stale_reasons_status", "status"),
+        Index("ix_stale_reasons_detected_at", "detected_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    candidate_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("merge_candidates.id"), nullable=True
+    )
+    attempt_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=True
+    )
+    task_id: Mapped[str | None] = mapped_column(String(36), ForeignKey("tasks.id"), nullable=True)
+
+    trigger_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    """Coarse trigger taxonomy: ``target_advanced`` / ``path_overlap`` /
+    ``schema_changed`` / ``dependency_changed`` / ``build_config_changed``.
+    Used by clients that want to group reasons by class without parsing
+    ``reason_code`` strings."""
+
+    trigger_ref: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    """Free-form reference for the trigger. For ``target_advanced`` this
+    is the new target SHA; for path-based triggers it is the matching
+    file path."""
+
+    reason_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    """One of ``STALE_TARGET_ADVANCED`` / ``STALE_OVERLAP`` /
+    ``STALE_DEPENDENCY`` / ``STALE_BUILD_CONFIG`` / ``STALE_SCHEMA``."""
+
+    explanation: Mapped[str] = mapped_column(String(2048), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    detected_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    workspace: Mapped[Workspace] = relationship()
+    candidate: Mapped[MergeCandidate | None] = relationship()
+
+
 class WorkspaceLogStream(Base):
     """Durable index for one workspace log stream.
 

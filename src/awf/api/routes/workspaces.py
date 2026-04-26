@@ -22,6 +22,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.api.deps import get_db_session
 from awf.api.schemas import (
     ErrorResponse,
+    StaleReasonListResponse,
+    StaleReasonResponse,
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
@@ -35,7 +37,11 @@ from awf.api.schemas import (
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
+from awf.db.repositories import (
+    StaleReasonRepository,
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.workspaces import (
@@ -283,6 +289,31 @@ async def list_workspace_events(
     return WorkspaceEventListResponse(
         items=[WorkspaceEventResponse.model_validate(row) for row in rows]
     )
+
+
+@router.get(
+    "/{workspace_id}/stale-reasons",
+    response_model=StaleReasonListResponse,
+)
+async def list_workspace_stale_reasons(
+    workspace_id: str,
+    include_resolved: Annotated[bool, Query()] = False,
+    session: AsyncSession = Depends(get_db_session),
+) -> StaleReasonListResponse:
+    repo = WorkspaceRepository(session)
+    if not await repo.exists(workspace_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
+        )
+
+    stale_repo = StaleReasonRepository(session)
+    rows = (
+        await stale_repo.list_for_workspace(workspace_id)
+        if include_resolved
+        else await stale_repo.list_active_for_workspace(workspace_id)
+    )
+    return StaleReasonListResponse(items=[StaleReasonResponse.model_validate(row) for row in rows])
 
 
 @router.post(

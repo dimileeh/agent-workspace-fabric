@@ -49,9 +49,7 @@ async def _create_queue_workspace(
         workspace.status = status.value
         workspace.branch_name = branch_name
         workspace.pr_url = pr_url
-        workspace.pr_number = (
-            int(pr_url.rstrip("/").split("/")[-1]) if pr_url is not None else None
-        )
+        workspace.pr_number = int(pr_url.rstrip("/").split("/")[-1]) if pr_url is not None else None
         if updated_at is not None:
             workspace.updated_at = updated_at
         task = await TaskRepository(session).create_or_get(
@@ -255,7 +253,9 @@ class TestMergeQueueList:
             "readiness",
             "canonical",
             "latest_validation",
+            "stale_reasons",
         }
+        assert item["stale_reasons"] == []
         assert item["candidate_id"].startswith("mc_")
         assert item["candidate_status"] == "open"
         assert item["attempt_id"].startswith("att_")
@@ -444,8 +444,7 @@ class TestMergeQueueList:
 
         assert response.status_code == 200
         actual = {
-            item["workspace_id"]: item["merge_blocker_reason"]
-            for item in response.json()["items"]
+            item["workspace_id"]: item["merge_blocker_reason"] for item in response.json()["items"]
         }
         assert actual == expected
 
@@ -468,9 +467,7 @@ class TestMergeQueueList:
 
         assert response.status_code == 200
         item = next(
-            item
-            for item in response.json()["items"]
-            if item["workspace_id"] == workspace_id
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
         )
         assert item["workspace_id"] == workspace_id
         assert item["status"] == WorkspaceStatus.monitoring_pr.value
@@ -514,9 +511,7 @@ class TestMergeQueueList:
 
         assert response.status_code == 200
         item = next(
-            item
-            for item in response.json()["items"]
-            if item["workspace_id"] == workspace_id
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
         )
         assert item["latest_validation"] == {
             "validation_run_id": "vr_222222222222222222222222",

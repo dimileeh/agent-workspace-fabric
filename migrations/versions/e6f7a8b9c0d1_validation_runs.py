@@ -1,7 +1,7 @@
 """Add durable validation run provenance.
 
 Revision ID: e6f7a8b9c0d1
-Revises: c4d5e6f7a8b9
+Revises: d5e6f7a8b9c0
 Create Date: 2026-04-26 00:00:00.000000+00:00
 """
 
@@ -13,7 +13,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision: str = "e6f7a8b9c0d1"
-down_revision: str | Sequence[str] | None = "c4d5e6f7a8b9"
+down_revision: str | Sequence[str] | None = "d5e6f7a8b9c0"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
 

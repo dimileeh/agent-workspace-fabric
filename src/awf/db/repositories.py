@@ -29,6 +29,7 @@ from awf.common.ids import (
     new_log_stream_id,
     new_merge_candidate_id,
     new_operation_id,
+    new_stale_reason_id,
     new_task_attempt_id,
     new_task_id,
     new_validation_run_id,
@@ -40,6 +41,7 @@ from awf.db.enums import AgentRuntime, OperationStatus, OperationType, Workspace
 from awf.db.models import (
     MergeCandidate,
     Operation,
+    StaleReason,
     Task,
     TaskAttempt,
     ValidationRun,
@@ -191,9 +193,7 @@ class TaskAttemptRepository:
         await self._lock_attempt_number_sequence(task.id)
         max_attempt_number = (
             await self._session.execute(
-                select(func.max(TaskAttempt.attempt_number)).where(
-                    TaskAttempt.task_id == task.id
-                )
+                select(func.max(TaskAttempt.attempt_number)).where(TaskAttempt.task_id == task.id)
             )
         ).scalar_one()
         attempt_number = (max_attempt_number or 0) + 1
@@ -294,8 +294,7 @@ class TaskAttemptRepository:
                 latest_attempt_numbers,
                 and_(
                     TaskAttempt.task_id == latest_attempt_numbers.c.task_id,
-                    TaskAttempt.attempt_number
-                    == latest_attempt_numbers.c.attempt_number,
+                    TaskAttempt.attempt_number == latest_attempt_numbers.c.attempt_number,
                 ),
             )
             .join(Workspace, TaskAttempt.workspace_id == Workspace.id)
@@ -376,7 +375,7 @@ class MergeCandidateRepository:
                         WorkspaceStatus.destroying.value,
                         WorkspaceStatus.destroyed.value,
                     )
-                )
+                ),
             )
             .options(
                 selectinload(MergeCandidate.attempt),
@@ -673,6 +672,162 @@ class ValidationRunRepository:
         return {run.workspace_id: run for run in (await self._session.execute(stmt)).scalars()}
 
 
+@dataclass(frozen=True)
+class StaleReasonCreate:
+    """Per-finding payload for ``StaleReasonRepository.replace_active_findings``."""
+
+    reason_code: str
+    trigger_type: str
+    trigger_ref: str | None
+    explanation: str
+
+
+class StaleReasonRepository:
+    """CRUD helpers for the durable ``stale_reasons`` table.
+
+    Used by the staleness refresh service to keep ``status='active'`` rows
+    in lockstep with the latest evaluation against the target branch. Rows
+    are flipped to ``status='resolved'`` (with ``resolved_at`` set) when a
+    finding no longer applies — the historical row stays so console
+    timelines can show recovery, not just degradation.
+    """
+
+    _ACTIVE = "active"
+    _RESOLVED = "resolved"
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def list_active_for_candidate(
+        self,
+        candidate_id: str,
+    ) -> builtins.list[StaleReason]:
+        return await self._list_for_candidate(candidate_id, status=self._ACTIVE)
+
+    async def list_active_for_candidates(
+        self,
+        candidate_ids: Iterable[str],
+    ) -> dict[str, builtins.list[StaleReason]]:
+        unique_ids = tuple(dict.fromkeys(candidate_ids))
+        if not unique_ids:
+            return {}
+        stmt = (
+            select(StaleReason)
+            .where(
+                StaleReason.candidate_id.in_(unique_ids),
+                StaleReason.status == self._ACTIVE,
+            )
+            .order_by(StaleReason.detected_at.asc(), StaleReason.id.asc())
+        )
+        rows = list((await self._session.execute(stmt)).scalars())
+        out: dict[str, builtins.list[StaleReason]] = {cid: [] for cid in unique_ids}
+        for row in rows:
+            if row.candidate_id is None:  # pragma: no cover - filtered by WHERE
+                continue
+            out[row.candidate_id].append(row)
+        return out
+
+    async def list_for_candidate(
+        self,
+        candidate_id: str,
+    ) -> builtins.list[StaleReason]:
+        return await self._list_for_candidate(candidate_id, status=None)
+
+    async def list_active_for_workspace(
+        self,
+        workspace_id: str,
+    ) -> builtins.list[StaleReason]:
+        return await self._list_for_workspace(workspace_id, status=self._ACTIVE)
+
+    async def list_for_workspace(
+        self,
+        workspace_id: str,
+    ) -> builtins.list[StaleReason]:
+        return await self._list_for_workspace(workspace_id, status=None)
+
+    async def replace_active_findings(
+        self,
+        *,
+        workspace_id: str,
+        candidate_id: str,
+        attempt_id: str | None,
+        task_id: str | None,
+        findings: builtins.list[StaleReasonCreate],
+    ) -> tuple[builtins.list[StaleReason], builtins.list[StaleReason]]:
+        """Make the active findings for ``candidate_id`` exactly match the
+        supplied list. Returns ``(newly_added, newly_resolved)``.
+
+        Idempotent: re-running with the same findings is a no-op (kept rows
+        are not re-emitted as ``newly_added``).
+        """
+        existing_active = await self._list_for_candidate(
+            candidate_id,
+            status=self._ACTIVE,
+        )
+        finding_keys = {(f.reason_code, f.trigger_type, f.trigger_ref) for f in findings}
+        now = datetime.now(UTC)
+
+        newly_resolved: builtins.list[StaleReason] = []
+        kept_keys: set[tuple[str, str, str | None]] = set()
+        for row in existing_active:
+            key = (row.reason_code, row.trigger_type, row.trigger_ref)
+            if key in finding_keys:
+                kept_keys.add(key)
+                continue
+            row.status = self._RESOLVED
+            row.resolved_at = now
+            newly_resolved.append(row)
+
+        newly_added: builtins.list[StaleReason] = []
+        for finding in findings:
+            key = (finding.reason_code, finding.trigger_type, finding.trigger_ref)
+            if key in kept_keys:
+                continue
+            row = StaleReason(
+                id=new_stale_reason_id(),
+                workspace_id=workspace_id,
+                candidate_id=candidate_id,
+                attempt_id=attempt_id,
+                task_id=task_id,
+                trigger_type=finding.trigger_type,
+                trigger_ref=finding.trigger_ref,
+                reason_code=finding.reason_code,
+                explanation=finding.explanation,
+                status=self._ACTIVE,
+                detected_at=now,
+                resolved_at=None,
+            )
+            self._session.add(row)
+            newly_added.append(row)
+
+        await self._session.flush()
+        return newly_added, newly_resolved
+
+    async def _list_for_candidate(
+        self,
+        candidate_id: str,
+        *,
+        status: str | None,
+    ) -> builtins.list[StaleReason]:
+        stmt = select(StaleReason).where(StaleReason.candidate_id == candidate_id)
+        if status is not None:
+            stmt = stmt.where(StaleReason.status == status)
+        stmt = stmt.order_by(StaleReason.detected_at.asc(), StaleReason.id.asc())
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def _list_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        status: str | None,
+    ) -> builtins.list[StaleReason]:
+        stmt = select(StaleReason).where(StaleReason.workspace_id == workspace_id)
+        if status is not None:
+            stmt = stmt.where(StaleReason.status == status)
+        stmt = stmt.order_by(StaleReason.detected_at.asc(), StaleReason.id.asc())
+        return list((await self._session.execute(stmt)).scalars())
+
+
 class WorkspaceRepository:
     """CRUD + state transitions for workspaces.
 
@@ -800,9 +955,7 @@ class WorkspaceRepository:
         branch_base: str,
         owned_paths: list[str],
     ) -> list[OwnedPathConflict]:
-        requested_paths = [
-            path for path in owned_paths if _normalize_owned_path(path) != ""
-        ]
+        requested_paths = [path for path in owned_paths if _normalize_owned_path(path) != ""]
         if not requested_paths:
             return []
 

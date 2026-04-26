@@ -19,14 +19,16 @@ from awf.api.schemas import (
     MergeCandidateReadinessResponse,
     MergeQueueItemResponse,
     MergeQueueListResponse,
+    StaleReasonResponse,
     ValidationRunSummaryResponse,
     WorkspaceEventResponse,
 )
 from awf.api.validation_runs import validation_run_summary
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import MergeCandidate, ValidationRun, Workspace, WorkspaceEvent
+from awf.db.models import MergeCandidate, StaleReason, ValidationRun, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     MergeCandidateRepository,
+    StaleReasonRepository,
     ValidationRunRepository,
     WorkspaceRepository,
 )
@@ -90,11 +92,15 @@ async def list_merge_queue(
     latest_validation_runs = await ValidationRunRepository(session).latest_by_workspace_ids(
         _row_workspace(row).id for row in page_rows
     )
+
+    stale_reasons_by_candidate = await _load_active_stale_reasons(session, page_rows)
+
     return MergeQueueListResponse(
         items=[
             _item_from_row(
                 row,
                 latest_validation_runs.get(_row_workspace(row).id),
+                stale_reasons_by_candidate,
             )
             for row in page_rows
         ],
@@ -105,18 +111,35 @@ async def list_merge_queue(
     )
 
 
+async def _load_active_stale_reasons(
+    session: AsyncSession,
+    rows: list[MergeCandidate | Workspace],
+) -> dict[str, list[StaleReason]]:
+    candidate_ids = [row.id for row in rows if isinstance(row, MergeCandidate)]
+    if not candidate_ids:
+        return {}
+    return await StaleReasonRepository(session).list_active_for_candidates(candidate_ids)
+
+
 def _item_from_row(
     row: MergeCandidate | Workspace,
     latest_validation_run: ValidationRun | None,
+    stale_reasons_by_candidate: dict[str, list[StaleReason]],
 ) -> MergeQueueItemResponse:
     if isinstance(row, MergeCandidate):
-        return _item_from_candidate(row, latest_validation_run)
+        return _item_from_candidate(
+            row,
+            latest_validation_run,
+            stale_reasons=stale_reasons_by_candidate.get(row.id, []),
+        )
     return _item_from_legacy_workspace(row, latest_validation_run)
 
 
 def _item_from_candidate(
     candidate: MergeCandidate,
     latest_validation_run: ValidationRun | None,
+    *,
+    stale_reasons: list[StaleReason],
 ) -> MergeQueueItemResponse:
     workspace = candidate.workspace
     latest_event = _latest_event(workspace.events)
@@ -150,6 +173,7 @@ def _item_from_candidate(
             latest_validation_run,
             current_target_head_sha=candidate.head_sha or workspace.monitor_last_commit_sha,
         ),
+        stale_reasons=[StaleReasonResponse.model_validate(r) for r in stale_reasons],
     )
 
 
@@ -191,6 +215,7 @@ def _item_from_legacy_workspace(
             latest_validation_run,
             current_target_head_sha=workspace.monitor_last_commit_sha,
         ),
+        stale_reasons=[],
     )
 
 
