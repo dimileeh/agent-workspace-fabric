@@ -36,12 +36,23 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
 
     expected_work_dir = "${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}"
     expected_host_home = "${AWF_HOST_HOME:-${HOME}}"
+    expected_auth_mounts = {
+        f"{expected_host_home}/.config/gh:{expected_host_home}/.config/gh:ro",
+        f"{expected_host_home}/.config/gcloud:{expected_host_home}/.config/gcloud:ro",
+        f"{expected_host_home}/.gitconfig:{expected_host_home}/.gitconfig:ro",
+        f"{expected_host_home}/.ssh:{expected_host_home}/.ssh:ro",
+        f"{expected_host_home}/.codex:{expected_host_home}/.codex:ro",
+        f"{expected_host_home}/.claude:{expected_host_home}/.claude:ro",
+        f"{expected_host_home}/.claude.json:{expected_host_home}/.claude.json:ro",
+        f"{expected_host_home}/.gemini:{expected_host_home}/.gemini:ro",
+    }
     for service_name in ("api", "worker"):
         volumes = services[service_name]["volumes"]
         assert "../..:/app" not in volumes
+        assert f"{expected_host_home}:{expected_host_home}:ro" not in volumes
         assert "/var/run/docker.sock:/var/run/docker.sock" in volumes
         assert f"{expected_work_dir}:{expected_work_dir}" in volumes
-        assert f"{expected_host_home}:{expected_host_home}:ro" in volumes
+        assert expected_auth_mounts.issubset(set(volumes))
         environment = services[service_name]["environment"]
         assert environment["AWF_API_BASE_URL"] == "http://api:8000"
         assert environment["AWF_API_TOKEN"] == "${AWF_API_TOKEN:-local-dev-token}"

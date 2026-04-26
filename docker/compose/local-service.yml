@@ -9,7 +9,14 @@ x-awf-service: &awf-service
   volumes:
     - /var/run/docker.sock:/var/run/docker.sock
     - ${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}:${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}
-    - ${AWF_HOST_HOME:-${HOME}}:${AWF_HOST_HOME:-${HOME}}:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.config/gh:${AWF_HOST_HOME:-${HOME}}/.config/gh:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.config/gcloud:${AWF_HOST_HOME:-${HOME}}/.config/gcloud:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.gitconfig:${AWF_HOST_HOME:-${HOME}}/.gitconfig:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.ssh:${AWF_HOST_HOME:-${HOME}}/.ssh:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.codex:${AWF_HOST_HOME:-${HOME}}/.codex:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.claude:${AWF_HOST_HOME:-${HOME}}/.claude:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.claude.json:${AWF_HOST_HOME:-${HOME}}/.claude.json:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.gemini:${AWF_HOST_HOME:-${HOME}}/.gemini:ro
   environment: &awf-environment
     AWF_SERVICE_NAME: awf
     AWF_ENV: local

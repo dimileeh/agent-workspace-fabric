@@ -534,10 +534,11 @@ containers. The local stack defaults this to `${HOME}/.awf/service`, overridable
 with `AWF_HOST_WORK_DIR=/absolute/path`.
 
 The worker also needs host-visible credential paths so workspace stacks can bind
-the same auth into agent containers. Local service mode mounts
-`${AWF_HOST_HOME:-${HOME}}` read-only at the same absolute path inside the API
-and worker containers. Set `AWF_HOST_HOME` if the shell running Docker Compose
-does not expose the operator home as `${HOME}`.
+the same auth into agent containers. Local service mode mounts only the known
+credential paths under `${AWF_HOST_HOME:-${HOME}}` into the API and worker
+containers, rather than mounting the whole home directory. Set `AWF_HOST_HOME`
+if the shell running Docker Compose does not expose the operator home as
+`${HOME}`.
 
 The worker reuses the per-workspace Compose file and project created during
 provisioning. It does not launch a second stack for agent execution,
@@ -790,8 +791,8 @@ Codex auth is intentionally isolated per workspace because a live host
 
 For local service mode, these host paths must be visible to the worker at their
 host absolute paths. `docker/compose/local-service.yml` does this by mounting
-`${AWF_HOST_HOME:-${HOME}}` read-only into the control-plane containers; the
-worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
+only the listed credential paths read-only into the control-plane containers;
+the worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
 `rules/` into `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/codex`
 before launching the workspace stack.
 
