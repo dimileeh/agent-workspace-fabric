@@ -38,6 +38,32 @@ def python_profile(*, source: str = "builtin:python") -> WorkspaceProfile:
     )
 
 
+def go_profile(*, source: str = "builtin:go") -> WorkspaceProfile:
+    return WorkspaceProfile(
+        name="go",
+        source=source,
+        confidence="medium",
+        description="Generic Go project profile using modules.",
+        phases={
+            "setup": ["go mod download"],
+            "validate": ["go test ./..."],
+        },
+    )
+
+
+def rust_profile(*, source: str = "builtin:rust") -> WorkspaceProfile:
+    return WorkspaceProfile(
+        name="rust",
+        source=source,
+        confidence="medium",
+        description="Generic Rust project profile using Cargo.",
+        phases={
+            "setup": ["cargo fetch"],
+            "validate": ["cargo test --all-targets"],
+        },
+    )
+
+
 def node_profile(*, package_manager: str = "npm", source: str = "builtin:node") -> WorkspaceProfile:
     install = {
         "pnpm": "pnpm install --frozen-lockfile",
@@ -83,6 +109,44 @@ def nextjs_profile(
                 }
             ),
         }
+    )
+
+
+def java_profile(*, build_tool: str = "maven", source: str = "builtin:java") -> WorkspaceProfile:
+    if build_tool == "gradle-wrapper":
+        setup = "./gradlew --no-daemon dependencies"
+        validate = "./gradlew --no-daemon test"
+        description = "Generic Java project profile using the Gradle wrapper."
+    elif build_tool == "gradle":
+        setup = "gradle --no-daemon dependencies"
+        validate = "gradle --no-daemon test"
+        description = "Generic Java project profile using Gradle."
+    else:
+        setup = "mvn -B -DskipTests dependency:go-offline"
+        validate = "mvn -B test"
+        description = "Generic Java project profile using Maven."
+    return WorkspaceProfile(
+        name="java",
+        source=source,
+        confidence="medium",
+        description=description,
+        phases={
+            "setup": [setup],
+            "validate": [validate],
+        },
+    )
+
+
+def cpp_profile(*, source: str = "builtin:cpp") -> WorkspaceProfile:
+    return WorkspaceProfile(
+        name="cpp",
+        source=source,
+        confidence="medium",
+        description="Generic C++ project profile using CMake.",
+        phases={
+            "setup": ["cmake -S . -B build"],
+            "validate": ["cmake --build build", "ctest --test-dir build --output-on-failure"],
+        },
     )
 
 
@@ -140,6 +204,10 @@ BUILTIN_PROFILES: dict[str, WorkspaceProfile] = {
     "python": python_profile(),
     "node": node_profile(),
     "nextjs": nextjs_profile(),
+    "go": go_profile(),
+    "rust": rust_profile(),
+    "java": java_profile(),
+    "cpp": cpp_profile(),
     "docker-compose": docker_compose_profile(),
     "aira": aira_profile(),
 }
@@ -166,6 +234,15 @@ def detect_profile(worktree_path: Path) -> WorkspaceProfile | None:
         worktree_path / "requirements.txt"
     ).is_file():
         return python_profile(source="detector:python")
+    if (worktree_path / "go.mod").is_file():
+        return go_profile(source="detector:go")
+    if (worktree_path / "Cargo.toml").is_file():
+        return rust_profile(source="detector:rust")
+    java_build_tool = _detect_java_build_tool(worktree_path)
+    if java_build_tool is not None:
+        return java_profile(build_tool=java_build_tool, source="detector:java")
+    if (worktree_path / "CMakeLists.txt").is_file():
+        return cpp_profile(source="detector:cpp")
     return None
 
 
@@ -189,6 +266,16 @@ def _detect_package_manager(worktree_path: Path) -> str:
     if (worktree_path / "bun.lockb").is_file() or (worktree_path / "bun.lock").is_file():
         return "bun"
     return "npm"
+
+
+def _detect_java_build_tool(worktree_path: Path) -> str | None:
+    if (worktree_path / "pom.xml").is_file():
+        return "maven"
+    if (worktree_path / "gradlew").is_file():
+        return "gradle-wrapper"
+    if (worktree_path / "build.gradle").is_file():
+        return "gradle"
+    return None
 
 
 def _looks_like_nextjs(package_json: Path) -> bool:
