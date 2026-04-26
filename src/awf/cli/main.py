@@ -18,12 +18,14 @@ import os
 import sys
 import urllib.parse
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 import httpx
 import typer
 
-from awf.db.enums import OperationStatus, OperationType
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 app = typer.Typer(
@@ -210,6 +212,70 @@ def service_logs(
         typer.echo(result.stdout, nl=False)
     if result.stderr:
         typer.echo(result.stderr, err=True, nl=False)
+
+
+@service_app.command("gc")
+def service_gc(
+    execute: bool = typer.Option(
+        False,
+        "--execute",
+        help="Delete selected worktree, compose, and auth directories. Defaults to dry-run.",
+    ),
+    min_age_hours: int = typer.Option(
+        DEFAULT_MIN_AGE_HOURS,
+        "--min-age-hours",
+        min=0,
+        help="Only consider terminal workspaces whose last update is at least this old.",
+    ),
+    limit: int | None = typer.Option(
+        None,
+        "--limit",
+        min=1,
+        help="Maximum number of candidates to plan, oldest first.",
+    ),
+    status: list[WorkspaceStatus] = typer.Option(
+        [],
+        "--status",
+        help=(
+            "Repeatable terminal status filter. Active statuses are always protected "
+            "even when requested."
+        ),
+    ),
+    exclude_status: list[WorkspaceStatus] = typer.Option(
+        [],
+        "--exclude-status",
+        help="Repeatable status filter to remove from the eligible terminal set.",
+    ),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Plan or execute filesystem GC for terminal service workspaces."""
+    from awf.db.session import make_engine, make_session_factory
+    from awf.service.config import resolve_service_settings
+    from awf.service.gc import run_terminal_workspace_gc
+
+    settings = resolve_service_settings()
+    engine = make_engine(settings.database_url)
+    session_factory = make_session_factory(engine)
+
+    async def _run() -> object:
+        try:
+            result = await run_terminal_workspace_gc(
+                session_factory,
+                work_dir=Path(settings.work_dir).expanduser().resolve(),
+                min_age_hours=min_age_hours,
+                limit=limit,
+                include_statuses=status or None,
+                exclude_statuses=exclude_status or None,
+                execute=execute,
+            )
+            return result.to_dict()
+        finally:
+            await engine.dispose()
+
+    payload = asyncio.run(_run())
+    _emit(payload, fmt)
+    if isinstance(payload, dict) and payload.get("delete_errors"):
+        raise typer.Exit(code=1)
 
 
 @workspace_app.command("create")
