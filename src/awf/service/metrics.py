@@ -42,6 +42,9 @@ EXECUTION_QUEUE_STATUSES = frozenset({WorkspaceStatus.ready.value})
 ADMISSION_OK_REASON = "ADMISSION_OK"
 WORKER_PROVISION_CONCURRENCY_SATURATED_REASON = "WORKER_PROVISION_CONCURRENCY_SATURATED"
 WORKER_EXECUTION_CONCURRENCY_SATURATED_REASON = "WORKER_EXECUTION_CONCURRENCY_SATURATED"
+WORKER_PROVISION_AND_EXECUTION_CONCURRENCY_SATURATED_REASON = (
+    "WORKER_PROVISION_AND_EXECUTION_CONCURRENCY_SATURATED"
+)
 
 
 @dataclass(frozen=True)
@@ -404,7 +407,22 @@ def _resource_admission_summary(
             ),
         )
 
-    if concurrency.execution.available <= 0:
+    provision_saturated = concurrency.provision.available <= 0
+    execution_saturated = concurrency.execution.available <= 0
+
+    if provision_saturated and execution_saturated:
+        return AdmissionSummary(
+            ok=True,
+            status="saturated",
+            reason=WORKER_PROVISION_AND_EXECUTION_CONCURRENCY_SATURATED_REASON,
+            detail=(
+                "Provisioning and execution workers are at their configured concurrency limits; "
+                "new workspaces can be accepted but may wait for both provisioning and "
+                "execution capacity."
+            ),
+        )
+
+    if execution_saturated:
         return AdmissionSummary(
             ok=True,
             status="saturated",
@@ -415,7 +433,7 @@ def _resource_admission_summary(
             ),
         )
 
-    if concurrency.provision.available <= 0:
+    if provision_saturated:
         return AdmissionSummary(
             ok=True,
             status="saturated",

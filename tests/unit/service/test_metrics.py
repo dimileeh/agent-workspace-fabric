@@ -287,6 +287,38 @@ async def test_resource_saturation_reports_active_counts_and_configured_defaults
 
 
 @pytest.mark.unit
+async def test_resource_saturation_admission_reports_both_saturated_concurrency_lanes(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_max_concurrent_provisions=1,
+        worker_max_concurrent_executions=1,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(session_factory, status=WorkspaceStatus.provisioning, updated_at=now)
+    await _workspace(session_factory, status=WorkspaceStatus.running, updated_at=now)
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.concurrency.provision.available == 0
+    assert summary.concurrency.execution.available == 0
+    assert summary.admission.ok is True
+    assert summary.admission.status == "saturated"
+    assert summary.admission.reason == "WORKER_PROVISION_AND_EXECUTION_CONCURRENCY_SATURATED"
+    assert summary.admission.detail is not None
+    assert "Provisioning and execution workers" in summary.admission.detail
+
+
+@pytest.mark.unit
 async def test_resource_saturation_admission_blocks_on_disk_pressure(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
