@@ -2012,7 +2012,8 @@ async function apiPost<T>(path: string): Promise<ApiEnvelope<T>> {
 
 async function parseApiResponse<T>(response: Response): Promise<ApiEnvelope<T>> {
   const text = await response.text();
-  const body = parseJsonOrNull(text);
+  const parsed = parseJson(text);
+  const body = parsed.ok ? parsed.value : null;
   if (!response.ok) {
     const errorBody = body as
       | { detail?: { error_code?: string; message?: string }; message?: string; error_code?: string }
@@ -2029,7 +2030,7 @@ async function parseApiResponse<T>(response: Response): Promise<ApiEnvelope<T>> 
       detail: body ?? text,
     };
   }
-  if (body === null && text) {
+  if (!parsed.ok) {
     return {
       ok: false,
       status: response.status,
@@ -2040,14 +2041,16 @@ async function parseApiResponse<T>(response: Response): Promise<ApiEnvelope<T>> 
   return { ok: true, data: body as T };
 }
 
-function parseJsonOrNull(text: string): unknown | null {
+type ParsedJson = { ok: true; value: unknown | null } | { ok: false };
+
+function parseJson(text: string): ParsedJson {
   if (!text) {
-    return null;
+    return { ok: true, value: null };
   }
   try {
-    return JSON.parse(text) as unknown;
+    return { ok: true, value: JSON.parse(text) as unknown };
   } catch {
-    return null;
+    return { ok: false };
   }
 }
 
