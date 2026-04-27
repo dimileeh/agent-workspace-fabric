@@ -36,6 +36,8 @@ from awf.runtime.validation import (
     ValidationRunner,
 )
 
+from .executor_paths import _test_worktrees_root
+
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
@@ -197,6 +199,7 @@ async def _seed_ready_workspace(
     compose_file_path: str | None = None,
     resolved_profile: dict | None = None,
     task_policy: dict | None = None,
+    create_worktree: bool = True,
 ) -> str:
     """Insert a workspace already in the ``ready`` state for the executor to pick up."""
     async with factory() as s:
@@ -220,8 +223,9 @@ async def _seed_ready_workspace(
         ws.compose_file_path = compose_file_path
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="X")
         await s.commit()
+        if create_worktree:
+            (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
         return ws.id
-
 
 class TestHappyPath:
     @pytest.mark.unit
