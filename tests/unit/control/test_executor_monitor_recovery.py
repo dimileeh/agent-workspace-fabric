@@ -298,7 +298,10 @@ async def test_executor_recovery_marks_validate_operation_succeeded_on_clean_pas
 ) -> None:
     """The validate Operation row created by the monitor's
     RECOVERY_DISPATCH must transition pending → succeeded when
-    validation passes."""
+    validation passes. ``started_at`` must be earlier than
+    ``finished_at`` so observability tooling sees a real lifecycle
+    rather than a row that jumped straight from pending to a terminal
+    status."""
 
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
     ws_id = await _seed_ready_workspace_with_recovery(factory)
@@ -320,6 +323,9 @@ async def test_executor_recovery_marks_validate_operation_succeeded_on_clean_pas
     assert op.status == OperationStatus.succeeded.value
     assert isinstance(op.result, dict)
     assert "validation_run_id" in op.result
+    assert op.started_at is not None
+    assert op.finished_at is not None
+    assert op.started_at < op.finished_at
 
 
 @pytest.mark.unit

@@ -317,6 +317,14 @@ class WorkspaceExecutor:
                     )
                     return
             else:
+                # The monitor created the recovery Operation in ``pending``;
+                # flush it to ``running`` before validation so observability
+                # tooling sees a real ``started_at`` (otherwise the row jumps
+                # straight from pending → succeeded/failed when the validate
+                # finalizer fires, with started_at == finished_at).
+                await self._start_pending_monitor_recovery_operations(
+                    workspace_id=workspace_id,
+                )
                 _log.info(
                     "executor.monitor_recovery_started",
                     workspace_id=workspace_id,
@@ -1828,6 +1836,36 @@ class WorkspaceExecutor:
             )
             await session.commit()
             return run.id
+
+    async def _start_pending_monitor_recovery_operations(
+        self,
+        *,
+        workspace_id: str,
+    ) -> None:
+        """Flush pending pr_monitor recovery operations to ``running``.
+
+        The monitor's RECOVERY_DISPATCH path creates the validate
+        Operation in ``pending``; without an explicit transition the row
+        would jump straight to ``succeeded``/``failed`` with
+        ``started_at == finished_at``, which loses the recovery
+        lifecycle for observability tooling.
+        """
+        async with self._session_factory() as session:
+            repo = OperationRepository(session)
+            pending = await repo.list_for_workspace(
+                workspace_id,
+                status=OperationStatus.pending,
+                limit=100,
+            )
+            now = datetime.now(UTC)
+            for operation in pending:
+                payload = operation.payload
+                if not isinstance(payload, dict) or payload.get("source") != "pr_monitor":
+                    continue
+                operation.status = OperationStatus.running.value
+                if operation.started_at is None:
+                    operation.started_at = now
+            await session.commit()
 
     async def _finish_pending_monitor_recovery_operations(
         self,
