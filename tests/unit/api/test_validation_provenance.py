@@ -264,7 +264,7 @@ async def _insert_validation_run(
     attempt_id: str | None = None,
     tier: int = 1,
     command_set_hash: str = "0" * 64,
-    commands: list[dict] | None = None,
+    commands: object | None = None,
     base_commit: str | None = "base-persisted",
     target_branch: str | None = "awf/persisted-validation",
     target_head_sha: str | None = "target-persisted",
@@ -571,6 +571,29 @@ async def test_validation_provenance_malformed_persisted_command_uses_safe_defau
     assert item["stderr_byte_count"] == 0
     assert item["target_branch"] is None
     assert item["branch_name"] is None
+
+
+@pytest.mark.unit
+async def test_validation_provenance_malformed_persisted_commands_container_uses_fallback(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _insert_validation_run(
+        engine,
+        run_id="vr_malformed_commands_00001",
+        workspace_id=workspace_id,
+        commands={"unexpected": "object"},
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["phase"] == "unknown"
+    assert item["command_index"] == 0
+    assert item["command"] is None
+    assert item["stream_ids"] == {"stdout": None, "stderr": None}
 
 
 @pytest.mark.unit
