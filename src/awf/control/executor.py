@@ -98,6 +98,32 @@ _log = get_logger(__name__)
 
 WORKTREE_MISSING_REASON_CODE = "WORKTREE_MISSING"
 
+_MONITOR_RECOVERY_ACTIVE_OPERATION_STATUSES = {
+    OperationStatus.pending.value,
+    OperationStatus.running.value,
+}
+
+
+def _pending_monitor_recovery(workspace: Any) -> dict[str, Any] | None:
+    """Return the active pr_monitor recovery payload (or ``None``).
+
+    The PR monitor's RECOVERY_DISPATCH path creates an Operation row
+    with ``payload["source"] == "pr_monitor"``; the executor uses this
+    as the discriminator that separates monitor-driven recovery from
+    a fresh feature-execution pass.
+    """
+    operations = getattr(workspace, "operations", None) or []
+    for operation in operations:
+        if operation.status not in _MONITOR_RECOVERY_ACTIVE_OPERATION_STATUSES:
+            continue
+        payload = operation.payload
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("source") != "pr_monitor":
+            continue
+        return payload
+    return None
+
 
 @dataclass(frozen=True)
 class ExecutorConfig:
@@ -209,6 +235,12 @@ class WorkspaceExecutor:
         worktree_path = self._config.worktrees_root / workspace_id
 
         # ── Step 1: agent CLI runs the task inside the container ────────────
+        # When the PR monitor's RECOVERY_DISPATCH path delivered this
+        # workspace, the executor must NOT re-run planning, the agent
+        # CLI, or any post-agent commit hooks — those would rewrite the
+        # plan artifact and re-implement the feature mid-merge. Recovery
+        # only re-runs validation against the already-pushed work.
+        recovery = _pending_monitor_recovery(ws)
         baseline_coverage: ValidationCoverageResult | None = None
         try:
             agent = AgentRuntime(ws.agent)
@@ -232,6 +264,17 @@ class WorkspaceExecutor:
             )
             if not setup_result.all_passed:
                 first_fail = setup_result.first_failure
+                if recovery is not None:
+                    await self._finish_pending_monitor_recovery_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        reason_code="MONITOR_RECOVERY_SETUP_FAILED",
+                        error_message=(
+                            f"profile setup failed: {first_fail.command}"
+                            if first_fail is not None
+                            else "profile setup failed"
+                        )[:2000],
+                    )
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
@@ -243,35 +286,43 @@ class WorkspaceExecutor:
                     )[:2000],
                 )
                 return
-            baseline_coverage = await self._run_baseline_coverage_preflight(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-            )
-            if not await self._recheck_status(
-                workspace_id,
-                expected=WorkspaceStatus.running,
-                action="agent_run",
-            ):
-                return
-            planning_error = await self._run_agent_task_with_optional_planning(
-                adapter=adapter,
-                workspace=ws,
-                profile=profile,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                worktree_path=worktree_path,
-                model=default_model,
-            )
-            if planning_error is not None:
-                await self._mark_failed(
+            if recovery is None:
+                baseline_coverage = await self._run_baseline_coverage_preflight(
                     workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.agent_failure,
-                    message=planning_error[:2000],
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    profile=profile,
                 )
-                return
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.running,
+                    action="agent_run",
+                ):
+                    return
+                planning_error = await self._run_agent_task_with_optional_planning(
+                    adapter=adapter,
+                    workspace=ws,
+                    profile=profile,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    worktree_path=worktree_path,
+                    model=default_model,
+                )
+                if planning_error is not None:
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.agent_failure,
+                        message=planning_error[:2000],
+                    )
+                    return
+            else:
+                _log.info(
+                    "executor.monitor_recovery_started",
+                    workspace_id=workspace_id,
+                    recovery_mode=recovery.get("recovery_mode"),
+                    reason=recovery.get("reason"),
+                )
             agent_exit_note = None
         except ComposeExecCleanupError as exc:
             _log.error(

@@ -7,6 +7,7 @@ dispatched (`recovery_mode = "validate_only"`).
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 
@@ -33,7 +34,6 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
-    pr_payload,
     seed_monitoring_workspace,
 )
 
@@ -101,10 +101,10 @@ async def test_initial_review_grace_defers_stale_recovery_dispatch(
         initial_review_grace_period_seconds=900,
     )
 
-    state = MonitorState(started_at=1_000.0)
+    # Seed the state with a monotonic timestamp ~now so grace is active.
+    state = MonitorState(started_at=time.monotonic())
 
-    # Use the private dispatcher directly so we can control "now" via
-    # state.started_at (the helper computes wait = grace - (now - started)).
+    # Use the private dispatcher directly so we can control state.
     # By passing a Merge action with a still-active grace window the
     # dispatcher must honour grace before checking stale.
     terminal = await runner._execute(
@@ -145,13 +145,11 @@ async def test_initial_review_grace_defers_stale_recovery_dispatch(
         assert payload.get("stale_reason") == "validation_insufficient_tier"
         assert payload.get("req_action") == "validate"
 
-    # The grace bookkeeping key was persisted so the wait does not
-    # restart on the next iteration.
-    async with factory() as s:
-        ws = await WorkspaceRepository(s).get(workspace_id)
-        assert ws is not None
-        threads = ws.monitor_threads_addressed or {}
-        assert _initial_review_grace_started_key(42) in threads
+    # The grace bookkeeping key is in-memory on the state; the main
+    # ``run()`` loop calls ``_persist_state`` after the dispatcher
+    # returns, but here we exercise ``_execute`` directly so we only
+    # check the in-memory mutation.
+    assert _initial_review_grace_started_key(42) in state.threads_addressed_ids
 
 
 @pytest.mark.unit
@@ -252,7 +250,7 @@ async def test_manual_merge_mode_aborts_stale_regardless_of_grace(
 
     # Grace would still be active (started_at ~now), but manual merge
     # mode must abort instead of waiting.
-    state = MonitorState(started_at=1_000.0)
+    state = MonitorState(started_at=time.monotonic())
 
     terminal = await runner._execute(
         action=Merge(),
@@ -349,7 +347,7 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
     original_module_compute = merge_eligibility.compute_stale_reason
     merge_eligibility.compute_stale_reason = fake_compute_stale_reason  # type: ignore[assignment]
     try:
-        state = MonitorState(started_at=1_000.0)
+        state = MonitorState(started_at=time.monotonic())
         terminal = await runner._execute(
             action=Merge(),
             workspace_id=workspace_id,
