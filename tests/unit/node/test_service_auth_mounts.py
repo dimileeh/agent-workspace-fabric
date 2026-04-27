@@ -20,6 +20,13 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     (host_home / ".claude" / "settings.json").write_text('{"theme": "dark"}\n')
     (host_home / ".gemini").mkdir()
     (host_home / ".gemini" / "settings.json").write_text('{"selectedAuthType": "oauth"}\n')
+    (host_home / ".config" / "opencode").mkdir(parents=True)
+    (host_home / ".config" / "opencode" / "opencode.json").write_text('{"model": "ollama/x"}\n')
+    (host_home / ".ollama").mkdir()
+    (host_home / ".ollama" / "config.json").write_text('{"integrations": {}}\n')
+    (host_home / ".ollama" / "id_ed25519").write_text("private-key\n")
+    (host_home / ".ollama" / "models").mkdir()
+    (host_home / ".ollama" / "models" / "large-blob").write_text("do not copy\n")
     (host_home / ".gitconfig").write_text("[user]\n  name = Test\n")
     (host_home / ".claude.json").write_text("{}\n")
 
@@ -33,6 +40,8 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     by_target = {m.target: m for m in mounts}
     claude_home = work_dir / "auth" / "ws_auth" / "claude"
     gemini_home = work_dir / "auth" / "ws_auth" / "gemini"
+    opencode_home = work_dir / "auth" / "ws_auth" / "opencode"
+    ollama_home = work_dir / "auth" / "ws_auth" / "ollama"
     assert by_target["/home/agent/.config/gh"].source == str(host_home / ".config" / "gh")
     assert by_target["/home/agent/.config/gh"].mode == "ro"
     assert by_target["/home/agent/.config/gcloud"].source == str(host_home / ".config" / "gcloud")
@@ -52,6 +61,20 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
     assert (gemini_home / ".gemini" / "settings.json").read_text() == (
         '{"selectedAuthType": "oauth"}\n'
     )
+    assert by_target["/home/agent/.config/opencode"].source == str(
+        opencode_home / ".config" / "opencode"
+    )
+    assert by_target["/home/agent/.config/opencode"].mode == "rw"
+    assert (
+        opencode_home / ".config" / "opencode" / "opencode.json"
+    ).read_text() == '{"model": "ollama/x"}\n'
+    assert by_target["/home/agent/.ollama"].source == str(ollama_home / ".ollama")
+    assert by_target["/home/agent/.ollama"].mode == "rw"
+    assert (ollama_home / ".ollama" / "config.json").read_text() == (
+        '{"integrations": {}}\n'
+    )
+    assert (ollama_home / ".ollama" / "id_ed25519").read_text() == "private-key\n"
+    assert not (ollama_home / ".ollama" / "models").exists()
 
 
 @pytest.mark.unit
@@ -180,6 +203,46 @@ def test_service_auth_mounts_preserve_existing_workspace_gemini_auth(tmp_path: P
     )
 
     assert (gemini_dir / "settings.json").read_text() == '{"auth": "agent-refreshed"}\n'
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_preserve_existing_workspace_opencode_and_ollama_auth(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_opencode = host_home / ".config" / "opencode"
+    host_ollama = host_home / ".ollama"
+    host_opencode.mkdir(parents=True)
+    host_ollama.mkdir(parents=True)
+    (host_opencode / "opencode.json").write_text('{"model": "initial"}\n')
+    (host_ollama / "config.json").write_text('{"token": "initial"}\n')
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+    by_target = {m.target: m for m in mounts}
+    opencode_dir = Path(by_target["/home/agent/.config/opencode"].source)
+    ollama_dir = Path(by_target["/home/agent/.ollama"].source)
+    (opencode_dir / "opencode.json").write_text('{"model": "agent-refreshed"}\n')
+    (ollama_dir / "config.json").write_text('{"token": "agent-refreshed"}\n')
+    (host_opencode / "opencode.json").write_text('{"model": "host-updated"}\n')
+    (host_ollama / "config.json").write_text('{"token": "host-updated"}\n')
+
+    resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    assert (opencode_dir / "opencode.json").read_text() == (
+        '{"model": "agent-refreshed"}\n'
+    )
+    assert (ollama_dir / "config.json").read_text() == '{"token": "agent-refreshed"}\n'
 
 
 @pytest.mark.unit

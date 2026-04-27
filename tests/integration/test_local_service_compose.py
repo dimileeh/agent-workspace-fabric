@@ -50,6 +50,8 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         f"{expected_host_home}/.claude:{expected_host_home}/.claude:ro",
         f"{expected_host_home}/.claude.json:{expected_host_home}/.claude.json:ro",
         f"{expected_host_home}/.gemini:{expected_host_home}/.gemini:ro",
+        f"{expected_host_home}/.config/opencode:{expected_host_home}/.config/opencode:ro",
+        f"{expected_host_home}/.ollama:{expected_host_home}/.ollama:ro",
     }
     for service_name in ("api", "worker"):
         volumes = services[service_name]["volumes"]
@@ -69,6 +71,9 @@ def test_local_service_compose_declares_control_plane_stack() -> None:
         assert (
             environment["GOOGLE_APPLICATION_CREDENTIALS"] == "${GOOGLE_APPLICATION_CREDENTIALS:-}"
         )
+        assert environment["AWF_OPENCODE_OLLAMA_BASE_URL"] == "${AWF_OPENCODE_OLLAMA_BASE_URL:-}"
+        assert environment["OLLAMA_HOST"] == "${OLLAMA_HOST:-}"
+        assert environment["OLLAMA_API_KEY"] == "${OLLAMA_API_KEY:-}"
         assert environment["SSH_AUTH_SOCK"] == "/run/host-services/ssh-auth.sock"
 
     assert "awf-work" not in data.get("volumes", {})

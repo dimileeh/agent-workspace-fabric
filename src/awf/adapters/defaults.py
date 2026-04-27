@@ -16,6 +16,7 @@ DEFAULT_AGENT_DEFAULTS: Mapping[AgentRuntime, AgentDefaults] = MappingProxyType(
         # ModelNotFoundError; ``gemini-3-pro-preview`` is the current
         # Pro-class model ID accepted by the CLI.
         AgentRuntime.gemini: AgentDefaults(model="gemini-3-pro-preview", effort="xhigh"),
+        AgentRuntime.opencode: AgentDefaults(model="ollama/kimi-k2.6:cloud", effort="xhigh"),
     }
 )
 

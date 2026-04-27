@@ -141,3 +141,6 @@ class AgentRuntime(StrEnum):
 
     gemini = "gemini"
     """Google Gemini CLI — ``gemini --yolo``."""
+
+    opencode = "opencode"
+    """OpenCode CLI — ``opencode run`` with an AWF-managed provider config."""

@@ -33,6 +33,7 @@ from sqlalchemy.ext.asyncio import create_async_engine  # noqa: E402
 import awf.adapters.claude_code  # noqa: E402, F401
 import awf.adapters.codex  # noqa: E402, F401
 import awf.adapters.gemini  # noqa: E402, F401
+import awf.adapters.opencode  # noqa: E402, F401
 from awf.adapters import base as _adapter_base  # noqa: E402
 from awf.adapters.base import AgentAdapter, AgentRunResult  # noqa: E402
 from awf.common.commands import AsyncioSubprocessRunner  # noqa: E402

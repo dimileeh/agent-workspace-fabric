@@ -1133,6 +1133,8 @@ class TestBuildAuthMounts:
         (tmp_path / ".claude").mkdir()
         # .claude.json exists as a file
         (tmp_path / ".claude.json").write_text("{}")
+        (tmp_path / ".config" / "opencode").mkdir(parents=True)
+        (tmp_path / ".ollama").mkdir()
         (tmp_path / ".config" / "gh").mkdir(parents=True)
         (tmp_path / ".config" / "gcloud").mkdir(parents=True)
         (tmp_path / ".gitconfig").write_text("")
@@ -1145,6 +1147,8 @@ class TestBuildAuthMounts:
         assert "/home/agent/.config/gh" in targets
         assert "/home/agent/.config/gcloud" in targets
         assert "/home/agent/.gitconfig" in targets
+        assert "/home/agent/.config/opencode" not in targets
+        assert "/home/agent/.ollama" not in targets
         assert "/home/agent/.gemini" not in targets
         assert "/home/agent/.ssh" not in targets
 
@@ -1157,6 +1161,8 @@ class TestBuildAuthMounts:
         assertion."""
         for d in (".codex", ".claude", ".gemini"):
             (tmp_path / d).mkdir()
+        (tmp_path / ".config" / "opencode").mkdir(parents=True)
+        (tmp_path / ".ollama").mkdir()
         (tmp_path / ".claude.json").write_text("{}")
         (tmp_path / ".config" / "gh").mkdir(parents=True)
         (tmp_path / ".config" / "gcloud").mkdir(parents=True)
@@ -1166,6 +1172,8 @@ class TestBuildAuthMounts:
         mounts = run_awf._build_auth_mounts(tmp_path)
         by_target = {m.target: m for m in mounts}
         assert "/home/agent/.codex" not in by_target
+        assert "/home/agent/.config/opencode" not in by_target
+        assert "/home/agent/.ollama" not in by_target
         assert by_target["/home/agent/.claude"].mode == "rw"
         assert by_target["/home/agent/.gemini"].mode == "rw"
         assert by_target["/home/agent/.config/gh"].mode == "ro"
@@ -1252,6 +1260,51 @@ class TestBuildAuthMounts:
 
         assert mounts == (base_mount,)
 
+    @pytest.mark.unit
+    def test_workspace_auth_mounts_seed_isolated_opencode_and_ollama_auth(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        host_home = tmp_path / "host"
+        host_opencode = host_home / ".config" / "opencode"
+        host_ollama = host_home / ".ollama"
+        host_opencode.mkdir(parents=True)
+        host_ollama.mkdir(parents=True)
+        (host_opencode / "opencode.json").write_text('{"model": "initial"}\n')
+        (host_ollama / "config.json").write_text('{"integrations": {}}\n')
+        (host_ollama / "id_ed25519").write_text("private-key\n")
+        (host_ollama / "models").mkdir()
+        (host_ollama / "models" / "large-blob").write_text("do not copy\n")
+        base_mount = run_awf.AuthMount(
+            source=str(host_home / ".claude"),
+            target="/home/agent/.claude",
+            mode="rw",
+        )
+
+        mounts = run_awf._workspace_auth_mounts(
+            [base_mount],
+            workspace_id="ws_test",
+            work_dir=tmp_path / "work",
+            host_home=host_home,
+        )
+
+        by_target = {m.target: m for m in mounts}
+        opencode_mount = by_target["/home/agent/.config/opencode"]
+        ollama_mount = by_target["/home/agent/.ollama"]
+        opencode_home = Path(opencode_mount.source)
+        ollama_home = Path(ollama_mount.source)
+        assert opencode_mount.mode == "rw"
+        assert ollama_mount.mode == "rw"
+        assert opencode_home == (
+            tmp_path / "work" / "auth" / "ws_test" / "opencode" / ".config" / "opencode"
+        )
+        assert ollama_home == tmp_path / "work" / "auth" / "ws_test" / "ollama" / ".ollama"
+        assert (opencode_home / "opencode.json").read_text() == '{"model": "initial"}\n'
+        assert (ollama_home / "config.json").read_text() == '{"integrations": {}}\n'
+        assert (ollama_home / "id_ed25519").read_text() == "private-key\n"
+        assert not (ollama_home / "models").exists()
+        assert by_target["/home/agent/.claude"] == base_mount
+
 
 class TestAgentEnvironmentWithHostAuth:
     @pytest.mark.unit
@@ -1261,6 +1314,7 @@ class TestAgentEnvironmentWithHostAuth:
             host_env={
                 "ANTHROPIC_API_KEY": "secret-anthropic",
                 "GEMINI_API_KEY": "secret-gemini",
+                "OLLAMA_API_KEY": "secret-ollama",
                 "AWF_GITHUB_TOKEN": "ghp_raw_secret",
             },
         )
@@ -1268,9 +1322,11 @@ class TestAgentEnvironmentWithHostAuth:
         assert ("PYTHONUNBUFFERED", "1") in env
         assert ("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}") in env
         assert ("GEMINI_API_KEY", "${GEMINI_API_KEY}") in env
+        assert ("OLLAMA_API_KEY", "${OLLAMA_API_KEY}") in env
         assert ("GH_TOKEN", "${AWF_GITHUB_TOKEN}") in env
         assert ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}") in env
         assert ("ANTHROPIC_API_KEY", "secret-anthropic") not in env
+        assert ("OLLAMA_API_KEY", "secret-ollama") not in env
         assert ("GH_TOKEN", "ghp_raw_secret") not in env
         assert ("GITHUB_TOKEN", "ghp_raw_secret") not in env
 

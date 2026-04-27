@@ -47,6 +47,11 @@ _AUTH_FAILURE_MARKERS = (
     "google_api_key",
     "google_genai_use_vertexai",
     "google_genai_use_gca",
+    "ollama api key",
+    "ollama cloud authentication",
+    "opencode auth",
+    "unauthorized",
+    "401",
 )
 
 
@@ -283,9 +288,9 @@ class AgentAdapter(ABC):
 
 # ── Registry ──────────────────────────────────────────────────────────────
 
-# Populated by awf.adapters.codex / .claude_code / .gemini on import. Keyed by
-# AgentRuntime enum so callers that receive a Workspace.agent string just map
-# through the enum.
+# Populated by awf.adapters.codex / .claude_code / .gemini / .opencode on
+# import. Keyed by AgentRuntime enum so callers that receive a Workspace.agent
+# string just map through the enum.
 _REGISTRY: dict[AgentRuntime, type[AgentAdapter]] = {}
 
 

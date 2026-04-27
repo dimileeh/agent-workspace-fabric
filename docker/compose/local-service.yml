@@ -18,6 +18,8 @@ x-awf-service: &awf-service
     - ${AWF_HOST_HOME:-${HOME}}/.claude:${AWF_HOST_HOME:-${HOME}}/.claude:ro
     - ${AWF_HOST_HOME:-${HOME}}/.claude.json:${AWF_HOST_HOME:-${HOME}}/.claude.json:ro
     - ${AWF_HOST_HOME:-${HOME}}/.gemini:${AWF_HOST_HOME:-${HOME}}/.gemini:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.config/opencode:${AWF_HOST_HOME:-${HOME}}/.config/opencode:ro
+    - ${AWF_HOST_HOME:-${HOME}}/.ollama:${AWF_HOST_HOME:-${HOME}}/.ollama:ro
   environment: &awf-environment
     AWF_SERVICE_NAME: awf
     AWF_ENV: local
@@ -50,6 +52,9 @@ x-awf-service: &awf-service
     GOOGLE_CLOUD_PROJECT: ${GOOGLE_CLOUD_PROJECT:-}
     GOOGLE_CLOUD_LOCATION: ${GOOGLE_CLOUD_LOCATION:-}
     GOOGLE_CLOUD_ACCESS_TOKEN: ${GOOGLE_CLOUD_ACCESS_TOKEN:-}
+    AWF_OPENCODE_OLLAMA_BASE_URL: ${AWF_OPENCODE_OLLAMA_BASE_URL:-}
+    OLLAMA_HOST: ${OLLAMA_HOST:-}
+    OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
     AWF_WORKER_POLL_INTERVAL_SECONDS: "1.0"
     AWF_WORKER_MAX_CONCURRENT_PROVISIONS: "3"
     AWF_WORKER_MAX_CONCURRENT_EXECUTIONS: "3"

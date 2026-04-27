@@ -76,7 +76,7 @@ Implemented now:
 - SQLAlchemy control-plane models for workspaces, operations, and events.
 - Profile-driven workspace resolution.
 - Per-workspace Docker Compose stack generation.
-- Codex, Claude Code, and Gemini adapters.
+- Codex, Claude Code, Gemini, and OpenCode adapters.
 - Central default model/effort map for agent adapters.
 - AWF-owned Plan -> Execute -> Compare lifecycle policy.
 - Generic phase-based validation.
@@ -843,6 +843,7 @@ Install:
     the installed Codex CLI.
   - Claude Code auth in `~/.claude` / `~/.claude.json` or Anthropic env vars.
   - Gemini auth in `~/.gemini` or Google/Gemini env vars.
+  - OpenCode via Ollama auth/state in `~/.config/opencode` and `~/.ollama`.
 
 Verify GitHub CLI:
 
@@ -949,17 +950,23 @@ auth into the agent container:
 - `~/.codex` copied into a per-workspace isolated auth directory.
 - `~/.claude` and `~/.claude.json`
 - `~/.gemini`
+- `~/.config/opencode` and small `~/.ollama` auth files copied into
+  per-workspace isolated auth directories for OpenCode/Ollama runs.
 - selected provider environment variables.
 
 Codex auth is intentionally isolated per workspace because a live host
 `~/.codex` contains state and locks that can collide with Codex Desktop.
+OpenCode/Ollama auth is isolated for the same reason: the agent can refresh
+local provider state without mutating the operator's live config.
 
 For local service mode, these host paths must be visible to the worker at their
 host absolute paths. `docker/compose/local-service.yml` does this by mounting
 only the listed credential paths read-only into the control-plane containers;
 the worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
-`rules/` into `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/codex`
-before launching the workspace stack.
+`rules/`, plus OpenCode config and Ollama auth files, into
+`${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/...` before
+launching the workspace stack. AWF does not copy `~/.ollama/models`; workspace
+OpenCode runs talk to the host Ollama daemon through `host.docker.internal`.
 
 Default agent models and effort are centralized in
 `src/awf/adapters/defaults.py`:
@@ -968,11 +975,15 @@ Default agent models and effort are centralized in
 | --- | --- | --- |
 | `claude_code` | `claude-opus-4-7` | `xhigh` mapped to Claude Code `max` |
 | `codex` | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
-| `gemini` | `gemini-3.1-pro` | `xhigh` mapped to Gemini `HIGH` thinking |
+| `gemini` | `gemini-3-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking |
+| `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
 If a local subscription or provider account cannot use a default model, choose a
 supported model in the task or adapter configuration. For example, Gemini
 dogfood tests can use a Flash preview model when Pro is unavailable.
+OpenCode model overrides use the `ollama/<model>` form, for example
+`ollama/glm-5.1:cloud`, `ollama/gemma4:31b-cloud`, or
+`ollama/deepseek-v4-pro:cloud`.
 
 ### Database Migrations
 

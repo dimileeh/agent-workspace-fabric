@@ -174,6 +174,7 @@ async def test_compose_stack_launcher_passes_provider_auth_placeholders(
 ) -> None:
     monkeypatch.setenv("CLAUDE_CODE_OAUTH_TOKEN", "claude_secret")
     monkeypatch.setenv("GEMINI_API_KEY", "gemini_secret")
+    monkeypatch.setenv("OLLAMA_API_KEY", "ollama_secret")
     compose = _RecordingCompose()
     launcher = ComposeStackLauncher(
         compose=compose,  # type: ignore[arg-type]
@@ -196,8 +197,10 @@ async def test_compose_stack_launcher_passes_provider_auth_placeholders(
     env = dict(compose.specs[0].agent_environment)
     assert env["CLAUDE_CODE_OAUTH_TOKEN"] == "${CLAUDE_CODE_OAUTH_TOKEN}"
     assert env["GEMINI_API_KEY"] == "${GEMINI_API_KEY}"
+    assert env["OLLAMA_API_KEY"] == "${OLLAMA_API_KEY}"
     assert "claude_secret" not in repr(compose.specs[0].agent_environment)
     assert "gemini_secret" not in repr(compose.specs[0].agent_environment)
+    assert "ollama_secret" not in repr(compose.specs[0].agent_environment)
 
 
 @pytest.mark.unit

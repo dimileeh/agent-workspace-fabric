@@ -1,6 +1,7 @@
 # AWF agent-runtime image — the container that holds the repo worktree and
-# the coding CLIs (Codex, Claude Code, Gemini). Built multi-arch for x86_64
-# and arm64 (DGX Spark target) via ``docker buildx build --platform=...``.
+# the coding CLIs (Codex, Claude Code, Gemini, OpenCode). Built multi-arch
+# for x86_64 and arm64 (DGX Spark target) via ``docker buildx build
+# --platform=...``.
 #
 # Build locally:
 #   docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
@@ -115,15 +116,18 @@ RUN curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION}.x | bash - \
 ARG CODEX_VERSION=latest
 ARG CLAUDE_CODE_VERSION=latest
 ARG GEMINI_VERSION=latest
+ARG OPENCODE_VERSION=latest
 
 RUN npm install -g --no-fund --no-audit \
       @openai/codex@${CODEX_VERSION} \
       @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION} \
       @google/gemini-cli@${GEMINI_VERSION} \
+      opencode-ai@${OPENCODE_VERSION} \
     && npm cache clean --force \
     && codex --version || true \
     && claude --version || true \
-    && gemini --version || true
+    && gemini --version || true \
+    && opencode --version || true
 
 # ── Stage 6: Python tooling the agent may need inside the container ────────
 RUN python -m pip install --upgrade pip \

@@ -12,6 +12,7 @@ from typing import Protocol
 from awf.node.compose_manager import AuthMount
 
 _CONTAINER_HOME = "/home/agent"
+_OLLAMA_AUTH_FILES = frozenset(("config.json", "id_ed25519", "id_ed25519.pub"))
 
 
 class WorkspaceAuthMountResolver(Protocol):
@@ -129,6 +130,18 @@ def _workspace_auth_mounts(
             target_root=auth_root / "gemini",
         )
     )
+    mounts.extend(
+        _prepare_isolated_opencode_auth(
+            host_home=host_home,
+            target_root=auth_root / "opencode",
+        )
+    )
+    mounts.extend(
+        _prepare_isolated_ollama_auth(
+            host_home=host_home,
+            target_root=auth_root / "ollama",
+        )
+    )
     mounts.extend(base_mounts)
     return tuple(mounts)
 
@@ -207,6 +220,63 @@ def _prepare_isolated_gemini_auth(*, host_home: Path, target_root: Path) -> tupl
         AuthMount(
             source=str(target_dir),
             target=f"{_CONTAINER_HOME}/.gemini",
+            mode="rw",
+        ),
+    )
+
+
+def _prepare_isolated_opencode_auth(
+    *,
+    host_home: Path,
+    target_root: Path,
+) -> tuple[AuthMount, ...]:
+    """Seed per-workspace OpenCode config without sharing writable host files."""
+
+    source_dir = host_home / ".config" / "opencode"
+    target_dir = target_root / ".config" / "opencode"
+    if not source_dir.is_dir():
+        return ()
+
+    target_root.mkdir(parents=True, exist_ok=True)
+    if not target_dir.exists():
+        shutil.copytree(source_dir, target_dir)
+
+    return (
+        AuthMount(
+            source=str(target_dir),
+            target=f"{_CONTAINER_HOME}/.config/opencode",
+            mode="rw",
+        ),
+    )
+
+
+def _prepare_isolated_ollama_auth(
+    *,
+    host_home: Path,
+    target_root: Path,
+) -> tuple[AuthMount, ...]:
+    """Seed per-workspace Ollama auth used by OpenCode/Ollama integration.
+
+    Do not copy ``~/.ollama/models``; those blobs can be tens of gigabytes and
+    the workspace reaches them through the host Ollama daemon instead.
+    """
+
+    source_dir = host_home / ".ollama"
+    target_dir = target_root / ".ollama"
+    if not source_dir.is_dir():
+        return ()
+
+    target_dir.mkdir(parents=True, exist_ok=True)
+    for filename in _OLLAMA_AUTH_FILES:
+        src = source_dir / filename
+        dst = target_dir / filename
+        if src.is_file() and not dst.exists():
+            shutil.copy2(src, dst)
+
+    return (
+        AuthMount(
+            source=str(target_dir),
+            target=f"{_CONTAINER_HOME}/.ollama",
             mode="rw",
         ),
     )

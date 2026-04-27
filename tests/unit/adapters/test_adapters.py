@@ -25,6 +25,10 @@ from awf.adapters.claude_code import ClaudeCodeAdapter
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.gemini import GeminiAdapter
+from awf.adapters.opencode import (
+    OPENCODE_OLLAMA_CLOUD_MODELS,
+    OpenCodeAdapter,
+)
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime
 
@@ -343,12 +347,74 @@ class TestGeminiAdapter:
         assert args[-1].endswith(_PROMPT)
 
 
+class TestOpenCodeAdapter:
+    @pytest.mark.unit
+    @pytest.mark.parametrize("model", OPENCODE_OLLAMA_CLOUD_MODELS)
+    async def test_runs_opencode_with_each_supported_ollama_cloud_model(
+        self,
+        model: str,
+    ) -> None:
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(
+            runner=runner,
+            default_model=model,
+            default_effort="xhigh",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        _assert_docker_exec_prefix(args)
+        sh_start = args.index("sh")
+        assert args[sh_start : sh_start + 3] == ["sh", "-lc", args[sh_start + 2]]
+        script = args[sh_start + 2]
+        assert "OPENCODE_CONFIG_CONTENT" in script
+        assert "AWF_OPENCODE_OLLAMA_BASE_URL" in script
+        assert "host.docker.internal:11434/v1" in script
+        assert "exec opencode run" in script
+        assert '"permission":"allow"' in script
+        assert '"think":true' in script
+        assert model in script
+        assert "--dangerously-skip-permissions" in args
+        assert "--model" in args
+        assert f"ollama/{model}" in args
+        assert "--variant" in args
+        assert "max" in args
+        assert "--thinking" in args
+        assert args[-1].endswith(_PROMPT)
+        assert "AWF workspace contract" in args[-1]
+
+    @pytest.mark.unit
+    async def test_preserves_fully_qualified_model_name(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(
+            runner=runner,
+            default_model="ollama/glm-5.1:cloud",
+            default_effort="max",
+        )
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        assert "--model" in args
+        assert "ollama/glm-5.1:cloud" in args
+
+
 class TestCentralDefaults:
     @pytest.mark.unit
     def test_defaults_map_uses_requested_models_and_xhigh_effort(self) -> None:
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-7"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.5"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3-pro-preview"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
         assert {d.effort for d in DEFAULT_AGENT_DEFAULTS.values()} == {"xhigh"}
 
     @pytest.mark.unit
@@ -367,13 +433,15 @@ class TestCentralDefaults:
 
 class TestRegistry:
     @pytest.mark.unit
-    def test_all_three_adapters_registered(self) -> None:
+    def test_all_adapters_registered(self) -> None:
         runner = FakeCommandRunner()
 
         codex = get_adapter(AgentRuntime.codex, runner=runner)
         claude = get_adapter(AgentRuntime.claude_code, runner=runner)
         gemini = get_adapter(AgentRuntime.gemini, runner=runner)
+        opencode = get_adapter(AgentRuntime.opencode, runner=runner)
 
         assert codex.name == AgentRuntime.codex
         assert claude.name == AgentRuntime.claude_code
         assert gemini.name == AgentRuntime.gemini
+        assert opencode.name == AgentRuntime.opencode

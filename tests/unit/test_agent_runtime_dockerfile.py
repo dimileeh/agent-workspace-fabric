@@ -40,6 +40,20 @@ def test_agent_runtime_installs_docker_compose_plugin() -> None:
 
 
 @pytest.mark.unit
+def test_agent_runtime_installs_all_supported_coding_clis() -> None:
+    dockerfile = _agent_runtime_dockerfile()
+
+    assert "@openai/codex@${CODEX_VERSION}" in dockerfile
+    assert "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" in dockerfile
+    assert "@google/gemini-cli@${GEMINI_VERSION}" in dockerfile
+    assert "opencode-ai@${OPENCODE_VERSION}" in dockerfile
+    assert "codex --version" in dockerfile
+    assert "claude --version" in dockerfile
+    assert "gemini --version" in dockerfile
+    assert "opencode --version" in dockerfile
+
+
+@pytest.mark.unit
 def test_readme_notes_agent_runtime_rebuild_for_docker_tooling_changes() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
     start = readme.index("### Build the Agent Runtime Image")

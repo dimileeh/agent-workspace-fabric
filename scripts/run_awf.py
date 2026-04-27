@@ -75,6 +75,7 @@ from awf.runtime.validation import ValidationRunner
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _TEMPLATE = _REPO_ROOT / "docker" / "compose" / "workspace.base.yml.j2"
+_OLLAMA_AUTH_FILES = frozenset(("config.json", "id_ed25519", "id_ed25519.pub"))
 
 _AGENT_AUTH_ENV_VARS = (
     # Claude Code portable/API-key auth. Host claude.ai OAuth can live in
@@ -96,6 +97,10 @@ _AGENT_AUTH_ENV_VARS = (
     "GOOGLE_CLOUD_LOCATION",
     "GOOGLE_APPLICATION_CREDENTIALS",
     "GOOGLE_CLOUD_ACCESS_TOKEN",
+    # OpenCode via Ollama/Ollama Cloud.
+    "AWF_OPENCODE_OLLAMA_BASE_URL",
+    "OLLAMA_HOST",
+    "OLLAMA_API_KEY",
 )
 
 # Central defaults used for every AWF-spawned agent CLI.
@@ -264,6 +269,9 @@ def _build_auth_mounts(
       logs, SQLite state, session files, and locks that collide with Codex
       Desktop. Each workspace gets an isolated Codex home via
       ``_workspace_auth_mounts`` instead.
+    - OpenCode and Ollama are also intentionally absent here. Their writable
+      config/auth state is seeded per workspace so agent runs cannot mutate
+      the operator's live home directory.
     - ``.claude`` and ``.gemini`` are ``rw`` because each CLI writes its model
       cache / token-refresh state inside its home directory; a read-only mount
       breaks session initialization.
@@ -331,6 +339,15 @@ def _workspace_auth_mounts(
                 mode="rw",
             ),
         )
+    isolated_mounts = _prepare_isolated_opencode_auth(
+        host_home=(host_home or Path(os.environ["HOME"])),
+        target_root=work_dir / "auth" / workspace_id / "opencode",
+    )
+    isolated_mounts += _prepare_isolated_ollama_auth(
+        host_home=(host_home or Path(os.environ["HOME"])),
+        target_root=work_dir / "auth" / workspace_id / "ollama",
+    )
+    mounts[0:0] = list(isolated_mounts)
     return tuple(mounts)
 
 
@@ -355,6 +372,55 @@ def _prepare_isolated_codex_home(*, host_home: Path, target_root: Path) -> Path 
             shutil.copytree(src_dir, target_root / dirname)
 
     return target_root
+
+
+def _prepare_isolated_opencode_auth(
+    *,
+    host_home: Path,
+    target_root: Path,
+) -> tuple[AuthMount, ...]:
+    source = host_home / ".config" / "opencode"
+    target = target_root / ".config" / "opencode"
+    if not source.is_dir():
+        return ()
+
+    target_root.mkdir(parents=True, exist_ok=True)
+    if not target.exists():
+        shutil.copytree(source, target)
+
+    return (
+        AuthMount(
+            source=str(target),
+            target="/home/agent/.config/opencode",
+            mode="rw",
+        ),
+    )
+
+
+def _prepare_isolated_ollama_auth(
+    *,
+    host_home: Path,
+    target_root: Path,
+) -> tuple[AuthMount, ...]:
+    source = host_home / ".ollama"
+    target = target_root / ".ollama"
+    if not source.is_dir():
+        return ()
+
+    target.mkdir(parents=True, exist_ok=True)
+    for filename in _OLLAMA_AUTH_FILES:
+        src = source / filename
+        dst = target / filename
+        if src.is_file() and not dst.exists():
+            shutil.copy2(src, dst)
+
+    return (
+        AuthMount(
+            source=str(target),
+            target="/home/agent/.ollama",
+            mode="rw",
+        ),
+    )
 
 
 def _agent_environment_with_host_auth(

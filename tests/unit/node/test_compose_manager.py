@@ -55,6 +55,18 @@ class TestRender:
         assert volumes == [f"{spec.worktree_host_path}:/workspace"]
 
     @pytest.mark.unit
+    def test_agent_can_reach_host_gateway_for_host_services(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+    ) -> None:
+        parsed = yaml.safe_load(manager.render(_spec(tmp_path)).compose_file.read_text())
+
+        assert parsed["services"]["agent"]["extra_hosts"] == [
+            "host.docker.internal:host-gateway"
+        ]
+
+    @pytest.mark.unit
     def test_profile_service_password_placeholders_are_resolved(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:
