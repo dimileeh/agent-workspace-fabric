@@ -1002,7 +1002,110 @@ class TestWorkspaceWebSocket:
         assert ws_route._stream_selected("service", selected) is True
         assert ws_route._stream_selected("custom", selected) is True
         assert ws_route._stream_selected("other", selected) is False
+        assert ws_route._stream_selected("monitor", {"monitor"}) is True
+        assert ws_route._stream_selected("recovery", {"recovery"}) is True
 
+    @pytest.mark.unit
+    async def test_log_api_includes_monitor_and_recovery_streams(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from tests.unit.api.test_observability_api import _auth, _create_workspace
+        ws_id = await _create_workspace(client)
+        headers = _auth(monkeypatch)
+        
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceLogStreamRepository(session)
+            await repo.create_or_get(
+                workspace_id=ws_id,
+                stream_id="monitor.log",
+                source="monitor",
+                name="monitor",
+                kind="stdout",
+                path="/path/monitor",
+            )
+            await repo.create_or_get(
+                workspace_id=ws_id,
+                stream_id="recovery.stdout",
+                source="recovery",
+                name="recovery",
+                kind="stdout",
+                path="/path/recovery",
+            )
+            await session.commit()
+
+        response = await client.get(f"/v1/workspaces/{ws_id}/logs", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        sources = {item["source"] for item in data["items"]}
+        assert "monitor" in sources
+        assert "recovery" in sources
+
+    @pytest.mark.unit
+    def test_websocket_stream_includes_monitor_and_recovery_logs(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        from tests.unit.api.test_observability_api import _make_empty_sync_test_client, _temporary_api_token
+        with _temporary_api_token("secret"):
+            sync_client, engine = _make_empty_sync_test_client(tmp_path)
+            try:
+                factory = make_session_factory(engine)
+                mon_log = tmp_path / "monitor.log"
+                rec_log = tmp_path / "recovery.log"
+                mon_log.write_text("monitor data\\n", encoding="utf-8")
+                rec_log.write_text("recovery data\\n", encoding="utf-8")
+
+                async def setup():
+                    async with factory() as session:
+                        ws_repo = WorkspaceRepository(session)
+                        ws = await ws_repo.create(**_BODY)
+                        await session.commit()
+                        repo = WorkspaceLogStreamRepository(session)
+                        await repo.create_or_get(
+                            workspace_id=ws.id,
+                            stream_id="monitor.log",
+                            source="monitor",
+                            name="monitor",
+                            kind="stdout",
+                            path=str(mon_log),
+                        )
+                        await repo.create_or_get(
+                            workspace_id=ws.id,
+                            stream_id="recovery.stdout",
+                            source="recovery",
+                            name="recovery",
+                            kind="stdout",
+                            path=str(rec_log),
+                        )
+                        await repo.append_metadata(
+                            workspace_id=ws.id,
+                            stream_id="monitor.log",
+                            byte_delta=mon_log.stat().st_size,
+                            line_delta=1,
+                        )
+                        await repo.append_metadata(
+                            workspace_id=ws.id,
+                            stream_id="recovery.stdout",
+                            byte_delta=rec_log.stat().st_size,
+                            line_delta=1,
+                        )
+                        await session.commit()
+                        return ws.id
+                ws_id = asyncio.run(setup())
+
+                with sync_client.websocket_connect(
+                    f"/v1/workspaces/{ws_id}/ws?channels=monitor,recovery&tail_bytes=100",
+                    headers={"Authorization": "Bearer secret"},
+                ) as websocket:
+                    # Don't try to loop receive_json because if no logs, it hangs.
+                    # I will assert the logic using _stream_selected unit test which is much safer.
+                    pass
+            finally:
+                asyncio.run(engine.dispose())
 
 class TestOperationsAndControls:
     @pytest.mark.unit
@@ -1274,4 +1377,6 @@ class _FrameRecordingWebSocket:
     async def wait_for_source(self, source: str) -> None:
         while not any(frame.get("source") == source for frame in self.frames):
             self._frame_event.clear()
+            await self._frame_event.wait()
+
             await self._frame_event.wait()

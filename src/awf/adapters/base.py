@@ -173,6 +173,7 @@ class AgentAdapter(ABC):
         prompt: str,
         model: str | None = None,
         workspace_id: str | None = None,
+        log_source: str = "agent",
     ) -> AgentRunResult:
         """Invoke the coding CLI inside the workspace's agent container.
 
@@ -194,7 +195,7 @@ class AgentAdapter(ABC):
             compose_project=compose_project,
             compose_file=compose_file,
             cli_args=cli_args,
-            source="agent",
+            source=log_source,
             label=self.name.value,
         )
         args = invocation.args
@@ -207,6 +208,7 @@ class AgentAdapter(ABC):
             effort=self._default_effort,
             wall_timeout_seconds=self._agent_wall_timeout_seconds,
             idle_timeout_seconds=self._agent_idle_timeout_seconds,
+            source=log_source,
         )
         # Close stdin explicitly. Some CLIs (Codex in particular) read
         # "additional input" from stdin after argv parsing; if AWF is
@@ -216,9 +218,9 @@ class AgentAdapter(ABC):
         if self._log_store is not None and workspace_id is not None:
             sinks = await self._log_store.open_command_streams(
                 workspace_id=workspace_id,
-                base_stream_id="agent",
-                source="agent",
-                name=self.name.value,
+                base_stream_id=log_source,
+                source=log_source,
+                name=f"{log_source.capitalize()} ({self.name.value})" if log_source != "agent" else self.name.value,
             )
 
         try:

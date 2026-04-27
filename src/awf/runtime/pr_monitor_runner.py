@@ -1261,6 +1261,7 @@ class PullRequestMonitorRunner:
                 compose_file=compose_file,
                 prompt=prompt,
                 workspace_id=workspace_id,
+                log_source="recovery",
             )
             result_stdout = result.stdout
         except AgentRunError as exc:
@@ -1333,6 +1334,7 @@ class PullRequestMonitorRunner:
                     compose_file=compose_file,
                     prompt=prompt,
                     workspace_id=workspace_id,
+                    log_source="recovery",
                 )
             except AgentRunError as exc:
                 _log.warning(
@@ -1368,6 +1370,7 @@ class PullRequestMonitorRunner:
                 compose_file=compose_file,
                 prompt=prompt,
                 workspace_id=workspace_id,
+                log_source="recovery",
             )
         except AgentRunError as exc:
             _log.warning(

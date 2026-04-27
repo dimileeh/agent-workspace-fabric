@@ -971,6 +971,38 @@ async def test_workspace_log_streams_are_idempotent_filterable_and_close_once(
 
 
 @pytest.mark.unit
+async def test_append_after_close_reopens_stream(session: AsyncSession) -> None:
+    workspace = await _workspace(session, title="reopen stream")
+    repo = WorkspaceLogStreamRepository(session)
+
+    stream = await repo.create_or_get(
+        workspace_id=workspace.id,
+        stream_id="agent.stdout",
+        source="agent",
+        name="agent",
+        kind="stdout",
+        path="/logs/agent.stdout.log",
+    )
+
+    await repo.close(workspace_id=workspace.id, stream_id="agent.stdout")
+    closed_stream = await repo.get(workspace_id=workspace.id, stream_id="agent.stdout")
+    assert closed_stream is not None
+    assert closed_stream.closed_at is not None
+
+    await repo.append_metadata(
+        workspace_id=workspace.id,
+        stream_id="agent.stdout",
+        byte_delta=10,
+        line_delta=1,
+    )
+    reopened_stream = await repo.get(workspace_id=workspace.id, stream_id="agent.stdout")
+    assert reopened_stream is not None
+    assert reopened_stream.closed_at is None
+    assert reopened_stream.byte_count == 10
+    assert reopened_stream.line_count == 1
+
+
+@pytest.mark.unit
 async def test_workspace_transition_if_current_releases_resources_and_claims_are_owned(
     session: AsyncSession,
 ) -> None:

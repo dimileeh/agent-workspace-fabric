@@ -356,6 +356,49 @@ async def test_log_sink_empty_write_and_close_without_session_are_noops(tmp_path
 
 
 @pytest.mark.unit
+async def test_workspace_log_sink_reopen_behavior(
+    engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@example.com:repo/app.git",
+            branch_base="main",
+            task_title="Reopen Logs",
+            task_prompt="Reopen",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+    store = LogStore(root=tmp_path, session_factory=factory)
+    sinks = await store.open_command_streams(
+        workspace_id=workspace.id,
+        base_stream_id="monitor.log",
+        source="monitor",
+        name="PR monitor",
+    )
+    await sinks.write_stdout("first line\\n")
+    await sinks.close()
+
+    async with factory() as session:
+        repo = WorkspaceLogStreamRepository(session)
+        stream = await repo.get(workspace_id=workspace.id, stream_id="monitor.log.stdout")
+        assert stream is not None
+        assert stream.closed_at is not None
+
+    await sinks.write_stdout("second line\\n")
+
+    async with factory() as session:
+        repo = WorkspaceLogStreamRepository(session)
+        stream = await repo.get(workspace_id=workspace.id, stream_id="monitor.log.stdout")
+        assert stream is not None
+        assert stream.closed_at is None
+        assert stream.byte_count == len("first line\\nsecond line\\n")
+
+
+@pytest.mark.unit
 async def test_agent_and_validation_runners_create_indexed_log_streams(
     engine: AsyncEngine,
     tmp_path,

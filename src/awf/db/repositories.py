@@ -2275,6 +2275,8 @@ class WorkspaceLogStreamRepository:
         stream = await self.get(workspace_id=workspace_id, stream_id=stream_id)
         if stream is None:
             return None
+        if stream.closed_at is not None:
+            stream.closed_at = None
         stream.byte_count += byte_delta
         stream.line_count += line_delta
         await self._session.flush()

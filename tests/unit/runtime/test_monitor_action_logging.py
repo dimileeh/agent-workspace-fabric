@@ -147,6 +147,56 @@ class TestMonitorActionLogging:
         assert '"action": "Merge"' in log_text
 
     @pytest.mark.unit
+    async def test_recovery_operation_log_indexing(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        cmd: FakeCommandRunner,
+        adapter: FakeAdapter,
+        sleep_fn: RecordedSleep,
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await seed_monitoring_workspace(factory)
+        thread = thread_node(tid="T_recov", author="reviewer")
+        # Outer iter 1
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
+        adapter.queue(stdout="fixed it")
+        cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
+        cmd.queue_result(returncode=0)  # push
+        cmd.queue_result(returncode=0, stdout="head2\\n")  # rev-parse
+        cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve
+        # Outer iter 2: clean -> Merge.
+        cmd.queue_result(returncode=0)  # git fetch origin <base>
+        cmd.queue_result(returncode=0, stdout="0\\n")
+        cmd.queue_result(returncode=0, stdout=pr_payload())
+        cmd.queue_result(returncode=0)  # merge
+        cmd.queue_result(returncode=0, stdout="MERGESHA\\n")
+
+        log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
+        adapter._log_store = log_store
+        runner = make_runner(
+            factory=factory,
+            cmd=cmd,
+            adapter=adapter,
+            sleep_fn=sleep_fn,
+            worktrees_root=tmp_path / "worktrees",
+            log_store=log_store,
+        )
+
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+        async with factory() as s:
+            streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws_id)
+            recovery_stream = next((stream for stream in streams if stream.source == "recovery"), None)
+        assert recovery_stream is not None, f"Expected a stream with source='recovery'. Streams: {[(s.stream_id, s.source) for s in streams]}. Calls: {[c.args for c in cmd.calls]}"
+        assert recovery_stream.kind == "stdout"
+
+    @pytest.mark.unit
     async def test_notify_human_action_emits_log_line(
         self,
         factory: async_sessionmaker[AsyncSession],
