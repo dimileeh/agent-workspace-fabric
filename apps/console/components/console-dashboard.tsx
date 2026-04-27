@@ -38,6 +38,7 @@ import {
   statusTone,
   toneClass,
 } from "@/lib/format";
+import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "@/lib/agent-format";
 import type {
   ApiEnvelope,
   AwfStreamFrame,
@@ -2581,46 +2582,6 @@ function toLogWorkspaceTarget(workspaceId: string, overview: WorkspaceOverview[]
     status: "running",
     pr_url: null,
   };
-}
-
-function formatAgentLabel(
-  workspace: Pick<WorkspaceOverview, "agent" | "agent_model">,
-): string {
-  const model = compactAgentModel(workspace.agent_model);
-  return model ? `${workspace.agent} · ${model}` : workspace.agent;
-}
-
-function formatAgentTitle(
-  workspace: Pick<
-    WorkspaceOverview,
-    "agent" | "agent_model" | "agent_effort" | "agent_model_source" | "agent_effort_source"
-  >,
-): string {
-  const parts: string[] = [workspace.agent];
-  if (workspace.agent_model) {
-    parts.push(workspace.agent_model);
-  }
-  if (workspace.agent_effort) {
-    parts.push(`effort ${workspace.agent_effort}`);
-  }
-  parts.push(`model ${workspace.agent_model_source}`);
-  parts.push(`effort ${workspace.agent_effort_source}`);
-  return parts.join(" / ");
-}
-
-function formatAgentEffort(
-  workspace: Pick<WorkspaceOverview, "agent_effort" | "agent_effort_source">,
-): string {
-  return workspace.agent_effort
-    ? `${workspace.agent_effort} (${workspace.agent_effort_source})`
-    : "—";
-}
-
-function compactAgentModel(model: string | null | undefined): string | null {
-  if (!model) {
-    return null;
-  }
-  return model.startsWith("ollama/") ? model.slice("ollama/".length) : model;
 }
 
 function formatTokenCount(value: number | null): string {
