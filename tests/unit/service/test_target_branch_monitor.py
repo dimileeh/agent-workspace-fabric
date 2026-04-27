@@ -811,6 +811,7 @@ class TestCandidateRefreshSummary:
             candidate_id="mc-1",
             workspace_id="ws-1",
             stale=True,
+            stale_reason="branch_behind_target",
             findings_count=2,
             error=None,
         )
@@ -819,6 +820,7 @@ class TestCandidateRefreshSummary:
             "candidate_id": "mc-1",
             "workspace_id": "ws-1",
             "stale": True,
+            "stale_reason": "branch_behind_target",
             "findings_count": 2,
             "error": None,
         }

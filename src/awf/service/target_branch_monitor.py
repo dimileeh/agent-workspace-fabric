@@ -80,6 +80,7 @@ class CandidateRefreshSummary:
     workspace_id: str
     stale: bool
     findings_count: int
+    stale_reason: str | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, object]:
@@ -88,6 +89,7 @@ class CandidateRefreshSummary:
             "workspace_id": self.workspace_id,
             "stale": self.stale,
             "findings_count": self.findings_count,
+            "stale_reason": self.stale_reason,
             "error": self.error,
         }
 
@@ -410,6 +412,9 @@ async def reconcile_and_refresh_stale_candidates(
             base_branch=branch,
         )
 
+        service = StalenessRefreshService(session)
+        target_states: dict[str, TargetBranchState] = {}
+
         for candidate in candidates:
             if candidate.workspace_id in excluded:
                 continue
@@ -420,14 +425,19 @@ async def reconcile_and_refresh_stale_candidates(
                         CandidateRefreshSummary(
                             candidate_id=candidate.id,
                             workspace_id=candidate.workspace_id,
-                            stale=False,
+                            stale=candidate.stale,
+                            stale_reason=candidate.stale_reason,
                             findings_count=0,
                         )
                     )
                     continue
 
-                target = await target_state_for_base_sha(candidate.base_sha)
-                service = StalenessRefreshService(session)
+                if candidate.base_sha not in target_states:
+                    target_states[candidate.base_sha] = await target_state_for_base_sha(
+                        candidate.base_sha
+                    )
+                target = target_states[candidate.base_sha]
+
                 refresh_result = await service.refresh_candidate(
                     candidate.id,
                     target=target,
@@ -437,6 +447,7 @@ async def reconcile_and_refresh_stale_candidates(
                         candidate_id=candidate.id,
                         workspace_id=candidate.workspace_id,
                         stale=refresh_result.stale,
+                        stale_reason=candidate.stale_reason,
                         findings_count=len(refresh_result.findings),
                     )
                 )
@@ -451,7 +462,8 @@ async def reconcile_and_refresh_stale_candidates(
                     CandidateRefreshSummary(
                         candidate_id=candidate.id,
                         workspace_id=candidate.workspace_id,
-                        stale=False,
+                        stale=candidate.stale,
+                        stale_reason=candidate.stale_reason,
                         findings_count=0,
                         error=str(exc)[:1000],
                     )
