@@ -573,7 +573,7 @@ def _probe_ollama(
             "ok": False,
             "detail": _redact(f"{type(exc).__name__}: {exc}", secrets),
         }
-    if 200 <= response.status_code < 400:
+    if 200 <= response.status_code < 300:
         return {"ok": True}
     detail = response.text or f"HTTP {response.status_code}"
     return {

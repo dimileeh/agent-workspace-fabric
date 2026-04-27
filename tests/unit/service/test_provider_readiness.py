@@ -383,6 +383,29 @@ def test_provider_readiness_opencode_ollama_unreachable_fails_when_strict(
 
 
 @pytest.mark.unit
+def test_provider_readiness_opencode_ollama_redirect_fails(tmp_path: Path) -> None:
+    def _http_get(_url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        return SimpleNamespace(status_code=302, text="redirect to login")
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={
+            "OLLAMA_API_KEY": "ollama_env_secret",
+            "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+        },
+        strict_providers={"opencode"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_http_get,
+    )
+
+    opencode = payload["providers"]["opencode"]
+    assert opencode["status"] == "fail"
+    assert opencode["reason"] == "OLLAMA_HOST_UNREACHABLE"
+    assert opencode["detail"] == "HTTP 302: redirect to login"
+
+
+@pytest.mark.unit
 def test_provider_readiness_opencode_ollama_file_reason_without_opencode_config(
     tmp_path: Path,
 ) -> None:
