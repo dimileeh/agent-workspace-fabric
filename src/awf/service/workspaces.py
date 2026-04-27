@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -75,6 +76,20 @@ RETRYABLE_WORKSPACE_STATUSES = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
 )
+
+
+@dataclass(frozen=True)
+class _WorkspaceResponseSource:
+    workspace: Workspace
+    computed_fields: Mapping[str, Any]
+
+    def __getattr__(self, name: str) -> Any:
+        try:
+            return self.computed_fields[name]
+        except KeyError:
+            return getattr(self.workspace, name)
+
+
 TASK_CLASS_PRIORITIES = {
     "migration_task": 5,
     "dependency_task": 4,
@@ -648,14 +663,8 @@ def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResp
 
 
 def workspace_response(workspace: Workspace) -> WorkspaceResponse:
-    response = WorkspaceResponse.model_validate(workspace)
-    payload = response.model_dump()
-    payload["active_policy_findings"] = payload.pop("policy_findings", [])
     return WorkspaceResponse.model_validate(
-        {
-            **payload,
-            **workspace_observability_payload(workspace),
-        }
+        _WorkspaceResponseSource(workspace, workspace_observability_payload(workspace))
     )
 
 
