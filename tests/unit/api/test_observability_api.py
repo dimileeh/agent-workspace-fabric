@@ -1015,7 +1015,7 @@ class TestWorkspaceWebSocket:
         from tests.unit.api.test_observability_api import _auth, _create_workspace
         ws_id = await _create_workspace(client)
         headers = _auth(monkeypatch)
-        
+
         factory = make_session_factory(engine)
         async with factory() as session:
             repo = WorkspaceLogStreamRepository(session)
@@ -1049,7 +1049,10 @@ class TestWorkspaceWebSocket:
         self,
         tmp_path: Path,
     ) -> None:
-        from tests.unit.api.test_observability_api import _make_empty_sync_test_client, _temporary_api_token
+        from tests.unit.api.test_observability_api import (
+            _make_empty_sync_test_client,
+            _temporary_api_token,
+        )
         with _temporary_api_token("secret"):
             sync_client, engine = _make_empty_sync_test_client(tmp_path)
             try:
@@ -1100,7 +1103,7 @@ class TestWorkspaceWebSocket:
                 with sync_client.websocket_connect(
                     f"/v1/workspaces/{ws_id}/ws?channels=monitor,recovery&tail_bytes=100",
                     headers={"Authorization": "Bearer secret"},
-                ) as websocket:
+                ):
                     # Don't try to loop receive_json because if no logs, it hangs.
                     # I will assert the logic using _stream_selected unit test which is much safer.
                     pass

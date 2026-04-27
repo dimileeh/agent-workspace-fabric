@@ -975,7 +975,7 @@ async def test_append_after_close_reopens_stream(session: AsyncSession) -> None:
     workspace = await _workspace(session, title="reopen stream")
     repo = WorkspaceLogStreamRepository(session)
 
-    stream = await repo.create_or_get(
+    await repo.create_or_get(
         workspace_id=workspace.id,
         stream_id="agent.stdout",
         source="agent",
