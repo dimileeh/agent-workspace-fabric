@@ -406,6 +406,9 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
         if "AGENT_AUTH_FAILED" in msg:
             likely_cause = "Agent Auth Failed"
             action = "Check agent credentials"
+        elif "GitHub auth/PR creation failed" in msg:
+            likely_cause = "GitHub Transient/Auth Error"
+            action = "Check GitHub App token or retry"
         elif "model not found" in msg or "404" in msg:
             likely_cause = "Model Not Found / 404"
             action = "Verify model configuration or availability"
@@ -418,9 +421,6 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
         elif "SyntaxError" in msg or "ImportError" in msg:
             likely_cause = "Syntax or Import Error"
             action = "Fix syntax/import issues in generated code"
-        elif "GitHub auth/PR creation failed" in msg:
-            likely_cause = "GitHub Transient/Auth Error"
-            action = "Check GitHub App token or retry"
         elif reason == FailureReason.agent_failure.value:
             likely_cause = "Unknown Agent Failure"
             action = "Review agent logs"
