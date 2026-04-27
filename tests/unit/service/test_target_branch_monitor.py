@@ -2,21 +2,40 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.db.base import Base
+from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
+from awf.db.session import make_engine, make_session_factory
 from awf.service.alembic_resolver import (
     AlembicResolveResult,
     AlembicResolveStatus,
 )
 from awf.service.target_branch_monitor import (
+    CandidateRefreshSummary,
+    GitCheckoutTargetBranchStateProvider,
+    ReconcileAndRefreshResult,
     TargetBranchMonitorError,
+    TargetBranchMonitorResult,
     TargetBranchMonitorStatus,
     TargetBranchReconcileMonitor,
+    reconcile_and_refresh_stale_candidates,
     run_target_branch_reconcile_once,
 )
+from awf.service.staleness import TargetBranchState
 
 
 class _StubResolver:
@@ -323,3 +342,465 @@ async def test_checkout_path_slug_fallbacks_and_convenience_entrypoint(
     assert fallback_path.name.startswith("repo-")
     assert fallback_path.name.endswith("-branch")
     assert result.status == TargetBranchMonitorStatus.clean
+
+
+# ── Reconcile + staleness refresh integration ────────────────────────────
+
+_REPO_URL = "git@github.com:example/svc.git"
+_BASE_BRANCH = "development"
+
+
+@pytest.fixture
+async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield make_session_factory(engine)
+    finally:
+        await engine.dispose()
+
+
+async def _seed_open_candidate(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    owned_paths: list[str],
+    task_class: str | None = None,
+    base_sha: str = "a" * 40,
+    repo_url: str = _REPO_URL,
+    base_branch: str = _BASE_BRANCH,
+) -> tuple[str, str, str]:
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url=repo_url,
+            branch_base=base_branch,
+            task_title="Reconcile fixture",
+            task_prompt="Implement.",
+            task_external_id="TICKET-RECONCILE",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            owned_paths=owned_paths,
+            task_class=task_class,
+        )
+        task = await TaskRepository(session).create_or_get(
+            repo_url=workspace.repo_url,
+            base_branch=workspace.branch_base,
+            title=workspace.task_title,
+            prompt=workspace.task_prompt,
+            external_id=workspace.task_external_id,
+            idempotency_key=None,
+            task_class=task_class,
+            owned_paths=owned_paths,
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+        ):
+            await repo.transition(workspace, to=target, reason_code="TEST")
+        workspace.branch_name = f"awf/{workspace.id}"
+        workspace.remote_push_branch = workspace.branch_name
+        workspace.base_commit = base_sha
+        workspace.pr_url = f"https://github.com/example/svc/pull/{hash(workspace.id) % 1000}"
+        workspace.pr_number = hash(workspace.id) % 1000
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="PR_OPENED",
+        )
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
+        assert attempt is not None
+        candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
+            task=task,
+            attempt=attempt,
+            workspace=workspace,
+            head_sha="h" * 40,
+            base_sha=base_sha,
+        )
+        await session.commit()
+        return workspace.id, attempt.id, candidate.id
+
+
+def _fake_reconcile_result(
+    *,
+    checkout_path: Path,
+    status: TargetBranchMonitorStatus = TargetBranchMonitorStatus.clean,
+) -> TargetBranchMonitorResult:
+    return TargetBranchMonitorResult(
+        repo_url=_REPO_URL,
+        branch=_BASE_BRANCH,
+        checkout_path=checkout_path,
+        status=status,
+        resolver_results=(),
+    )
+
+
+class TestReconcileAndRefreshStaleCandidates:
+    @pytest.mark.unit
+    async def test_reconcile_and_refresh_refreshes_open_candidates(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id_1, _attempt_id_1, cand_id_1 = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="refactor_task",
+        )
+        _ws_id_2, _attempt_id_2, cand_id_2 = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/db/**"],
+            task_class="refactor_task",
+        )
+
+        async def _reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            return _fake_reconcile_result(checkout_path=tmp_path / "checkout")
+
+        target_state = TargetBranchState(
+            branch=_BASE_BRANCH,
+            head_sha="c" * 40,
+            changed_paths=("src/awf/api/routes/health.py", "src/awf/db/models.py"),
+            advanced_commits=3,
+        )
+
+        result = await reconcile_and_refresh_stale_candidates(
+            reconcile_fn=_reconcile,
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            session_factory=factory,
+            target_state_for_base_sha=lambda _base_sha: target_state,
+        )
+
+        assert isinstance(result, ReconcileAndRefreshResult)
+        assert result.reconcile.status == TargetBranchMonitorStatus.clean
+        assert len(result.candidate_refreshes) == 2
+        refreshed_ids = {s.candidate_id for s in result.candidate_refreshes}
+        assert cand_id_1 in refreshed_ids
+        assert cand_id_2 in refreshed_ids
+        assert all(s.error is None for s in result.candidate_refreshes)
+        assert all(s.stale is True for s in result.candidate_refreshes)
+
+        async with factory() as session:
+            c1 = await MergeCandidateRepository(session).get_by_attempt_id(
+                _attempt_id_1
+            )
+        assert c1 is not None
+        assert c1.stale is True
+
+    @pytest.mark.unit
+    async def test_reconcile_and_refresh_isolates_candidate_refresh_failure(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id_1, attempt_id_1, cand_id_1 = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="refactor_task",
+        )
+        _ws_id_2, _attempt_id_2, cand_id_2 = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/db/**"],
+            task_class="refactor_task",
+        )
+
+        async def _reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            return _fake_reconcile_result(checkout_path=tmp_path / "checkout")
+
+        call_count = 0
+
+        def _target_state_partial(base_sha: str) -> TargetBranchState:
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                raise RuntimeError("simulated provider failure")
+            return TargetBranchState(
+                branch=_BASE_BRANCH,
+                head_sha="c" * 40,
+                changed_paths=("src/awf/db/models.py",),
+                advanced_commits=2,
+            )
+
+        result = await reconcile_and_refresh_stale_candidates(
+            reconcile_fn=_reconcile,
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            session_factory=factory,
+            target_state_for_base_sha=_target_state_partial,
+        )
+
+        assert result.reconcile.status == TargetBranchMonitorStatus.clean
+        errors = [s for s in result.candidate_refreshes if s.error is not None]
+        successes = [s for s in result.candidate_refreshes if s.error is None]
+        assert len(errors) == 1
+        assert len(successes) == 1
+        assert "simulated provider failure" in errors[0].error
+
+    @pytest.mark.unit
+    async def test_reconcile_and_refresh_excludes_just_merged_workspace(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id_1, _attempt_id_1, cand_id_1 = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="refactor_task",
+        )
+        ws_id_2, _attempt_id_2, cand_id_2 = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/db/**"],
+            task_class="refactor_task",
+        )
+
+        async def _reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            return _fake_reconcile_result(checkout_path=tmp_path / "checkout")
+
+        target_state = TargetBranchState(
+            branch=_BASE_BRANCH,
+            head_sha="c" * 40,
+            changed_paths=("src/awf/api/routes/health.py",),
+            advanced_commits=1,
+        )
+
+        result = await reconcile_and_refresh_stale_candidates(
+            reconcile_fn=_reconcile,
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            session_factory=factory,
+            target_state_for_base_sha=lambda _base_sha: target_state,
+            exclude_workspace_ids={ws_id_1},
+        )
+
+        refreshed_ids = {s.candidate_id for s in result.candidate_refreshes}
+        assert cand_id_1 not in refreshed_ids
+        assert cand_id_2 in refreshed_ids
+
+    @pytest.mark.unit
+    async def test_reconcile_and_refresh_returns_structured_result_data(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        _ws_id, _attempt_id, _cand_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="refactor_task",
+        )
+
+        async def _reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            return _fake_reconcile_result(checkout_path=tmp_path / "checkout")
+
+        target_state = TargetBranchState(
+            branch=_BASE_BRANCH,
+            head_sha="c" * 40,
+            changed_paths=("src/awf/api/routes/health.py",),
+            advanced_commits=1,
+        )
+
+        result = await reconcile_and_refresh_stale_candidates(
+            reconcile_fn=_reconcile,
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            session_factory=factory,
+            target_state_for_base_sha=lambda _base_sha: target_state,
+        )
+
+        assert isinstance(result, ReconcileAndRefreshResult)
+        d = result.to_dict()
+        assert "reconcile" in d
+        assert "candidate_refreshes" in d
+        assert d["reconcile"]["status"] == "clean"
+        assert len(d["candidate_refreshes"]) == 1
+        summary = d["candidate_refreshes"][0]
+        assert "candidate_id" in summary
+        assert "workspace_id" in summary
+        assert "stale" in summary
+        assert "findings_count" in summary
+        assert "error" in summary
+
+    @pytest.mark.unit
+    async def test_reconcile_and_refresh_skips_refresh_when_reconcile_fails(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        _ws_id, _attempt_id, _cand_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="refactor_task",
+        )
+
+        async def _failing_reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            raise TargetBranchMonitorError(
+                operation="target_branch.git_clone",
+                result=MagicMock(returncode=128, stderr="clone failed", stdout=""),
+            )
+
+        with pytest.raises(TargetBranchMonitorError, match="clone failed"):
+            await reconcile_and_refresh_stale_candidates(
+                reconcile_fn=_failing_reconcile,
+                repo_url=_REPO_URL,
+                branch=_BASE_BRANCH,
+                session_factory=factory,
+                target_state_for_base_sha=lambda _base_sha: TargetBranchState(
+                    branch=_BASE_BRANCH,
+                    head_sha="c" * 40,
+                    changed_paths=(),
+                    advanced_commits=0,
+                ),
+            )
+
+    @pytest.mark.unit
+    async def test_reconcile_and_refresh_no_candidates_returns_empty_refreshes(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        async def _reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            return _fake_reconcile_result(checkout_path=tmp_path / "checkout")
+
+        result = await reconcile_and_refresh_stale_candidates(
+            reconcile_fn=_reconcile,
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            session_factory=factory,
+            target_state_for_base_sha=lambda _base_sha: TargetBranchState(
+                branch=_BASE_BRANCH,
+                head_sha="c" * 40,
+                changed_paths=(),
+                advanced_commits=0,
+            ),
+        )
+
+        assert result.candidate_refreshes == ()
+
+
+class TestGitCheckoutTargetBranchStateProvider:
+    @pytest.mark.unit
+    async def test_fetch_uses_git_commands_to_build_target_branch_state(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(stdout="c" * 40 + "\n")
+        runner.queue_result(stdout="3\n")
+        runner.queue_result(stdout="src/awf/api/routes/health.py\nsrc/awf/db/models.py\n")
+
+        provider = GitCheckoutTargetBranchStateProvider(
+            runner=runner,
+            checkout_path=tmp_path,
+        )
+        state = await provider.fetch(
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            base_sha="a" * 40,
+        )
+
+        assert state.branch == _BASE_BRANCH
+        assert state.head_sha == "c" * 40
+        assert state.advanced_commits == 3
+        assert state.changed_paths == (
+            "src/awf/api/routes/health.py",
+            "src/awf/db/models.py",
+        )
+
+    @pytest.mark.unit
+    async def test_fetch_raises_on_git_failure(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=128, stderr="rev-parse failed")
+
+        provider = GitCheckoutTargetBranchStateProvider(
+            runner=runner,
+            checkout_path=tmp_path,
+        )
+
+        with pytest.raises(TargetBranchMonitorError, match="rev-parse failed"):
+            await provider.fetch(
+                repo_url=_REPO_URL,
+                branch=_BASE_BRANCH,
+                base_sha="a" * 40,
+            )
+
+
+class TestCandidateRefreshSummary:
+    @pytest.mark.unit
+    def test_to_dict_includes_all_fields(self) -> None:
+        summary = CandidateRefreshSummary(
+            candidate_id="mc-1",
+            workspace_id="ws-1",
+            stale=True,
+            findings_count=2,
+            error=None,
+        )
+        d = summary.to_dict()
+        assert d == {
+            "candidate_id": "mc-1",
+            "workspace_id": "ws-1",
+            "stale": True,
+            "findings_count": 2,
+            "error": None,
+        }
+
+    @pytest.mark.unit
+    def test_to_dict_with_error(self) -> None:
+        summary = CandidateRefreshSummary(
+            candidate_id="mc-2",
+            workspace_id="ws-2",
+            stale=False,
+            findings_count=0,
+            error="provider failed",
+        )
+        d = summary.to_dict()
+        assert d["error"] == "provider failed"
+
+
+class TestReconcileAndRefreshResult:
+    @pytest.mark.unit
+    def test_to_dict_nests_reconcile_and_summaries(self) -> None:
+        reconcile = TargetBranchMonitorResult(
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            checkout_path=Path("/tmp/checkout"),
+            status=TargetBranchMonitorStatus.committed,
+            resolver_results=(),
+            commit_sha="abc123",
+            pushed=True,
+        )
+        summary = CandidateRefreshSummary(
+            candidate_id="mc-1",
+            workspace_id="ws-1",
+            stale=True,
+            findings_count=1,
+        )
+        result = ReconcileAndRefreshResult(
+            reconcile=reconcile,
+            candidate_refreshes=(summary,),
+        )
+        d = result.to_dict()
+        assert d["reconcile"]["status"] == "committed"
+        assert d["reconcile"]["commit_sha"] == "abc123"
+        assert len(d["candidate_refreshes"]) == 1
+        assert d["candidate_refreshes"][0]["candidate_id"] == "mc-1"
