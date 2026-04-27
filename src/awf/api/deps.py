@@ -69,10 +69,9 @@ async def _ensure_live_session_factory(request: Request) -> async_sessionmaker[A
             return _get_session_factory(request)
         old_engine = getattr(request.app.state, "db_engine", None)
         new_engine = make_engine(database_url)
-        if database_url.startswith("sqlite"):
-            async with new_engine.begin() as conn:
-                await conn.run_sync(Base.metadata.create_all)
-            latest_identity = _sqlite_identity(db_path)
+        async with new_engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        latest_identity = _sqlite_identity(db_path)
         new_factory = make_session_factory(new_engine)
         request.app.state.db_engine = new_engine
         request.app.state.db_session_factory = new_factory

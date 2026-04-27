@@ -596,7 +596,7 @@ def default_cleaner() -> WorkspaceCleaner:
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
     return WorkspaceCleaner(
         git=GitManager(work_dir / "git"),
-        compose=ComposeManager(work_dir=work_dir / "compose", template_path=template),
+        compose=ComposeManager(work_dir=work_dir, template_path=template),
     )
 
 
