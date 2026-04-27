@@ -271,6 +271,46 @@ class TestCoverageEnforcement:
         assert result.coverage is not None
         assert result.coverage.percent == 96
 
+    @pytest.mark.unit
+    async def test_runs_baseline_coverage_with_distinct_artifact_label(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=1,
+            stdout=(
+                "Name        Stmts   Miss  Cover\n"
+                "-------------------------------\n"
+                "TOTAL         100     12    88%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-baseline",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_coverage(
+            workspace_id="ws_baseline_coverage",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase="baseline_coverage",
+        )
+
+        assert result is not None
+        assert result.percent == 88
+        assert result.reason_code == "COVERAGE_BELOW_THRESHOLD"
+        assert result.command_result is not None
+        assert result.command_result.stdout_path.name == "01_baseline_coverage.stdout"
+
 
 class TestMigration:
     @pytest.mark.unit

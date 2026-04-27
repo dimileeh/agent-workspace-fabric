@@ -197,6 +197,32 @@ class ValidationRunner:
             coverage=coverage,
         )
 
+    async def run_profile_coverage(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        profile: WorkspaceProfile,
+        phase: str = "coverage",
+    ) -> ValidationCoverageResult | None:
+        """Run only the profile coverage command and return its policy result."""
+        coverage = profile.validation.coverage
+        if not _coverage_requested(coverage):
+            return None
+        workspace_artifacts = self._artifacts_dir / workspace_id
+        workspace_artifacts.mkdir(parents=True, exist_ok=True)
+        return await self._collect_coverage(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            coverage=coverage,
+            artifacts_dir=workspace_artifacts,
+            results=[],
+            phase_indices={},
+            phase=phase,
+        )
+
     async def _run_commands(
         self,
         *,
@@ -329,6 +355,7 @@ class ValidationRunner:
         artifacts_dir: Path,
         results: list[ValidationCommandResult],
         phase_indices: dict[str, int],
+        phase: str = "coverage",
     ) -> ValidationCoverageResult:
         if coverage.provider != "python":
             return ValidationCoverageResult(
@@ -342,15 +369,15 @@ class ValidationRunner:
 
         command_result: ValidationCommandResult | None = None
         if coverage.command is not None:
-            phase_indices["coverage"] = phase_indices.get("coverage", 0) + 1
-            label = f"{phase_indices['coverage']:02d}_coverage"
+            phase_indices[phase] = phase_indices.get(phase, 0) + 1
+            label = f"{phase_indices[phase]:02d}_{phase}"
             command_result = await self._exec(
                 compose_project=compose_project,
                 compose_file=compose_file,
                 cli_args=["sh", "-lc", _VENV_ACTIVATE_PREAMBLE + coverage.command.command],
                 label=label,
                 artifacts_dir=artifacts_dir,
-                phase="coverage",
+                phase=phase,
                 timeout_seconds=coverage.command.timeout_seconds,
             )
             coverage_outputs = [command_result]

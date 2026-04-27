@@ -89,7 +89,7 @@ type LogEntry = {
 
 type LogWorkspaceTarget = Pick<
   WorkspaceOverview,
-  "workspace_id" | "title" | "repo_url" | "base_branch" | "agent" | "status" | "pr_url"
+  "workspace_id" | "title" | "repo_url" | "base_branch" | "agent" | "agent_model" | "status" | "pr_url"
 >;
 
 type RetryActionState =
@@ -485,6 +485,7 @@ export function ConsoleDashboard() {
             item.repo_url,
             item.base_branch,
             item.agent,
+            item.agent_model ?? "",
             item.status,
           ]
             .join(" ")
@@ -1007,7 +1008,9 @@ function WorkspaceList({
                 </div>
                 <div className="flex items-center gap-2 text-xs text-slate-600">
                   <Bot size={13} aria-hidden />
-                  <span>{item.agent}</span>
+                  <span className="truncate" title={formatAgentTitle(item)}>
+                    {formatAgentLabel(item)}
+                  </span>
                   <span className="text-slate-300">/</span>
                   <span className="truncate">{item.base_branch}</span>
                 </div>
@@ -1083,7 +1086,7 @@ function WorkspaceSummary({
         </div>
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <Fact label="Workspace" value={overview.workspace_id} mono />
-          <Fact label="Agent" value={overview.agent} />
+          <Fact label="Agent" value={formatAgentLabel(overview)} />
           <Fact label="Branch" value={workspace?.branch_name ?? overview.branch_name ?? "—"} mono />
           <Fact label="Base" value={overview.base_branch} mono />
           <Fact label="Phase" value={overview.current_phase} />
@@ -1963,7 +1966,7 @@ function WorkspaceLogColumn({
           <h3 className="truncate text-sm font-semibold text-slate-950">{workspace.title}</h3>
           <p className="mono truncate text-[11px] text-slate-500">{workspace.workspace_id}</p>
           <p className="truncate text-[11px] text-slate-500">
-            {workspace.agent} / {workspace.status} / stream {streamState}
+            {formatAgentLabel(workspace)} / {workspace.status} / stream {streamState}
           </p>
         </div>
         <div className="flex shrink-0 items-center gap-1">
@@ -2493,9 +2496,26 @@ function toLogWorkspaceTarget(workspaceId: string, overview: WorkspaceOverview[]
     repo_url: "unknown",
     base_branch: "unknown",
     agent: "codex",
+    agent_model: null,
     status: "running",
     pr_url: null,
   };
+}
+
+function formatAgentLabel(workspace: Pick<WorkspaceOverview, "agent" | "agent_model">): string {
+  const model = compactAgentModel(workspace.agent_model);
+  return model ? `${workspace.agent} · ${model}` : workspace.agent;
+}
+
+function formatAgentTitle(workspace: Pick<WorkspaceOverview, "agent" | "agent_model">): string {
+  return workspace.agent_model ? `${workspace.agent} / ${workspace.agent_model}` : workspace.agent;
+}
+
+function compactAgentModel(model: string | null | undefined): string | null {
+  if (!model) {
+    return null;
+  }
+  return model.startsWith("ollama/") ? model.slice("ollama/".length) : model;
 }
 
 function toggleWorkspaceSelection(current: string[], workspaceId: string, checked: boolean): string[] {

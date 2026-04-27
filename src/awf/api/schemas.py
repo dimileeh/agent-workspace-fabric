@@ -332,6 +332,7 @@ class TaskResponse(BaseModel):
     task_class: TaskClass | None
     owned_paths: list[str]
     agent: AgentRuntime
+    agent_model: str | None = None
     status: WorkspaceStatus
     pr_url: str | None
     failure_reason: str | None
@@ -383,6 +384,7 @@ class WorkspaceOverviewResponse(BaseModel):
     task_class: TaskClass | None
     owned_paths: list[str]
     agent: AgentRuntime
+    agent_model: str | None = None
     status: WorkspaceStatus
     current_phase: str
     active_operation: str | None

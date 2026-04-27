@@ -262,6 +262,56 @@ class TestFixCycleRecoversAfterOneFailure:
         assert "AssertionError" in fix_prompt or "FAILED tests/foo.py" in fix_prompt
 
 
+class TestProtectedQualityGateChanges:
+    @pytest.mark.unit
+    async def test_initial_agent_cannot_commit_unowned_quality_gate_change(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(returncode=0)  # adapter.run (initial)
+        fake.queue_result(returncode=0, stdout="")  # rev-parse --abbrev-ref HEAD
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout=".awf/workspace.yml\n")  # protected diff
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert "protected quality-gate" in (ws.failure_message or "")
+            assert ".awf/workspace.yml" in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    async def test_fix_pass_cannot_commit_unowned_quality_gate_change(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory)
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="coverage below threshold")
+        fake.queue_result(returncode=0)  # adapter.run (fix pass)
+        fake.queue_result(returncode=0)  # git add -A
+        fake.queue_result(returncode=0, stdout="pyproject.toml\n")  # protected diff
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "policy_failure"
+            assert "pyproject.toml" in (ws.failure_message or "")
+
+
 class TestFixCycleExhaustion:
     @pytest.mark.unit
     async def test_persistent_failure_hits_cap_and_marks_failed(

@@ -108,6 +108,7 @@ def _task_from_attempt(
         task_class=attempt.task_class,
         owned_paths=list(attempt.owned_paths),
         agent=AgentRuntime(attempt.agent),
+        agent_model=_agent_model_from_workspace(workspace),
         status=WorkspaceStatus(workspace.status),
         pr_url=workspace.pr_url,
         failure_reason=workspace.failure_reason,
@@ -160,12 +161,18 @@ def _task_from_workspace(row: Workspace) -> TaskResponse:
         task_class=row.task_class,
         owned_paths=list(row.owned_paths),
         agent=AgentRuntime(row.agent),
+        agent_model=_agent_model_from_workspace(row),
         status=WorkspaceStatus(row.status),
         pr_url=row.pr_url,
         failure_reason=row.failure_reason,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
+
+
+def _agent_model_from_workspace(workspace: Workspace) -> str | None:
+    model = workspace.task_policy.get("agent_model")
+    return model if isinstance(model, str) and model else None
 
 
 def _readiness_from_candidate(

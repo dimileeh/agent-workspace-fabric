@@ -64,6 +64,18 @@ class ValidationFixContext:
     not only the one that just failed. Gives the CLI the full gate
     list so a fix to one command doesn't accidentally break another."""
 
+    reason_code: str | None = None
+    """Structured validation reason code when available."""
+
+    coverage_percent: float | None = None
+    """Coverage observed on the failed validation pass, when available."""
+
+    coverage_minimum_percent: float | None = None
+    """Configured coverage threshold, when coverage enforcement failed."""
+
+    baseline_coverage_percent: float | None = None
+    """Coverage observed before the agent changed the branch, when measured."""
+
 
 def read_output_tail(path: Path, *, max_chars: int = DEFAULT_TAIL_CHARS) -> str:
     """Return up to ``max_chars`` trailing characters from a file.
@@ -114,6 +126,32 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
     stdout_block = context.stdout_tail.rstrip() or "(empty)"
     stderr_block = context.stderr_tail.rstrip() or "(empty)"
     test_cmds_block = "\n".join(f"  - {cmd}" for cmd in context.test_commands)
+    policy_block = (
+        "Quality-gate policy:\n"
+        "  - Do not lower, disable, or bypass validation or coverage thresholds.\n"
+        "  - Do not edit quality-gate configuration files such as "
+        "`.awf/workspace.yml`, `pyproject.toml`, `.coveragerc`, "
+        "`pytest.ini`, or CI workflow files unless the task explicitly "
+        "asked you to change those policies.\n"
+        "  - If coverage is below the configured threshold, add meaningful "
+        "tests for the relevant code paths. If the threshold is already "
+        "unreachable on the unchanged base branch, preserve the threshold "
+        "and make the smallest honest coverage improvement you can.\n"
+    )
+    coverage_lines: list[str] = []
+    if context.reason_code:
+        coverage_lines.append(f"Reason code: {context.reason_code}")
+    if context.coverage_percent is not None:
+        coverage_lines.append(f"Observed coverage: {context.coverage_percent:.2f}%")
+    if context.coverage_minimum_percent is not None:
+        coverage_lines.append(f"Required coverage: {context.coverage_minimum_percent:.2f}%")
+    if context.baseline_coverage_percent is not None:
+        coverage_lines.append(
+            f"Pre-agent base-branch coverage: {context.baseline_coverage_percent:.2f}%"
+        )
+    coverage_block = ""
+    if coverage_lines:
+        coverage_block = "Coverage context:\n" + "\n".join(f"  - {line}" for line in coverage_lines)
 
     return (
         f"Validation failed after your previous pass. This is attempt "
@@ -126,6 +164,8 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
         f"{stderr_block}\n\n"
         f"All validation commands that will run on the next pass:\n"
         f"{test_cmds_block}\n\n"
+        f"{policy_block}\n"
+        f"{coverage_block}\n\n"
         f"Your job: FIX the failure above. Inspect the tail output for "
         f"concrete clues (assertion mismatches, missing fixtures, wrong "
         f"test IDs, stale imports) and make the minimum change that will "

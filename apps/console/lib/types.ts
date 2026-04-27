@@ -12,7 +12,7 @@ export type WorkspaceStatus =
   | "destroying"
   | "destroyed";
 
-export type AgentRuntime = "codex" | "claude_code" | "gemini";
+export type AgentRuntime = "codex" | "claude_code" | "gemini" | "opencode";
 
 export type ApiEnvelope<T> =
   | { ok: true; data: T }
@@ -37,6 +37,7 @@ export interface WorkspaceOverview {
   base_branch: string;
   branch_name: string | null;
   agent: AgentRuntime;
+  agent_model: string | null;
   status: WorkspaceStatus;
   current_phase: string;
   active_operation: string | null;

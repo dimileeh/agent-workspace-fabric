@@ -809,6 +809,14 @@ class TestFailurePaths:
             )
             await session.commit()
 
+        fake.queue_result(
+            returncode=1,
+            stdout=(
+                "Name        Stmts   Miss  Cover\n"
+                "-------------------------------\n"
+                "TOTAL         100     12    88%\n"
+            ),
+        )  # baseline coverage preflight
         fake.queue_result(returncode=0, stdout="codex finished")  # adapter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
@@ -875,6 +883,9 @@ class TestFailurePaths:
             "enforce": True,
             "status": "failed",
             "reason_code": "COVERAGE_BELOW_THRESHOLD",
+            "baseline_percent": 88.0,
+            "baseline_status": "failed",
+            "baseline_reason_code": "COVERAGE_BELOW_THRESHOLD",
         }
         assert operation["status"] == "failed"
         assert operation["error_code"] == "COVERAGE_BELOW_THRESHOLD"
@@ -885,6 +896,9 @@ class TestFailurePaths:
             "enforce": True,
             "status": "failed",
             "reason_code": "COVERAGE_BELOW_THRESHOLD",
+            "baseline_percent": 88.0,
+            "baseline_status": "failed",
+            "baseline_reason_code": "COVERAGE_BELOW_THRESHOLD",
         }
 
     @pytest.mark.unit

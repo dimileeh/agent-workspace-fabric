@@ -33,6 +33,7 @@ ENV/
 
 # Testing
 .pytest_cache/
+.playwright-cli/
 .coverage
 .coverage.*
 htmlcov/

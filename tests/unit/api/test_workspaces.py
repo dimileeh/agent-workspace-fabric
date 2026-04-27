@@ -410,9 +410,15 @@ class TestCreateWorkspaceV2PolicyMetadata:
 
         ws_id = create.json()["workspace_id"]
         response = await client.get(f"/v1/workspaces/{ws_id}")
+        overview = await client.get("/v1/workspaces/overview")
+        tasks = await client.get("/v1/tasks")
 
         assert response.status_code == 200
         assert response.json()["task_policy"]["agent_model"] == "ollama/glm-5.1:cloud"
+        assert overview.status_code == 200
+        assert overview.json()["items"][0]["agent_model"] == "ollama/glm-5.1:cloud"
+        assert tasks.status_code == 200
+        assert tasks.json()["items"][0]["agent_model"] == "ollama/glm-5.1:cloud"
 
     @pytest.mark.unit
     async def test_workspace_response_exposes_latest_decision_and_active_reservation(

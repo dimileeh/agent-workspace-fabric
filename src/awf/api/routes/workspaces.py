@@ -254,6 +254,7 @@ async def list_workspace_overview(
                 task_class=ws.task_class,
                 owned_paths=list(ws.owned_paths),
                 agent=AgentRuntime(ws.agent),
+                agent_model=_stored_task_agent_model(ws),
                 status=WorkspaceStatus(ws.status),
                 current_phase=ws.status,
                 active_operation=active_operation.type if active_operation is not None else None,

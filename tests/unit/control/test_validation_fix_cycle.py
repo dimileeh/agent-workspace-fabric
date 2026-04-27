@@ -148,6 +148,23 @@ class TestBuildFixPrompt:
         # No stray empty-placeholder artifacts.
         assert "None" not in prompt
 
+    @pytest.mark.unit
+    def test_forbids_lowering_quality_gates_on_coverage_failure(self) -> None:
+        prompt = build_fix_prompt(
+            self._ctx(
+                reason_code="COVERAGE_BELOW_THRESHOLD",
+                coverage_percent=88.07,
+                coverage_minimum_percent=99.0,
+                baseline_coverage_percent=88.07,
+            )
+        ).lower()
+
+        assert "do not lower" in prompt
+        assert "do not edit quality-gate configuration" in prompt
+        assert "add meaningful tests" in prompt
+        assert "pre-agent base-branch coverage: 88.07%" in prompt
+        assert "required coverage: 99.00%" in prompt
+
 
 class TestValidationFixContext:
     @pytest.mark.unit

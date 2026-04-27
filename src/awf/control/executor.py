@@ -37,6 +37,10 @@ from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_ov
 from awf.common.commands import AsyncCommandRunner
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.logging import get_logger
+from awf.control.quality_gates import (
+    find_protected_quality_gate_changes,
+    quality_gate_violation_message,
+)
 from awf.control.validation_fix_cycle import (
     ValidationFixContext,
     build_fix_prompt,
@@ -71,7 +75,7 @@ from awf.runtime.planning import (
     render_workspace_path,
 )
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
-from awf.runtime.validation import ValidationResult, ValidationRunner
+from awf.runtime.validation import ValidationCoverageResult, ValidationResult, ValidationRunner
 
 
 class _MonitorRunnerProto(Protocol):
@@ -198,6 +202,7 @@ class WorkspaceExecutor:
         worktree_path = self._config.worktrees_root / workspace_id
 
         # ── Step 1: agent CLI runs the task inside the container ────────────
+        baseline_coverage: ValidationCoverageResult | None = None
         try:
             agent = AgentRuntime(ws.agent)
             defaults = self._defaults_for(agent)
@@ -231,6 +236,12 @@ class WorkspaceExecutor:
                     )[:2000],
                 )
                 return
+            baseline_coverage = await self._run_baseline_coverage_preflight(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                profile=profile,
+            )
             if not await self._recheck_status(
                 workspace_id,
                 expected=WorkspaceStatus.running,
@@ -480,6 +491,19 @@ class WorkspaceExecutor:
             await _git_in_worktree(["add", "-A"])
             cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
             if cached.stdout.strip():
+                violations = find_protected_quality_gate_changes(
+                    changed_paths=_git_name_lines(cached.stdout),
+                    owned_paths=list(ws.owned_paths),
+                )
+                if violations:
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.policy_failure,
+                        reason_code="QUALITY_GATE_POLICY_CHANGED",
+                        message=quality_gate_violation_message(violations)[:2000],
+                    )
+                    return
                 commit_msg = f"awf: {ws.task_title}"[:72]
                 commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
                 commit_result = await self._runner.run(
@@ -670,7 +694,10 @@ class WorkspaceExecutor:
                 status="succeeded" if val_result.all_passed else "failed",
                 reason_code=_validation_run_reason_code(val_result),
                 retry_count=val_result.total_retries,
-                coverage=_validation_run_coverage_metadata(val_result),
+                coverage=_validation_run_coverage_metadata(
+                    val_result,
+                    baseline_coverage=baseline_coverage,
+                ),
                 command_retries=[c.retry_count for c in val_result.commands],
             )
             if val_result.all_passed:
@@ -681,7 +708,10 @@ class WorkspaceExecutor:
                     validation_run_id=validation_run_id,
                     requested_tier=validation_tier,
                     reason_code="VALIDATION_OK",
-                    coverage=_validation_run_coverage_metadata(val_result),
+                    coverage=_validation_run_coverage_metadata(
+                        val_result,
+                        baseline_coverage=baseline_coverage,
+                    ),
                 )
                 if pass_number > 0:
                     _log.info(
@@ -699,7 +729,10 @@ class WorkspaceExecutor:
                 fix_pass=pass_number,
                 max_fix_passes=max_fix_passes,
             )
-            last_failure_message = _validation_failure_message(val_result)
+            last_failure_message = _validation_failure_message(
+                val_result,
+                baseline_coverage=baseline_coverage,
+            )
 
             if pass_number >= max_fix_passes or first_fail is None:
                 # Exhausted our budget (or no failure details to anchor a
@@ -710,7 +743,10 @@ class WorkspaceExecutor:
                     validation_run_id=validation_run_id,
                     requested_tier=validation_tier,
                     reason_code=_validation_run_reason_code(val_result),
-                    coverage=_validation_run_coverage_metadata(val_result),
+                    coverage=_validation_run_coverage_metadata(
+                        val_result,
+                        baseline_coverage=baseline_coverage,
+                    ),
                     error_message=last_failure_message,
                 )
                 await self._mark_failed(
@@ -734,6 +770,14 @@ class WorkspaceExecutor:
                 pass_number=pass_number + 1,
                 total_passes=max_fix_passes,
                 test_commands=test_commands_tuple,
+                reason_code=_validation_run_reason_code(val_result),
+                coverage_percent=val_result.coverage.percent if val_result.coverage else None,
+                coverage_minimum_percent=(
+                    val_result.coverage.minimum_percent if val_result.coverage else None
+                ),
+                baseline_coverage_percent=(
+                    baseline_coverage.percent if baseline_coverage is not None else None
+                ),
             )
             fix_prompt = build_fix_prompt(fix_context)
             _log.info(
@@ -790,6 +834,32 @@ class WorkspaceExecutor:
                 )
             fix_cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
             if fix_cached.stdout.strip():
+                violations = find_protected_quality_gate_changes(
+                    changed_paths=_git_name_lines(fix_cached.stdout),
+                    owned_paths=list(ws.owned_paths),
+                )
+                if violations:
+                    message = quality_gate_violation_message(violations)
+                    await self._finish_pending_validate_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        validation_run_id=validation_run_id,
+                        requested_tier=validation_tier,
+                        reason_code="QUALITY_GATE_POLICY_CHANGED",
+                        coverage=_validation_run_coverage_metadata(
+                            val_result,
+                            baseline_coverage=baseline_coverage,
+                        ),
+                        error_message=message,
+                    )
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.validating,
+                        failure_reason=FailureReason.policy_failure,
+                        reason_code="QUALITY_GATE_POLICY_CHANGED",
+                        message=message[:2000],
+                    )
+                    return
                 commit_msg = f"awf: fix pass {pass_number + 1} for {ws.task_title}"[:72]
                 commit_body = (
                     f"AWF validation fix pass {pass_number + 1} of "
@@ -1139,6 +1209,42 @@ class WorkspaceExecutor:
             base=self._config.agent_defaults,
         )
         return defaults.get(agent)
+
+    async def _run_baseline_coverage_preflight(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        profile: WorkspaceProfile,
+    ) -> ValidationCoverageResult | None:
+        """Measure coverage before agent edits so fix prompts know the baseline.
+
+        This is intentionally non-blocking. A repository may already be below a
+        newly tightened target, and AWF should still let explicitly launched
+        coverage-improvement work proceed. The result is attached to later fix
+        prompts and validation metadata so agents are steered toward adding
+        tests instead of weakening the gate.
+        """
+        coverage = profile.validation.coverage
+        if coverage.command is None and coverage.minimum_percent <= 0:
+            return None
+        result = await self._validation.run_profile_coverage(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+            phase="baseline_coverage",
+        )
+        if result is not None and not result.ok:
+            _log.info(
+                "executor.baseline_coverage_below_policy",
+                workspace_id=workspace_id,
+                percent=result.percent,
+                minimum_percent=result.minimum_percent,
+                reason_code=result.reason_code,
+            )
+        return result
 
     async def _run_agent_task_with_optional_planning(
         self,
@@ -1756,26 +1862,63 @@ def _validation_run_reason_code(result: ValidationResult) -> str:
     return first_failure.reason_code
 
 
-def _validation_run_coverage_metadata(result: ValidationResult) -> dict[str, object] | None:
+def _validation_run_coverage_metadata(
+    result: ValidationResult,
+    *,
+    baseline_coverage: ValidationCoverageResult | None = None,
+) -> dict[str, object] | None:
     if result.coverage is None:
         return None
-    return result.coverage.as_metadata()
+    metadata = result.coverage.as_metadata()
+    if baseline_coverage is not None:
+        metadata["baseline_percent"] = (
+            float(baseline_coverage.percent)
+            if baseline_coverage.percent is not None
+            else None
+        )
+        metadata["baseline_status"] = baseline_coverage.status
+        metadata["baseline_reason_code"] = baseline_coverage.reason_code
+    return metadata
 
 
-def _validation_failure_message(result: ValidationResult) -> str:
+def _validation_failure_message(
+    result: ValidationResult,
+    *,
+    baseline_coverage: ValidationCoverageResult | None = None,
+) -> str:
     coverage = result.coverage
     if coverage is not None and not coverage.ok:
+        baseline_debt = (
+            baseline_coverage is not None
+            and baseline_coverage.percent is not None
+            and baseline_coverage.percent < coverage.minimum_percent
+        )
+        baseline_suffix = (
+            f"; pre-agent base coverage was {baseline_coverage.percent:.1f}%"
+            f" against the same {coverage.minimum_percent:.1f}% requirement"
+            if baseline_debt and baseline_coverage is not None and baseline_coverage.percent is not None
+            else ""
+        )
         if coverage.reason_code == "COVERAGE_BELOW_THRESHOLD" and coverage.percent is not None:
             return (
                 "validation failed: coverage "
                 f"{coverage.percent:.1f}% is below required {coverage.minimum_percent:.1f}%"
+                f"{baseline_suffix}; add meaningful tests and do not lower coverage thresholds"
             )
         if coverage.reason_code == "COVERAGE_NOT_FOUND":
             return "validation failed: coverage output was not found"
         if coverage.reason_code == "COVERAGE_COMMAND_FAILED":
-            return "validation failed: coverage command failed"
+            return (
+                "validation failed: coverage command failed"
+                f"{baseline_suffix}; fix the failing tests or add meaningful coverage, "
+                "do not lower coverage thresholds"
+            )
         if coverage.reason_code == "COVERAGE_PROVIDER_UNSUPPORTED":
             return f"validation failed: unsupported coverage provider {coverage.provider}"
 
     first_fail = result.first_failure
     return f"validation failed: {first_fail.command}" if first_fail else "validation failed"
+
+
+def _git_name_lines(output: str) -> list[str]:
+    return [line.strip() for line in output.splitlines() if line.strip()]
