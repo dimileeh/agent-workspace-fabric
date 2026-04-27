@@ -402,7 +402,7 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
 
         likely_cause = "Unknown Validation Failure"
         action = "Review validation logs"
-        
+
         if "AGENT_AUTH_FAILED" in msg:
             likely_cause = "Agent Auth Failed"
             action = "Check agent credentials"

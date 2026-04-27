@@ -1001,7 +1001,7 @@ async def test_root_cause_clusters_mixed_rows(
     from awf.service.metrics import summarize_failure_analysis
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    
+
     # 1. AGENT_AUTH_FAILED
     await _workspace(
         session_factory,
@@ -1076,10 +1076,10 @@ async def test_root_cause_clusters_mixed_rows(
     )
 
     summary = await summarize_failure_analysis(session_factory, now=now)
-    
+
     assert len(summary.root_cause_clusters) == 7
     cluster_reasons = [c.likely_cause for c in summary.root_cause_clusters]
-    
+
     assert "Agent Auth Failed" in cluster_reasons
     assert "Model Not Found / 404" in cluster_reasons
     assert "Missing Managed Worktree" in cluster_reasons
@@ -1101,7 +1101,7 @@ async def test_root_cause_clusters_agent_model_extraction(
     from awf.service.metrics import summarize_failure_analysis
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    
+
     await _workspace(
         session_factory,
         status=WorkspaceStatus.failed,
@@ -1111,7 +1111,7 @@ async def test_root_cause_clusters_agent_model_extraction(
         agent="gemini",
         task_policy={"agent_model": "gemini-1.5-pro"},
     )
-    
+
     await _workspace(
         session_factory,
         status=WorkspaceStatus.failed,
@@ -1121,13 +1121,13 @@ async def test_root_cause_clusters_agent_model_extraction(
         agent="gemini",
         task_policy={},
     )
-    
+
     summary = await summarize_failure_analysis(session_factory, now=now)
-    
+
     # Groups should be split by agent_model
     syntax_clusters = [c for c in summary.root_cause_clusters if c.likely_cause == "Syntax or Import Error"]
     assert len(syntax_clusters) == 2
-    
+
     models = {c.agent_model for c in syntax_clusters}
     assert models == {"gemini-1.5-pro", None}
 
@@ -1140,7 +1140,7 @@ async def test_root_cause_clusters_empty_history(
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
     summary = await summarize_failure_analysis(session_factory, now=now)
-    
+
     assert summary.root_cause_clusters == []
 
 
@@ -1151,7 +1151,7 @@ async def test_existing_failure_groups_unaffected(
     from awf.service.metrics import summarize_failure_analysis
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    
+
     await _workspace(
         session_factory,
         status=WorkspaceStatus.failed,
@@ -1160,9 +1160,9 @@ async def test_existing_failure_groups_unaffected(
         failure_message="AGENT_AUTH_FAILED",
         agent="gemini",
     )
-    
+
     summary = await summarize_failure_analysis(session_factory, now=now)
-    
+
     assert len(summary.failure_groups) == 1
     assert summary.failure_groups[0].failure_reason == FailureReason.agent_failure.value
     assert len(summary.latest_examples) == 1

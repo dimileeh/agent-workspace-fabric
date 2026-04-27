@@ -192,10 +192,10 @@ async def test_api_route_serialization(
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
-    from awf.db.enums import WorkspaceStatus, FailureReason
-    
+    from awf.db.enums import FailureReason, WorkspaceStatus
+
     now = datetime.now(UTC)
-    
+
     workspace = await _workspace(
         engine,
         status=WorkspaceStatus.failed,
@@ -205,17 +205,17 @@ async def test_api_route_serialization(
         agent="gemini",
         task_policy={"agent_model": "gemini-1.5-pro"},
     )
-        
+
     response = await client.get("/v1/metrics/failures/summary")
-    
+
     assert response.status_code == 200
     body = response.json()
-    
+
     assert "root_cause_clusters" in body
     clusters = body["root_cause_clusters"]
     assert len(clusters) == 1
     cluster = clusters[0]
-    
+
     assert cluster["agent"] == "gemini"
     assert cluster["agent_model"] == "gemini-1.5-pro"
     assert cluster["failure_reason"] == "validation_failure"
