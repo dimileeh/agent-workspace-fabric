@@ -329,6 +329,54 @@ async def test_executor_recovery_marks_validate_operation_succeeded_on_clean_pas
 
 
 @pytest.mark.unit
+async def test_executor_recovery_closes_operation_row_for_rebase_only_mode(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """When the monitor dispatches recovery with ``recovery_mode='rebase_only'``,
+    the recovery Operation row must still be closed cleanly by the
+    executor's recovery branch.
+
+    Until the future rebase slice lands the runner always creates the
+    recovery op as ``OperationType.validate`` (the executor's recovery
+    branch only runs validation today, and its finisher queries by
+    type). A ``rebase``-typed row would leak forever as ``running`` —
+    the very bug fixed in commit 666cba6. This test guards the contract
+    from the executor side: the ``rebase_only`` payload discriminator
+    must not change which operation rows the executor closes.
+    """
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, recovery_mode="rebase_only"
+    )
+
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation
+    _queue_push_and_pr(fake)
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    pr_monitor_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(pr_monitor_ops) == 1
+    op = pr_monitor_ops[0]
+    assert op.type == OperationType.validate.value
+    assert op.payload is not None
+    assert op.payload.get("recovery_mode") == "rebase_only"
+    assert op.status == OperationStatus.succeeded.value
+    assert isinstance(op.result, dict)
+    assert "validation_run_id" in op.result
+    assert op.started_at is not None
+    assert op.finished_at is not None
+    assert op.started_at < op.finished_at
+
+
+@pytest.mark.unit
 async def test_executor_recovery_marks_validate_operation_failed_when_validation_fails(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
