@@ -293,6 +293,96 @@ class TestLogs:
         assert response.status_code == 404
         assert response.json()["detail"]["error_code"] == "NOT_FOUND"
 
+    @pytest.mark.unit
+    async def test_logs_for_missing_workspace_return_404(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        headers = _auth(monkeypatch)
+
+        listed = await client.get("/v1/workspaces/ws_missing/logs", headers=headers)
+        read = await client.get(
+            "/v1/workspaces/ws_missing/logs/agent.stdout",
+            headers=headers,
+        )
+
+        assert listed.status_code == 404
+        assert listed.json()["detail"]["error_code"] == "NOT_FOUND"
+        assert read.status_code == 404
+        assert read.json()["detail"]["error_code"] == "NOT_FOUND"
+
+    @pytest.mark.unit
+    async def test_missing_log_file_returns_structured_404(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        missing_log_path = tmp_path / "deleted.log"
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            await WorkspaceLogStreamRepository(session).create_or_get(
+                workspace_id=workspace_id,
+                stream_id="agent.stdout",
+                source="agent",
+                name="Agent stdout",
+                kind="stdout",
+                path=str(missing_log_path),
+            )
+            await session.commit()
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/logs/agent.stdout",
+            headers=_auth(monkeypatch),
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["error_code"] == "LOG_FILE_MISSING"
+
+    @pytest.mark.unit
+    async def test_log_read_reports_eof_at_next_offset(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        log_path = tmp_path / "agent.log"
+        log_path.write_text("alpha\n", encoding="utf-8")
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceLogStreamRepository(session)
+            await repo.create_or_get(
+                workspace_id=workspace_id,
+                stream_id="agent.stdout",
+                source="agent",
+                name="Agent stdout",
+                kind="stdout",
+                path=str(log_path),
+            )
+            await repo.append_metadata(
+                workspace_id=workspace_id,
+                stream_id="agent.stdout",
+                byte_delta=log_path.stat().st_size,
+                line_delta=1,
+            )
+            await session.commit()
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/logs/agent.stdout",
+            params={"offset": 0, "limit_bytes": 10},
+            headers=_auth(monkeypatch),
+        )
+
+        assert response.status_code == 200
+        assert response.json()["data"] == "alpha\n"
+        assert response.json()["next_offset"] == 6
+        assert response.json()["eof"] is True
+
 
 class TestWorkspaceWebSocket:
     @pytest.mark.unit

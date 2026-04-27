@@ -25,9 +25,15 @@ from awf.adapters.claude_code import ClaudeCodeAdapter
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.gemini import GeminiAdapter
+from awf.adapters.gemini import _settings_for_effort as gemini_settings_for_effort
+from awf.adapters.gemini import _thinking_level_for_effort as gemini_thinking_level_for_effort
 from awf.adapters.opencode import (
     OPENCODE_OLLAMA_CLOUD_MODELS,
     OpenCodeAdapter,
+    _opencode_config_for_effort,
+    _qualified_model,
+    _thinking_enabled,
+    _variant_for_effort,
 )
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.db.enums import AgentRuntime
@@ -108,7 +114,43 @@ class _RecordingLogStore:
         return self.sinks
 
 
+class _RunOnlyRunner:
+    def __init__(self) -> None:
+        self.calls: list[dict[str, object]] = []
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        self.calls.append({"args": args, "input_bytes": input_bytes, "cwd": cwd})
+        return CommandResult(returncode=0, stdout="legacy stdout", stderr="legacy stderr")
+
+
 class TestCodexAdapter:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("wall_timeout", "idle_timeout", "message"),
+        [
+            (0.0, 1.0, "agent_wall_timeout_seconds must be positive"),
+            (1.0, 0.0, "agent_idle_timeout_seconds must be positive"),
+        ],
+    )
+    def test_rejects_non_positive_agent_timeouts(
+        self,
+        wall_timeout: float,
+        idle_timeout: float,
+        message: str,
+    ) -> None:
+        with pytest.raises(ValueError, match=message):
+            CodexAdapter(
+                runner=FakeCommandRunner(),
+                agent_wall_timeout_seconds=wall_timeout,
+                agent_idle_timeout_seconds=idle_timeout,
+            )
+
     @pytest.mark.unit
     async def test_produces_correct_cli_invocation(self) -> None:
         runner = FakeCommandRunner()
@@ -241,6 +283,29 @@ class TestCodexAdapter:
         assert runner.wall_timeout_seconds == 12.0
         assert runner.idle_timeout_seconds == 3.0
 
+    @pytest.mark.unit
+    async def test_run_only_runner_falls_back_and_still_writes_log_streams(self) -> None:
+        runner = _RunOnlyRunner()
+        log_store = _RecordingLogStore()
+        adapter = CodexAdapter(
+            runner=runner,  # type: ignore[arg-type]
+            log_store=log_store,  # type: ignore[arg-type]
+        )
+
+        result = await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_legacy_runner",
+        )
+
+        assert result.stdout == "legacy stdout"
+        assert result.stderr == "legacy stderr"
+        assert runner.calls[0]["input_bytes"] == b""
+        assert log_store.sinks.stdout_data == ["legacy stdout"]
+        assert log_store.sinks.stderr_data == ["legacy stderr"]
+        assert log_store.sinks.closed is True
+
 
 class TestClaudeCodeAdapter:
     @pytest.mark.unit
@@ -346,6 +411,23 @@ class TestGeminiAdapter:
         assert "-m" in args and "gemini-3-pro-preview" in args
         assert args[-1].endswith(_PROMPT)
 
+    @pytest.mark.unit
+    def test_gemini_effort_helpers_map_only_high_effort_to_high_thinking(self) -> None:
+        assert gemini_thinking_level_for_effort("high") == "HIGH"
+        assert gemini_thinking_level_for_effort("xhigh") == "HIGH"
+        assert gemini_thinking_level_for_effort("max") == "HIGH"
+        assert gemini_thinking_level_for_effort("medium") is None
+        assert gemini_settings_for_effort(model="gemini-3-pro-preview", effort="low") == {}
+        no_model_settings = gemini_settings_for_effort(model=None, effort="xhigh")
+        override = no_model_settings["modelConfigs"]["overrides"][0]  # type: ignore[index]
+        assert override["match"] == {}
+        assert (
+            override["modelConfig"]["generateContentConfig"]["thinkingConfig"][
+                "thinkingLevel"
+            ]
+            == "HIGH"
+        )
+
 
 class TestOpenCodeAdapter:
     @pytest.mark.unit
@@ -406,6 +488,23 @@ class TestOpenCodeAdapter:
         args = runner.calls[0].args
         assert "--model" in args
         assert "ollama/glm-5.1:cloud" in args
+
+    @pytest.mark.unit
+    def test_opencode_effort_helpers_cover_default_and_high_paths(self) -> None:
+        assert _qualified_model("kimi-k2.6:cloud") == "ollama/kimi-k2.6:cloud"
+        assert _qualified_model("ollama/glm-5.1:cloud") == "ollama/glm-5.1:cloud"
+        assert _thinking_enabled(None) is False
+        assert _thinking_enabled("medium") is False
+        assert _thinking_enabled("high") is True
+        assert _variant_for_effort(None) is None
+        assert _variant_for_effort("medium") is None
+        assert _variant_for_effort("high") == "high"
+        assert _variant_for_effort("xhigh") == "max"
+        assert _variant_for_effort("max") == "max"
+
+        low_config = _opencode_config_for_effort(effort=None)
+        models = low_config["provider"]["ollama"]["models"]  # type: ignore[index]
+        assert all("options" not in model for model in models.values())
 
 
 class TestCentralDefaults:

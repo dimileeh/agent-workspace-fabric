@@ -8,8 +8,10 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+import awf.service.merge_queue as merge_queue
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -294,3 +296,220 @@ async def test_candidates_on_other_repo_or_base_do_not_block(
         )
 
     assert blockers == []
+
+
+def _candidate(
+    *,
+    candidate_id: str,
+    created_at: datetime,
+    status: str = "open",
+    workspace_status: WorkspaceStatus | str = WorkspaceStatus.monitoring_pr,
+    auto_merge: bool = True,
+    canonical: bool = True,
+    stale: bool = False,
+    repo_url: str = "git@github.com:example/service.git",
+    base_branch: str = "development",
+    operations: list[Operation] | None = None,
+) -> MergeCandidate:
+    workspace_status_value = (
+        workspace_status.value
+        if isinstance(workspace_status, WorkspaceStatus)
+        else workspace_status
+    )
+    workspace = Workspace(
+        id=f"ws_{candidate_id}",
+        status=workspace_status_value,
+        repo_url=repo_url,
+        branch_base=base_branch,
+        task_title=f"Candidate {candidate_id}",
+        task_prompt="Merge me",
+        agent=AgentRuntime.codex.value,
+        auto_merge=auto_merge,
+    )
+    workspace.operations = operations or []
+    attempt = TaskAttempt(
+        id=f"att_{candidate_id}",
+        task_id=f"task_{candidate_id}",
+        workspace_id=workspace.id,
+        attempt_number=1,
+        agent=AgentRuntime.codex.value,
+        repo_url=repo_url,
+        base_branch=base_branch,
+        title=workspace.task_title,
+        status=workspace.status,
+        is_canonical_for_merge=canonical,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    candidate = MergeCandidate(
+        id=candidate_id,
+        task_id=attempt.task_id,
+        attempt_id=attempt.id,
+        workspace_id=workspace.id,
+        pr_url=f"https://github.com/example/service/pull/{candidate_id}",
+        pr_number=1,
+        repo_url=repo_url,
+        base_branch=base_branch,
+        status=status,
+        stale=stale,
+        created_at=created_at,
+        updated_at=created_at,
+    )
+    candidate.workspace = workspace
+    candidate.attempt = attempt
+    return candidate
+
+
+@pytest.mark.unit
+async def test_batch_blocker_lookup_handles_empty_candidate_list() -> None:
+    blockers = await merge_queue.list_merge_queue_blockers_for_candidates(
+        object(),  # type: ignore[arg-type]
+        candidate_ids=[],
+    )
+
+    assert blockers == {}
+
+
+@pytest.mark.unit
+async def test_batch_blocker_lookup_returns_empty_for_non_ready_candidates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+
+    async def fake_load_candidates(
+        _session: object,
+        candidate_ids: list[str],
+    ) -> list[MergeCandidate]:
+        assert candidate_ids == ["later"]
+        return [
+            _candidate(
+                candidate_id="later",
+                created_at=now,
+                workspace_status=WorkspaceStatus.running,
+            )
+        ]
+
+    monkeypatch.setattr(merge_queue, "_load_candidates", fake_load_candidates)
+
+    blockers = await merge_queue.list_merge_queue_blockers_for_candidates(
+        object(),  # type: ignore[arg-type]
+        candidate_ids=["later", "later"],
+    )
+
+    assert blockers == {"later": []}
+
+
+@pytest.mark.unit
+async def test_batch_blocker_lookup_filters_same_candidate_newer_and_nonblocking_pool(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    target = _candidate(candidate_id="later", created_at=now + timedelta(minutes=5))
+    older_blocker = _candidate(candidate_id="older", created_at=now)
+    same_candidate = _candidate(candidate_id="later", created_at=now - timedelta(minutes=1))
+    newer_candidate = _candidate(candidate_id="newer", created_at=now + timedelta(minutes=10))
+    nonblocking_candidate = _candidate(
+        candidate_id="nonblocking",
+        created_at=now - timedelta(minutes=2),
+        workspace_status=WorkspaceStatus.completed,
+    )
+
+    async def fake_load_candidates(
+        _session: object,
+        _candidate_ids: list[str],
+    ) -> list[MergeCandidate]:
+        return [target]
+
+    async def fake_blocker_pool(
+        _session: object,
+        _candidates: list[MergeCandidate],
+    ) -> list[MergeCandidate]:
+        return [same_candidate, newer_candidate, nonblocking_candidate, older_blocker]
+
+    monkeypatch.setattr(merge_queue, "_load_candidates", fake_load_candidates)
+    monkeypatch.setattr(merge_queue, "_load_older_open_candidate_pool", fake_blocker_pool)
+
+    blockers = await merge_queue.list_merge_queue_blockers_for_candidates(
+        object(),  # type: ignore[arg-type]
+        candidate_ids=["later"],
+    )
+
+    assert [blocker.candidate_id for blocker in blockers["later"]] == ["older"]
+    assert blockers["later"][0].blocker_state == "merge_eligible"
+
+
+@pytest.mark.unit
+def test_merge_queue_private_policy_helpers_cover_false_paths() -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    target = _candidate(candidate_id="later", created_at=now)
+
+    assert merge_queue._is_older_candidate(
+        _candidate(candidate_id="older", created_at=now - timedelta(seconds=1)),
+        target,
+    )
+    assert not merge_queue._is_older_candidate(
+        _candidate(candidate_id="newer", created_at=now + timedelta(seconds=1)),
+        target,
+    )
+    assert merge_queue._workspace_status(
+        _candidate(candidate_id="bad", created_at=now, workspace_status="unknown").workspace
+    ) is None
+    assert not merge_queue._is_merge_ready_candidate(
+        _candidate(candidate_id="closed", created_at=now, status="closed")
+    )
+    assert not merge_queue._is_merge_ready_candidate(
+        _candidate(candidate_id="manual", created_at=now, auto_merge=False)
+    )
+    assert not merge_queue._is_merge_ready_candidate(
+        _candidate(candidate_id="stale", created_at=now, stale=True)
+    )
+    assert (
+        merge_queue._blocking_state(
+            _candidate(
+                candidate_id="completed",
+                created_at=now,
+                workspace_status=WorkspaceStatus.completed,
+            )
+        )
+        is None
+    )
+
+
+@pytest.mark.unit
+def test_monitor_recovery_operation_policy_false_and_true_paths() -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+
+    assert not merge_queue._is_monitor_recovery_operation(
+        Operation(
+            type="cancel",
+            status=OperationStatus.pending.value,
+            payload={"source": "pr_monitor"},
+        )
+    )
+    assert not merge_queue._is_monitor_recovery_operation(
+        Operation(type=OperationType.validate.value, status=OperationStatus.succeeded.value)
+    )
+    assert not merge_queue._is_monitor_recovery_operation(
+        Operation(type=OperationType.validate.value, status=OperationStatus.pending.value)
+    )
+    assert not merge_queue._is_monitor_recovery_operation(
+        Operation(
+            type=OperationType.validate.value,
+            status=OperationStatus.pending.value,
+            payload={"source": "operator"},
+        )
+    )
+    recovery_candidate = _candidate(
+        candidate_id="recovery",
+        created_at=now,
+        workspace_status=WorkspaceStatus.validating,
+        operations=[
+            Operation(
+                type=OperationType.rebase.value,
+                status=OperationStatus.running.value,
+                payload={"source": "pr_monitor"},
+            )
+        ],
+    )
+    assert merge_queue._is_monitor_owned_recovery(recovery_candidate)
+    assert merge_queue._blocking_state(recovery_candidate) == "monitor_owned_recovery"

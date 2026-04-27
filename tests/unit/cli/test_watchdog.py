@@ -22,8 +22,15 @@ subprocess runs. They lock the invariants that matter operationally:
 from __future__ import annotations
 
 import json
+import signal
+import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 
+import pytest
+from typer.testing import CliRunner
+
+import awf.cli.watchdog as watchdog
 from awf.cli.watchdog import WatchdogConfig, run_one_scan
 
 
@@ -257,6 +264,37 @@ class TestWatchdogScan:
 
         assert spawn.calls == []
 
+    def test_watchdog_survives_wrong_json_shape_and_missing_pr_number(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        spawn = _FakeSpawn()
+
+        run_one_scan(
+            config=_cfg(["dimileeh/aira-web", "dimileeh/aira-agent"], tmp_path),
+            gh_lister=lambda repo: json.dumps({"not": "a list"})
+            if repo == "dimileeh/aira-web"
+            else json.dumps([{"headRefName": "awf/ws"}]),
+            process_lister=lambda: "",
+            spawn_attach=spawn,
+        )
+
+        assert spawn.calls == []
+
+    def test_watchdog_survives_attach_spawn_exception(self, tmp_path: Path) -> None:
+        def boom(**_kwargs: object) -> int:
+            raise RuntimeError("spawn exploded")
+
+        run_one_scan(
+            config=_cfg(["dimileeh/aira-web"], tmp_path),
+            gh_lister=lambda _repo: _canned_gh_output(
+                repo="dimileeh/aira-web",
+                prs=[(100, "awf/ws1")],
+            ),
+            process_lister=lambda: "",
+            spawn_attach=boom,
+        )
+
 
 class TestWatchdogConfig:
     def test_default_repos_list_matches_brief(self) -> None:
@@ -268,3 +306,220 @@ class TestWatchdogConfig:
             "dimileeh/aira-web",
             "dimileeh/aira-agent-workspace-fabric",
         ]
+
+
+class TestWatchdogRealSeams:
+    def test_default_gh_lister_calls_gh_with_repo_head_and_limit(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_run(args: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append({"args": args, **kwargs})
+            return SimpleNamespace(stdout="[]")
+
+        monkeypatch.setattr(watchdog.subprocess, "run", fake_run)
+
+        assert watchdog._default_gh_lister("dimileeh/aira-web", limit=17) == "[]"
+
+        assert calls == [
+            {
+                "args": [
+                    "gh",
+                    "pr",
+                    "list",
+                    "--repo",
+                    "dimileeh/aira-web",
+                    "--state",
+                    "open",
+                    "--head",
+                    "awf/",
+                    "--json",
+                    "number,headRefName,baseRefName",
+                    "--limit",
+                    "17",
+                ],
+                "capture_output": True,
+                "text": True,
+                "check": True,
+            }
+        ]
+
+    def test_default_process_lister_returns_ps_output(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(
+            watchdog.subprocess,
+            "check_output",
+            lambda args, **kwargs: f"{args} {kwargs}",
+        )
+
+        output = watchdog._default_process_lister()
+
+        assert "ps" in output
+        assert "stderr" in output
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            subprocess.CalledProcessError(1, ["ps", "-ef"]),
+            FileNotFoundError("ps"),
+            OSError("process table unavailable"),
+        ],
+    )
+    def test_default_process_lister_returns_empty_on_process_errors(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        exc: Exception,
+    ) -> None:
+        def fake_check_output(*_args: object, **_kwargs: object) -> str:
+            raise exc
+
+        monkeypatch.setattr(watchdog.subprocess, "check_output", fake_check_output)
+
+        assert watchdog._default_process_lister() == ""
+
+    def test_default_spawn_attach_invokes_attach_script(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        calls: list[dict[str, object]] = []
+        monkeypatch.setattr(watchdog, "_project_root", lambda: Path("/repo"))
+
+        def fake_run(args: list[str], **kwargs: object) -> SimpleNamespace:
+            calls.append({"args": args, **kwargs})
+            return SimpleNamespace(returncode=0, stderr="")
+
+        monkeypatch.setattr(watchdog.subprocess, "run", fake_run)
+
+        returncode = watchdog._default_spawn_attach(
+            repo="dimileeh/aira-web",
+            pr_number=123,
+            work_dir=tmp_path,
+            agent="codex",
+        )
+
+        assert returncode == 0
+        assert calls[0]["args"] == [
+            watchdog.sys.executable,
+            "/repo/scripts/attach_feature_pr_monitor.py",
+            "--repo",
+            "git@github.com:dimileeh/aira-web.git",
+            "--pr",
+            "123",
+            "--work-dir",
+            str(tmp_path),
+            "--agent",
+            "codex",
+        ]
+        assert calls[0]["capture_output"] is True
+        assert calls[0]["text"] is True
+        assert calls[0]["check"] is False
+
+    def test_default_spawn_attach_returns_nonzero_exit_code(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        monkeypatch.setattr(watchdog, "_project_root", lambda: Path("/repo"))
+        monkeypatch.setattr(
+            watchdog.subprocess,
+            "run",
+            lambda *_args, **_kwargs: SimpleNamespace(returncode=17, stderr="bad auth"),
+        )
+
+        assert (
+            watchdog._default_spawn_attach(
+                repo="dimileeh/aira-web",
+                pr_number=123,
+                work_dir=tmp_path,
+                agent="codex",
+            )
+            == 17
+        )
+
+    def test_project_root_raises_when_pyproject_is_not_found(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        monkeypatch.setattr(watchdog.Path, "is_file", lambda _self: False)
+
+        with pytest.raises(RuntimeError, match="could not locate pyproject.toml"):
+            watchdog._project_root()
+
+
+class TestWatchdogLoopAndCli:
+    def test_shutdown_flag_handle_sets_stop(self) -> None:
+        flag = watchdog._ShutdownFlag()
+
+        flag.handle(signal.SIGTERM, None)
+
+        assert flag.stop is True
+
+    def test_run_loop_exits_after_signal(self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+        handlers: dict[int, object] = {}
+        scans: list[str] = []
+
+        def fake_signal(signum: int, handler: object) -> None:
+            handlers[signum] = handler
+
+        def gh_lister(_repo: str) -> str:
+            scans.append("scan")
+            handler = handlers[signal.SIGTERM]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+            return "[]"
+
+        monkeypatch.setattr(watchdog.signal, "signal", fake_signal)
+
+        watchdog._run_loop(
+            config=WatchdogConfig(work_dir=tmp_path, repos=["dimileeh/aira-web"], poll_seconds=2),
+            gh_lister=gh_lister,
+            process_lister=lambda: "",
+            spawn_attach=lambda **_kwargs: 0,
+            sleep=lambda _seconds: None,
+        )
+
+        assert scans == ["scan"]
+        assert signal.SIGINT in handlers
+        assert signal.SIGTERM in handlers
+
+    def test_start_command_wires_options_into_run_loop(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        calls: list[dict[str, object]] = []
+
+        def fake_run_loop(**kwargs: object) -> None:
+            calls.append(kwargs)
+
+        monkeypatch.setattr(watchdog, "_run_loop", fake_run_loop)
+
+        result = CliRunner().invoke(
+            watchdog.app,
+            [
+                "--work-dir",
+                str(tmp_path),
+                "--poll-seconds",
+                "7",
+                "--repo",
+                "dimileeh/aira-web",
+                "--agent",
+                "codex",
+                "--gh-pr-limit",
+                "11",
+            ],
+        )
+
+        assert result.exit_code == 0
+        config = calls[0]["config"]
+        assert isinstance(config, WatchdogConfig)
+        assert config.work_dir == tmp_path
+        assert config.poll_seconds == 7
+        assert config.repos == ["dimileeh/aira-web"]
+        assert config.agent == "codex"
+        assert config.gh_pr_limit == 11

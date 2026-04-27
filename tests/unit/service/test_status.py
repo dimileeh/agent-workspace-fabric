@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 from pathlib import Path
 from typing import Any
 
@@ -12,7 +13,16 @@ import pytest
 from awf.service.config import ServiceSettings
 from awf.service.status import (
     WorkspaceIdView,
+    _check_agent_runtime_image,
+    _check_api,
+    _check_docker,
     _default_workspace_id_lookup,
+    _docker_result_to_check,
+    _docker_socket_path,
+    _parse_workspace_projects,
+    _run_docker_command,
+    _truncate,
+    _workspace_id_from_project,
     collect_service_status,
 )
 
@@ -39,6 +49,16 @@ class _Response:
 
     def json(self) -> dict[str, str]:
         return {"status": "ok"}
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _JsonErrorResponse:
+    status_code = 200
+
+    def json(self) -> dict[str, str]:
+        raise ValueError("not json")
 
     def raise_for_status(self) -> None:
         return None
@@ -546,3 +566,135 @@ def test_default_workspace_id_lookup_returns_unavailable_for_malformed_url() -> 
     assert view.available is False
     assert view.active_ids == frozenset()
     assert view.terminal_ids == frozenset()
+
+
+@pytest.mark.unit
+def test_status_helpers_cover_api_json_and_failure_paths(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    async def bad_json_get(_url: str, *, timeout: float) -> _JsonErrorResponse:
+        assert timeout == 5.0
+        return _JsonErrorResponse()
+
+    async def raising_get(_url: str, *, timeout: float) -> _Response:
+        raise RuntimeError("api down")
+
+    assert asyncio.run(_check_api(settings, bad_json_get)) == {"ok": True, "status": "ok"}
+    failed = asyncio.run(_check_api(settings, raising_get))
+    assert failed["ok"] is False
+    assert failed["reason"] == "API_UNREACHABLE"
+    assert "RuntimeError" in str(failed["detail"])
+
+
+@pytest.mark.unit
+def test_status_helpers_cover_docker_socket_and_result_failures(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    missing_socket = _check_docker(
+        settings,
+        run_subprocess=_make_run_subprocess(),
+        socket_exists=lambda _path: False,
+    )
+    assert missing_socket["reason"] == "DOCKER_SOCKET_UNREACHABLE"
+
+    non_unix_settings = ServiceSettings(
+        **{**settings.__dict__, "docker_host": "tcp://docker:2375"}
+    )
+    docker_ok = _check_docker(
+        non_unix_settings,
+        run_subprocess=_make_run_subprocess(),
+        socket_exists=lambda _path: False,
+    )
+    assert docker_ok["ok"] is True
+    assert docker_ok["version"] == "27.0.3"
+    image_ok = _check_agent_runtime_image(non_unix_settings, _make_run_subprocess())
+    assert image_ok["version"] == "sha256:deadbeef"
+
+    timeout_check = _docker_result_to_check(
+        subprocess.TimeoutExpired(["docker", "info"], timeout=5),
+        fail_reason="DOCKER_TIMEOUT",
+        detail_prefix="docker: ",
+    )
+    assert timeout_check["reason"] == "DOCKER_TIMEOUT"
+    generic_check = _docker_result_to_check(
+        RuntimeError("boom"),
+        fail_reason="DOCKER_FAILED",
+        detail_prefix="docker: ",
+    )
+    assert generic_check["reason"] == "DOCKER_FAILED"
+    failed_process = type("Completed", (), {"returncode": 1, "stdout": "stdout", "stderr": ""})()
+    assert _docker_result_to_check(failed_process, fail_reason="DOCKER_FAILED") == {
+        "ok": False,
+        "status": "fail",
+        "reason": "DOCKER_FAILED",
+        "detail": "stdout",
+    }
+
+
+@pytest.mark.unit
+def test_run_docker_command_passes_docker_host_and_captures_exceptions(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    calls: list[dict[str, object]] = []
+
+    def run(args: list[str], **kwargs: object) -> Any:
+        calls.append({"args": args, **kwargs})
+        return type("Completed", (), {"returncode": 0, "stdout": "ok", "stderr": ""})()
+
+    result = _run_docker_command(["docker", "info"], settings=settings, run_subprocess=run)
+
+    assert result.returncode == 0
+    assert calls[0]["args"] == ["docker", "info"]
+    env = calls[0]["env"]
+    assert isinstance(env, dict)
+    assert env["DOCKER_HOST"] == settings.docker_host
+
+    def boom(*_args: object, **_kwargs: object) -> Any:
+        raise RuntimeError("docker exploded")
+
+    captured = _run_docker_command(["docker", "info"], settings=settings, run_subprocess=boom)
+    assert isinstance(captured, RuntimeError)
+
+
+@pytest.mark.unit
+def test_workspace_project_parsing_skips_bad_rows_and_extracts_supported_prefixes() -> None:
+    payload = "\n".join(
+        [
+            "",
+            "not-json",
+            json.dumps(["not", "a", "dict"]),
+            json.dumps({"project": ""}),
+            json.dumps({"project": "other"}),
+            json.dumps({"project": "awf_not_workspace"}),
+            json.dumps(
+                {
+                    "id": "abc",
+                    "name": "agent",
+                    "service": "agent",
+                    "state": "running",
+                    "status": "Up",
+                    "project": "awf_ws_one",
+                }
+            ),
+            json.dumps(
+                {
+                    "id": "def",
+                    "name": "agent",
+                    "service": "agent",
+                    "state": "running",
+                    "status": "Up",
+                    "project": "awf-ws_two",
+                }
+            ),
+        ]
+    )
+
+    projects = _parse_workspace_projects(payload)
+
+    assert [project.workspace_id for project in projects] == ["ws_two", "ws_one"]
+    assert _workspace_id_from_project("awf_ws_three") == "ws_three"
+    assert _workspace_id_from_project("awf-ws_four") == "ws_four"
+    assert _workspace_id_from_project("awf_not_workspace") is None
+    assert _docker_socket_path("tcp://docker:2375") is None
+    assert str(_docker_socket_path("unix:///var/run/docker.sock")) == "/var/run/docker.sock"
+    assert len(_truncate("x" * 300)) == 240
+    assert _truncate("ok") == "ok"
