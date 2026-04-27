@@ -11,7 +11,7 @@ from fastapi import APIRouter, Depends, WebSocket, WebSocketDisconnect, status
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.deps import require_api_token
-from awf.api.schemas import WorkspaceEventResponse, WorkspaceResponse
+from awf.api.schemas import WorkspaceEventResponse
 from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
@@ -19,6 +19,7 @@ from awf.db.repositories import (
 )
 from awf.runtime.events import WORKSPACE_EVENT_BROADCASTER, WorkspaceEventFrame
 from awf.runtime.logs import LOG_BROADCASTER, LogFrame, read_log_chunk
+from awf.service.workspaces import workspace_response
 
 router = APIRouter(tags=["workspace-streams"])
 
@@ -105,7 +106,7 @@ async def _send_initial_state(
         await websocket.send_json(
             {
                 "type": "snapshot",
-                "workspace": WorkspaceResponse.model_validate(workspace).model_dump(mode="json"),
+                "workspace": workspace_response(workspace).model_dump(mode="json"),
             }
         )
         if "events" in selected:

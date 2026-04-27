@@ -25,6 +25,11 @@ from awf.db.repositories import (
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
+from awf.service.workspace_observability import (
+    effective_agent_identity,
+    workspace_lifecycle_summary,
+    workspace_usage_summary,
+)
 from awf.service.workspaces import (
     WorkspaceRetryError,
     WorkspaceRetryNotAllowedError,
@@ -36,11 +41,6 @@ from awf.service.workspaces import (
     profile_with_requested_tier,
     retry_workspace_row,
     v2_task_policy_snapshot,
-)
-from awf.service.workspace_observability import (
-    effective_agent_identity,
-    workspace_lifecycle_summary,
-    workspace_usage_summary,
 )
 
 

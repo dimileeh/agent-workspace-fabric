@@ -32,6 +32,14 @@ MergeCandidateStatus = Literal["open", "merged", "closed"]
 MergeQueueBlockerState = Literal["merge_eligible", "monitor_owned_recovery"]
 ValidationTier = Literal[1, 2, 3]
 ValidationProvenanceStatus = Literal["running", "succeeded", "failed", "unknown"]
+AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
+WorkspaceLifecycleStageStatus = Literal[
+    "pending",
+    "active",
+    "completed",
+    "terminal_skipped",
+]
+LlmUsageStatus = Literal["available", "unavailable"]
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -188,6 +196,25 @@ class PolicyFindingResponse(BaseModel):
     resolved_at: datetime | None
 
 
+class WorkspaceLifecycleStageResponse(BaseModel):
+    stage: str
+    started_at: datetime | None = None
+    ended_at: datetime | None = None
+    duration_seconds: int | None = None
+    status: WorkspaceLifecycleStageStatus
+
+
+class WorkspaceLlmUsageSummaryResponse(BaseModel):
+    input_tokens: int | None = None
+    output_tokens: int | None = None
+    total_tokens: int | None = None
+    cost_estimate: float | None = None
+    currency: str | None = None
+    status: LlmUsageStatus = "unavailable"
+    source: str = "none"
+    reason: str | None = "usage_not_reported"
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -212,6 +239,10 @@ class WorkspaceResponse(BaseModel):
     initial_review_grace_period_seconds: float | None
 
     agent: AgentRuntime
+    agent_model: str | None = None
+    agent_effort: str | None = None
+    agent_model_source: AgentIdentitySource = "unavailable"
+    agent_effort_source: AgentIdentitySource = "unavailable"
     env_profile: str | None
     profile_ref: str | None
     requested_profile: dict[str, Any] | None
@@ -233,6 +264,10 @@ class WorkspaceResponse(BaseModel):
     policy_findings: list[PolicyFindingResponse] = Field(
         default_factory=list,
         validation_alias="active_policy_findings",
+    )
+    lifecycle: list[WorkspaceLifecycleStageResponse] = Field(default_factory=list)
+    llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
+        default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
 
     created_at: datetime
@@ -333,6 +368,12 @@ class TaskResponse(BaseModel):
     owned_paths: list[str]
     agent: AgentRuntime
     agent_model: str | None = None
+    agent_effort: str | None = None
+    agent_model_source: AgentIdentitySource = "unavailable"
+    agent_effort_source: AgentIdentitySource = "unavailable"
+    llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
+        default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
+    )
     status: WorkspaceStatus
     pr_url: str | None
     failure_reason: str | None
@@ -385,6 +426,13 @@ class WorkspaceOverviewResponse(BaseModel):
     owned_paths: list[str]
     agent: AgentRuntime
     agent_model: str | None = None
+    agent_effort: str | None = None
+    agent_model_source: AgentIdentitySource = "unavailable"
+    agent_effort_source: AgentIdentitySource = "unavailable"
+    lifecycle: list[WorkspaceLifecycleStageResponse] = Field(default_factory=list)
+    llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
+        default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
+    )
     status: WorkspaceStatus
     current_phase: str
     active_operation: str | None

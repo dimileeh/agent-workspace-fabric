@@ -18,6 +18,7 @@ from awf.api.schemas import (
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import MergeCandidate, TaskAttempt, Workspace
 from awf.db.repositories import TaskAttemptRepository, TaskRepository, WorkspaceRepository
+from awf.service.workspace_observability import workspace_identity_usage_payload
 
 router = APIRouter(prefix="/v1/tasks", tags=["tasks"])
 
@@ -89,6 +90,7 @@ def _task_from_attempt(
 ) -> TaskResponse:
     workspace = attempt.workspace
     candidate = attempt.merge_candidate
+    observability = workspace_identity_usage_payload(workspace)
     return TaskResponse(
         task_id=attempt.task.external_id or attempt.task.id,
         attempt_id=attempt.id,
@@ -108,7 +110,11 @@ def _task_from_attempt(
         task_class=attempt.task_class,
         owned_paths=list(attempt.owned_paths),
         agent=AgentRuntime(attempt.agent),
-        agent_model=_agent_model_from_workspace(workspace),
+        agent_model=observability["agent_model"],
+        agent_effort=observability["agent_effort"],
+        agent_model_source=observability["agent_model_source"],
+        agent_effort_source=observability["agent_effort_source"],
+        llm_usage=observability["llm_usage"],
         status=WorkspaceStatus(workspace.status),
         pr_url=workspace.pr_url,
         failure_reason=workspace.failure_reason,
@@ -142,6 +148,7 @@ def _attempt_response(attempt: TaskAttempt) -> TaskAttemptResponse:
 
 
 def _task_from_workspace(row: Workspace) -> TaskResponse:
+    observability = workspace_identity_usage_payload(row)
     return TaskResponse(
         task_id=row.task_external_id or row.id,
         attempt_id=None,
@@ -161,18 +168,17 @@ def _task_from_workspace(row: Workspace) -> TaskResponse:
         task_class=row.task_class,
         owned_paths=list(row.owned_paths),
         agent=AgentRuntime(row.agent),
-        agent_model=_agent_model_from_workspace(row),
+        agent_model=observability["agent_model"],
+        agent_effort=observability["agent_effort"],
+        agent_model_source=observability["agent_model_source"],
+        agent_effort_source=observability["agent_effort_source"],
+        llm_usage=observability["llm_usage"],
         status=WorkspaceStatus(row.status),
         pr_url=row.pr_url,
         failure_reason=row.failure_reason,
         created_at=row.created_at,
         updated_at=row.updated_at,
     )
-
-
-def _agent_model_from_workspace(workspace: Workspace) -> str | None:
-    model = workspace.task_policy.get("agent_model")
-    return model if isinstance(model, str) and model else None
 
 
 def _readiness_from_candidate(

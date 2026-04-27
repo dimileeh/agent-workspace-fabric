@@ -50,6 +50,7 @@ from awf.service.controls import (
     default_cleaner,
     stop_project_containers,
 )
+from awf.service.workspace_observability import workspace_observability_payload
 
 
 class RuntimeInspection(Protocol):
@@ -196,13 +197,13 @@ class WorkspaceService:
                 requires_database=req.requires_database,
             )
             await s.commit()
-            return WorkspaceResponse.model_validate(ws)
+            return workspace_response(ws)
 
     async def create_v2(self, req: WorkspaceCreateV2Request) -> WorkspaceResponse:
         async with self._factory() as s:
             ws = await create_workspace_v2_row(s, req)
             await s.commit()
-            return WorkspaceResponse.model_validate(ws)
+            return workspace_response(ws)
 
     async def retry_workspace(self, workspace_id: str) -> WorkspaceRetryResponse:
         async with self._factory() as s:
@@ -213,12 +214,12 @@ class WorkspaceService:
     async def get(self, workspace_id: str) -> WorkspaceResponse | None:
         async with self._factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
-            return WorkspaceResponse.model_validate(ws) if ws is not None else None
+            return workspace_response(ws) if ws is not None else None
 
     async def list(self, *, limit: int = 50) -> list[WorkspaceResponse]:
         async with self._factory() as s:
             rows = await WorkspaceRepository(s).list(limit=limit)
-            return [WorkspaceResponse.model_validate(r) for r in rows]
+            return [workspace_response(r) for r in rows]
 
     async def cancel_workspace(
         self,
@@ -643,6 +644,18 @@ def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResp
         attempt_number=result.attempt_number,
         status_url=f"/v1/workspaces/{new_workspace_id}",
         events_url=f"/v1/workspaces/{new_workspace_id}/events",
+    )
+
+
+def workspace_response(workspace: Workspace) -> WorkspaceResponse:
+    response = WorkspaceResponse.model_validate(workspace)
+    payload = response.model_dump()
+    payload["active_policy_findings"] = payload.pop("policy_findings", [])
+    return WorkspaceResponse.model_validate(
+        {
+            **payload,
+            **workspace_observability_payload(workspace),
+        }
     )
 
 

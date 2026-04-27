@@ -14,6 +14,33 @@ export type WorkspaceStatus =
 
 export type AgentRuntime = "codex" | "claude_code" | "gemini" | "opencode";
 
+export type AgentIdentitySource = "task_policy" | "default" | "unavailable";
+
+export type WorkspaceLifecycleStageStatus =
+  | "pending"
+  | "active"
+  | "completed"
+  | "terminal_skipped";
+
+export interface WorkspaceLifecycleStage {
+  stage: string;
+  started_at: string | null;
+  ended_at: string | null;
+  duration_seconds: number | null;
+  status: WorkspaceLifecycleStageStatus;
+}
+
+export interface LlmUsageSummary {
+  input_tokens: number | null;
+  output_tokens: number | null;
+  total_tokens: number | null;
+  cost_estimate: number | null;
+  currency: string | null;
+  status: "available" | "unavailable";
+  source: string;
+  reason: string | null;
+}
+
 export type ApiEnvelope<T> =
   | { ok: true; data: T }
   | { ok: false; status: number; message: string; errorCode?: string; detail?: unknown };
@@ -38,6 +65,11 @@ export interface WorkspaceOverview {
   branch_name: string | null;
   agent: AgentRuntime;
   agent_model: string | null;
+  agent_effort: string | null;
+  agent_model_source: AgentIdentitySource;
+  agent_effort_source: AgentIdentitySource;
+  lifecycle: WorkspaceLifecycleStage[];
+  llm_usage: LlmUsageSummary;
   status: WorkspaceStatus;
   current_phase: string;
   active_operation: string | null;
@@ -161,6 +193,12 @@ export interface Workspace {
   task_prompt: string;
   task_external_id: string | null;
   agent: AgentRuntime;
+  agent_model: string | null;
+  agent_effort: string | null;
+  agent_model_source: AgentIdentitySource;
+  agent_effort_source: AgentIdentitySource;
+  lifecycle: WorkspaceLifecycleStage[];
+  llm_usage: LlmUsageSummary;
   env_profile: string | null;
   profile_ref: string | null;
   requested_profile: Record<string, unknown> | null;
