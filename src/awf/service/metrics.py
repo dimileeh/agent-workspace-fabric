@@ -20,7 +20,7 @@ MAX_SUMMARY_WINDOW_HOURS = 168
 DEFAULT_FAILURE_EXAMPLE_LIMIT = 5
 MIN_FAILURE_EXAMPLE_LIMIT = 1
 MAX_FAILURE_EXAMPLE_LIMIT = 25
-_MAX_CLUSTER_SAMPLE_IDS = 5
+DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT = 5
 UNKNOWN_FAILURE_REASON = "unknown"
 
 TERMINAL_WORKSPACE_STATUSES = frozenset(
@@ -440,7 +440,7 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
             likely_cause=k[3],
             actionable_next_action=k[4],
             count=len(wids),
-            sample_workspace_ids=tuple(wids[:_MAX_CLUSTER_SAMPLE_IDS]),
+            sample_workspace_ids=tuple(wids[:DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT]),
         )
         for k, wids in clusters.items()
     ]
