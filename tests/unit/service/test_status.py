@@ -5,24 +5,33 @@ from __future__ import annotations
 import asyncio
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Any
 
 import pytest
 
+from awf.db.base import Base
+from awf.db.enums import WorkspaceStatus
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_engine, make_session_factory
 from awf.service.config import ServiceSettings
 from awf.service.status import (
     WorkspaceIdView,
+    _build_orphan_check,
     _check_agent_runtime_image,
     _check_api,
     _check_docker,
     _default_workspace_id_lookup,
     _docker_result_to_check,
     _docker_socket_path,
+    _fail,
     _parse_workspace_projects,
     _run_docker_command,
+    _run_subprocess,
     _truncate,
     _workspace_id_from_project,
+    check_database,
     collect_service_status,
 )
 
@@ -59,6 +68,16 @@ class _JsonErrorResponse:
 
     def json(self) -> dict[str, str]:
         raise ValueError("not json")
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _VersionResponse:
+    status_code = 200
+
+    def json(self) -> dict[str, str]:
+        return {"status": "ok", "version": "0.1.0"}
 
     def raise_for_status(self) -> None:
         return None
@@ -569,6 +588,64 @@ def test_default_workspace_id_lookup_returns_unavailable_for_malformed_url() -> 
 
 
 @pytest.mark.unit
+def test_database_probe_and_workspace_lookup_read_sqlite_rows(tmp_path: Path) -> None:
+    db_path = tmp_path / "awf-status.db"
+    database_url = f"sqlite+aiosqlite:///{db_path}"
+
+    async def seed() -> None:
+        engine = make_engine(database_url)
+        try:
+            async with engine.begin() as conn:
+                await conn.run_sync(Base.metadata.create_all)
+            factory = make_session_factory(engine)
+            async with factory() as session:
+                repo = WorkspaceRepository(session)
+                active = await repo.create(
+                    repo_url="git@github.com:example/active.git",
+                    branch_base="main",
+                    task_title="Active",
+                    task_prompt="Active workspace",
+                    agent="codex",
+                    test_commands=["pytest -q"],
+                )
+                terminal = await repo.create(
+                    repo_url="git@github.com:example/terminal.git",
+                    branch_base="main",
+                    task_title="Terminal",
+                    task_prompt="Terminal workspace",
+                    agent="codex",
+                    test_commands=["pytest -q"],
+                )
+                terminal.status = WorkspaceStatus.completed.value
+                ignored = await repo.create(
+                    repo_url="git@github.com:example/ignored.git",
+                    branch_base="main",
+                    task_title="Ignored",
+                    task_prompt="Unknown status workspace",
+                    agent="codex",
+                    test_commands=["pytest -q"],
+                )
+                ignored.status = "unknown_future_status"
+                await session.commit()
+        finally:
+            await engine.dispose()
+
+    asyncio.run(seed())
+
+    db_check = asyncio.run(check_database(database_url))
+    view = asyncio.run(_default_workspace_id_lookup(database_url))
+    failed = asyncio.run(check_database("sqlite+aiosqlite:////no/such/parent/awf.db"))
+
+    assert db_check == {"ok": True, "status": "ok"}
+    assert view.available is True
+    assert len(view.active_ids) == 1
+    assert len(view.terminal_ids) == 1
+    assert view.active_ids.isdisjoint(view.terminal_ids)
+    assert failed["ok"] is False
+    assert failed["reason"] == "DB_CONNECTION_FAILED"
+
+
+@pytest.mark.unit
 def test_status_helpers_cover_api_json_and_failure_paths(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 
@@ -576,10 +653,19 @@ def test_status_helpers_cover_api_json_and_failure_paths(tmp_path: Path) -> None
         assert timeout == 5.0
         return _JsonErrorResponse()
 
+    async def version_get(_url: str, *, timeout: float) -> _VersionResponse:
+        assert _url == "http://localhost:8000/healthz"
+        return _VersionResponse()
+
     async def raising_get(_url: str, *, timeout: float) -> _Response:
         raise RuntimeError("api down")
 
     assert asyncio.run(_check_api(settings, bad_json_get)) == {"ok": True, "status": "ok"}
+    assert asyncio.run(_check_api(settings, version_get)) == {
+        "ok": True,
+        "status": "ok",
+        "version": "0.1.0",
+    }
     failed = asyncio.run(_check_api(settings, raising_get))
     assert failed["ok"] is False
     assert failed["reason"] == "API_UNREACHABLE"
@@ -698,3 +784,41 @@ def test_workspace_project_parsing_skips_bad_rows_and_extracts_supported_prefixe
     assert str(_docker_socket_path("unix:///var/run/docker.sock")) == "/var/run/docker.sock"
     assert len(_truncate("x" * 300)) == 240
     assert _truncate("ok") == "ok"
+
+
+@pytest.mark.unit
+def test_orphan_check_classifies_timeout_and_generic_ps_errors() -> None:
+    view = WorkspaceIdView(
+        active_ids=frozenset(),
+        terminal_ids=frozenset(),
+        available=True,
+    )
+
+    timeout = _build_orphan_check(
+        subprocess.TimeoutExpired(["docker", "ps"], timeout=5),
+        workspace_view=view,
+    )
+    generic = _build_orphan_check(RuntimeError("daemon exploded"), workspace_view=view)
+
+    assert timeout["ok"] is True
+    assert timeout["status"] == "unavailable"
+    assert timeout["reason"] == "DOCKER_UNAVAILABLE"
+    assert "timed out" in str(timeout["detail"])
+    assert generic["reason"] == "DOCKER_UNAVAILABLE"
+    assert "RuntimeError: daemon exploded" in str(generic["detail"])
+
+
+@pytest.mark.unit
+def test_run_subprocess_wrapper_and_fail_without_detail() -> None:
+    result = _run_subprocess(
+        [sys.executable, "-c", "print('wrapped')"],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=5.0,
+        env={},
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "wrapped\n"
+    assert _fail("NO_DETAIL", "") == {"ok": False, "status": "fail", "reason": "NO_DETAIL"}
