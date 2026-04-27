@@ -251,6 +251,27 @@ class TestCreateWorkspace:
 
 class TestCreateWorkspaceV2DiskPressure:
     @pytest.mark.unit
+    async def test_default_disk_admission_checks_configured_work_dir(
+        self,
+        tmp_path: Any,
+    ) -> None:
+        settings = Settings(
+            _env_file=None,
+            work_dir=str(tmp_path),
+            min_free_disk_bytes=0,
+        )
+        request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+        disk_check = await workspaces_route._workspace_admission_disk_check(  # noqa: SLF001
+            request,  # type: ignore[arg-type]
+            settings,
+        )
+
+        assert disk_check.ok is True
+        assert disk_check.path == str(tmp_path)
+        assert disk_check.threshold_bytes == 0
+
+    @pytest.mark.unit
     async def test_rejects_low_disk_without_creating_row(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
@@ -492,6 +513,28 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert accepted.workspace_id.startswith("ws_")
         assert accepted.status == WorkspaceStatus.requested
         assert accepted.warnings == []
+
+    @pytest.mark.unit
+    async def test_direct_v2_create_with_fresh_idempotency_key_creates_workspace(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            accepted = await workspaces_route.create_workspace_v2(
+                WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY),
+                _request_with_disk_check(),
+                idempotency_key="fresh-direct-v2-key",
+                settings=Settings(_env_file=None),
+                session=session,
+            )
+            workspace = await WorkspaceRepository(session).get_by_idempotency_key(
+                "fresh-direct-v2-key"
+            )
+
+        assert accepted.workspace_id.startswith("ws_")
+        assert workspace is not None
+        assert workspace.id == accepted.workspace_id
 
 
 class TestCreateWorkspaceV2PolicyMetadata:

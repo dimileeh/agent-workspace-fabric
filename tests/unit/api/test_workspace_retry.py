@@ -6,6 +6,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.api.routes.workspaces as workspaces_route
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -117,6 +118,24 @@ async def test_retry_endpoint_creates_new_requested_workspace(
     assert retried_body["test_commands"] == _V2_RETRY_BODY["validation"]["commands"]
     assert retried_body["failure_reason"] is None
     assert retried_body["failure_message"] is None
+
+
+@pytest.mark.unit
+async def test_retry_route_direct_success_returns_retry_response(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    original_id = await _create_failed_workspace(client, engine)
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        response = await workspaces_route.retry_workspace(original_id, session=session)
+
+    assert response.source_workspace_id == original_id
+    assert response.new_workspace_id.startswith("ws_")
+    assert response.operation_id.startswith("op_")
+    assert response.status == WorkspaceStatus.requested
+    assert response.attempt_number == 2
 
 
 @pytest.mark.unit
