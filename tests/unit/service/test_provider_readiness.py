@@ -19,7 +19,12 @@ from awf.service.provider_readiness import (
 )
 
 
-def _settings(tmp_path: Path, *, github_token: str | None = None) -> ServiceSettings:
+def _settings(
+    tmp_path: Path,
+    *,
+    github_token: str | None = None,
+    host_home: str | None = None,
+) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
         env="local",
@@ -32,7 +37,7 @@ def _settings(tmp_path: Path, *, github_token: str | None = None) -> ServiceSett
         github_token=github_token,
         worker_poll_interval_seconds=0.1,
         worker_max_concurrent_provisions=1,
-        host_home=str(tmp_path / "home"),
+        host_home=str(tmp_path / "home") if host_home is None else host_home,
     )
 
 
@@ -159,6 +164,30 @@ def test_provider_readiness_keyring_only_github_warning_is_actionable(tmp_path: 
     assert "AWF_GITHUB_TOKEN" in str(github)
     assert "GH_TOKEN" in str(github)
     assert "ghp_file_secret" not in json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_provider_readiness_empty_host_home_defaults_to_user_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cwd = tmp_path / "cwd"
+    cwd.mkdir()
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude.json").write_text('{"token":"claude_file_secret"}')
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("HOME", str(home))
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path, host_home=""),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    claude = payload["providers"]["claude_code"]
+    assert claude["ok"] is True
+    assert claude["reason"] == "CLAUDE_FILE_AUTH_PRESENT"
+    assert "claude_file_secret" not in json.dumps(payload, sort_keys=True)
 
 
 @pytest.mark.unit

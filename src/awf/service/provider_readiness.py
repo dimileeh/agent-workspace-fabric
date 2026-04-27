@@ -116,7 +116,7 @@ def collect_agent_readiness(
 
     env = os.environ if environ is None else environ
     strict = validate_provider_names(strict_providers or ())
-    host_home = Path(settings.host_home).expanduser()
+    host_home = Path(settings.host_home or "~").expanduser()
     secrets = _secret_values(settings, env)
     resolved_run = run_subprocess or _run_subprocess
     resolved_http_get = http_get or _http_get
