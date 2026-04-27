@@ -298,6 +298,29 @@ async def test_candidates_on_other_repo_or_base_do_not_block(
     assert blockers == []
 
 
+@pytest.mark.unit
+async def test_single_blocker_lookup_returns_empty_for_missing_candidate(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_candidate(
+            session,
+            candidate_id="missing",
+        )
+
+    assert blockers == []
+
+
+@pytest.mark.unit
+async def test_older_open_candidate_pool_handles_empty_ready_candidate_list() -> None:
+    blockers = await merge_queue._load_older_open_candidate_pool(  # noqa: SLF001
+        object(),  # type: ignore[arg-type]
+        [],
+    )
+
+    assert blockers == []
+
+
 def _candidate(
     *,
     candidate_id: str,

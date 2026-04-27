@@ -23,7 +23,7 @@ import structlog
 import awf.adapters.registry  # noqa: F401
 from awf.adapters import get_adapter  # noqa: F401 - populates registry via __init__
 from awf.adapters.base import AgentRunError
-from awf.adapters.claude_code import ClaudeCodeAdapter
+from awf.adapters.claude_code import ClaudeCodeAdapter, _claude_effort_for_awf_effort
 from awf.adapters.codex import CodexAdapter
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
 from awf.adapters.gemini import GeminiAdapter
@@ -536,6 +536,10 @@ class TestClaudeCodeAdapter:
 
         assert exc.value.reason_code == "AGENT_AUTH_FAILED"
 
+    @pytest.mark.unit
+    def test_effort_mapper_preserves_non_top_effort_values(self) -> None:
+        assert _claude_effort_for_awf_effort("low") == "low"
+
 
 class TestGeminiAdapter:
     @pytest.mark.unit
@@ -565,6 +569,26 @@ class TestGeminiAdapter:
         assert args[-1].endswith(_PROMPT)
         assert "AWF workspace contract" in args[-1]
         assert "-m" in args and "gemini-2.5-pro" in args
+
+    @pytest.mark.unit
+    async def test_produces_cli_invocation_without_model_or_effort(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = GeminiAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        gemini_start = args.index("gemini")
+        assert args[gemini_start : gemini_start + 3] == [
+            "gemini",
+            "--skip-trust",
+            "--yolo",
+        ]
+        assert "-m" not in args
 
     @pytest.mark.unit
     async def test_xhigh_effort_uses_system_settings_wrapper(self) -> None:
@@ -668,6 +692,23 @@ class TestOpenCodeAdapter:
         args = runner.calls[0].args
         assert "--model" in args
         assert "ollama/glm-5.1:cloud" in args
+
+    @pytest.mark.unit
+    async def test_default_opencode_invocation_omits_variant_without_effort(self) -> None:
+        runner = FakeCommandRunner()
+        adapter = OpenCodeAdapter(runner=runner)
+
+        await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+        )
+
+        args = runner.calls[0].args
+        assert "--model" in args
+        assert "ollama/kimi-k2.6:cloud" in args
+        assert "--variant" not in args
+        assert "--thinking" not in args
 
     @pytest.mark.unit
     def test_opencode_effort_helpers_cover_default_and_high_paths(self) -> None:

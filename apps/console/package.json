@@ -6,6 +6,7 @@
     "dev": "next dev",
     "start": "next start",
     "build": "next build",
+    "test": "node --test --disable-warning=MODULE_TYPELESS_PACKAGE_JSON lib/*.test.mjs",
     "lint": "eslint .",
     "typecheck": "next typegen && tsc --noEmit"
   },

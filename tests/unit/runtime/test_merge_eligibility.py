@@ -273,6 +273,34 @@ def test_compute_stale_reason_clears_after_post_rebase_validation() -> None:
 
 
 @pytest.mark.unit
+def test_compute_stale_reason_ignores_failed_and_pre_rebase_validation_runs() -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    workspace = _workspace_with_operations(
+        task_class=TaskClass.refactor_task.value,
+        operations=[
+            _operation(operation_type="rebase", created_at=now),
+        ],
+    )
+    workspace.validation_runs = [
+        _validation_run(
+            tier=3,
+            started_at=now - timedelta(minutes=10),
+            finished_at=now - timedelta(minutes=9),
+        ),
+        _validation_run(
+            tier=3,
+            status="failed",
+            started_at=now + timedelta(minutes=1),
+        ),
+    ]
+
+    assert compute_stale_reason(workspace) == (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        "validate",
+    )
+
+
+@pytest.mark.unit
 def test_compute_stale_reason_ignores_failed_validation_and_rebase_operations() -> None:
     now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     workspace = _workspace_with_operations(
