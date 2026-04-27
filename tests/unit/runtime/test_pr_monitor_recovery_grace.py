@@ -385,6 +385,91 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
 
 
 @pytest.mark.unit
+async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """When ``req_action == "rebase"`` and no prior failed rebase exists,
+    the dispatch must still create a ``validate``-typed Operation row.
+
+    The executor's recovery branch only runs validation today, and its
+    success/failure paths close pending ops via the validate finisher
+    (which queries by ``OperationType.validate``). A ``rebase``-typed
+    row would therefore leak forever as ``running``. ``recovery_mode``
+    in the payload remains the discriminator for the future rebase
+    slice.
+    """
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+
+    cmd.queue_result(returncode=0)  # any optional gh call
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=900,
+    )
+
+    import awf.runtime.merge_eligibility as merge_eligibility
+
+    def fake_compute_stale_reason(ws):  # type: ignore[no-untyped-def]
+        return ("validation_insufficient_tier", "rebase")
+
+    original_module_compute = merge_eligibility.compute_stale_reason
+    merge_eligibility.compute_stale_reason = fake_compute_stale_reason  # type: ignore[assignment]
+    try:
+        # Pre-mark grace as elapsed so the dispatch block runs.
+        state = MonitorState(started_at=0.0)
+        state.mark_addressed(
+            _initial_review_grace_started_key(42),
+            f"{0.0:.6f}",
+        )
+        terminal = await runner._execute(
+            action=Merge(),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_green_pr_status(),
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+    finally:
+        merge_eligibility.compute_stale_reason = original_module_compute  # type: ignore[assignment]
+
+    assert terminal is True
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.ready.value
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+    assert len(operations) == 1
+    operation = operations[0]
+    # Operation type is ``validate`` even though req_action was ``rebase``
+    # — otherwise the validate finisher (which queries by type) would
+    # never close it on the executor's success path.
+    assert operation.type == OperationType.validate.value
+    # The ``rebase_only`` recovery_mode survives in the payload as the
+    # discriminator the future rebase slice can read.
+    assert operation.payload == {
+        "source": "pr_monitor",
+        "reason": "validation_insufficient_tier",
+        "recovery_mode": "rebase_only",
+    }
+
+
+@pytest.mark.unit
 async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

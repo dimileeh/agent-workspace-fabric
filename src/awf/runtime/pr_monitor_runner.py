@@ -744,7 +744,11 @@ class PullRequestMonitorRunner:
                 # recovery branch handles this row: ``validate_only``
                 # runs validation against the already-committed work,
                 # ``rebase_only`` is reserved for a future slice that
-                # routes the rebase path through here as well.
+                # routes the rebase path through here as well. Until
+                # that slice lands the executor only runs validation in
+                # the recovery branch, so the operation type is always
+                # ``validate`` — otherwise a ``rebase``-typed row would
+                # leak forever (the validate finisher queries by type).
                 recovery_mode = (
                     "rebase_only" if req_action == "rebase" else "validate_only"
                 )
@@ -777,7 +781,7 @@ class PullRequestMonitorRunner:
                             return True
                         await OperationRepository(s).create(
                             workspace_id=workspace_id,
-                            operation_type=req_action or "validate",
+                            operation_type="validate",
                             payload=operation_payload,
                         )
                         await WorkspaceRepository(s).transition(
