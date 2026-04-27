@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 from datetime import UTC, datetime
 
@@ -10,9 +11,12 @@ from httpx import AsyncClient
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.api.routes.merge_queue as merge_queue_route
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import MergeCandidate
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.merge_eligibility import VALIDATION_INSUFFICIENT_TIER_STALE_REASON
 
 
 async def _create_queue_workspace(
@@ -97,6 +101,52 @@ async def _create_queue_workspace(
         )
         await session.commit()
         return workspace.id
+
+
+async def _create_legacy_queue_workspace(
+    engine: AsyncEngine,
+    *,
+    title: str,
+    status: WorkspaceStatus,
+    pr_url: str,
+    auto_merge: bool = True,
+    updated_at: datetime | None = None,
+) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/legacy.git",
+            branch_base="main",
+            task_title=title,
+            task_prompt=f"Implement {title}.",
+            task_external_id=f"LEGACY-{title}",
+            task_class="test_task",
+            owned_paths=["legacy/**"],
+            auto_merge=auto_merge,
+            agent=AgentRuntime.codex.value,
+            test_commands=["pytest -q"],
+        )
+        workspace.status = status.value
+        workspace.branch_name = f"codex/{title.lower().replace(' ', '-')}"
+        workspace.pr_url = pr_url
+        workspace.pr_number = int(pr_url.rstrip("/").split("/")[-1])
+        if updated_at is not None:
+            workspace.updated_at = updated_at
+        await repo.add_event(
+            workspace,
+            event_type="merge_queue.legacy_marker",
+            reason_code="TEST",
+            payload={"title": title},
+        )
+        await session.commit()
+        return workspace.id
+
+
+def _encoded_cursor(payload: dict[str, object]) -> str:
+    return base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
 
 
 async def _refresh_scope_policy(
@@ -476,6 +526,29 @@ class TestMergeQueueList:
         assert response.json()["detail"]["error_code"] == "INVALID_CURSOR"
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "cursor",
+        [
+            _encoded_cursor({"id": "ws_missing_timestamp"}),
+            _encoded_cursor({"u": "2026-04-26T12:00:00+00:00"}),
+            _encoded_cursor({"u": "2026-04-26T12:00:00+00:00", "id": 123}),
+            _encoded_cursor({"u": "2026-04-26T12:00:00+00:00", "id": ""}),
+        ],
+    )
+    async def test_rejects_structurally_invalid_cursors(
+        self,
+        client: AsyncClient,
+        cursor: str,
+    ) -> None:
+        response = await client.get("/v1/merge-queue", params={"cursor": cursor})
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "error_code": "INVALID_CURSOR",
+            "message": "Invalid merge queue cursor.",
+        }
+
+    @pytest.mark.unit
     @pytest.mark.parametrize("limit", [0, 501])
     async def test_validates_limit_bounds(self, client: AsyncClient, limit: int) -> None:
         response = await client.get("/v1/merge-queue", params={"limit": limit})
@@ -526,6 +599,88 @@ class TestMergeQueueList:
             item["workspace_id"]: item["merge_blocker_reason"] for item in response.json()["items"]
         }
         assert actual == expected
+
+    @pytest.mark.unit
+    async def test_legacy_queue_rows_expose_workspace_blocker_reasons(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        expected: dict[str, tuple[str, str | None]] = {}
+        for index, (title, status, auto_merge, reason, action) in enumerate(
+            [
+                (
+                    "Auto monitoring legacy",
+                    WorkspaceStatus.monitoring_pr,
+                    True,
+                    "ready_to_merge_or_waiting_for_github",
+                    None,
+                ),
+                (
+                    "Manual monitoring legacy",
+                    WorkspaceStatus.monitoring_pr,
+                    False,
+                    "manual_merge_required",
+                    None,
+                ),
+                (
+                    "Pushing legacy",
+                    WorkspaceStatus.pushing,
+                    True,
+                    "waiting_for_monitor",
+                    None,
+                ),
+                ("Completed legacy", WorkspaceStatus.completed, True, "completed", None),
+                (
+                    "Failed legacy",
+                    WorkspaceStatus.failed,
+                    True,
+                    "failed_or_cancelled",
+                    None,
+                ),
+                (
+                    "Cancelled legacy",
+                    WorkspaceStatus.cancelled,
+                    True,
+                    "failed_or_cancelled",
+                    None,
+                ),
+                (
+                    "Requested legacy",
+                    WorkspaceStatus.requested,
+                    True,
+                    "workspace_not_terminal",
+                    None,
+                ),
+            ]
+        ):
+            workspace_id = await _create_legacy_queue_workspace(
+                engine,
+                title=title,
+                status=status,
+                auto_merge=auto_merge,
+                pr_url=f"https://github.com/example/legacy/pull/{90 + index}",
+                updated_at=datetime(2026, 4, 20 + index, 12, 0, tzinfo=UTC),
+            )
+            expected[workspace_id] = (reason, action)
+
+        response = await client.get(
+            "/v1/merge-queue",
+            params={"repo_url": "git@github.com:example/legacy.git", "limit": 20},
+        )
+
+        assert response.status_code == 200
+        items = {item["workspace_id"]: item for item in response.json()["items"]}
+        assert set(items) == set(expected)
+        for workspace_id, (reason, action) in expected.items():
+            item = items[workspace_id]
+            assert item["candidate_id"] is None
+            assert item["readiness"] is None
+            assert item["canonical"] is False
+            assert item["queue_blockers"] == []
+            assert item["merge_blocker_reason"] == reason
+            assert item["required_next_action"] == action
+            assert item["last_event"]["event_type"] == "merge_queue.legacy_marker"
 
     @pytest.mark.unit
     async def test_returns_candidate_backed_readiness_while_preserving_workspace_fields(
@@ -887,3 +1042,54 @@ class TestMergeQueueList:
             item["latest_validation"]["coverage_reason_code"]
             == "COVERAGE_BELOW_THRESHOLD"
         )
+
+
+class TestMergeQueueHelpers:
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("flags", "expected_reason", "expected_action"),
+        [
+            ({"completed": True}, "completed", None),
+            ({"failed_or_cancelled": True}, "failed_or_cancelled", None),
+            ({"not_canonical": True}, "not_canonical", None),
+            (
+                {"stale": True, "stale_reason": VALIDATION_INSUFFICIENT_TIER_STALE_REASON},
+                "stale",
+                "validate",
+            ),
+            ({"stale": True, "stale_reason": "branch_behind_target"}, "stale", "rebase"),
+        ],
+    )
+    def test_candidate_blocker_reason_priority_for_terminal_and_stale_flags(
+        self,
+        flags: dict[str, object],
+        expected_reason: str,
+        expected_action: str | None,
+    ) -> None:
+        candidate = _candidate_for_reason(**flags)
+
+        assert merge_queue_route._merge_blocker_reason(
+            candidate,
+            policy_findings=[],
+            queue_blockers=[],
+        ) == (expected_reason, expected_action)
+
+
+def _candidate_for_reason(**flags: object) -> MergeCandidate:
+    candidate = MergeCandidate(
+        id="mc_reason",
+        task_id="task_reason",
+        attempt_id="att_reason",
+        workspace_id="ws_reason",
+        pr_url="https://github.com/example/reason/pull/1",
+        pr_number=1,
+        repo_url="git@github.com:example/reason.git",
+        base_branch="main",
+        branch_name="codex/reason",
+        head_sha="head",
+        base_sha="base",
+        status="open",
+    )
+    for name, value in flags.items():
+        setattr(candidate, name, value)
+    return candidate

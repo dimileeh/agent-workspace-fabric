@@ -7,14 +7,20 @@ true integration + E2E tests live under tests/integration/ and tests/e2e/.
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
+from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.api.routes.workspaces as workspaces_route
 from awf.api.app import configure_database, create_app
+from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
@@ -128,6 +134,20 @@ def _disk_check(
     )
 
 
+def _request_with_disk_check() -> SimpleNamespace:
+    return SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(
+                workspace_admission_disk_check=lambda settings: _disk_check(
+                    free_bytes=settings.min_free_disk_bytes + 1,
+                    threshold_bytes=settings.min_free_disk_bytes,
+                    ok=True,
+                )
+            )
+        )
+    )
+
+
 @pytest.fixture
 async def disk_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[Any, AsyncClient]]:
     app = create_app(use_lifespan=False)
@@ -196,6 +216,37 @@ class TestCreateWorkspace:
         bad = {**_MINIMAL_BODY, "hax0r_field": "value"}
         response = await client.post("/v1/workspaces", json=bad)
         assert response.status_code == 422
+
+    @pytest.mark.unit
+    async def test_direct_v1_create_replays_same_payload_and_rejects_conflict(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        payload = WorkspaceCreateRequest.model_validate(_MINIMAL_BODY)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            first = await workspaces_route.create_workspace(
+                payload,
+                idempotency_key="direct-v1-replay",
+                session=session,
+            )
+            replay = await workspaces_route.create_workspace(
+                payload,
+                idempotency_key="direct-v1-replay",
+                session=session,
+            )
+            conflict = await workspaces_route.create_workspace(
+                WorkspaceCreateRequest.model_validate(
+                    {**_MINIMAL_BODY, "task_title": "Changed direct replay"}
+                ),
+                idempotency_key="direct-v1-replay",
+                session=session,
+            )
+
+        assert first.workspace_id == replay.workspace_id
+        assert isinstance(conflict, JSONResponse)
+        assert conflict.status_code == 409
+        assert json.loads(conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
 class TestCreateWorkspaceV2DiskPressure:
@@ -366,6 +417,81 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert first.status_code == 202
         assert replay.status_code == 409
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
+    async def test_direct_v2_replay_returns_existing_row_and_conflict_response(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        headers = {"Idempotency-Key": "direct-v2-replay"}
+        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        assert first.status_code == 202
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            replay = await workspaces_route.create_workspace_v2(
+                WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY),
+                _request_with_disk_check(),
+                idempotency_key="direct-v2-replay",
+                settings=Settings(_env_file=None),
+                session=session,
+            )
+            conflict = await workspaces_route.create_workspace_v2(
+                WorkspaceCreateV2Request.model_validate(
+                    {
+                        **_V2_MINIMAL_BODY,
+                        "task": {
+                            **_V2_MINIMAL_BODY["task"],
+                            "title": "Changed replay title",
+                        },
+                    }
+                ),
+                _request_with_disk_check(),
+                idempotency_key="direct-v2-replay",
+                settings=Settings(_env_file=None),
+                session=session,
+            )
+
+        assert replay.workspace_id == first.json()["workspace_id"]
+        assert replay.warnings == []
+        assert isinstance(conflict, JSONResponse)
+        assert conflict.status_code == 409
+        assert json.loads(conflict.body)["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
+    async def test_v2_invalid_profile_ref_returns_structured_422(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "workspace": {"profile_ref": "missing-profile", "profile": None},
+        }
+
+        response = await client.post("/v2/workspaces", json=payload)
+
+        assert response.status_code == 422
+        assert response.json()["error_code"] == "INVALID_PROFILE"
+
+    @pytest.mark.unit
+    async def test_direct_v2_create_success_returns_accepted_response(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            accepted = await workspaces_route.create_workspace_v2(
+                WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY),
+                _request_with_disk_check(),
+                idempotency_key=None,
+                settings=Settings(_env_file=None),
+                session=session,
+            )
+
+        assert accepted.workspace_id.startswith("ws_")
+        assert accepted.status == WorkspaceStatus.requested
+        assert accepted.warnings == []
 
 
 class TestCreateWorkspaceV2PolicyMetadata:
@@ -593,6 +719,52 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert task_policy["out_of_scope_changes"] == {
             "mode": "block",
             "allowlist_patterns": ["docs/generated/**"],
+        }
+
+    @pytest.mark.unit
+    def test_stored_profile_and_policy_helpers_handle_missing_or_malformed_data(self) -> None:
+        workspace = SimpleNamespace(
+            resolved_profile={"validation": {"requested_tier": 2}},
+            task_policy={
+                "agent_model": "gpt-test",
+                "out_of_scope_changes": {"mode": "warn"},
+            },
+        )
+        malformed_workspace = SimpleNamespace(
+            resolved_profile={"validation": {"requested_tier": "2"}},
+            task_policy={"agent_model": "", "out_of_scope_changes": "warn"},
+        )
+        missing_profile_workspace = SimpleNamespace(
+            resolved_profile=None,
+            task_policy={},
+        )
+        malformed_validation_workspace = SimpleNamespace(
+            resolved_profile={"validation": "tier-two"},
+            task_policy={},
+        )
+        policy_payload = WorkspaceCreateV2Request.model_validate(
+            {
+                **_V2_MINIMAL_BODY,
+                "task": {
+                    **_V2_MINIMAL_BODY["task"],
+                    "out_of_scope_changes": {"mode": "block"},
+                },
+            }
+        )
+        payload = WorkspaceCreateV2Request.model_validate(_V2_MINIMAL_BODY)
+
+        assert workspaces_route._resolved_profile_requested_tier(workspace) == 2  # type: ignore[arg-type]
+        assert workspaces_route._resolved_profile_requested_tier(malformed_workspace) is None  # type: ignore[arg-type]
+        assert workspaces_route._resolved_profile_requested_tier(missing_profile_workspace) is None  # type: ignore[arg-type]
+        assert workspaces_route._resolved_profile_requested_tier(malformed_validation_workspace) is None  # type: ignore[arg-type]
+        assert workspaces_route._stored_task_agent_model(workspace) == "gpt-test"  # type: ignore[arg-type]
+        assert workspaces_route._stored_task_agent_model(malformed_workspace) is None  # type: ignore[arg-type]
+        assert workspaces_route._stored_task_out_of_scope_policy(workspace) == {"mode": "warn"}  # type: ignore[arg-type]
+        assert workspaces_route._stored_task_out_of_scope_policy(malformed_workspace) is None  # type: ignore[arg-type]
+        assert workspaces_route._requested_task_out_of_scope_policy(payload) is None
+        assert workspaces_route._requested_task_out_of_scope_policy(policy_payload) == {
+            "mode": "block",
+            "allowlist_patterns": [],
         }
 
 
@@ -843,6 +1015,73 @@ class TestGetWorkspace:
         response = await client.get("/v1/workspaces/ws_doesnotexist000000000000")
         assert response.status_code == 404
         assert response.json()["detail"]["error_code"] == "NOT_FOUND"
+
+
+class TestWorkspaceDirectRoutes:
+    @pytest.mark.unit
+    async def test_overview_route_maps_workspace_without_events_or_operations(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="overview direct")
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            response = await workspaces_route.list_workspace_overview(session=session)
+
+        item = next(item for item in response.items if item.workspace_id == workspace_id)
+        assert item.title == "overview direct"
+        assert item.active_operation is None
+        assert item.last_event is not None
+
+    @pytest.mark.unit
+    async def test_existing_events_stale_reasons_get_retry_and_list_routes_directly(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client, task_title="direct route workspace")
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            events = await workspaces_route.list_workspace_events(workspace_id, session=session)
+            stale = await workspaces_route.list_workspace_stale_reasons(
+                workspace_id,
+                include_resolved=True,
+                session=session,
+            )
+            listed = await workspaces_route.list_workspaces(session=session)
+            detail = await workspaces_route.get_workspace(workspace_id, session=session)
+            retry_error = await workspaces_route.retry_workspace("ws_missing", session=session)
+
+        assert [event.event_type for event in events.items] == ["workspace.created"]
+        assert stale.items == []
+        assert [workspace.id for workspace in listed] == [workspace_id]
+        assert detail.id == workspace_id
+        assert isinstance(retry_error, JSONResponse)
+        assert retry_error.status_code == 404
+        assert json.loads(retry_error.body)["error_code"] == "WORKSPACE_NOT_FOUND"
+
+    @pytest.mark.unit
+    async def test_events_and_stale_reason_routes_reject_missing_workspace_directly(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            with pytest.raises(HTTPException) as events_error:
+                await workspaces_route.list_workspace_events("ws_missing", session=session)
+            with pytest.raises(HTTPException) as stale_error:
+                await workspaces_route.list_workspace_stale_reasons(
+                    "ws_missing",
+                    session=session,
+                )
+
+        assert events_error.value.status_code == 404
+        assert events_error.value.detail["error_code"] == "NOT_FOUND"
+        assert stale_error.value.status_code == 404
+        assert stale_error.value.detail["error_code"] == "NOT_FOUND"
 
 
 class TestListWorkspaces:

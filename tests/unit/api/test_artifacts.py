@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -186,6 +187,50 @@ class TestWorkspaceArtifacts:
         items = artifacts._list_artifacts(workspace_id, artifact_dir)
 
         assert [item.relative_path for item in items] == ["stable.txt"]
+
+    @pytest.mark.unit
+    def test_listing_returns_empty_for_symlinked_root(self, tmp_path: Path) -> None:
+        workspace_id = "ws_artifact_symlink_root"
+        target = tmp_path / "target"
+        target.mkdir()
+        artifact_dir = tmp_path / "artifacts" / workspace_id
+        artifact_dir.parent.mkdir()
+        artifact_dir.symlink_to(target, target_is_directory=True)
+
+        assert artifacts._list_artifacts(workspace_id, artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_listing_returns_empty_when_root_resolution_raises(self) -> None:
+        class BrokenArtifactRoot:
+            def is_dir(self) -> bool:
+                return True
+
+            def is_symlink(self) -> bool:
+                return False
+
+            def resolve(self, *, strict: bool = False) -> Path:
+                assert strict is True
+                raise OSError("cannot resolve")
+
+        assert artifacts._list_artifacts("ws_broken_artifacts", BrokenArtifactRoot()) == []  # type: ignore[arg-type]
+
+    @pytest.mark.unit
+    def test_listing_skips_non_regular_files_and_uses_file_kind_for_extensionless_files(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = "ws_artifact_kinds"
+        artifact_dir = tmp_path / "artifacts" / workspace_id
+        artifact_dir.mkdir(parents=True)
+        extensionless = artifact_dir / "README"
+        extensionless.write_text("notes\n", encoding="utf-8")
+        fifo = artifact_dir / "events.pipe"
+        os.mkfifo(fifo)
+
+        items = artifacts._list_artifacts(workspace_id, artifact_dir)
+
+        assert [item.relative_path for item in items] == ["README"]
+        assert items[0].kind == "file"
 
     @pytest.mark.unit
     async def test_artifact_listing_offloads_filesystem_scan(

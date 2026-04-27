@@ -134,6 +134,40 @@ async def _create_stream_pair(
         await session.commit()
 
 
+async def _create_validation_stream(
+    engine: AsyncEngine,
+    *,
+    workspace_id: str,
+    stream_id: str,
+    kind: str,
+    name: str,
+    byte_count: int = 1,
+    line_count: int = 1,
+    closed: bool = True,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceLogStreamRepository(session)
+        stream = await repo.create_or_get(
+            workspace_id=workspace_id,
+            stream_id=stream_id,
+            source="validation",
+            name=name,
+            kind=kind,
+            path=f"/tmp/{stream_id}.log",
+        )
+        stream.opened_at = datetime(2026, 4, 26, 14, 0, tzinfo=UTC)
+        await repo.append_metadata(
+            workspace_id=workspace_id,
+            stream_id=stream_id,
+            byte_delta=byte_count,
+            line_delta=line_count,
+        )
+        if closed:
+            await repo.close(workspace_id=workspace_id, stream_id=stream_id)
+        await session.commit()
+
+
 async def _mark_workspace_completed(engine: AsyncEngine, workspace_id: str) -> None:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -142,6 +176,68 @@ async def _mark_workspace_completed(engine: AsyncEngine, workspace_id: str) -> N
         workspace.status = WorkspaceStatus.completed.value
         workspace.branch_name = "codex/validation-provenance"
         workspace.base_commit = "abc123def456"
+        await session.commit()
+
+
+async def _clear_workspace_failure_message(engine: AsyncEngine, workspace_id: str) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.failed.value
+        workspace.failure_reason = FailureReason.validation_failure.value
+        workspace.failure_message = None
+        await session.commit()
+
+
+async def _store_resolved_profile(engine: AsyncEngine, workspace_id: str, profile: dict) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.resolved_profile = profile
+        await session.commit()
+
+
+async def _attach_merge_candidate(
+    engine: AsyncEngine,
+    workspace_id: str,
+    *,
+    head_sha: str | None,
+    updated_at: datetime,
+) -> None:
+    from awf.db.repositories import MergeCandidateRepository, TaskAttemptRepository, TaskRepository
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.pr_url = "https://github.com/example/provenance/pull/1"
+        workspace.pr_number = 1
+        workspace.branch_name = "codex/validation-provenance"
+        task = await TaskRepository(session).create_or_get(
+            repo_url=workspace.repo_url,
+            base_branch=workspace.branch_base,
+            title=workspace.task_title,
+            prompt=workspace.task_prompt,
+            external_id=f"VALIDATION-{head_sha or 'missing'}",
+            idempotency_key=None,
+            task_class=workspace.task_class,
+            owned_paths=list(workspace.owned_paths),
+        )
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
+        attempt.is_canonical_for_merge = True
+        candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
+            task=task,
+            attempt=attempt,
+            workspace=workspace,
+            head_sha=head_sha,
+            base_sha="base-head",
+        )
+        candidate.updated_at = updated_at
         await session.commit()
 
 
@@ -442,6 +538,70 @@ async def test_validation_provenance_reports_persisted_coverage_policy(
 
 
 @pytest.mark.unit
+async def test_validation_provenance_malformed_persisted_command_uses_safe_defaults(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _insert_validation_run(
+        engine,
+        run_id="vr_malformed_command_000001",
+        workspace_id=workspace_id,
+        commands=[
+            {
+                "phase": 123,
+                "command_index": "first",
+                "command": ["pytest"],
+                "stream_ids": "not-a-dict",
+            }
+        ],
+        target_branch=None,
+        target_head_sha=None,
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["phase"] == "unknown"
+    assert item["command_index"] == 0
+    assert item["command"] is None
+    assert item["stream_ids"] == {"stdout": None, "stderr": None}
+    assert item["stdout_byte_count"] == 0
+    assert item["stderr_byte_count"] == 0
+    assert item["target_branch"] is None
+    assert item["branch_name"] is None
+
+
+@pytest.mark.unit
+async def test_validation_provenance_uses_latest_candidate_head_for_freshness(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _attach_merge_candidate(
+        engine,
+        workspace_id,
+        head_sha="candidate-head",
+        updated_at=datetime(2026, 4, 26, 13, 0, tzinfo=UTC),
+    )
+    await _insert_validation_run(
+        engine,
+        run_id="vr_candidate_head_0000001",
+        workspace_id=workspace_id,
+        target_head_sha="run-head",
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["target_head_sha"] == "run-head"
+    assert item["current_target_head_sha"] == "candidate-head"
+    assert item["fresh_for_target"] is False
+
+
+@pytest.mark.unit
 async def test_validation_provenance_resolves_profile_commands_by_phase_index(
     client: AsyncClient,
     engine: AsyncEngine,
@@ -508,6 +668,112 @@ async def test_validation_provenance_resolves_profile_commands_by_phase_index(
 
 
 @pytest.mark.unit
+async def test_validation_provenance_resolves_coverage_command_from_profile(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v2_workspace_with_body(
+        client,
+        {
+            **_V2_PROFILE_BODY,
+            "workspace": {
+                "profile_ref": "auto",
+                "profile": {
+                    "name": "api-provenance-coverage-command-test",
+                    "phases": {"validate": ["pytest -q"]},
+                    "validation": {
+                        "coverage": {
+                            "minimum_percent": 99,
+                            "command": "uv run pytest --cov=awf --cov-report=term",
+                        }
+                    },
+                },
+            },
+        },
+    )
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.01_coverage",
+        phase="coverage",
+        stdout_bytes=10,
+        stdout_lines=1,
+        stderr_bytes=0,
+        stderr_lines=0,
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["phase"] == "coverage"
+    assert item["command_index"] == 1
+    assert item["command"] == "uv run pytest --cov=awf --cov-report=term"
+
+
+@pytest.mark.unit
+async def test_validation_provenance_handles_stream_id_suffixes_and_label_fallbacks(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _mark_workspace_completed(engine, workspace_id)
+    await _create_validation_stream(
+        engine,
+        workspace_id=workspace_id,
+        stream_id="validation.run_42.stdout",
+        kind="log",
+        name="coverage run_42 stdout",
+        byte_count=4,
+        line_count=1,
+    )
+    await _create_validation_stream(
+        engine,
+        workspace_id=workspace_id,
+        stream_id="setup.01_cleanup.stderr",
+        kind="log",
+        name="cleanup setup stderr",
+        byte_count=7,
+        line_count=2,
+    )
+    await _create_validation_stream(
+        engine,
+        workspace_id=workspace_id,
+        stream_id="plainstream",
+        kind="stdout",
+        name="unknown plain stdout",
+        byte_count=5,
+        line_count=1,
+    )
+    await _create_validation_stream(
+        engine,
+        workspace_id=workspace_id,
+        stream_id="ignored.log",
+        kind="log",
+        name="ignored log",
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert [(item["phase"], item["command_index"]) for item in items] == [
+        ("coverage", 42),
+        ("cleanup", 1),
+        ("unknown", 0),
+    ]
+    assert items[0]["stream_ids"] == {
+        "stdout": "validation.run_42.stdout",
+        "stderr": None,
+    }
+    assert items[1]["stream_ids"] == {
+        "stdout": None,
+        "stderr": "setup.01_cleanup.stderr",
+    }
+    assert items[2]["stream_ids"] == {"stdout": "plainstream", "stderr": None}
+
+
+@pytest.mark.unit
 async def test_validation_provenance_marks_open_streams_running_and_uses_request_commands(
     client: AsyncClient,
     engine: AsyncEngine,
@@ -536,6 +802,32 @@ async def test_validation_provenance_marks_open_streams_running_and_uses_request
     assert item["command"] == "pytest -q"
     assert item["status"] == "running"
     assert item["closed_at"] is None
+
+
+@pytest.mark.unit
+async def test_validation_provenance_ignores_malformed_resolved_profile(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace_with_commands(client, ["pytest -q"])
+    await _store_resolved_profile(engine, workspace_id, {"name": "", "phases": "invalid"})
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.cmd_01",
+        phase="validate",
+        stdout_bytes=12,
+        stdout_lines=1,
+        stderr_bytes=0,
+        stderr_lines=0,
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["phase"] == "validate"
+    assert item["command"] == "pytest -q"
 
 
 @pytest.mark.unit
@@ -603,6 +895,32 @@ async def test_validation_provenance_marks_failed_command_from_workspace_failure
         ("pytest -q", "succeeded"),
         ("ruff check", "failed"),
     ]
+
+
+@pytest.mark.unit
+async def test_validation_provenance_failed_workspace_without_message_keeps_status_unknown(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace_with_commands(client, ["pytest -q"])
+    await _clear_workspace_failure_message(engine, workspace_id)
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.cmd_01",
+        phase="validate",
+        stdout_bytes=20,
+        stdout_lines=1,
+        stderr_bytes=0,
+        stderr_lines=0,
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["command"] == "pytest -q"
+    assert item["status"] == "unknown"
 
 
 @pytest.mark.unit

@@ -7,6 +7,7 @@ from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.api.routes.tasks as tasks_route
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import TaskAttemptRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -104,6 +105,29 @@ class TestTaskList:
         assert new["base_branch"] == "main"
         assert new["task_class"] == "test_task"
         assert new["status"] == WorkspaceStatus.requested.value
+
+    @pytest.mark.unit
+    async def test_list_tasks_route_merges_attempt_and_legacy_rows_directly(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        legacy_workspace_id = await _create_v1_workspace(client)
+        new_workspace_id = await _create_v2_workspace(
+            client,
+            external_id="TICKET-DIRECT",
+            title="Direct route task",
+        )
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            response = await tasks_route.list_tasks(session=session)
+
+        items_by_workspace = {item.workspace_id: item for item in response.items}
+        assert set(items_by_workspace) == {legacy_workspace_id, new_workspace_id}
+        assert items_by_workspace[legacy_workspace_id].attempt_id is None
+        assert items_by_workspace[new_workspace_id].attempt_id is not None
+        assert items_by_workspace[new_workspace_id].task_id == "TICKET-DIRECT"
 
     @pytest.mark.unit
     async def test_idempotent_v2_replay_does_not_duplicate_attempts(
@@ -393,3 +417,19 @@ class TestTaskList:
         assert body["items"][0]["redispatch_from_attempt_id"] == second.id
         assert body["items"][1]["parent_attempt_id"] == first.id
         assert body["items"][2]["parent_attempt_id"] is None
+
+    @pytest.mark.unit
+    async def test_task_attempts_missing_task_returns_404(self, client: AsyncClient) -> None:
+        response = await client.get("/v1/tasks/NO-SUCH-TASK/attempts")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == {
+            "error_code": "NOT_FOUND",
+            "message": "No task with ref NO-SUCH-TASK",
+        }
+
+    @pytest.mark.unit
+    async def test_task_attempts_validates_limit_bounds(self, client: AsyncClient) -> None:
+        response = await client.get("/v1/tasks/NO-SUCH-TASK/attempts", params={"limit": 0})
+
+        assert response.status_code == 422

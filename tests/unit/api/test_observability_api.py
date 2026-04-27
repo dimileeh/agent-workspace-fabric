@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import suppress
+import os
+from contextlib import contextmanager, suppress
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -12,6 +13,7 @@ from fastapi.testclient import TestClient
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.testclient import WebSocketDenialResponse
+from starlette.websockets import WebSocketDisconnect
 
 import awf.api.routes.controls as controls_route
 import awf.api.routes.ws as ws_route
@@ -386,6 +388,44 @@ class TestLogs:
 
 class TestWorkspaceWebSocket:
     @pytest.mark.unit
+    def test_websocket_closes_when_database_factory_is_missing(self) -> None:
+        app = create_app(use_lifespan=False)
+
+        with _temporary_api_token("secret"):
+            client = TestClient(app)
+            with (
+                pytest.raises(WebSocketDisconnect) as exc_info,
+                client.websocket_connect(
+                    "/v1/workspaces/ws_missing/ws",
+                    headers={"Authorization": "Bearer secret"},
+                ),
+            ):
+                pass
+
+        assert exc_info.value.code == 1011
+
+    @pytest.mark.unit
+    def test_websocket_sends_error_frame_for_missing_workspace(self, tmp_path: Path) -> None:
+        with _temporary_api_token("secret"):
+            client, engine = _make_empty_sync_test_client(tmp_path)
+            try:
+                with client.websocket_connect(
+                    "/v1/workspaces/ws_missing/ws",
+                    headers={"Authorization": "Bearer secret"},
+                ) as websocket:
+                    assert websocket.receive_json() == {
+                        "type": "error",
+                        "error_code": "NOT_FOUND",
+                        "message": "workspace not found",
+                    }
+                    with pytest.raises(WebSocketDisconnect) as exc_info:
+                        websocket.receive_json()
+            finally:
+                asyncio.run(engine.dispose())
+
+        assert exc_info.value.code == 1008
+
+    @pytest.mark.unit
     def test_websocket_requires_token(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -506,6 +546,277 @@ class TestWorkspaceWebSocket:
                 await stream_task
 
         assert websocket.events == ["workspace.state_changed"]
+
+    @pytest.mark.unit
+    async def test_initial_state_tails_only_selected_log_sources(
+        self,
+        engine: AsyncEngine,
+        tmp_path: Path,
+    ) -> None:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/ws.git",
+                branch_base="main",
+                task_title="Stream selected logs",
+                task_prompt="Check websocket backlog filtering.",
+                agent="codex",
+                test_commands=[],
+            )
+            log_repo = WorkspaceLogStreamRepository(session)
+            for source, stream_id, contents in (
+                ("agent", "agent.stdout", "agent backlog\n"),
+                ("validation", "validation.stdout", "validation backlog\n"),
+                ("service", "service.stdout", "service backlog\n"),
+                ("custom", "custom.stdout", "custom backlog\n"),
+            ):
+                path = tmp_path / f"{stream_id}.log"
+                path.write_text(contents, encoding="utf-8")
+                await log_repo.create_or_get(
+                    workspace_id=workspace.id,
+                    stream_id=stream_id,
+                    source=source,
+                    name=f"{source} stdout",
+                    kind="stdout",
+                    path=str(path),
+                )
+                await log_repo.append_metadata(
+                    workspace_id=workspace.id,
+                    stream_id=stream_id,
+                    byte_delta=path.stat().st_size,
+                    line_delta=1,
+                )
+            await log_repo.create_or_get(
+                workspace_id=workspace.id,
+                stream_id="validation.missing",
+                source="validation",
+                name="missing validation stdout",
+                kind="stdout",
+                path=str(tmp_path / "missing.log"),
+            )
+            await session.commit()
+            workspace_id = workspace.id
+
+        websocket = _FrameRecordingWebSocket()
+
+        sent = await ws_route._send_initial_state(
+            websocket,
+            factory,
+            workspace_id,
+            selected={"validation", "services", "custom"},
+            seen_event_ids=set(),
+            tail_bytes=10,
+        )
+
+        assert sent is True
+        assert [frame["type"] for frame in websocket.frames] == ["snapshot", "log", "log", "log"]
+        assert [frame["source"] for frame in websocket.frames[1:]] == [
+            "validation",
+            "service",
+            "custom",
+        ]
+        assert [frame["data"] for frame in websocket.frames[1:]] == [
+            "n backlog\n",
+            "e backlog\n",
+            "m backlog\n",
+        ]
+        assert websocket.closed_codes == []
+
+    @pytest.mark.unit
+    async def test_initial_state_reports_missing_workspace(self, engine: AsyncEngine) -> None:
+        websocket = _FrameRecordingWebSocket()
+
+        sent = await ws_route._send_initial_state(
+            websocket,
+            make_session_factory(engine),
+            "ws_missing",
+            selected={"events"},
+            seen_event_ids=set(),
+            tail_bytes=100,
+        )
+
+        assert sent is False
+        assert websocket.frames == [
+            {
+                "type": "error",
+                "error_code": "NOT_FOUND",
+                "message": "workspace not found",
+            }
+        ]
+        assert websocket.closed_codes == [1008]
+
+    @pytest.mark.unit
+    async def test_initial_state_can_send_event_backlog_without_logs(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.create(
+                repo_url="git@github.com:example/ws.git",
+                branch_base="main",
+                task_title="Stream event backlog",
+                task_prompt="Check websocket event backlog.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+            workspace_id = workspace.id
+
+        websocket = _FrameRecordingWebSocket()
+        seen_event_ids: set[str] = set()
+
+        sent = await ws_route._send_initial_state(
+            websocket,
+            factory,
+            workspace_id,
+            selected={"events"},
+            seen_event_ids=seen_event_ids,
+            tail_bytes=100,
+        )
+
+        assert sent is True
+        assert [frame["type"] for frame in websocket.frames] == ["snapshot", "event"]
+        assert websocket.frames[1]["event"]["event_type"] == "workspace.created"
+        assert seen_event_ids == {websocket.frames[1]["event"]["id"]}
+
+    @pytest.mark.unit
+    async def test_initial_state_can_send_snapshot_without_backlog_channels(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/ws.git",
+                branch_base="main",
+                task_title="Snapshot only",
+                task_prompt="Check websocket snapshot-only channel selection.",
+                agent="codex",
+                test_commands=[],
+            )
+            await session.commit()
+            workspace_id = workspace.id
+
+        websocket = _FrameRecordingWebSocket()
+
+        sent = await ws_route._send_initial_state(
+            websocket,
+            factory,
+            workspace_id,
+            selected={"custom"},
+            seen_event_ids=set(),
+            tail_bytes=100,
+        )
+
+        assert sent is True
+        assert [frame["type"] for frame in websocket.frames] == ["snapshot"]
+        assert websocket.frames[0]["workspace"]["id"] == workspace_id
+
+    @pytest.mark.unit
+    async def test_live_stream_emits_heartbeats_and_selected_logs(self) -> None:
+        workspace_id = "ws_live_heartbeat"
+        websocket = _FrameRecordingWebSocket()
+        stream_task = asyncio.create_task(
+            ws_route._stream_live_frames(
+                websocket,
+                workspace_id=workspace_id,
+                selected={"agent"},
+                seen_event_ids=set(),
+                event_queue=None,
+                heartbeat_interval=0.01,
+            )
+        )
+
+        try:
+            await asyncio.wait_for(websocket.wait_for_type("heartbeat"), timeout=1)
+            await LOG_BROADCASTER.publish(
+                workspace_id=workspace_id,
+                stream_id="validation.stdout",
+                source="validation",
+                fd="stdout",
+                offset=0,
+                data="ignored\n",
+            )
+            await LOG_BROADCASTER.publish(
+                workspace_id=workspace_id,
+                stream_id="agent.stdout",
+                source="agent",
+                fd="stdout",
+                offset=0,
+                data="selected\n",
+            )
+            await asyncio.wait_for(websocket.wait_for_source("agent"), timeout=1)
+        finally:
+            stream_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await stream_task
+
+        assert {"type": "heartbeat", "workspace_id": workspace_id} in websocket.frames
+        log_frames = [frame for frame in websocket.frames if frame.get("type") == "log"]
+        assert [frame["source"] for frame in log_frames] == ["agent"]
+        assert log_frames[0]["data"] == "selected\n"
+
+    @pytest.mark.unit
+    async def test_live_stream_suppresses_duplicate_event_ids(self) -> None:
+        workspace_id = "ws_live_duplicate_events"
+        event_queue: asyncio.Queue[WorkspaceEventFrame] = asyncio.Queue()
+        websocket = _FrameRecordingWebSocket()
+        duplicate_event = WorkspaceEventFrame(
+            id="evt_duplicate",
+            workspace_id=workspace_id,
+            event_type="workspace.state_changed",
+            old_state="requested",
+            new_state="running",
+            reason_code="TEST",
+            payload=None,
+            occurred_at=datetime.now(UTC),
+        )
+        stream_task = asyncio.create_task(
+            ws_route._stream_live_frames(
+                websocket,
+                workspace_id=workspace_id,
+                selected={"events"},
+                seen_event_ids={"evt_duplicate"},
+                event_queue=event_queue,
+                heartbeat_interval=60,
+            )
+        )
+
+        try:
+            await event_queue.put(duplicate_event)
+            await event_queue.put(
+                WorkspaceEventFrame(
+                    id="evt_unique",
+                    workspace_id=workspace_id,
+                    event_type="workspace.finished",
+                    old_state="running",
+                    new_state="completed",
+                    reason_code="TEST_DONE",
+                    payload=None,
+                    occurred_at=datetime.now(UTC),
+                )
+            )
+            await asyncio.wait_for(websocket.wait_for_type("event"), timeout=1)
+            await asyncio.sleep(0)
+        finally:
+            stream_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await stream_task
+
+        event_frames = [frame for frame in websocket.frames if frame.get("type") == "event"]
+        assert [frame["event"]["id"] for frame in event_frames] == ["evt_unique"]
+
+    @pytest.mark.unit
+    def test_stream_selected_maps_builtin_and_custom_sources(self) -> None:
+        selected = {"agent", "validation", "services", "custom"}
+
+        assert ws_route._stream_selected("agent", selected) is True
+        assert ws_route._stream_selected("validation", selected) is True
+        assert ws_route._stream_selected("service", selected) is True
+        assert ws_route._stream_selected("custom", selected) is True
+        assert ws_route._stream_selected("other", selected) is False
 
 
 class TestOperationsAndControls:
@@ -675,6 +986,39 @@ def _make_sync_test_client(
     return workspace_id, TestClient(app), engine
 
 
+def _make_empty_sync_test_client(tmp_path: Path) -> tuple[TestClient, AsyncEngine]:
+    db_path = tmp_path / "empty-ws.db"
+    engine = make_engine(f"sqlite+aiosqlite:///{db_path}")
+    factory = make_session_factory(engine)
+
+    async def create_schema() -> None:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    asyncio.run(create_schema())
+    app = create_app(use_lifespan=False)
+    configure_database(app, factory)
+    return TestClient(app), engine
+
+
+@contextmanager
+def _temporary_api_token(token: str | None) -> object:
+    previous = os.environ.get("AWF_API_TOKEN")
+    try:
+        if token is None:
+            os.environ.pop("AWF_API_TOKEN", None)
+        else:
+            os.environ["AWF_API_TOKEN"] = token
+        get_settings.cache_clear()
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("AWF_API_TOKEN", None)
+        else:
+            os.environ["AWF_API_TOKEN"] = previous
+        get_settings.cache_clear()
+
+
 class _RecordingWebSocket:
     def __init__(self) -> None:
         self.event_sent = asyncio.Event()
@@ -689,3 +1033,27 @@ class _RecordingWebSocket:
         assert isinstance(event_type, str)
         self.events.append(event_type)
         self.event_sent.set()
+
+
+class _FrameRecordingWebSocket:
+    def __init__(self) -> None:
+        self.frames: list[dict[str, object]] = []
+        self.closed_codes: list[int] = []
+        self._frame_event = asyncio.Event()
+
+    async def send_json(self, payload: dict[str, object]) -> None:
+        self.frames.append(payload)
+        self._frame_event.set()
+
+    async def close(self, *, code: int) -> None:
+        self.closed_codes.append(code)
+
+    async def wait_for_type(self, frame_type: str) -> None:
+        while not any(frame.get("type") == frame_type for frame in self.frames):
+            self._frame_event.clear()
+            await self._frame_event.wait()
+
+    async def wait_for_source(self, source: str) -> None:
+        while not any(frame.get("source") == source for frame in self.frames):
+            self._frame_event.clear()
+            await self._frame_event.wait()
