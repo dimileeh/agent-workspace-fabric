@@ -116,6 +116,7 @@ class TestExecutorFixPassWarnings:
             await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="T")
             await s.commit()
             ws_id = ws.id
+        (tmp_path / "w" / "wt" / ws_id).mkdir(parents=True, exist_ok=True)
 
         fake = FakeCommandRunner()
         # adapter.run is via subprocess.

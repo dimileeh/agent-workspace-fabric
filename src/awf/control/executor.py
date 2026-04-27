@@ -96,6 +96,8 @@ class _MonitorRunnerProto(Protocol):
 
 _log = get_logger(__name__)
 
+WORKTREE_MISSING_REASON_CODE = "WORKTREE_MISSING"
+
 
 @dataclass(frozen=True)
 class ExecutorConfig:
@@ -335,7 +337,13 @@ class WorkspaceExecutor:
         # stage everything and commit if anything's cached. If HEAD still
         # matches the base branch afterwards, the agent produced zero change
         # and we fail with a specific reason rather than pushing nothing.
-        worktree_host = self._config.worktrees_root / workspace_id
+        if not await self._ensure_worktree_available(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            expected=WorkspaceStatus.running,
+            action="post_agent_commit",
+        ):
+            return
 
         # ``base_commit`` is set by the provisioner before a workspace ever
         # reaches ``ready`` — if it's missing here something went wrong
@@ -361,9 +369,9 @@ class WorkspaceExecutor:
             return await self._runner.run(
                 [
                     "git",
-                    *git_safe_directory_config_args(worktree_host),
+                    *git_safe_directory_config_args(worktree_path),
                     "-C",
-                    str(worktree_host),
+                    str(worktree_path),
                     *args,
                 ]
             )
@@ -531,9 +539,9 @@ class WorkspaceExecutor:
                 commit_result = await self._runner.run(
                     [
                         "git",
-                        *git_safe_directory_config_args(worktree_host),
+                        *git_safe_directory_config_args(worktree_path),
                         "-C",
-                        str(worktree_host),
+                        str(worktree_path),
                         *git_identity_config_args(),
                         "commit",
                         "-m",
@@ -602,9 +610,9 @@ class WorkspaceExecutor:
                     recover_commit = await self._runner.run(
                         [
                             "git",
-                            *git_safe_directory_config_args(worktree_host),
+                            *git_safe_directory_config_args(worktree_path),
                             "-C",
-                            str(worktree_host),
+                            str(worktree_path),
                             *git_identity_config_args(),
                             "commit",
                             "-m",
@@ -851,6 +859,15 @@ class WorkspaceExecutor:
                 action="validation_fix_agent_run",
             ):
                 return
+            if not await self._ensure_worktree_available(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                expected=WorkspaceStatus.validating,
+                action="validation_fix_agent_run",
+                validation_run_id=validation_run_id,
+                requested_tier=validation_tier,
+            ):
+                return
             try:
                 await adapter.run(
                     compose_project=compose_project,
@@ -909,6 +926,15 @@ class WorkspaceExecutor:
                 action="validation_fix_commit",
             ):
                 return
+            if not await self._ensure_worktree_available(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                expected=WorkspaceStatus.validating,
+                action="validation_fix_git_add",
+                validation_run_id=validation_run_id,
+                requested_tier=validation_tier,
+            ):
+                return
 
             # Commit whatever the fix pass produced. Simpler than the initial
             # post-agent commit block — orphan-history recovery isn't possible
@@ -921,6 +947,15 @@ class WorkspaceExecutor:
                     workspace_id=workspace_id,
                     stderr=fix_add.stderr[:400],
                 )
+            if not await self._ensure_worktree_available(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                expected=WorkspaceStatus.validating,
+                action="validation_fix_git_diff",
+                validation_run_id=validation_run_id,
+                requested_tier=validation_tier,
+            ):
+                return
             fix_cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
             if fix_cached.stdout.strip():
                 violations = find_protected_quality_gate_changes(
@@ -949,6 +984,15 @@ class WorkspaceExecutor:
                         message=message[:2000],
                     )
                     return
+                if not await self._ensure_worktree_available(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                    expected=WorkspaceStatus.validating,
+                    action="validation_fix_git_commit",
+                    validation_run_id=validation_run_id,
+                    requested_tier=validation_tier,
+                ):
+                    return
                 commit_msg = f"awf: fix pass {pass_number + 1} for {ws.task_title}"[:72]
                 commit_body = (
                     f"AWF validation fix pass {pass_number + 1} of "
@@ -960,7 +1004,7 @@ class WorkspaceExecutor:
                     [
                         "git",
                         "-C",
-                        str(worktree_host),
+                        str(worktree_path),
                         "commit",
                         "-m",
                         commit_msg,
@@ -983,6 +1027,13 @@ class WorkspaceExecutor:
             to=WorkspaceStatus.pushing,
             reason="VALIDATION_OK",
             action="start_push",
+        ):
+            return
+        if not await self._ensure_worktree_available(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            expected=WorkspaceStatus.pushing,
+            action="pr_push_open",
         ):
             return
 
@@ -1291,6 +1342,72 @@ class WorkspaceExecutor:
             )
             await session.commit()
             return remote_push_branch
+
+    async def _ensure_worktree_available(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        expected: WorkspaceStatus,
+        action: str,
+        validation_run_id: str | None = None,
+        requested_tier: int | None = None,
+    ) -> bool:
+        if worktree_path.is_dir():
+            return True
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - row disappeared mid-flight
+                return False
+            if ws.status != expected.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    ws,
+                    action=action,
+                    expected=expected,
+                    reason_code="EXECUTOR_STALE_STATUS",
+                )
+                await session.commit()
+                return False
+
+            message = _worktree_missing_message(worktree_path, action)
+            _log.error(
+                "executor.worktree_missing",
+                workspace_id=workspace_id,
+                action=action,
+                worktree_path=str(worktree_path),
+                reason_code=WORKTREE_MISSING_REASON_CODE,
+            )
+            await repo.add_event(
+                ws,
+                event_type="workspace.executor_worktree_missing",
+                reason_code=WORKTREE_MISSING_REASON_CODE,
+                payload={
+                    "action": action,
+                    "worktree_path": str(worktree_path),
+                },
+            )
+            if validation_run_id is not None and requested_tier is not None:
+                await self._finish_pending_validate_operations_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    validation_run_id=validation_run_id,
+                    requested_tier=requested_tier,
+                    reason_code=WORKTREE_MISSING_REASON_CODE,
+                    error_message=message,
+                )
+            ws.failure_reason = FailureReason.infrastructure_failure.value
+            ws.failure_message = message[:2000]
+            await repo.transition(
+                ws,
+                to=WorkspaceStatus.failed,
+                reason_code=WORKTREE_MISSING_REASON_CODE,
+            )
+            await session.commit()
+            return False
 
     def _defaults_for(self, agent: AgentRuntime) -> AgentDefaults | None:
         defaults = defaults_with_model_overrides(
@@ -1672,38 +1789,61 @@ class WorkspaceExecutor:
         coverage: dict[str, object] | None = None,
     ) -> None:
         async with self._session_factory() as session:
-            repo = OperationRepository(session)
-            pending = await repo.list_for_workspace(
-                workspace_id,
-                operation_type=OperationType.validate,
-                status=OperationStatus.pending,
-                limit=100,
+            await self._finish_pending_validate_operations_in_session(
+                session,
+                workspace_id=workspace_id,
+                status=status,
+                validation_run_id=validation_run_id,
+                requested_tier=requested_tier,
+                reason_code=reason_code,
+                error_message=error_message,
+                coverage=coverage,
             )
-            running = await repo.list_for_workspace(
-                workspace_id,
-                operation_type=OperationType.validate,
-                status=OperationStatus.running,
-                limit=100,
-            )
-            result = {
-                "validation_run_id": validation_run_id,
-                "requested_tier": requested_tier,
-                "reason_code": reason_code,
-            }
-            if coverage is not None:
-                result["coverage"] = coverage
-            for operation in [*pending, *running]:
-                payload = dict(operation.payload or {})
-                payload.setdefault("requested_tier", requested_tier)
-                operation.payload = payload
-                await repo.finish(
-                    operation,
-                    status=status,
-                    result=result,
-                    error_code=reason_code if status == OperationStatus.failed else None,
-                    error_message=error_message,
-                )
             await session.commit()
+
+    async def _finish_pending_validate_operations_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        status: OperationStatus,
+        validation_run_id: str,
+        requested_tier: int,
+        reason_code: str | None,
+        error_message: str | None = None,
+        coverage: dict[str, object] | None = None,
+    ) -> None:
+        repo = OperationRepository(session)
+        pending = await repo.list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.pending,
+            limit=100,
+        )
+        running = await repo.list_for_workspace(
+            workspace_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.running,
+            limit=100,
+        )
+        result = {
+            "validation_run_id": validation_run_id,
+            "requested_tier": requested_tier,
+            "reason_code": reason_code,
+        }
+        if coverage is not None:
+            result["coverage"] = coverage
+        for operation in [*pending, *running]:
+            payload = dict(operation.payload or {})
+            payload.setdefault("requested_tier", requested_tier)
+            operation.payload = payload
+            await repo.finish(
+                operation,
+                status=status,
+                result=result,
+                error_code=reason_code if status == OperationStatus.failed else None,
+                error_message=error_message,
+            )
 
     async def _finish_validation_run(
         self,
@@ -1755,6 +1895,13 @@ def _extract_pr_number(pr_url: str) -> int | None:
     """
     match = _PR_NUMBER_RE.search(pr_url)
     return int(match.group(1)) if match else None
+
+
+def _worktree_missing_message(worktree_path: Path, action: str) -> str:
+    return (
+        f"{WORKTREE_MISSING_REASON_CODE}: managed worktree path is missing or not a "
+        f"directory while preparing `{action}`: {worktree_path}"
+    )
 
 
 def _missing_monitor_recovery_metadata(ws: Workspace) -> list[str]:
