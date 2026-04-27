@@ -84,7 +84,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     async def _post_merge_reconciler(
         *, repo_url: str, branch: str
     ) -> object:
-        checkout_path = target_branch_reconciler._checkout_path(
+        checkout_path = target_branch_reconciler.checkout_path(
             repo_url=repo_url, branch=branch,
         )
 

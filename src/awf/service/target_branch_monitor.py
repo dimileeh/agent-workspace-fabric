@@ -145,7 +145,7 @@ class TargetBranchReconcileMonitor:
     ) -> TargetBranchMonitorResult:
         """Run one reconciliation pass for ``repo_url``/``branch``."""
 
-        checkout_path = self._checkout_path(repo_url=repo_url, branch=branch)
+        checkout_path = self.checkout_path(repo_url=repo_url, branch=branch)
         await self._prepare_checkout(
             repo_url=repo_url,
             branch=branch,
@@ -294,7 +294,7 @@ class TargetBranchReconcileMonitor:
             raise TargetBranchMonitorError(operation=operation, result=result)
         return result
 
-    def _checkout_path(self, *, repo_url: str, branch: str) -> Path:
+    def checkout_path(self, *, repo_url: str, branch: str) -> Path:
         slug = _slugify_repo(repo_url)
         digest = hashlib.sha256(repo_url.encode("utf-8")).hexdigest()[:12]
         branch_slug = _slugify_branch(branch)

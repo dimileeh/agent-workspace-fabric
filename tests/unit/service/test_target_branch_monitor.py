@@ -335,7 +335,7 @@ async def test_checkout_path_slug_fallbacks_and_convenience_entrypoint(
             ),
         ),
     )
-    fallback_path = monitor._checkout_path(repo_url="///", branch="///")
+    fallback_path = monitor.checkout_path(repo_url="///", branch="///")
 
     result = await run_target_branch_reconcile_once(
         runner=runner,
