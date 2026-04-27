@@ -18,14 +18,23 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
 from awf.common.commands import FakeCommandRunner
-from awf.control.executor import ExecutorConfig, WorkspaceExecutor
+from awf.control.executor import (
+    ExecutorConfig,
+    WorkspaceExecutor,
+    _apply_baseline_coverage_ratchet,
+)
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
-from awf.runtime.validation import ValidationRunner
+from awf.runtime.validation import (
+    ValidationCommandResult,
+    ValidationCoverageResult,
+    ValidationResult,
+    ValidationRunner,
+)
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -91,6 +100,92 @@ def _queue_pre_push_diagnostics(fake: FakeCommandRunner) -> None:
     fake.queue_result(returncode=0, stdout="deadbeef01\n")  # rev-parse HEAD
     fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref
     fake.queue_result(returncode=0, stdout="abc1234 commit\n")  # log ahead-of-base
+
+
+class TestCoverageBaselineRatchet:
+    @pytest.mark.unit
+    def test_accepts_below_threshold_coverage_when_baseline_is_preserved(
+        self, tmp_path: Path
+    ) -> None:
+        command = ValidationCommandResult(
+            command="pytest --cov=awf --cov-report=term",
+            returncode=1,
+            duration_seconds=1.0,
+            stdout_path=tmp_path / "coverage.stdout",
+            stderr_path=tmp_path / "coverage.stderr",
+            phase="coverage",
+            reason_code="COVERAGE_BELOW_THRESHOLD",
+            policy_failed=True,
+        )
+        result = ValidationResult(
+            commands=[command],
+            coverage=ValidationCoverageResult(
+                provider="python",
+                percent=88.25,
+                minimum_percent=99.0,
+                enforce=True,
+                status="failed",
+                reason_code="COVERAGE_BELOW_THRESHOLD",
+                command_result=command,
+            ),
+        )
+        baseline = ValidationCoverageResult(
+            provider="python",
+            percent=88.0,
+            minimum_percent=99.0,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_BELOW_THRESHOLD",
+            command_result=None,
+        )
+
+        adjusted = _apply_baseline_coverage_ratchet(result, baseline_coverage=baseline)
+
+        assert adjusted.all_passed
+        assert adjusted.coverage is not None
+        assert adjusted.coverage.status == "baseline_debt"
+        assert adjusted.coverage.reason_code == "COVERAGE_BASELINE_DEBT_NO_REGRESSION"
+        assert adjusted.commands[0].ok
+
+    @pytest.mark.unit
+    def test_keeps_coverage_failed_when_workspace_regresses_baseline(self, tmp_path: Path) -> None:
+        command = ValidationCommandResult(
+            command="pytest --cov=awf --cov-report=term",
+            returncode=1,
+            duration_seconds=1.0,
+            stdout_path=tmp_path / "coverage.stdout",
+            stderr_path=tmp_path / "coverage.stderr",
+            phase="coverage",
+            reason_code="COVERAGE_BELOW_THRESHOLD",
+            policy_failed=True,
+        )
+        result = ValidationResult(
+            commands=[command],
+            coverage=ValidationCoverageResult(
+                provider="python",
+                percent=87.5,
+                minimum_percent=99.0,
+                enforce=True,
+                status="failed",
+                reason_code="COVERAGE_BELOW_THRESHOLD",
+                command_result=command,
+            ),
+        )
+        baseline = ValidationCoverageResult(
+            provider="python",
+            percent=88.0,
+            minimum_percent=99.0,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_BELOW_THRESHOLD",
+            command_result=None,
+        )
+
+        adjusted = _apply_baseline_coverage_ratchet(result, baseline_coverage=baseline)
+
+        assert not adjusted.all_passed
+        assert adjusted.coverage is not None
+        assert adjusted.coverage.reason_code == "COVERAGE_BELOW_THRESHOLD"
 
 
 async def _seed_ready_workspace(
@@ -830,7 +925,7 @@ class TestFailurePaths:
             stdout=(
                 "Name        Stmts   Miss  Cover\n"
                 "-------------------------------\n"
-                "TOTAL         100      2    98%\n"
+                "TOTAL         100     13    87%\n"
             ),
         )  # coverage cmd
 
@@ -878,7 +973,7 @@ class TestFailurePaths:
         assert run["reason_code"] == "COVERAGE_BELOW_THRESHOLD"
         assert json.loads(run["log_stream_refs"])["coverage"] == {
             "provider": "python",
-            "percent": 98.0,
+            "percent": 87.0,
             "minimum_percent": 99.0,
             "enforce": True,
             "status": "failed",
@@ -891,7 +986,7 @@ class TestFailurePaths:
         assert operation["error_code"] == "COVERAGE_BELOW_THRESHOLD"
         assert json.loads(operation["result"])["coverage"] == {
             "provider": "python",
-            "percent": 98.0,
+            "percent": 87.0,
             "minimum_percent": 99.0,
             "enforce": True,
             "status": "failed",

@@ -18,7 +18,7 @@ from __future__ import annotations
 import inspect
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Protocol
@@ -689,6 +689,10 @@ class WorkspaceExecutor:
                     reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
                 )
                 return
+            val_result = _apply_baseline_coverage_ratchet(
+                val_result,
+                baseline_coverage=baseline_coverage,
+            )
             await self._finish_validation_run(
                 validation_run_id,
                 status="succeeded" if val_result.all_passed else "failed",
@@ -1860,6 +1864,71 @@ def _validation_run_reason_code(result: ValidationResult) -> str:
     if first_failure is None:
         return "VALIDATION_FAILED"
     return first_failure.reason_code
+
+
+def _apply_baseline_coverage_ratchet(
+    result: ValidationResult,
+    *,
+    baseline_coverage: ValidationCoverageResult | None,
+) -> ValidationResult:
+    """Accept coverage baseline debt only when a workspace does not regress it.
+
+    AWF's self profile carries an aspirational 99% coverage target. Until the
+    existing repo baseline reaches that target, unrelated feature PRs should
+    not be forced to repay the whole historical debt. They must, however,
+    preserve or improve the measured baseline and must not lower the gate.
+    """
+    coverage = result.coverage
+    if not _coverage_preserves_below_threshold_baseline(
+        coverage,
+        baseline_coverage=baseline_coverage,
+    ):
+        return result
+
+    assert coverage is not None  # narrowed by helper above
+    command_result = coverage.command_result
+    adjusted_command = (
+        replace(
+            command_result,
+            returncode=0,
+            reason_code="COVERAGE_BASELINE_DEBT_NO_REGRESSION",
+            policy_failed=False,
+        )
+        if command_result is not None
+        else None
+    )
+    adjusted_coverage = replace(
+        coverage,
+        status="baseline_debt",
+        reason_code="COVERAGE_BASELINE_DEBT_NO_REGRESSION",
+        command_result=adjusted_command,
+    )
+    adjusted_commands = list(result.commands)
+    if adjusted_command is not None and command_result is not None:
+        adjusted_commands = [
+            adjusted_command
+            if command.stdout_path == command_result.stdout_path
+            and command.stderr_path == command_result.stderr_path
+            else command
+            for command in result.commands
+        ]
+    return replace(result, commands=adjusted_commands, coverage=adjusted_coverage)
+
+
+def _coverage_preserves_below_threshold_baseline(
+    coverage: ValidationCoverageResult | None,
+    *,
+    baseline_coverage: ValidationCoverageResult | None,
+) -> bool:
+    if coverage is None or baseline_coverage is None:
+        return False
+    if coverage.reason_code != "COVERAGE_BELOW_THRESHOLD":
+        return False
+    if coverage.percent is None or baseline_coverage.percent is None:
+        return False
+    if baseline_coverage.percent >= coverage.minimum_percent:
+        return False
+    return coverage.percent + 0.005 >= baseline_coverage.percent
 
 
 def _validation_run_coverage_metadata(
