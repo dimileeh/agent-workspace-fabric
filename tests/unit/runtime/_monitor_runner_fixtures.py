@@ -63,9 +63,19 @@ class FakeAdapter(AgentAdapter):
         prompt: str,
         model: str | None = None,
         workspace_id: str | None = None,
+        log_source: str = "agent",
     ) -> AgentRunResult:
         self.calls.append(prompt)
         self.workspace_ids.append(workspace_id)
+        if self._log_store and workspace_id:
+            sinks = await self._log_store.open_command_streams(
+                workspace_id=workspace_id,
+                base_stream_id=log_source,
+                source=log_source,
+                name=log_source,
+            )
+            await sinks.write_stdout("mock output\n")
+            await sinks.close()
         if not self._queued:
             raise AssertionError(
                 "FakeAdapter.run called with empty queue; queue() a result "

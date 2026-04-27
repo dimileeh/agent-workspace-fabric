@@ -70,6 +70,7 @@ class FakeAdapter(AgentAdapter):
         prompt: str,
         model: str | None = None,
         workspace_id: str | None = None,
+        log_source: str = "agent",
     ) -> AgentRunResult:
         self.calls.append(prompt)
         self.workspace_ids.append(workspace_id)
