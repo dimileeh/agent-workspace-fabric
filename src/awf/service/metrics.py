@@ -107,7 +107,7 @@ class RootCauseCluster:
     likely_cause: str
     actionable_next_action: str
     count: int
-    sample_workspace_ids: list[str]
+    sample_workspace_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -438,7 +438,7 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
             likely_cause=k[3],
             actionable_next_action=k[4],
             count=len(wids),
-            sample_workspace_ids=wids[:5],
+            sample_workspace_ids=tuple(wids[:5]),
         )
         for k, wids in clusters.items()
     ]
