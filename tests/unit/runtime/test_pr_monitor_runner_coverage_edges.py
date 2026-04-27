@@ -11,7 +11,7 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
-from awf.common.github_client import GitHubClient, RepoRef
+from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.base import Base
 from awf.db.enums import OperationType, TaskClass, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceEventCreate, WorkspaceRepository
@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor import (
     MergeStateStatus,
     MonitorConfig,
     MonitorState,
+    NotifyHuman,
     PRStatus,
     ReportCiFailure,
     ReviewComment,
@@ -42,6 +43,7 @@ from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_wait_seconds,
     _initial_review_grace_wall_started_value_from_datetime,
     _is_pending_check,
+    _is_transient_github_client_error,
     _merge_rejection_reason,
     _notify_human_reason,
     _stale_pending_check_warnings,
@@ -250,6 +252,74 @@ async def test_monitor_run_terminates_on_github_status_error(
 
 
 @pytest.mark.unit
+async def test_monitor_run_retries_transient_github_status_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [60]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.completed.value
+
+
+@pytest.mark.unit
+def test_transient_github_error_classifier_keeps_auth_errors_terminal() -> None:
+    assert _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="HTTP 503 Service Unavailable",
+        )
+    )
+    assert _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh pr merge",
+            returncode=1,
+            stderr="secondary rate limit hit; please try again",
+        )
+    )
+    assert not _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="Bad credentials",
+        )
+    )
+    assert not _is_transient_github_client_error(
+        GitHubClientError(
+            operation="gh api graphql",
+            returncode=1,
+            stderr="review is required before merging",
+        )
+    )
+
+
+@pytest.mark.unit
 async def test_stale_merge_without_auto_merge_aborts_workspace(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -365,6 +435,50 @@ async def test_pre_merge_recheck_github_error_fails_workspace(
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert "pre-merge recheck" in (ws.failure_message or "")
+
+
+@pytest.mark.unit
+async def test_pre_merge_recheck_transient_github_error_retries_later(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=1, stderr="HTTP 503 Service Unavailable")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        pre_merge_settle_seconds=2,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [2, 60]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.failure_message is None
 
 
 @pytest.mark.unit
@@ -505,7 +619,9 @@ async def test_merge_queue_wait_records_event_once_per_head_and_blocker(
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
-        events = [event for event in ws.events if event.event_type == "workspace.merge_queue_waiting"]
+        events = [
+            event for event in ws.events if event.event_type == "workspace.merge_queue_waiting"
+        ]
         assert len(events) == 1
         assert events[0].payload["blocker_candidate_id"] == "mc_older"
 
@@ -565,6 +681,139 @@ async def test_merge_queue_blocker_after_lock_defers_merge_without_calling_githu
     assert runner.blocker_calls == 2
     assert sleep_fn.calls == [60]
     assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_transient_github_merge_error_retries_without_human_escalation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    cmd.queue_result(returncode=1, stderr="HTTP 504 Gateway Timeout")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args[:3] == ["gh", "pr", "merge"]
+    assert state.threads_addressed_ids == {}
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_transient_human_notification_comment_error_retries_without_crashing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=NotifyHuman(message="branch protection temporarily unavailable"),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args[:3] == ["gh", "pr", "comment"]
+    assert state.threads_addressed_ids == {}
+
+
+@pytest.mark.unit
+async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    cmd.queue_result(returncode=0, stdout="{}")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_retry",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id="ws_retry",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch="awf/ws_retry",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [30]
+    assert state.threads_addressed_ids == {"T_retry": "fix_committed"}
+    assert [call.args[:3] for call in cmd.calls] == [
+        ["gh", "api", "graphql"],
+        ["git", "-C", str(tmp_path / "worktrees" / "ws_retry")],
+        ["gh", "api", "graphql"],
+    ]
 
 
 @pytest.mark.unit
@@ -830,9 +1079,7 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
 
     terminal = await runner._execute(
         action=ReportCiFailure(
-            failures=(
-                CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="traceback"),
-            )
+            failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="traceback"),)
         ),
         workspace_id=workspace_id,
         repo_url="git@github.com:dimileeh/aira-web.git",
@@ -1004,9 +1251,7 @@ async def test_ci_fix_records_agent_failure_but_commits_and_pushes_changes(
     await runner._run_ci_fix(
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
-        failures=(
-            CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),
-        ),
+        failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="assert 1 == 2"),),
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
         workspace_id=workspace_id,
@@ -1262,9 +1507,7 @@ def test_initial_review_grace_state_converts_wall_and_legacy_values() -> None:
     )
     assert wait_state.threads_addressed_ids[started_key] == "123.000000"
     assert (
-        _initial_review_grace_wall_started_value_from_datetime(
-            datetime(2026, 4, 27, 12, 0)
-        )
+        _initial_review_grace_wall_started_value_from_datetime(datetime(2026, 4, 27, 12, 0))
         == f"{wall_started:.6f}"
     )
 
@@ -1305,10 +1548,13 @@ def test_pending_check_and_defer_helpers_cover_unknown_and_review_paths() -> Non
 
     assert [item["id"] for item in bot_items] == ["T1"]
     assert [item["kind"] for item in human_items] == ["review"]
-    assert _notify_human_reason(
-        _status_for_helpers(reviews=(human_review,)),
-        state,
-    ) == "human review feedback was deferred by the agent and remains unresolved"
+    assert (
+        _notify_human_reason(
+            _status_for_helpers(reviews=(human_review,)),
+            state,
+        )
+        == "human review feedback was deferred by the agent and remains unresolved"
+    )
     with_failures = _with_ci_failures(
         _status_for_helpers(),
         (CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="failed"),),

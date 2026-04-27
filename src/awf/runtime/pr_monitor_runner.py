@@ -108,6 +108,45 @@ class MonitorRunnerConfig:
     max_fix_cycle_passes: int = 5
 
 
+_NON_TRANSIENT_GITHUB_ERROR_MARKERS = (
+    "authentication",
+    "auth failed",
+    "bad credentials",
+    "not logged in",
+    "please run gh auth login",
+    "not found",
+    "could not resolve to a repository",
+    "could not resolve to a node",
+)
+_TRANSIENT_GITHUB_ERROR_MARKERS = (
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+    "500 internal server",
+    "502 bad gateway",
+    "503 service unavailable",
+    "504 gateway timeout",
+    "bad gateway",
+    "gateway timeout",
+    "service unavailable",
+    "temporarily unavailable",
+    "try again",
+    "timed out",
+    "timeout",
+    "connection reset",
+    "connection refused",
+    "connection aborted",
+    "tls handshake timeout",
+    "network",
+    "eof",
+    "rate limit",
+    "secondary rate limit",
+    "abuse detection",
+    "something went wrong",
+)
+
+
 @dataclass
 class _RunnerDeps:
     """All side-effect collaborators in one bag — easy to fake in tests."""
@@ -304,6 +343,14 @@ class PullRequestMonitorRunner:
                         base_branch=ws.branch_base,
                     )
                 except GitHubClientError as exc:
+                    if await self._wait_after_transient_github_error(
+                        exc,
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        context="fetch_pr_status",
+                        monitor_log=monitor_log,
+                    ):
+                        continue
                     await self._write_monitor_log(
                         monitor_log,
                         {
@@ -762,6 +809,14 @@ class PullRequestMonitorRunner:
                 return False
 
             if recheck_error is not None:
+                if await self._wait_after_transient_github_error(
+                    recheck_error,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="pre_merge_recheck",
+                    monitor_log=monitor_log,
+                ):
+                    return False
                 await self._terminate_failed(
                     workspace_id,
                     message=(f"monitor: github error during pre-merge recheck: {recheck_error}")[
@@ -795,6 +850,14 @@ class PullRequestMonitorRunner:
                 )
 
             if merge_blocker is not None:
+                if await self._wait_after_transient_github_error(
+                    merge_blocker,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="merge_pr",
+                    monitor_log=monitor_log,
+                ):
+                    return False
                 # Branch protection often blocks merges; fall back to the
                 # release-PR flow rather than failing.
                 _log.warning(
@@ -833,13 +896,24 @@ class PullRequestMonitorRunner:
             return True
 
         if isinstance(action, NotifyHuman):
-            await self._post_human_notification_once(
-                repo=repo,
-                pr_number=pr_number,
-                status=status,
-                state=state,
-                blocker_reason=action.message,
-            )
+            try:
+                await self._post_human_notification_once(
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    blocker_reason=action.message,
+                )
+            except GitHubClientError as exc:
+                if await self._wait_after_transient_github_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="post_human_notification",
+                    monitor_log=monitor_log,
+                ):
+                    return False
+                raise
             await self._deps.sleep(self._config.poll_interval_seconds)
             return False
 
@@ -1032,9 +1106,21 @@ class PullRequestMonitorRunner:
 
             # 2) Settle window — small sleep, then re-poll for new activity.
             await self._deps.sleep(self._config.settle_interval_seconds)
-            status = await self._deps.gh.fetch_pr_status(
-                repo=repo, pr_number=pr_number, base_behind_count=0
-            )
+            try:
+                status = await self._deps.gh.fetch_pr_status(
+                    repo=repo, pr_number=pr_number, base_behind_count=0
+                )
+            except GitHubClientError as exc:
+                if _is_transient_github_client_error(exc):
+                    _log.warning(
+                        "monitor.github_transient_error_during_fix_cycle",
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        operation=exc.operation,
+                        stderr=exc.stderr[:400],
+                    )
+                    break
+                raise
             new_threads = [
                 t
                 for t in status.unresolved_inline_threads
@@ -1476,6 +1562,44 @@ class PullRequestMonitorRunner:
             )
             status = _with_ci_failures(status, failures)
         return status
+
+    async def _wait_after_transient_github_error(
+        self,
+        exc: GitHubClientError,
+        *,
+        workspace_id: str,
+        pr_number: int,
+        context: str,
+        monitor_log: WorkspaceLogSink | None,
+    ) -> bool:
+        if not _is_transient_github_client_error(exc):
+            return False
+        wait_seconds = self._config.poll_interval_seconds
+        _log.warning(
+            "monitor.github_transient_error_retrying",
+            workspace_id=workspace_id,
+            pr_number=pr_number,
+            context=context,
+            operation=exc.operation,
+            returncode=exc.returncode,
+            stderr=exc.stderr[:400],
+            wait_seconds=wait_seconds,
+        )
+        await self._write_monitor_log(
+            monitor_log,
+            {
+                "event": "monitor.github_transient_error_retrying",
+                "workspace_id": workspace_id,
+                "pr_number": pr_number,
+                "context": context,
+                "operation": exc.operation,
+                "returncode": exc.returncode,
+                "message": str(exc)[:400],
+                "wait_seconds": wait_seconds,
+            },
+        )
+        await self._deps.sleep(wait_seconds)
+        return True
 
     # ── Defer-signal artifact ─────────────────────────────────────────────
 
@@ -2005,6 +2129,15 @@ def _merge_rejection_reason(stderr: str) -> str:
     if detail:
         return f"GitHub rejected the merge attempt: {detail}"
     return "GitHub rejected the merge attempt"
+
+
+def _is_transient_github_client_error(exc: GitHubClientError) -> bool:
+    """Classify GitHub/gh failures that should keep the monitor polling."""
+
+    text = f"{exc.operation}\n{exc.stderr}".lower()
+    if any(marker in text for marker in _NON_TRANSIENT_GITHUB_ERROR_MARKERS):
+        return False
+    return any(marker in text for marker in _TRANSIENT_GITHUB_ERROR_MARKERS)
 
 
 def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
