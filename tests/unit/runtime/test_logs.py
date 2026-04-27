@@ -219,7 +219,53 @@ async def test_log_broadcaster_delivers_workspace_frames() -> None:
 
     assert frame.workspace_id == "ws_1"
     assert frame.stream_id == "agent.stdout"
-    assert frame.data == "live\n"
+
+
+@pytest.mark.unit
+async def test_log_broadcaster_keeps_workspace_entry_until_last_subscriber_exits() -> None:
+    broadcaster = LogBroadcaster()
+
+    async with broadcaster.subscribe("ws_1") as first:
+        async with broadcaster.subscribe("ws_1") as second:
+            await broadcaster.publish(
+                workspace_id="ws_1",
+                stream_id="agent.stdout",
+                source="agent",
+                fd="stdout",
+                offset=0,
+                data="live\n",
+            )
+            assert first.get_nowait().data == "live\n"
+            assert second.get_nowait().data == "live\n"
+
+        assert "ws_1" in broadcaster._subscribers
+
+    assert "ws_1" not in broadcaster._subscribers
+
+
+@pytest.mark.unit
+async def test_log_store_without_database_opens_writes_and_closes_noop(tmp_path: Path) -> None:
+    broadcaster = LogBroadcaster()
+    store = LogStore(root=tmp_path, broadcaster=broadcaster)
+    sink = await store.open_stream(
+        workspace_id="ws_no_db",
+        stream_id="custom/stdout",
+        source="agent",
+        name="Custom stdout",
+        kind="stdout",
+    )
+
+    async with broadcaster.subscribe("ws_no_db") as queue:
+        await sink.write("")
+        assert queue.empty()
+        await sink.write("hello\n")
+        frame = queue.get_nowait()
+        await sink.close()
+
+    assert sink.path.name == "custom_stdout.log"
+    assert sink.path.read_text(encoding="utf-8") == "hello\n"
+    assert frame.offset == 0
+    assert frame.data == "hello\n"
     assert frame.seq == 1
 
 

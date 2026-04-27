@@ -168,14 +168,16 @@ async def collect_service_status(
 
 
 async def check_database(database_url: str) -> CheckPayload:
-    engine = make_engine(database_url)
+    engine = None
     try:
+        engine = make_engine(database_url)
         async with engine.connect() as conn:
             await conn.execute(text("SELECT 1"))
     except Exception as exc:
         return _fail("DB_CONNECTION_FAILED", _truncate(f"{type(exc).__name__}: {exc}"))
     finally:
-        await engine.dispose()
+        if engine is not None:
+            await engine.dispose()
     return _ok()
 
 

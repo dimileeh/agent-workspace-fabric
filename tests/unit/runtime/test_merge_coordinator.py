@@ -106,6 +106,19 @@ class TestInProcessMergeCoordinator:
         assert loop_locks == {}
 
     @pytest.mark.unit
+    async def test_release_entry_ignores_missing_loop_bucket(self) -> None:
+        coordinator = InProcessMergeCoordinator()
+        key = merge_coordinator_mod.MergeCoordinationKey.from_values(
+            repo_url=REPO_URL,
+            base_branch="development",
+        )
+        entry = merge_coordinator_mod._MergeLockEntry(lock=asyncio.Lock(), ref_count=1)
+
+        coordinator._release_entry(key, entry)
+
+        assert asyncio.get_running_loop() not in coordinator._locks_by_loop
+
+    @pytest.mark.unit
     async def test_retains_lock_entry_while_task_waits(self) -> None:
         coordinator = InProcessMergeCoordinator()
         first_entered = asyncio.Event()
@@ -277,6 +290,39 @@ class TestPostgresAdvisoryMergeCoordinator:
             "close",
         ]
 
+    @pytest.mark.unit
+    async def test_try_lock_errors_close_connection_before_reraising(self) -> None:
+        calls: list[object] = []
+        coordinator = merge_coordinator_mod.PostgresAdvisoryMergeCoordinator(
+            _fake_engine(),
+            connect=_FailingAdvisoryConnector(calls).connect,
+        )
+
+        with pytest.raises(RuntimeError, match="try-lock failed"):
+            async with coordinator.serialized_merge(
+                repo_url=REPO_URL,
+                base_branch="development",
+            ):
+                raise AssertionError("lock body should not run")
+
+        assert calls == [
+            ("connect", "postgresql://awf:secret@db:5432/awf"),
+            ("try-lock", -4806809152263605362),
+            "close",
+        ]
+
+    @pytest.mark.unit
+    def test_asyncpg_dsn_from_engine_preserves_plain_driver_name(self) -> None:
+        engine = cast(
+            AsyncEngine,
+            SimpleNamespace(url=make_url("postgresql://awf:secret@db:5432/awf")),
+        )
+
+        assert (
+            merge_coordinator_mod._asyncpg_dsn_from_engine(engine)
+            == "postgresql://awf:secret@db:5432/awf"
+        )
+
 
 def _fake_engine() -> AsyncEngine:
     return cast(
@@ -315,6 +361,30 @@ class _FakeAdvisoryConnection:
         if query != "SELECT pg_advisory_unlock($1)":
             raise AssertionError(f"unexpected query: {query}")
         self._calls.append(("unlock", args[0]))
+
+    async def close(self) -> None:
+        self._calls.append("close")
+
+
+class _FailingAdvisoryConnector:
+    def __init__(self, calls: list[object]) -> None:
+        self._calls = calls
+
+    async def connect(self, dsn: str) -> _FailingAdvisoryConnection:
+        self._calls.append(("connect", dsn))
+        return _FailingAdvisoryConnection(self._calls)
+
+
+class _FailingAdvisoryConnection:
+    def __init__(self, calls: list[object]) -> None:
+        self._calls = calls
+
+    async def fetchval(self, query: str, *args: object) -> bool:
+        self._calls.append(("try-lock", args[0]))
+        raise RuntimeError("try-lock failed")
+
+    async def execute(self, query: str, *args: object) -> None:
+        raise AssertionError(f"unexpected unlock: {query}")
 
     async def close(self) -> None:
         self._calls.append("close")

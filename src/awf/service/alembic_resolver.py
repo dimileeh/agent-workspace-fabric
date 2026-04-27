@@ -21,7 +21,6 @@ from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from alembic.util.exc import CommandError
 
 
 class AlembicResolveStatus(StrEnum):
@@ -89,7 +88,7 @@ class AlembicMergeResolver:
         script, version_dir = loaded
         try:
             heads = tuple(sorted(script.get_heads()))
-        except CommandError as exc:
+        except Exception as exc:
             return AlembicResolveResult(
                 status=AlembicResolveStatus.unsupported,
                 reason_code="ALEMBIC_GRAPH_UNREADABLE",

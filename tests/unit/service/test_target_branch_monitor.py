@@ -12,8 +12,10 @@ from awf.service.alembic_resolver import (
     AlembicResolveStatus,
 )
 from awf.service.target_branch_monitor import (
+    TargetBranchMonitorError,
     TargetBranchMonitorStatus,
     TargetBranchReconcileMonitor,
+    run_target_branch_reconcile_once,
 )
 
 
@@ -108,6 +110,7 @@ async def test_monitor_noops_when_resolvers_find_no_target_branch_issue(tmp_path
     )
 
     assert result.status == TargetBranchMonitorStatus.clean
+    assert result.to_dict()["status"] == "clean"
     assert result.pushed is False
     assert [call.args for call in runner.calls] == [
         [
@@ -129,7 +132,7 @@ async def test_monitor_dry_run_reports_would_commit_without_git_write(tmp_path: 
     monitor = TargetBranchReconcileMonitor(
         runner=runner,
         work_dir=tmp_path,
-        resolvers=(_StubResolver(_resolved(tmp_path)),),
+        resolvers=(_ResolvingStubResolver(),),
     )
 
     result = await monitor.reconcile(
@@ -178,3 +181,145 @@ async def test_monitor_refreshes_existing_checkout_before_resolving(tmp_path: Pa
         ["git", "-C", str(checkout), "reset", "--hard", "origin/development"],
         ["git", "-C", str(checkout), "clean", "-fd"],
     ]
+
+
+@pytest.mark.unit
+async def test_existing_non_git_checkout_raises_before_resolver_or_git(
+    tmp_path: Path,
+) -> None:
+    checkout = tmp_path / "target-branches" / "repo-3f11352a998e-development"
+    checkout.mkdir(parents=True)
+    runner = FakeCommandRunner()
+    resolver = _StubResolver(_resolved(tmp_path))
+    monitor = TargetBranchReconcileMonitor(
+        runner=runner,
+        work_dir=tmp_path,
+        resolvers=(resolver,),
+    )
+
+    with pytest.raises(RuntimeError, match="not a git checkout"):
+        await monitor.reconcile(
+            repo_url="git@github.com:example/repo.git",
+            branch="development",
+        )
+
+    assert runner.calls == []
+    assert resolver.calls == []
+
+
+@pytest.mark.unit
+async def test_monitor_returns_clean_when_resolver_change_has_no_staged_diff(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result()  # clone
+    runner.queue_result()  # add generated file
+    runner.queue_result(returncode=0)  # diff --cached --quiet: no staged changes
+    monitor = TargetBranchReconcileMonitor(
+        runner=runner,
+        work_dir=tmp_path,
+        resolvers=(_ResolvingStubResolver(),),
+    )
+
+    result = await monitor.reconcile(
+        repo_url="git@github.com:example/repo.git",
+        branch="development",
+    )
+
+    assert result.status == TargetBranchMonitorStatus.clean
+    assert result.pushed is False
+    assert runner.calls[0].args[1] == "clone"
+    assert runner.calls[1].args[3] == "add"
+    assert runner.calls[2].args[3:6] == ["diff", "--cached", "--quiet"]
+
+
+@pytest.mark.unit
+async def test_monitor_raises_when_cached_diff_returns_unexpected_code(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result()  # clone
+    runner.queue_result()  # add
+    runner.queue_result(returncode=2, stderr="diff failed")
+    monitor = TargetBranchReconcileMonitor(
+        runner=runner,
+        work_dir=tmp_path,
+        resolvers=(_ResolvingStubResolver(),),
+    )
+
+    with pytest.raises(TargetBranchMonitorError) as exc_info:
+        await monitor.reconcile(
+            repo_url="git@github.com:example/repo.git",
+            branch="development",
+        )
+
+    assert exc_info.value.operation == "target_branch.git_diff_cached"
+    assert "diff failed" in str(exc_info.value)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("existing_checkout", "operation"),
+    [
+        (False, "target_branch.git_clone"),
+        (True, "target_branch.git_fetch"),
+    ],
+)
+async def test_monitor_command_failures_report_operation_names(
+    tmp_path: Path,
+    existing_checkout: bool,
+    operation: str,
+) -> None:
+    checkout = tmp_path / "target-branches" / "repo-3f11352a998e-development"
+    if existing_checkout:
+        (checkout / ".git").mkdir(parents=True)
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="git failed")
+    monitor = TargetBranchReconcileMonitor(
+        runner=runner,
+        work_dir=tmp_path,
+        resolvers=(_StubResolver(_resolved(tmp_path)),),
+    )
+
+    with pytest.raises(TargetBranchMonitorError) as exc_info:
+        await monitor.reconcile(
+            repo_url="git@github.com:example/repo.git",
+            branch="development",
+        )
+
+    assert exc_info.value.operation == operation
+    assert "git failed" in str(exc_info.value)
+
+
+@pytest.mark.unit
+async def test_checkout_path_slug_fallbacks_and_convenience_entrypoint(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result()  # clone
+    monitor = TargetBranchReconcileMonitor(
+        runner=runner,
+        work_dir=tmp_path,
+        resolvers=(
+            _StubResolver(
+                AlembicResolveResult(
+                    status=AlembicResolveStatus.not_needed,
+                    reason_code="ALEMBIC_SINGLE_HEAD",
+                    heads=("head",),
+                )
+            ),
+        ),
+    )
+    fallback_path = monitor._checkout_path(repo_url="///", branch="///")
+
+    result = await run_target_branch_reconcile_once(
+        runner=runner,
+        work_dir=tmp_path,
+        repo_url="git@github.com:example/repo.git",
+        branch="development",
+        dry_run=True,
+    )
+
+    assert fallback_path.name.startswith("repo-")
+    assert fallback_path.name.endswith("-branch")
+    assert result.status == TargetBranchMonitorStatus.clean

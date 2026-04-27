@@ -18,6 +18,8 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.service.gc import (
+    WorkspaceGCPath,
+    _delete_gc_path,
     plan_terminal_workspace_gc,
     run_terminal_workspace_gc,
     run_workspace_filesystem_gc,
@@ -393,3 +395,110 @@ async def test_single_workspace_gc_ignores_active_workspace(
     assert result.plan.candidates == []
     assert result.deleted_paths == []
     assert worktree.exists()
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_dry_run_for_missing_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        workspace_id="ws_missing",
+        execute=False,
+        now=now,
+    )
+
+    assert result.dry_run is True
+    assert result.plan.include_statuses == ()
+    assert result.plan.candidates == []
+    assert result.to_dict()["candidate_count"] == 0
+
+
+@pytest.mark.unit
+async def test_gc_execution_reports_refused_file_symlink_and_out_of_root_paths(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    outside_dir = tmp_path / "outside-compose"
+    outside_dir.mkdir()
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        compose_file_path=str(outside_dir / "compose.yml"),
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    symlink_target = work_dir / "auth" / "target"
+    symlink_target.mkdir(parents=True)
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    worktree.write_text("not a directory", encoding="utf-8")
+    auth.parent.mkdir(parents=True, exist_ok=True)
+    auth.symlink_to(symlink_target, target_is_directory=True)
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        now=now,
+    )
+    payload = result.to_dict()
+
+    assert result.deleted_paths == []
+    assert {(error.kind, error.error) for error in result.delete_errors} == {
+        ("worktree", "refusing to delete non-directory path"),
+        ("compose", "path is outside the expected service GC roots"),
+        ("auth", "refusing to delete symlink"),
+    }
+    assert worktree.exists()
+    assert auth.is_symlink()
+    assert payload["delete_errors"] == [
+        {
+            "workspace_id": workspace_id,
+            "kind": "worktree",
+            "path": str(worktree),
+            "error": "refusing to delete non-directory path",
+        },
+        {
+            "workspace_id": workspace_id,
+            "kind": "compose",
+            "path": str(outside_dir),
+            "error": "path is outside the expected service GC roots",
+        },
+        {
+            "workspace_id": workspace_id,
+            "kind": "auth",
+            "path": str(auth),
+            "error": "refusing to delete symlink",
+        },
+    ]
+    candidate = payload["candidates"][0]
+    assert candidate["paths"]["worktree"]["error"] == "refusing to delete non-directory path"
+    assert candidate["paths"]["compose"]["error"] == "path is outside the expected service GC roots"
+    assert candidate["paths"]["auth"]["error"] == "refusing to delete symlink"
+
+
+@pytest.mark.unit
+def test_delete_gc_path_rejects_unknown_gc_kind(tmp_path: Path) -> None:
+    target = tmp_path / "service" / "unknown" / "ws_unknown"
+    target.mkdir(parents=True)
+    gc_path = WorkspaceGCPath(
+        kind="unknown",
+        path=target,
+        exists=True,
+        estimated_bytes=0,
+    )
+
+    deleted, error = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
+
+    assert deleted is False
+    assert error == "path is outside the expected service GC roots"
+    assert gc_path.to_dict(error=error)["error"] == error
+    assert target.exists()

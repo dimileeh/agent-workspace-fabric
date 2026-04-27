@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import datetime
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -22,7 +23,9 @@ from awf.db.session import make_engine, make_session_factory
 from awf.service.scope_policy import (
     OUT_OF_SCOPE_CHANGE_CODE,
     OutOfScopeChangePolicy,
+    ScopePolicyRefreshError,
     ScopePolicyRefreshService,
+    _isoformat,
     evaluate_out_of_scope_changes,
     out_of_scope_policy_for_workspace,
 )
@@ -44,6 +47,7 @@ async def _seed_open_candidate(
     *,
     owned_paths: list[str],
     resolved_profile: dict | None = None,
+    task_policy: dict | None = None,
 ) -> tuple[str, str]:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -57,6 +61,7 @@ async def _seed_open_candidate(
             test_commands=[],
             owned_paths=owned_paths,
             resolved_profile=resolved_profile,
+            task_policy=task_policy,
         )
         task = await TaskRepository(session).create_or_get(
             repo_url=workspace.repo_url,
@@ -129,6 +134,28 @@ def test_allowlist_patterns_suppress_expected_generated_and_docs_files() -> None
 
 
 @pytest.mark.unit
+def test_changed_paths_are_normalized_and_deduplicated_before_evaluation() -> None:
+    findings = evaluate_out_of_scope_changes(
+        changed_paths=(
+            "",
+            ".",
+            "../outside.md",
+            "src/../docs/guide.md",
+            "docs/guide.md",
+            "src\\owned\\module.py",
+            "src/owned/module.py",
+        ),
+        owned_paths=("src/owned/**",),
+        policy=OutOfScopeChangePolicy(mode="block"),
+    )
+
+    assert [(finding.path, finding.severity) for finding in findings] == [
+        ("outside.md", "blocking"),
+        ("docs/guide.md", "blocking"),
+    ]
+
+
+@pytest.mark.unit
 def test_default_mode_is_warn_but_profile_or_task_policy_can_block() -> None:
     default_policy = out_of_scope_policy_for_workspace(Workspace(resolved_profile=None))
     profile_policy = out_of_scope_policy_for_workspace(
@@ -147,6 +174,47 @@ def test_default_mode_is_warn_but_profile_or_task_policy_can_block() -> None:
     assert default_policy.mode == "warn"
     assert profile_policy.mode == "block"
     assert task_policy.mode == "block"
+
+
+@pytest.mark.unit
+def test_policy_allowlists_are_deduped_and_invalid_entries_are_ignored() -> None:
+    policy = out_of_scope_policy_for_workspace(
+        Workspace(
+            resolved_profile={
+                "quality": {
+                    "out_of_scope_changes": {
+                        "mode": "warn",
+                        "allowlist_patterns": ["docs/**", 42, "generated/**"],
+                    }
+                },
+                "task_policy": {
+                    "out_of_scope_changes": {
+                        "mode": "block",
+                        "allowlist_patterns": ["docs/**", None, "schema/**"],
+                    }
+                },
+            },
+            task_policy={
+                "out_of_scope_changes": {
+                    "mode": "block",
+                    "allowlist_patterns": ["generated/**", None, "assets/**"],
+                }
+            },
+        )
+    )
+
+    assert policy.mode == "block"
+    assert policy.allowlist_patterns == [
+        "docs/**",
+        "generated/**",
+        "assets/**",
+    ]
+
+
+@pytest.mark.unit
+def test_isoformat_handles_none_and_naive_datetimes() -> None:
+    assert _isoformat(None) is None
+    assert _isoformat(datetime(2026, 4, 27, 12, 0)) == "2026-04-27T12:00:00+00:00"
 
 
 @pytest.mark.unit
@@ -179,3 +247,107 @@ async def test_refresh_records_structured_out_of_scope_policy_findings(
     assert findings[0].subject_path == "src/unowned.py"
     assert events[0].reason_code == OUT_OF_SCOPE_CHANGE_CODE
     assert events[0].payload["path"] == "src/unowned.py"
+
+
+@pytest.mark.unit
+async def test_refresh_workspace_open_candidate_delegates_to_latest_open_candidate(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, candidate_id = await _seed_open_candidate(
+        factory,
+        owned_paths=["src/owned/**"],
+    )
+
+    async with factory() as session:
+        result = await ScopePolicyRefreshService(session).refresh_workspace_open_candidate(
+            workspace_id,
+            changed_paths=["src/unowned.py"],
+        )
+
+    assert result is not None
+    assert result.candidate_id == candidate_id
+    assert [finding.path for finding in result.findings] == ["src/unowned.py"]
+
+
+@pytest.mark.unit
+async def test_refresh_workspace_open_candidate_returns_none_without_open_candidate(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/svc.git",
+            branch_base="development",
+            task_title="No candidate",
+            task_prompt="No PR yet.",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+        )
+        await session.commit()
+        workspace_id = workspace.id
+
+    async with factory() as session:
+        result = await ScopePolicyRefreshService(session).refresh_workspace_open_candidate(
+            workspace_id,
+            changed_paths=["src/outside.py"],
+        )
+
+    assert result is None
+
+
+@pytest.mark.unit
+async def test_refresh_candidate_missing_id_raises(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        with pytest.raises(ScopePolicyRefreshError, match="not found"):
+            await ScopePolicyRefreshService(session).refresh_candidate(
+                "mc_missing",
+                changed_paths=["src/outside.py"],
+            )
+
+
+@pytest.mark.unit
+async def test_refresh_resolves_blocking_findings_and_clears_policy_block(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id, candidate_id = await _seed_open_candidate(
+        factory,
+        owned_paths=["src/owned/**"],
+        task_policy={
+            "out_of_scope_changes": {
+                "mode": "block",
+                "allowlist_patterns": ["generated/**"],
+            }
+        },
+    )
+
+    async with factory() as session:
+        service = ScopePolicyRefreshService(session)
+        blocked = await service.refresh_candidate(
+            candidate_id,
+            changed_paths=["src/outside.py"],
+        )
+        cleared = await service.refresh_candidate(
+            candidate_id,
+            changed_paths=["src/owned/module.py", "generated/client.py"],
+        )
+        await session.commit()
+
+    async with factory() as session:
+        findings = await PolicyFindingRepository(session).list_for_workspace(workspace_id)
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.policy_finding",
+        )
+        candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+            findings[0].attempt_id
+        )
+
+    assert blocked.policy_blocked is True
+    assert cleared.policy_blocked is False
+    assert cleared.findings == []
+    assert [finding.status for finding in findings] == ["resolved"]
+    assert len(events) == 1
+    assert candidate is not None
+    assert candidate.policy_blocked is False
+    assert candidate.ready is True
