@@ -1381,5 +1381,3 @@ class _FrameRecordingWebSocket:
         while not any(frame.get("source") == source for frame in self.frames):
             self._frame_event.clear()
             await self._frame_event.wait()
-
-            await self._frame_event.wait()
