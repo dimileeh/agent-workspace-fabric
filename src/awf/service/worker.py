@@ -88,11 +88,12 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             repo_url=repo_url, branch=branch,
         )
 
+        provider = GitCheckoutTargetBranchStateProvider(
+            runner=runner,
+            checkout_path=checkout_path,
+        )
+
         async def _target_state_for_base_sha(base_sha: str) -> TargetBranchState:
-            provider = GitCheckoutTargetBranchStateProvider(
-                runner=runner,
-                checkout_path=checkout_path,
-            )
             return await provider.fetch(
                 repo_url=repo_url,
                 branch=branch,
