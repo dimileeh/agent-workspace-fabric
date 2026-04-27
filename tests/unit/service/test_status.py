@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -26,6 +27,7 @@ from awf.service.status import (
     _docker_result_to_check,
     _docker_socket_path,
     _fail,
+    _http_get,
     _parse_workspace_projects,
     _run_docker_command,
     _run_subprocess,
@@ -78,6 +80,16 @@ class _VersionResponse:
 
     def json(self) -> dict[str, str]:
         return {"status": "ok", "version": "0.1.0"}
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _ListResponse:
+    status_code = 200
+
+    def json(self) -> list[str]:
+        return ["ok"]
 
     def raise_for_status(self) -> None:
         return None
@@ -486,6 +498,38 @@ def test_orphan_check_unavailable_when_docker_ps_fails(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_collect_status_cancels_pending_auxiliary_tasks_on_probe_error(tmp_path: Path) -> None:
+    lookup_cancelled = False
+
+    async def failing_db_probe(_database_url: str) -> dict[str, Any]:
+        raise RuntimeError("db probe exploded")
+
+    async def slow_workspace_lookup(_database_url: str) -> WorkspaceIdView:
+        nonlocal lookup_cancelled
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            lookup_cancelled = True
+            raise
+        raise AssertionError("workspace lookup should have been cancelled")
+
+    with pytest.raises(RuntimeError, match="db probe exploded"):
+        asyncio.run(
+            collect_service_status(
+                _settings(tmp_path),
+                api_get=_api_get,
+                db_probe=failing_db_probe,
+                run_subprocess=_make_run_subprocess(),
+                socket_exists=lambda _path: True,
+                disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+                workspace_id_lookup=slow_workspace_lookup,
+            )
+        )
+
+    assert lookup_cancelled is True
+
+
+@pytest.mark.unit
 def test_orphan_check_extracts_labels_via_docker_template(tmp_path: Path) -> None:
     captured_args: list[list[str]] = []
 
@@ -657,10 +701,14 @@ def test_status_helpers_cover_api_json_and_failure_paths(tmp_path: Path) -> None
         assert _url == "http://localhost:8000/healthz"
         return _VersionResponse()
 
+    async def list_get(_url: str, *, timeout: float) -> _ListResponse:
+        return _ListResponse()
+
     async def raising_get(_url: str, *, timeout: float) -> _Response:
         raise RuntimeError("api down")
 
     assert asyncio.run(_check_api(settings, bad_json_get)) == {"ok": True, "status": "ok"}
+    assert asyncio.run(_check_api(settings, list_get)) == {"ok": True, "status": "ok"}
     assert asyncio.run(_check_api(settings, version_get)) == {
         "ok": True,
         "status": "ok",
@@ -739,6 +787,84 @@ def test_run_docker_command_passes_docker_host_and_captures_exceptions(tmp_path:
 
     captured = _run_docker_command(["docker", "info"], settings=settings, run_subprocess=boom)
     assert isinstance(captured, RuntimeError)
+
+
+@pytest.mark.unit
+async def test_docker_process_reports_missing_binary_without_crashing(tmp_path: Path) -> None:
+    from awf.service.controls import WorkspaceStackStopError, _docker_process
+
+    empty_bin = tmp_path / "empty-bin"
+    empty_bin.mkdir()
+    original_path = os.environ.get("PATH")
+    os.environ["PATH"] = str(empty_bin)
+    try:
+        with pytest.raises(WorkspaceStackStopError) as exc_info:
+            await _docker_process("ps", operation="ps")
+    finally:
+        if original_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = original_path
+
+    assert exc_info.value.returncode == 127
+    assert "docker executable is not available" in exc_info.value.stderr
+
+
+@pytest.mark.unit
+async def test_docker_process_reports_os_error_without_crashing(tmp_path: Path) -> None:
+    from awf.service.controls import WorkspaceStackStopError, _docker_process
+
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    docker_path = bin_dir / "docker"
+    docker_path.write_text("#!/bin/sh\necho should not run\n", encoding="utf-8")
+    docker_path.chmod(0o644)
+
+    original_path = os.environ.get("PATH")
+    os.environ["PATH"] = str(bin_dir)
+    try:
+        with pytest.raises(WorkspaceStackStopError) as exc_info:
+            await _docker_process("ps", operation="ps")
+    finally:
+        if original_path is None:
+            os.environ.pop("PATH", None)
+        else:
+            os.environ["PATH"] = original_path
+
+    assert exc_info.value.returncode == 1
+    assert "PermissionError" in exc_info.value.stderr
+
+
+@pytest.mark.unit
+async def test_http_get_fetches_json_from_local_health_server() -> None:
+    async def handle_client(
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        await reader.readuntil(b"\r\n\r\n")
+        writer.write(
+            b"HTTP/1.1 200 OK\r\n"
+            b"Content-Type: application/json\r\n"
+            b"Content-Length: 15\r\n"
+            b"Connection: close\r\n"
+            b"\r\n"
+            b'{"status":"ok"}'
+        )
+        await writer.drain()
+        writer.close()
+        await writer.wait_closed()
+
+    server = await asyncio.start_server(handle_client, "127.0.0.1", 0)
+    try:
+        socket = server.sockets[0]
+        host, port = socket.getsockname()[:2]
+        response = await _http_get(f"http://{host}:{port}/healthz", timeout=5.0)
+    finally:
+        server.close()
+        await server.wait_closed()
+
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
 
 
 @pytest.mark.unit

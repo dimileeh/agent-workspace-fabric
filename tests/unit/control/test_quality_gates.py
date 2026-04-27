@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from awf.control.quality_gates import find_protected_quality_gate_changes
+from awf.control.quality_gates import (
+    find_protected_quality_gate_changes,
+    quality_gate_violation_message,
+)
 
 
 @pytest.mark.unit
@@ -40,8 +43,35 @@ def test_explicit_ownership_allows_quality_gate_change() -> None:
 @pytest.mark.unit
 def test_regular_source_changes_are_not_protected() -> None:
     violations = find_protected_quality_gate_changes(
-        changed_paths=["src/awf/control/executor.py", "tests/unit/control/test_executor.py"],
+        changed_paths=[
+            "   ",
+            "./src/awf/control/executor.py",
+            "tests/unit/control/test_executor.py",
+        ],
         owned_paths=[],
     )
 
     assert violations == []
+
+
+@pytest.mark.unit
+def test_violation_message_reports_overflow_count() -> None:
+    violations = find_protected_quality_gate_changes(
+        changed_paths=[
+            ".awf/workspace.yml",
+            ".coveragerc",
+            ".github/workflows/ci.yml",
+            "pyproject.toml",
+            "pytest.ini",
+            "setup.cfg",
+            "setup.py",
+            "tox.ini",
+            ".github/workflows/release.yml",
+        ],
+        owned_paths=[],
+    )
+
+    message = quality_gate_violation_message(violations)
+
+    assert ".awf/workspace.yml" in message
+    assert "and 1 more" in message

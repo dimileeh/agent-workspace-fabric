@@ -26,7 +26,7 @@ _REMONITOR_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 
 
 class WorkspaceCleanerProtocol(Protocol):
-    async def cleanup(
+    async def cleanup(  # pragma: no cover - Protocol method declaration only.
         self,
         *,
         workspace_id: str,

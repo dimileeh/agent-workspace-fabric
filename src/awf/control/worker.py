@@ -64,7 +64,7 @@ class _ActiveExecutionCandidate:
 
 
 class WorkspaceExecutorProtocol(Protocol):
-    async def execute(
+    async def execute(  # pragma: no cover - Protocol method declaration only.
         self,
         workspace_id: str,
         *,
@@ -72,11 +72,17 @@ class WorkspaceExecutorProtocol(Protocol):
         execution_lease_expires_at: datetime | None = None,
     ) -> None: ...
 
-    async def resume_pr_monitor(self, workspace_id: str) -> None: ...
+    async def resume_pr_monitor(  # pragma: no cover - Protocol method declaration only.
+        self,
+        workspace_id: str,
+    ) -> None: ...
 
 
 class RuntimeInspectorProtocol(Protocol):
-    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot: ...
+    async def inspect(  # pragma: no cover - Protocol method declaration only.
+        self,
+        compose_project_name: str | None,
+    ) -> RuntimeSnapshot: ...
 
 
 class ControlWorker:

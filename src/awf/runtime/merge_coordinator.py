@@ -33,11 +33,19 @@ class MergeCoordinator(Protocol):
 
 
 class _AdvisoryConnection(Protocol):
-    async def fetchval(self, query: str, *args: object) -> object: ...
+    async def fetchval(  # pragma: no cover - Protocol method declaration only.
+        self,
+        query: str,
+        *args: object,
+    ) -> object: ...
 
-    async def execute(self, query: str, *args: object) -> object: ...
+    async def execute(  # pragma: no cover - Protocol method declaration only.
+        self,
+        query: str,
+        *args: object,
+    ) -> object: ...
 
-    async def close(self) -> None: ...
+    async def close(self) -> None: ...  # pragma: no cover - Protocol method declaration only.
 
 
 _AdvisoryConnect = Callable[[str], Awaitable[_AdvisoryConnection]]

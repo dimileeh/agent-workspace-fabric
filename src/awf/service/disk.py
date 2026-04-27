@@ -10,17 +10,20 @@ from typing import Protocol
 
 class DiskUsageStats(Protocol):
     @property
-    def total(self) -> int: ...
+    def total(self) -> int: ...  # pragma: no cover - Protocol property declaration only.
 
     @property
-    def used(self) -> int: ...
+    def used(self) -> int: ...  # pragma: no cover - Protocol property declaration only.
 
     @property
-    def free(self) -> int: ...
+    def free(self) -> int: ...  # pragma: no cover - Protocol property declaration only.
 
 
 class DiskUsage(Protocol):
-    def __call__(self, path: Path) -> DiskUsageStats: ...
+    def __call__(  # pragma: no cover - Protocol method declaration only.
+        self,
+        path: Path,
+    ) -> DiskUsageStats: ...
 
 
 @dataclass(frozen=True, kw_only=True)

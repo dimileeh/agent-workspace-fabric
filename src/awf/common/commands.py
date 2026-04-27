@@ -43,7 +43,7 @@ class CommandResult:
 class AsyncCommandRunner(Protocol):
     """Runs shell commands. Producton impl uses asyncio subprocess; tests fake it."""
 
-    async def run(
+    async def run(  # pragma: no cover - Protocol method declaration only.
         self,
         args: list[str],
         *,
@@ -58,7 +58,7 @@ StreamCallback = Callable[[str], Awaitable[None] | None]
 class AsyncStreamingCommandRunner(AsyncCommandRunner, Protocol):
     """Optional extension for runners that can stream stdout/stderr chunks."""
 
-    async def run_streaming(
+    async def run_streaming(  # pragma: no cover - Protocol method declaration only.
         self,
         args: list[str],
         *,

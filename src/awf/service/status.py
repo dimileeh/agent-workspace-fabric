@@ -66,13 +66,18 @@ WorkspaceIdLookup = Callable[[str], Awaitable[WorkspaceIdView]]
 class HttpResponse(Protocol):
     status_code: int
 
-    def json(self) -> Any: ...
+    def json(self) -> Any: ...  # pragma: no cover - Protocol method declaration only.
 
-    def raise_for_status(self) -> Any: ...
+    def raise_for_status(self) -> Any: ...  # pragma: no cover - Protocol method declaration only.
 
 
 class HttpGet(Protocol):
-    def __call__(self, url: str, *, timeout: float) -> Awaitable[HttpResponse]: ...
+    def __call__(  # pragma: no cover - Protocol method declaration only.
+        self,
+        url: str,
+        *,
+        timeout: float,
+    ) -> Awaitable[HttpResponse]: ...
 
 
 class CompletedProcessLike(Protocol):
@@ -82,7 +87,7 @@ class CompletedProcessLike(Protocol):
 
 
 class SubprocessRun(Protocol):
-    def __call__(
+    def __call__(  # pragma: no cover - Protocol method declaration only.
         self,
         args: list[str],
         *,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
@@ -286,3 +288,29 @@ async def test_list_workspace_locks_offloads_overlap_risk_calculation(
 
     assert offloaded is True
     assert any(lock.overlap_risks for lock in locks)
+
+
+@pytest.mark.unit
+async def test_lock_helpers_short_circuit_empty_overlap_inputs() -> None:
+    from awf.service.locks import (
+        _active_overlap_candidates,
+        _workspace_overlap_risks_for_page,
+    )
+
+    class _SessionThatShouldNotExecute:
+        async def execute(self, *_args: object, **_kwargs: object) -> object:
+            raise AssertionError("empty lock inputs should not hit the database")
+
+    assert await _active_overlap_candidates(_SessionThatShouldNotExecute(), []) == []  # type: ignore[arg-type]
+    assert await _workspace_overlap_risks_for_page([], overlap_candidates=[]) == {}
+
+
+@pytest.mark.unit
+def test_lock_cursor_rejects_empty_workspace_id() -> None:
+    from awf.service.locks import InvalidWorkspaceLockCursorError, _decode_cursor
+
+    payload = {"created_at": datetime(2026, 4, 27, tzinfo=UTC).isoformat(), "workspace_id": ""}
+    cursor = base64.urlsafe_b64encode(json.dumps(payload).encode("utf-8")).decode("ascii")
+
+    with pytest.raises(InvalidWorkspaceLockCursorError, match="Invalid workspace lock cursor"):
+        _decode_cursor(cursor)

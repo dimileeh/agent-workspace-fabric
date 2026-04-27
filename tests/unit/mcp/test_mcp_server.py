@@ -25,6 +25,7 @@ from awf.db.session import make_engine, make_session_factory
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
+from awf.service.controls import WorkspaceControlError
 
 
 @pytest.fixture
@@ -233,6 +234,27 @@ class _RecordingControlService:
         )
 
 
+class _FailingControlService(_RecordingControlService):
+    async def cancel_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        stop_stack: bool,
+    ) -> WorkspaceControlResponse:
+        del workspace_id, reason, stop_stack
+        raise WorkspaceControlError(error_code="NOPE", message="cancel refused")
+
+    async def stop_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None,
+    ) -> WorkspaceControlResponse:
+        del workspace_id, reason
+        raise WorkspaceControlError(error_code="NOPE", message="stop refused")
+
+
 class TestWorkspaceControls:
     @pytest.mark.unit
     async def test_cancel_workspace_calls_service_and_returns_structured_response(
@@ -328,6 +350,32 @@ class TestWorkspaceControls:
             "operation_id": "op_destroy",
             "status": "destroyed",
             "message": "workspace destroyed",
+        }
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("tool_name", "expected_message"),
+        [
+            ("awf_cancel_workspace", "cancel refused"),
+            ("awf_stop_workspace", "stop refused"),
+        ],
+    )
+    async def test_control_tool_errors_return_structured_mcp_error(
+        self,
+        tool_name: str,
+        expected_message: str,
+    ) -> None:
+        service = _FailingControlService()
+        mcp = build_mcp_server(service=service)  # type: ignore[arg-type]
+
+        result = await mcp.call_tool(tool_name, {"workspace_id": "ws_control"})
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "NOPE",
+            "message": expected_message,
+            "detail": None,
         }
 
     @pytest.mark.unit

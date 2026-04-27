@@ -94,11 +94,11 @@ class _ComposeLogsProcess(Protocol):
     stderr: asyncio.StreamReader | None
     returncode: int | None
 
-    def terminate(self) -> None: ...
+    def terminate(self) -> None: ...  # pragma: no cover - Protocol method declaration only.
 
-    def kill(self) -> None: ...
+    def kill(self) -> None: ...  # pragma: no cover - Protocol method declaration only.
 
-    async def wait(self) -> int: ...
+    async def wait(self) -> int: ...  # pragma: no cover - Protocol method declaration only.
 
 
 _ComposeLogsProcessFactory = Callable[..., Awaitable[_ComposeLogsProcess]]

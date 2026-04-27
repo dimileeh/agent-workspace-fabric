@@ -389,6 +389,7 @@ class TestEvaluateStaleness:
         ("path", "pattern", "expected"),
         [
             ("a", "", False),
+            ("anything.py", "*", True),
             ("src/awf/api/routes/health.py", "src/awf/api/**", True),
             ("src/awf/api", "src/awf/api/**", True),
             ("src/awf/api/health.py", "src/awf/api/*", True),
@@ -432,6 +433,13 @@ class TestEvaluateStaleness:
         )
 
         assert [f.reason_code for f in findings] == ["STALE_TARGET_ADVANCED"]
+
+    @pytest.mark.unit
+    def test_isoformat_handles_none_and_naive_datetimes(self) -> None:
+        from awf.service.staleness import _isoformat
+
+        assert _isoformat(None) is None
+        assert _isoformat(datetime(2026, 4, 27, 12, 30)) == "2026-04-27T12:30:00+00:00"
 
 
 class TestStalenessRefreshService:
@@ -486,6 +494,39 @@ class TestStalenessRefreshService:
         assert first.status == "active"
         assert first.detected_at is not None
         assert first.resolved_at is None
+
+    @pytest.mark.unit
+    async def test_fetch_target_requires_provider_and_candidate_base_sha(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import StalenessRefreshError, StalenessRefreshService
+
+        _workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/**"],
+            task_class="refactor_task",
+        )
+
+        async with factory() as session:
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(attempt_id)
+            assert candidate is not None
+            service = StalenessRefreshService(session)
+
+            with pytest.raises(StalenessRefreshError, match="no provider injected"):
+                await service._fetch_target(candidate)
+
+            class _Provider:
+                async def fetch(self, **_kwargs: object) -> None:
+                    raise AssertionError("base_sha validation should happen before provider fetch")
+
+            candidate.base_sha = None
+            service_with_provider = StalenessRefreshService(
+                session,
+                target_state_provider=_Provider(),  # type: ignore[arg-type]
+            )
+            with pytest.raises(StalenessRefreshError, match="has no validation base_sha"):
+                await service_with_provider._fetch_target(candidate)
 
     @pytest.mark.unit
     async def test_refresh_preserves_specific_stale_reason_from_readiness(

@@ -744,6 +744,145 @@ class TestBranchDriftRecovery:
             assert ws.status == WorkspaceStatus.failed.value
             assert "branch drift" in (ws.failure_message or "")
 
+    @pytest.mark.unit
+    async def test_branch_drift_check_rev_parse_failure_marks_workspace_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=128, stderr="fatal: bad HEAD")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "branch drift check" in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    async def test_branch_drift_without_resolvable_agent_head_marks_workspace_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/drifted\n")
+        fake.queue_result(returncode=128, stderr="fatal: cannot resolve HEAD")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "agent HEAD could not be resolved" in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    async def test_branch_drift_status_failure_marks_workspace_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/drifted\n")
+        fake.queue_result(returncode=0, stdout="deadbeef\n")
+        fake.queue_result(returncode=128, stderr="fatal: status failed")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "git status" in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    async def test_branch_drift_unstashable_wip_marks_workspace_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/drifted\n")
+        fake.queue_result(returncode=0, stdout="deadbeef\n")
+        fake.queue_result(returncode=0, stdout=" M src/wip.py\n")
+        fake.queue_result(returncode=1, stderr="cannot write index")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "couldn't be stashed" in (ws.failure_message or "")
+
+    @pytest.mark.unit
+    async def test_branch_drift_switch_failure_with_stash_restores_wip_before_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/drifted\n")
+        fake.queue_result(returncode=0, stdout="deadbeef\n")
+        fake.queue_result(returncode=0, stdout=" M src/wip.py\n")
+        fake.queue_result(returncode=0, stdout="Saved")
+        fake.queue_result(returncode=1, stderr="fatal: invalid reference: awf/x")
+        fake.queue_result(returncode=0, stdout="restored")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "could not switch back" in (ws.failure_message or "")
+        assert any("stash" in call.args and "pop" in call.args for call in fake.calls)
+
+    @pytest.mark.unit
+    async def test_branch_drift_merge_failure_with_stash_restores_wip_before_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/drifted\n")
+        fake.queue_result(returncode=0, stdout="deadbeef\n")
+        fake.queue_result(returncode=0, stdout=" M src/wip.py\n")
+        fake.queue_result(returncode=0, stdout="Saved")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=1, stderr="fatal: not possible to fast-forward")
+        fake.queue_result(returncode=0, stdout="restored")
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert "merge --ff-only" in (ws.failure_message or "")
+        assert any("stash" in call.args and "pop" in call.args for call in fake.calls)
+
 
 class TestCommitStepRuntimeError:
     @pytest.mark.unit

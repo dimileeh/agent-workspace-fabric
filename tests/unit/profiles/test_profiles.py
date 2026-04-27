@@ -8,7 +8,13 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from awf.profiles.models import DockerMode, WorkspaceProfile
+from awf.profiles.models import (
+    DockerMode,
+    ProfileCommand,
+    ProfilePhaseSet,
+    ProfileSecret,
+    WorkspaceProfile,
+)
 from awf.profiles.registry import aira_profile, detect_profile, docker_compose_profile
 from awf.profiles.resolver import (
     ProfileResolutionError,
@@ -68,6 +74,26 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
         profile.validation.coverage.command.command == "uv run pytest --cov=awf --cov-report=term"
     )
     assert profile.validation.coverage.command.timeout_seconds == 900
+
+
+@pytest.mark.unit
+def test_profile_command_from_shell_returns_existing_command_instance() -> None:
+    command = ProfileCommand(command="pytest -q", timeout_seconds=120)
+
+    assert ProfileCommand.from_shell(command) is command
+
+
+@pytest.mark.unit
+def test_profile_phase_set_coerces_none_phase_to_empty_list() -> None:
+    phases = ProfilePhaseSet.model_validate({"setup": None})
+
+    assert phases.setup == []
+
+
+@pytest.mark.unit
+def test_profile_phase_set_rejects_non_list_phase_values() -> None:
+    with pytest.raises(ValidationError):
+        ProfilePhaseSet.model_validate({"setup": "uv sync"})
 
 
 @pytest.mark.unit
@@ -178,6 +204,20 @@ def test_profile_schema_rejects_service_with_both_image_and_build_context() -> N
                 ],
             }
         )
+
+
+@pytest.mark.unit
+def test_profile_secret_accepts_safe_mount_without_provider_ref_pair() -> None:
+    secret = ProfileSecret(name="ssh", target="/run/awf/secrets/ssh")
+
+    assert secret.provider is None
+    assert secret.ref is None
+
+
+@pytest.mark.unit
+def test_profile_secret_rejects_reserved_env_targets() -> None:
+    with pytest.raises(ValidationError, match="too broad or invalid"):
+        ProfileSecret(name="bad-home", target="HOME", kind="env")
 
 
 @pytest.mark.unit
@@ -526,6 +566,13 @@ def test_auto_detection_falls_back_to_generic(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_workspace_profile_with_validation_commands_returns_self_for_empty_override() -> None:
+    profile = WorkspaceProfile(name="generic")
+
+    assert profile.with_validation_commands([]) is profile
+
+
+@pytest.mark.unit
 def test_unknown_profile_ref_raises_resolution_error(tmp_path: Path) -> None:
     with pytest.raises(ProfileResolutionError, match="unknown workspace profile_ref"):
         ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="missing-profile")
@@ -546,6 +593,29 @@ def test_repo_profile_awf_section_must_be_mapping(tmp_path: Path) -> None:
     (tmp_path / ".awf" / "workspace.yml").write_text("awf:\n  - not\n  - a mapping\n")
 
     with pytest.raises(ProfileResolutionError, match="awf section must be a mapping"):
+        ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+
+
+@pytest.mark.unit
+def test_repo_profile_invalid_yaml_reports_resolution_error(tmp_path: Path) -> None:
+    (tmp_path / ".awf").mkdir()
+    (tmp_path / ".awf" / "workspace.yml").write_text("awf: [unterminated\n", encoding="utf-8")
+
+    with pytest.raises(ProfileResolutionError, match="could not read workspace profile"):
+        ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+
+
+@pytest.mark.unit
+def test_repo_profile_validation_error_reports_resolution_error(tmp_path: Path) -> None:
+    (tmp_path / ".awf").mkdir()
+    (tmp_path / ".awf" / "workspace.yml").write_text(
+        "name: bad\n"
+        "services:\n"
+        "  - name: db\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ProfileResolutionError, match="invalid workspace profile"):
         ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
 
 

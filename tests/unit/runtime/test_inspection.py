@@ -3,11 +3,23 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
 from awf.runtime import inspection
 from awf.runtime.inspection import RuntimeInspector, _ProcessResult
+
+
+@pytest.mark.unit
+async def test_run_captures_successful_subprocess_output() -> None:
+    result = await inspection._run(
+        [sys.executable, "-c", "import sys; print('out'); print('err', file=sys.stderr)"]
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "out\n"
+    assert result.stderr == "err\n"
 
 
 @pytest.mark.unit

@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from awf.common.commands import AsyncioSubprocessRunner
+from awf.common.commands import (
+    COMMAND_TIMEOUT_REASON,
+    AsyncioSubprocessRunner,
+    _format_seconds,
+    _terminate_process,
+    _timeout_diagnostic,
+)
 
 
 @pytest.mark.unit
@@ -142,6 +148,55 @@ async def test_asyncio_runner_ignores_child_that_closes_stdin_early() -> None:
     assert result.returncode == 0
     assert result.stdout == "closed\n"
     assert stdout == ["closed\n"]
+
+
+@pytest.mark.unit
+async def test_asyncio_runner_watchdog_exits_when_process_finishes_before_deadline() -> None:
+    runner = AsyncioSubprocessRunner()
+
+    result = await runner.run_streaming(
+        [sys.executable, "-c", "print('quick')"],
+        wall_timeout_seconds=10.0,
+        idle_timeout_seconds=10.0,
+    )
+
+    assert result.returncode == 0
+    assert result.reason_code is None
+    assert result.stdout == "quick\n"
+    assert result.stderr == ""
+
+
+@pytest.mark.unit
+async def test_terminate_process_noops_when_process_already_exited() -> None:
+    class _AlreadyExitedProcess:
+        returncode = 0
+
+        def terminate(self) -> None:
+            raise AssertionError("terminate should not be called")
+
+        def kill(self) -> None:
+            raise AssertionError("kill should not be called")
+
+    async def _done() -> int:
+        return 0
+
+    wait_task = asyncio.create_task(_done())
+    await wait_task
+
+    await _terminate_process(_AlreadyExitedProcess(), wait_task)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_timeout_diagnostic_formats_unknown_wall_timeout() -> None:
+    assert _format_seconds(None) == "unknown"
+    assert (
+        _timeout_diagnostic(
+            COMMAND_TIMEOUT_REASON,
+            wall_timeout_seconds=None,
+            idle_timeout_seconds=None,
+        )
+        == "command wall timeout after unknowns\n"
+    )
 
 
 async def _wait_for_file(path: Path) -> None:

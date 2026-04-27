@@ -20,6 +20,7 @@ from awf.db.session import make_session_factory
 from awf.service.gc import (
     WorkspaceGCPath,
     _delete_gc_path,
+    _estimate_bytes,
     plan_terminal_workspace_gc,
     run_terminal_workspace_gc,
     run_workspace_filesystem_gc,
@@ -502,3 +503,43 @@ def test_delete_gc_path_rejects_unknown_gc_kind(tmp_path: Path) -> None:
     assert error == "path is outside the expected service GC roots"
     assert gc_path.to_dict(error=error)["error"] == error
     assert target.exists()
+
+
+@pytest.mark.unit
+def test_estimate_bytes_treats_stat_races_as_zero_or_skipped() -> None:
+    class _RacyFile:
+        def exists(self) -> bool:
+            return True
+
+        def is_file(self) -> bool:
+            return True
+
+        def stat(self) -> object:
+            raise OSError("file disappeared")
+
+    class _StableChild:
+        def is_file(self) -> bool:
+            return True
+
+        def stat(self) -> object:
+            return type("Stat", (), {"st_size": 7})()
+
+    class _RacyChild:
+        def is_file(self) -> bool:
+            return True
+
+        def stat(self) -> object:
+            raise OSError("child disappeared")
+
+    class _RacyDirectory:
+        def exists(self) -> bool:
+            return True
+
+        def is_file(self) -> bool:
+            return False
+
+        def rglob(self, _pattern: str) -> list[object]:
+            return [_StableChild(), _RacyChild()]
+
+    assert _estimate_bytes(_RacyFile()) == 0  # type: ignore[arg-type]
+    assert _estimate_bytes(_RacyDirectory()) == 7  # type: ignore[arg-type]

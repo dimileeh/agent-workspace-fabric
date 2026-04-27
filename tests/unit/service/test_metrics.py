@@ -147,6 +147,18 @@ def test_failure_actions_cover_every_known_failure_reason() -> None:
 
 
 @pytest.mark.unit
+def test_failure_action_coverage_guard_reports_missing_reason() -> None:
+    from awf.service import metrics
+
+    removed = metrics._FAILURE_ACTIONS.pop(FailureReason.agent_failure.value)
+    try:
+        with pytest.raises(RuntimeError, match=FailureReason.agent_failure.value):
+            metrics._validate_failure_action_coverage()
+    finally:
+        metrics._FAILURE_ACTIONS[FailureReason.agent_failure.value] = removed
+
+
+@pytest.mark.unit
 async def test_empty_db_returns_zero_workspace_reliability_summary(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -756,6 +768,35 @@ async def test_resource_saturation_admission_reports_both_saturated_concurrency_
 
 
 @pytest.mark.unit
+async def test_resource_saturation_admission_reports_provision_only_saturation(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        worker_max_concurrent_provisions=1,
+        worker_max_concurrent_executions=3,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    await _workspace(session_factory, status=WorkspaceStatus.provisioning, updated_at=now)
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    assert summary.concurrency.provision.available == 0
+    assert summary.concurrency.execution.available == 3
+    assert summary.admission.ok is True
+    assert summary.admission.status == "saturated"
+    assert summary.admission.reason == "WORKER_PROVISION_CONCURRENCY_SATURATED"
+
+
+@pytest.mark.unit
 async def test_resource_saturation_admission_blocks_on_disk_pressure(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -933,3 +974,18 @@ async def test_workspace_reliability_reports_cleanup_failure_reason_code_coverag
     assert summary.actionable_reason_count == 2
     assert summary.unactionable_reason_count == 2
 
+
+@pytest.mark.unit
+@pytest.mark.parametrize("since_hours", [0, 169])
+async def test_workspace_reliability_validates_since_hours(
+    session_factory: async_sessionmaker[AsyncSession],
+    since_hours: int,
+) -> None:
+    from awf.service.metrics import summarize_workspace_reliability
+
+    with pytest.raises(ValueError, match="since_hours must be between"):
+        await summarize_workspace_reliability(
+            session_factory,
+            settings=Settings(_env_file=None),
+            since_hours=since_hours,
+        )

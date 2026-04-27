@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
+from starlette.requests import Request
 
 from awf.common.config import get_settings
 from awf.db.enums import FailureReason, WorkspaceStatus
@@ -190,3 +192,48 @@ async def test_workspace_summary_is_token_free_when_api_token_is_configured(
         get_settings.cache_clear()
 
     assert response.status_code == 200
+
+
+@pytest.mark.unit
+async def test_metrics_route_functions_return_response_models_directly(
+    engine: AsyncEngine,
+    tmp_path,
+) -> None:
+    from awf.api.routes.metrics import (
+        get_failure_analysis_summary,
+        get_resource_saturation_summary,
+        get_workspace_reliability_summary,
+    )
+    from awf.common.config import Settings
+
+    factory = make_session_factory(engine)
+    settings = Settings(
+        _env_file=None,
+        work_dir=str(tmp_path),
+        min_free_disk_bytes=0,
+    )
+    request = Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/metrics/resources/saturation",
+            "headers": [],
+            "app": SimpleNamespace(state=SimpleNamespace()),
+        }
+    )
+
+    async with factory() as session:
+        failure = await get_failure_analysis_summary(session=session)
+        reliability = await get_workspace_reliability_summary(
+            settings=settings,
+            session=session,
+        )
+        saturation = await get_resource_saturation_summary(
+            request=request,
+            settings=settings,
+            session=session,
+        )
+
+    assert failure.total_failed_workspaces == 0
+    assert reliability.active_count == 0
+    assert saturation.disk.reason == "SUFFICIENT_DISK"

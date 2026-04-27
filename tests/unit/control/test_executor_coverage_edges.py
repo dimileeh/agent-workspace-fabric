@@ -25,7 +25,7 @@ from awf.control.executor import (
     _validation_tier_for_workspace,
 )
 from awf.db.enums import FailureReason, TaskClass
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import ProfilePlanning, WorkspaceProfile
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -296,6 +296,37 @@ async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: P
 
 
 @pytest.mark.unit
+async def test_planning_required_reports_invalid_rendered_paths(tmp_path: Path) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    adapter = _PlanningAdapter()
+    profile = WorkspaceProfile.model_construct(
+        name="planning-invalid-path",
+        planning=ProfilePlanning.model_construct(
+            required=True,
+            plan_path="/tmp/{workspace_id}.md",
+            conformance_report_path="docs/awf-plans/{workspace_id}.json",
+            max_iterations=0,
+            enforce_plan_only_changes=True,
+            fail_on_unexplained_deviation=True,
+        ),
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_bad_path", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is not None
+    assert message.startswith("planning profile is invalid:")
+    assert adapter.prompts == []
+
+
+@pytest.mark.unit
 async def test_planning_required_rejects_extra_plan_phase_changes(tmp_path: Path) -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="")
@@ -378,6 +409,49 @@ async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Pa
         "conformance phase changed files outside `docs/awf-plans/ws_compare.json`: "
         "src/side_effect.py"
     )
+
+
+@pytest.mark.unit
+async def test_planning_required_reports_unsatisfied_conformance_after_iterations(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_unsat.md\n?? docs/awf-plans/ws_unsat.json\n",
+    )
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan",
+        "implementation",
+        '{"status":"needs_iteration","summary":"more tests needed","gaps":["gap one"]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-unsatisfied",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_unsat", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message == "plan conformance was not satisfied after 0 iteration(s): gap one"
 
 
 @pytest.mark.unit
