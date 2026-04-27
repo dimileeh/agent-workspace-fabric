@@ -101,6 +101,7 @@ async def _seed_ready_workspace(
     requires_database: bool = False,
     compose_file_path: str | None = None,
     resolved_profile: dict | None = None,
+    task_policy: dict | None = None,
 ) -> str:
     """Insert a workspace already in the ``ready`` state for the executor to pick up."""
     async with factory() as s:
@@ -114,6 +115,7 @@ async def _seed_ready_workspace(
             test_commands=test_commands or ["pytest -q"],
             requires_database=requires_database,
             resolved_profile=resolved_profile,
+            task_policy=task_policy or {},
         )
         # Walk through the transitions: requested → provisioning → ready.
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
@@ -193,6 +195,40 @@ class TestHappyPath:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/123"
+
+    @pytest.mark.unit
+    async def test_task_policy_agent_model_overrides_adapter_default(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            agent="opencode",
+            task_policy={"agent_model": "ollama/gemma4:31b-cloud"},
+        )
+
+        fake.queue_result(returncode=0, stdout="opencode finished")  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(
+            returncode=0,
+            stdout="https://github.com/dimileeh/aira-agent/pull/124\n",
+        )  # gh pr create
+
+        await executor.execute(ws_id)
+
+        adapter_args = fake.calls[0].args
+        assert "--model" in adapter_args
+        assert "ollama/gemma4:31b-cloud" in adapter_args
 
     @pytest.mark.unit
     async def test_planning_profile_runs_plan_execute_compare_before_validation(

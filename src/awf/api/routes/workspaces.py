@@ -427,6 +427,7 @@ def _payloads_match_v2(existing: Workspace, payload: WorkspaceCreateV2Request) -
         and existing.task_external_id == payload.task.external_id
         and existing.task_class == task_class
         and list(existing.owned_paths) == list(payload.task.owned_paths)
+        and _stored_task_agent_model(existing) == payload.task.model
         and _stored_task_out_of_scope_policy(existing)
         == _requested_task_out_of_scope_policy(payload)
         and existing.auto_merge == payload.task.auto_merge
@@ -468,3 +469,8 @@ def _requested_task_out_of_scope_policy(
 def _stored_task_out_of_scope_policy(existing: Workspace) -> dict[str, object] | None:
     out_of_scope = existing.task_policy.get("out_of_scope_changes")
     return out_of_scope if isinstance(out_of_scope, dict) else None
+
+
+def _stored_task_agent_model(existing: Workspace) -> str | None:
+    model = existing.task_policy.get("agent_model")
+    return model if isinstance(model, str) and model else None

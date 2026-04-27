@@ -406,6 +406,7 @@ class TestCreateWorkspaceV2:
                 "task_prompt": "Implement the planner hook.",
                 "task_kind": "refactor_task",
                 "agent": "claude_code",
+                "model": "claude-opus-4-7",
                 "task_external_id": "AIRA-42",
                 "profile_ref": "python",
                 "profile": {
@@ -433,6 +434,7 @@ class TestCreateWorkspaceV2:
         assert ws.task_external_id == "AIRA-42"
         assert ws.task_kind == "refactor_task"
         assert ws.agent == "claude_code"
+        assert ws.task_policy["agent_model"] == "claude-opus-4-7"
         assert ws.profile_ref == "python"
         assert ws.requested_profile is not None
         assert ws.requested_profile["name"] == "inline-python"

@@ -118,6 +118,10 @@ def build_mcp_server(
             default=AgentRuntime.codex,
             description="Which coding CLI to run inside the container.",
         ),
+        model: str | None = Field(
+            default=None,
+            description="Optional model override for the selected agent runtime.",
+        ),
         task_external_id: str | None = Field(
             default=None, description="Optional caller-side task ID for correlation."
         ),
@@ -167,6 +171,7 @@ def build_mcp_server(
                 "prompt": task_prompt,
                 "kind": task_kind,
                 "agent": agent,
+                "model": model,
                 "external_id": task_external_id,
                 "task_class": task_class,
                 "owned_paths": owned_paths,

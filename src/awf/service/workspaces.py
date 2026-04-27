@@ -870,13 +870,14 @@ def v2_profile_snapshots(
 
 
 def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]:
-    if payload.task.out_of_scope_changes is None:
-        return {}
-    return {
-        "out_of_scope_changes": payload.task.out_of_scope_changes.model_dump(
+    policy: dict[str, Any] = {}
+    if payload.task.model is not None:
+        policy["agent_model"] = payload.task.model
+    if payload.task.out_of_scope_changes is not None:
+        policy["out_of_scope_changes"] = payload.task.out_of_scope_changes.model_dump(
             mode="json"
         )
-    }
+    return policy
 
 
 def profile_with_requested_tier(

@@ -55,6 +55,7 @@ def _v2_body(
     title: str = "Owned path policy test",
     task_class: str | None = None,
     owned_paths: list[str] | None = None,
+    model: str | None = None,
 ) -> dict[str, object]:
     task = {
         **_V2_MINIMAL_BODY["task"],
@@ -64,6 +65,8 @@ def _v2_body(
         task["task_class"] = task_class
     if owned_paths is not None:
         task["owned_paths"] = owned_paths
+    if model is not None:
+        task["model"] = model
     return {
         **_V2_MINIMAL_BODY,
         "repo": {
@@ -394,6 +397,22 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert listed.status_code == 200
         assert listed.json()[0]["task_class"] == "refactor_task"
         assert listed.json()[0]["owned_paths"] == ["src/awf/**/*.py", "tests/unit/**"]
+
+    @pytest.mark.unit
+    async def test_persists_agent_model_override_in_task_policy(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = _v2_body(model="ollama/glm-5.1:cloud")
+
+        create = await client.post("/v2/workspaces", json=payload)
+        assert create.status_code == 202
+
+        ws_id = create.json()["workspace_id"]
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        assert response.json()["task_policy"]["agent_model"] == "ollama/glm-5.1:cloud"
 
     @pytest.mark.unit
     async def test_workspace_response_exposes_latest_decision_and_active_reservation(

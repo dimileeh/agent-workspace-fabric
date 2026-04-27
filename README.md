@@ -411,6 +411,7 @@ curl -X POST http://localhost:8000/v2/workspaces \
       "prompt": "Build the requested feature and commit the result.",
       "kind": "feature_branch_pr",
       "agent": "codex",
+      "model": null,
       "task_class": "refactor_task",
       "owned_paths": ["src/**", "tests/**"],
       "auto_merge": true,
@@ -742,6 +743,7 @@ Example `awf_create_workspace_v2` arguments:
   "task_class": "docs_task",
   "owned_paths": ["README.md", "docs/**"],
   "agent": "codex",
+  "model": null,
   "task_external_id": "AIRA-123",
   "profile_ref": "auto",
   "profile": null,
@@ -979,9 +981,10 @@ Default agent models and effort are centralized in
 | `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
 If a local subscription or provider account cannot use a default model, choose a
-supported model in the task or adapter configuration. For example, Gemini
-dogfood tests can use a Flash preview model when Pro is unavailable.
-OpenCode model overrides use the `ollama/<model>` form, for example
+supported model in the task or adapter configuration. In the v2 API, set
+`task.model` to override the selected agent's default for that workspace.
+For example, Gemini dogfood tests can use a Flash preview model when Pro is
+unavailable. OpenCode model overrides use the `ollama/<model>` form, for example
 `ollama/glm-5.1:cloud`, `ollama/gemma4:31b-cloud`, or
 `ollama/deepseek-v4-pro:cloud`.
 

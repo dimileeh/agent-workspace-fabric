@@ -201,7 +201,7 @@ class WorkspaceExecutor:
         try:
             agent = AgentRuntime(ws.agent)
             defaults = self._defaults_for(agent)
-            default_model = defaults.model if defaults else None
+            default_model = _agent_model_for_workspace(ws, defaults)
             adapter = get_adapter(
                 agent,
                 runner=self._runner,
@@ -1629,6 +1629,17 @@ def _profile_for_workspace(ws: Workspace, *, worktree_path: Path) -> WorkspacePr
         profile_ref=ws.profile_ref or ws.env_profile or "auto",
         validation_commands=list(ws.test_commands),
     ).profile
+
+
+def _agent_model_for_workspace(
+    ws: Workspace,
+    defaults: AgentDefaults | None,
+) -> str | None:
+    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    model = policy.get("agent_model")
+    if isinstance(model, str) and model.strip():
+        return model.strip()
+    return defaults.model if defaults else None
 
 
 def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
