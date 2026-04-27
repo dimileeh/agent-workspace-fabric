@@ -315,10 +315,9 @@ class WorkspaceExecutor:
         # stage everything and commit if anything's cached. If HEAD still
         # matches the base branch afterwards, the agent produced zero change
         # and we fail with a specific reason rather than pushing nothing.
-        worktree_host = self._config.worktrees_root / workspace_id
         if not await self._ensure_worktree_available(
             workspace_id=workspace_id,
-            worktree_path=worktree_host,
+            worktree_path=worktree_path,
             expected=WorkspaceStatus.running,
             action="post_agent_commit",
         ):
@@ -348,9 +347,9 @@ class WorkspaceExecutor:
             return await self._runner.run(
                 [
                     "git",
-                    *git_safe_directory_config_args(worktree_host),
+                    *git_safe_directory_config_args(worktree_path),
                     "-C",
-                    str(worktree_host),
+                    str(worktree_path),
                     *args,
                 ]
             )
@@ -518,9 +517,9 @@ class WorkspaceExecutor:
                 commit_result = await self._runner.run(
                     [
                         "git",
-                        *git_safe_directory_config_args(worktree_host),
+                        *git_safe_directory_config_args(worktree_path),
                         "-C",
-                        str(worktree_host),
+                        str(worktree_path),
                         *git_identity_config_args(),
                         "commit",
                         "-m",
@@ -589,9 +588,9 @@ class WorkspaceExecutor:
                     recover_commit = await self._runner.run(
                         [
                             "git",
-                            *git_safe_directory_config_args(worktree_host),
+                            *git_safe_directory_config_args(worktree_path),
                             "-C",
-                            str(worktree_host),
+                            str(worktree_path),
                             *git_identity_config_args(),
                             "commit",
                             "-m",
@@ -808,7 +807,7 @@ class WorkspaceExecutor:
                 return
             if not await self._ensure_worktree_available(
                 workspace_id=workspace_id,
-                worktree_path=worktree_host,
+                worktree_path=worktree_path,
                 expected=WorkspaceStatus.validating,
                 action="validation_fix_agent_run",
                 validation_run_id=validation_run_id,
@@ -844,7 +843,7 @@ class WorkspaceExecutor:
                 return
             if not await self._ensure_worktree_available(
                 workspace_id=workspace_id,
-                worktree_path=worktree_host,
+                worktree_path=worktree_path,
                 expected=WorkspaceStatus.validating,
                 action="validation_fix_git_add",
                 validation_run_id=validation_run_id,
@@ -865,7 +864,7 @@ class WorkspaceExecutor:
                 )
             if not await self._ensure_worktree_available(
                 workspace_id=workspace_id,
-                worktree_path=worktree_host,
+                worktree_path=worktree_path,
                 expected=WorkspaceStatus.validating,
                 action="validation_fix_git_diff",
                 validation_run_id=validation_run_id,
@@ -902,7 +901,7 @@ class WorkspaceExecutor:
                     return
                 if not await self._ensure_worktree_available(
                     workspace_id=workspace_id,
-                    worktree_path=worktree_host,
+                    worktree_path=worktree_path,
                     expected=WorkspaceStatus.validating,
                     action="validation_fix_git_commit",
                     validation_run_id=validation_run_id,
@@ -920,7 +919,7 @@ class WorkspaceExecutor:
                     [
                         "git",
                         "-C",
-                        str(worktree_host),
+                        str(worktree_path),
                         "commit",
                         "-m",
                         commit_msg,
