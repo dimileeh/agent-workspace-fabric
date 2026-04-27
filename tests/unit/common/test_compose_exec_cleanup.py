@@ -85,6 +85,23 @@ def test_cleanup_command_targets_only_invocation_id() -> None:
     assert all(marker not in invocation.cleanup_script for marker in forbidden)
 
 
+def test_cleanup_command_bounds_integer_sleep_fallback_wait() -> None:
+    invocation = build_tracked_compose_exec(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex"],
+        source="agent",
+        label="codex",
+        invocation_id="awf_cleanup_sleep",
+    )
+
+    script = invocation.cleanup_script
+
+    assert "sleep 0.1 2>/dev/null || sleep 1" not in script
+    assert "awf_cleanup_wait_limit=20" in script
+    assert "awf_cleanup_wait_limit=2" in script
+
+
 def test_rejects_empty_or_unsafe_invocation_inputs() -> None:
     with pytest.raises(ValueError, match="cli_args"):
         build_tracked_compose_exec(

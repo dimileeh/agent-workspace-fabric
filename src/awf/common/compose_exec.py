@@ -307,12 +307,27 @@ kill_pids() {{
   done
 }}
 
+awf_cleanup_sleep_seconds=0.1
+
+sleep_between_checks() {{
+  if [ "$awf_cleanup_sleep_seconds" = "0.1" ]; then
+    if sleep 0.1 2>/dev/null; then
+      return 0
+    fi
+    awf_cleanup_sleep_seconds=1
+    awf_cleanup_wait_limit=2
+  fi
+  sleep "$awf_cleanup_sleep_seconds"
+}}
+
 wait_until_absent() {{
   i=0
-  while [ "$i" -lt 20 ]; do
+  awf_cleanup_wait_limit=20
+  [ "$awf_cleanup_sleep_seconds" = "1" ] && awf_cleanup_wait_limit=2
+  while [ "$i" -lt "$awf_cleanup_wait_limit" ]; do
     collect_pids
     [ -z "$pids" ] && return 0
-    sleep 0.1 2>/dev/null || sleep 1
+    sleep_between_checks
     i=$((i + 1))
   done
   return 1
