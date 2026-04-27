@@ -15,6 +15,7 @@ file targets specific error branches that need dedicated fixtures:
 
 from __future__ import annotations
 
+import shutil
 from collections.abc import AsyncIterator
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,7 +36,7 @@ from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
-from awf.runtime.validation import ValidationRunner
+from awf.runtime.validation import ValidationResult, ValidationRunner
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -154,6 +155,32 @@ class _CancellingSetupValidation:
         return None
 
 
+class _CancellingSuccessfulValidation:
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...],
+        **_kwargs: Any,
+    ) -> ValidationResult:
+        self.calls.append(phase_names)
+        if phase_names == ("post_agent", "validate"):
+            async with self._factory() as s:
+                repo = WorkspaceRepository(s)
+                ws = await repo.get(workspace_id)
+                assert ws is not None
+                await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCELLED")
+                await s.commit()
+        return ValidationResult()
+
+    async def run_profile_coverage(self, **_kwargs: Any) -> None:
+        return None
+
+
 class _DivergingPrCreator:
     def __init__(self, factory: async_sessionmaker[AsyncSession], workspace_id: str) -> None:
         self._factory = factory
@@ -171,6 +198,26 @@ class _DivergingPrCreator:
             branch=branch_name,
             head_sha="b" * 40,
         )
+
+
+class _RemovingValidation:
+    def __init__(self, worktree_path: Path) -> None:
+        self._worktree_path = worktree_path
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        phase_names: tuple[str, ...],
+        **_kwargs: Any,
+    ) -> ValidationResult:
+        self.calls.append(phase_names)
+        if phase_names == ("post_agent", "validate"):
+            shutil.rmtree(self._worktree_path)
+        return ValidationResult()
+
+    async def run_profile_coverage(self, **_kwargs: Any) -> None:
+        return None
 
 
 async def _move_to_operator_control_status(
@@ -198,6 +245,7 @@ async def _seed_ready(
     base_commit: str | None = "a" * 40,
     auto_merge: bool | None = None,
     resolved_profile: dict[str, Any] | None = None,
+    create_worktree: bool = True,
 ) -> str:
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -220,7 +268,19 @@ async def _seed_ready(
             ws.auto_merge = auto_merge
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="SEED")
         await s.commit()
+        if create_worktree:
+            (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
         return ws.id
+
+
+def _test_worktrees_root(factory: async_sessionmaker[AsyncSession]) -> Path:
+    bind = factory.kw["bind"]
+    database_path = Path(str(bind.url.database))
+    return database_path.parent / "work" / "worktrees"
+
+
+def _test_worktree_path(factory: async_sessionmaker[AsyncSession], workspace_id: str) -> Path:
+    return _test_worktrees_root(factory) / workspace_id
 
 
 async def _seed_monitoring_pr(
@@ -483,6 +543,151 @@ class TestOperatorControlRaces:
             assert ws is not None
             assert ws.status == final_status.value
             assert ws.failure_reason is None
+
+    @pytest.mark.unit
+    async def test_start_push_stops_when_validation_cancelled_workspace(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        validation = _CancellingSuccessfulValidation(factory)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # branch drift check
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff
+        fake.queue_result(returncode=0)  # commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base
+        executor = _make_executor(fake, factory, tmp_path, validation=validation)
+
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+
+        assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
+        assert ws.status == WorkspaceStatus.cancelled.value
+        assert ws.failure_reason is None
+        assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+        assert ws.events[-1].payload["action"] == "start_push"
+        assert not any("push" in call.args for call in fake.calls)
+
+
+class TestMissingWorktreeFailure:
+    @pytest.mark.unit
+    async def test_missing_worktree_before_post_agent_commit_marks_infrastructure_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory, create_worktree=False)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        git_calls = [call.args for call in fake.calls if call.args[:1] == ["git"]]
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "WORKTREE_MISSING" in (ws.failure_message or "")
+        assert str(worktree_path) in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == "WORKTREE_MISSING"
+        assert any(
+            event.event_type == "workspace.executor_worktree_missing"
+            and event.reason_code == "WORKTREE_MISSING"
+            for event in ws.events
+        )
+        assert git_calls == []
+
+    @pytest.mark.unit
+    async def test_missing_worktree_before_pr_push_marks_infrastructure_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        worktree_path = _test_worktree_path(factory, ws_id)
+        validation = _RemovingValidation(worktree_path)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # branch drift check
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff
+        fake.queue_result(returncode=0)  # commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base
+        executor = _make_executor(fake, factory, tmp_path, validation=validation)
+
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+
+        assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "WORKTREE_MISSING" in (ws.failure_message or "")
+        assert str(worktree_path) in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == "WORKTREE_MISSING"
+        assert not any("push" in call.args for call in fake.calls)
+        assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls)
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize("final_status", [WorkspaceStatus.cancelled, WorkspaceStatus.destroyed])
+    async def test_cancelled_or_destroyed_status_wins_over_missing_worktree(
+        self,
+        final_status: WorkspaceStatus,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory, create_worktree=False)
+        fake.queue_result(returncode=0, stdout="adapter ok")
+        executor = _make_executor(fake, factory, tmp_path)
+        original_recheck_status = executor._recheck_status
+
+        async def _recheck_then_operator_status(
+            workspace_id: str,
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+            reason_code: str = "EXECUTOR_STALE_STATUS",
+        ) -> bool:
+            result = await original_recheck_status(
+                workspace_id,
+                expected=expected,
+                action=action,
+                reason_code=reason_code,
+            )
+            if result and action == "post_agent_commit":
+                await _move_to_operator_control_status(factory, workspace_id, final_status)
+            return result
+
+        executor._recheck_status = _recheck_then_operator_status  # type: ignore[method-assign]
+
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+
+        assert ws.status == final_status.value
+        assert ws.failure_reason is None
+        assert not any(
+            event.event_type == "workspace.state_changed"
+            and event.reason_code == "WORKTREE_MISSING"
+            for event in ws.events
+        )
 
 
 class TestAgentWatchdogConfig:

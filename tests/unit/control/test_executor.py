@@ -197,6 +197,7 @@ async def _seed_ready_workspace(
     compose_file_path: str | None = None,
     resolved_profile: dict | None = None,
     task_policy: dict | None = None,
+    create_worktree: bool = True,
 ) -> str:
     """Insert a workspace already in the ``ready`` state for the executor to pick up."""
     async with factory() as s:
@@ -220,7 +221,15 @@ async def _seed_ready_workspace(
         ws.compose_file_path = compose_file_path
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="X")
         await s.commit()
+        if create_worktree:
+            (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
         return ws.id
+
+
+def _test_worktrees_root(factory: async_sessionmaker[AsyncSession]) -> Path:
+    bind = factory.kw["bind"]
+    database_path = Path(str(bind.url.database))
+    return database_path.parent / "work" / "worktrees"
 
 
 class TestHappyPath:
