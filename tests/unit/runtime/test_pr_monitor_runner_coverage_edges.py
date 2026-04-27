@@ -401,7 +401,11 @@ async def test_stale_auto_merge_dispatches_validation_recovery(
     assert [(op.type, op.payload) for op in operations] == [
         (
             OperationType.validate.value,
-            {"source": "pr_monitor", "reason": "validation_insufficient_tier"},
+            {
+                "source": "pr_monitor",
+                "reason": "validation_insufficient_tier",
+                "recovery_mode": "validate_only",
+            },
         )
     ]
 

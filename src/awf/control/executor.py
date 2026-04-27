@@ -98,6 +98,32 @@ _log = get_logger(__name__)
 
 WORKTREE_MISSING_REASON_CODE = "WORKTREE_MISSING"
 
+_MONITOR_RECOVERY_ACTIVE_OPERATION_STATUSES = {
+    OperationStatus.pending.value,
+    OperationStatus.running.value,
+}
+
+
+def _pending_monitor_recovery(workspace: Any) -> dict[str, Any] | None:
+    """Return the active pr_monitor recovery payload (or ``None``).
+
+    The PR monitor's RECOVERY_DISPATCH path creates an Operation row
+    with ``payload["source"] == "pr_monitor"``; the executor uses this
+    as the discriminator that separates monitor-driven recovery from
+    a fresh feature-execution pass.
+    """
+    operations = getattr(workspace, "operations", None) or []
+    for operation in operations:
+        if operation.status not in _MONITOR_RECOVERY_ACTIVE_OPERATION_STATUSES:
+            continue
+        payload = operation.payload
+        if not isinstance(payload, dict):
+            continue
+        if payload.get("source") != "pr_monitor":
+            continue
+        return payload
+    return None
+
 
 @dataclass(frozen=True)
 class ExecutorConfig:
@@ -209,6 +235,12 @@ class WorkspaceExecutor:
         worktree_path = self._config.worktrees_root / workspace_id
 
         # ── Step 1: agent CLI runs the task inside the container ────────────
+        # When the PR monitor's RECOVERY_DISPATCH path delivered this
+        # workspace, the executor must NOT re-run planning, the agent
+        # CLI, or any post-agent commit hooks — those would rewrite the
+        # plan artifact and re-implement the feature mid-merge. Recovery
+        # only re-runs validation against the already-pushed work.
+        recovery = _pending_monitor_recovery(ws)
         baseline_coverage: ValidationCoverageResult | None = None
         try:
             agent = AgentRuntime(ws.agent)
@@ -232,6 +264,17 @@ class WorkspaceExecutor:
             )
             if not setup_result.all_passed:
                 first_fail = setup_result.first_failure
+                if recovery is not None:
+                    await self._finish_pending_monitor_recovery_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        reason_code="MONITOR_RECOVERY_SETUP_FAILED",
+                        error_message=(
+                            f"profile setup failed: {first_fail.command}"
+                            if first_fail is not None
+                            else "profile setup failed"
+                        )[:2000],
+                    )
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.running,
@@ -243,35 +286,51 @@ class WorkspaceExecutor:
                     )[:2000],
                 )
                 return
-            baseline_coverage = await self._run_baseline_coverage_preflight(
-                workspace_id=workspace_id,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                profile=profile,
-            )
-            if not await self._recheck_status(
-                workspace_id,
-                expected=WorkspaceStatus.running,
-                action="agent_run",
-            ):
-                return
-            planning_error = await self._run_agent_task_with_optional_planning(
-                adapter=adapter,
-                workspace=ws,
-                profile=profile,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                worktree_path=worktree_path,
-                model=default_model,
-            )
-            if planning_error is not None:
-                await self._mark_failed(
+            if recovery is None:
+                baseline_coverage = await self._run_baseline_coverage_preflight(
                     workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.agent_failure,
-                    message=planning_error[:2000],
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    profile=profile,
                 )
-                return
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.running,
+                    action="agent_run",
+                ):
+                    return
+                planning_error = await self._run_agent_task_with_optional_planning(
+                    adapter=adapter,
+                    workspace=ws,
+                    profile=profile,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    worktree_path=worktree_path,
+                    model=default_model,
+                )
+                if planning_error is not None:
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.agent_failure,
+                        message=planning_error[:2000],
+                    )
+                    return
+            else:
+                # The monitor created the recovery Operation in ``pending``;
+                # flush it to ``running`` before validation so observability
+                # tooling sees a real ``started_at`` (otherwise the row jumps
+                # straight from pending → succeeded/failed when the validate
+                # finalizer fires, with started_at == finished_at).
+                await self._start_pending_monitor_recovery_operations(
+                    workspace_id=workspace_id,
+                )
+                _log.info(
+                    "executor.monitor_recovery_started",
+                    workspace_id=workspace_id,
+                    recovery_mode=recovery.get("recovery_mode"),
+                    reason=recovery.get("reason"),
+                )
             agent_exit_note = None
         except ComposeExecCleanupError as exc:
             _log.error(
@@ -379,235 +438,165 @@ class WorkspaceExecutor:
         expected_branch = ws.branch_name or f"awf/{workspace_id}"
 
         try:
-            # ── Branch-drift recovery ──────────────────────────────────
-            # Agent CLIs (Claude Code, Codex) sometimes run
-            # ``git checkout -b <descriptive-name>`` mid-session as part
-            # of "good git hygiene" — they don't know AWF already
-            # created the right branch for them. If they commit on the
-            # drifted branch, ``pr_creator.push_and_open`` pushes the
-            # original (empty) AWF branch to origin and ``gh pr create``
-            # fails with "No commits between development and awf/ws_...".
-            #
-            # Incident 2026-04-24 (T41 Phase 3, ws_9ca6134a): agent
-            # switched to ``awf/t41-phase3-github-app-install-flow``
-            # and committed there. AWF's push of the empty
-            # ``awf/ws_9ca6134a...`` created a no-op PR. Agent's work
-            # stranded in the worktree.
-            #
-            # Recovery: if HEAD's branch diverged, fast-forward the
-            # expected branch to the agent's tip. Both branches share
-            # the same base commit (the worktree was created fresh
-            # from origin/<base>), so this is a safe pointer update.
-            current_branch_r = await _git_in_worktree(["rev-parse", "--abbrev-ref", "HEAD"])
-            # If rev-parse itself failed (corrupted git state, missing
-            # HEAD, etc.) we can't reliably detect drift. Fail loudly
-            # rather than silently skip — a working tree that can't
-            # resolve HEAD is broken enough that continuing to push
-            # would produce nonsense anyway.
-            if not current_branch_r.ok:
-                raise RuntimeError(
-                    "branch drift check: ``git rev-parse --abbrev-ref HEAD`` "
-                    f"failed with exit {current_branch_r.returncode}: "
-                    f"{current_branch_r.stderr!r}"
-                )
-            current_branch = (current_branch_r.stdout or "").strip()
-            if current_branch and current_branch != expected_branch:
-                _log.warning(
-                    "executor.branch_drift_detected",
-                    workspace_id=workspace_id,
-                    current_branch=current_branch,
-                    expected_branch=expected_branch,
-                )
-                agent_head_r = await _git_in_worktree(["rev-parse", "HEAD"])
-                agent_head = (agent_head_r.stdout or "").strip()
-                if not agent_head_r.ok or not agent_head:
+            if recovery is None:
+                # ── Branch-drift recovery ──────────────────────────────────
+                # Agent CLIs (Claude Code, Codex) sometimes run
+                # ``git checkout -b <descriptive-name>`` mid-session as part
+                # of "good git hygiene" — they don't know AWF already
+                # created the right branch for them. If they commit on the
+                # drifted branch, ``pr_creator.push_and_open`` pushes the
+                # original (empty) AWF branch to origin and ``gh pr create``
+                # fails with "No commits between development and awf/ws_...".
+                #
+                # Incident 2026-04-24 (T41 Phase 3, ws_9ca6134a): agent
+                # switched to ``awf/t41-phase3-github-app-install-flow``
+                # and committed there. AWF's push of the empty
+                # ``awf/ws_9ca6134a...`` created a no-op PR. Agent's work
+                # stranded in the worktree.
+                #
+                # Recovery: if HEAD's branch diverged, fast-forward the
+                # expected branch to the agent's tip. Both branches share
+                # the same base commit (the worktree was created fresh
+                # from origin/<base>), so this is a safe pointer update.
+                current_branch_r = await _git_in_worktree(["rev-parse", "--abbrev-ref", "HEAD"])
+                # If rev-parse itself failed (corrupted git state, missing
+                # HEAD, etc.) we can't reliably detect drift. Fail loudly
+                # rather than silently skip — a working tree that can't
+                # resolve HEAD is broken enough that continuing to push
+                # would produce nonsense anyway.
+                if not current_branch_r.ok:
                     raise RuntimeError(
-                        f"branch drift detected (current={current_branch} "
-                        f"expected={expected_branch}) but agent HEAD could not "
-                        f"be resolved: {agent_head_r.stderr!r}"
+                        "branch drift check: ``git rev-parse --abbrev-ref HEAD`` "
+                        f"failed with exit {current_branch_r.returncode}: "
+                        f"{current_branch_r.stderr!r}"
                     )
-                # Preserve uncommitted changes. The executor's core
-                # contract is "salvage whatever the agent left on
-                # disk" — including edits not yet committed on the
-                # drifted branch. ``status --porcelain`` with
-                # ``--untracked-files=all`` catches both staged,
-                # unstaged, and untracked files. If any exist, stash
-                # them (with ``-u`` to include untracked) before the
-                # ``switch`` so they don't get lost. Pop after the
-                # fast-forward so they end up on top of the agent's
-                # commits on the expected branch.
-                status_r = await _git_in_worktree(
-                    ["status", "--porcelain=v1", "--untracked-files=all"]
-                )
-                if not status_r.ok:
-                    raise RuntimeError(
-                        f"branch drift recovery: ``git status`` failed: {status_r.stderr!r}"
-                    )
-                has_wip = bool(status_r.stdout.strip())
-                stash_created = False
-                if has_wip:
-                    stash_r = await _git_in_worktree(
-                        [
-                            "stash",
-                            "push",
-                            "--include-untracked",
-                            "--message",
-                            f"awf-drift-recovery-{workspace_id}",
-                        ]
-                    )
-                    if not stash_r.ok:
-                        raise RuntimeError(
-                            f"branch drift recovery: ``git stash push`` failed: "
-                            f"{stash_r.stderr!r} (refusing to switch with dirty "
-                            f"worktree that couldn't be stashed)"
-                        )
-                    stash_created = True
-
-                # Switch to the expected branch. It should exist
-                # locally — AWF created it at worktree-add time.
-                switch_r = await _git_in_worktree(["switch", expected_branch])
-                if not switch_r.ok:
-                    # Best-effort: try to restore stashed WIP so it's
-                    # not silently lost before bailing out.
-                    if stash_created:
-                        await _git_in_worktree(["stash", "pop"])
-                    raise RuntimeError(
-                        f"branch drift recovery: could not switch back to "
-                        f"{expected_branch}: {switch_r.stderr!r}"
-                    )
-                # Fast-forward the expected branch to the agent's tip
-                # using ``merge --ff-only``. The two branches share
-                # the same base (AWF created the worktree fresh from
-                # ``origin/<base>``) and the agent only added commits
-                # on top, so ff must succeed. ``merge --ff-only`` over
-                # ``reset --hard`` because the latter would also wipe
-                # any WIP the user has in the working tree if the
-                # stash step above silently did nothing (e.g. if
-                # ``status`` missed an edge case).
-                merge_r = await _git_in_worktree(["merge", "--ff-only", agent_head])
-                if not merge_r.ok:
-                    if stash_created:
-                        await _git_in_worktree(["stash", "pop"])
-                    raise RuntimeError(
-                        f"branch drift recovery: ``merge --ff-only "
-                        f"{agent_head[:10]}`` failed: {merge_r.stderr!r}"
-                    )
-
-                if stash_created:
-                    pop_r = await _git_in_worktree(["stash", "pop"])
-                    if not pop_r.ok:
-                        # A pop conflict means the agent's WIP and the
-                        # fast-forwarded commits touch the same
-                        # regions. That's a real problem for the
-                        # workspace — the WIP is left in the stash
-                        # under a named entry, but we can't auto-merge
-                        # it. Fail loudly so the operator knows to
-                        # inspect.
-                        raise RuntimeError(
-                            f"branch drift recovery: ``git stash pop`` failed "
-                            f"(WIP conflicts with recovered commits): "
-                            f"{pop_r.stderr!r}"
-                        )
-
-                _log.info(
-                    "executor.branch_drift_recovered",
-                    workspace_id=workspace_id,
-                    recovered_from=current_branch,
-                    recovered_to=expected_branch,
-                    head_sha=agent_head,
-                    wip_stashed=has_wip,
-                )
-
-            await _git_in_worktree(["add", "-A"])
-            cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
-            if cached.stdout.strip():
-                violations = find_protected_quality_gate_changes(
-                    changed_paths=_git_name_lines(cached.stdout),
-                    owned_paths=list(ws.owned_paths),
-                )
-                if violations:
-                    await self._mark_failed(
+                current_branch = (current_branch_r.stdout or "").strip()
+                if current_branch and current_branch != expected_branch:
+                    _log.warning(
+                        "executor.branch_drift_detected",
                         workspace_id=workspace_id,
-                        from_status=WorkspaceStatus.running,
-                        failure_reason=FailureReason.policy_failure,
-                        reason_code="QUALITY_GATE_POLICY_CHANGED",
-                        message=quality_gate_violation_message(violations)[:2000],
+                        current_branch=current_branch,
+                        expected_branch=expected_branch,
                     )
-                    return
-                commit_msg = f"awf: {ws.task_title}"[:72]
-                commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
-                commit_result = await self._runner.run(
-                    [
-                        "git",
-                        *git_safe_directory_config_args(worktree_path),
-                        "-C",
-                        str(worktree_path),
-                        *git_identity_config_args(),
-                        "commit",
-                        "-m",
-                        commit_msg,
-                        "-m",
-                        commit_body,
-                    ],
-                )
-                if not commit_result.ok:
-                    raise RuntimeError(
-                        f"post-agent commit failed (exit={commit_result.returncode}): "
-                        f"{commit_result.stderr}"
+                    agent_head_r = await _git_in_worktree(["rev-parse", "HEAD"])
+                    agent_head = (agent_head_r.stdout or "").strip()
+                    if not agent_head_r.ok or not agent_head:
+                        raise RuntimeError(
+                            f"branch drift detected (current={current_branch} "
+                            f"expected={expected_branch}) but agent HEAD could not "
+                            f"be resolved: {agent_head_r.stderr!r}"
+                        )
+                    # Preserve uncommitted changes. The executor's core
+                    # contract is "salvage whatever the agent left on
+                    # disk" — including edits not yet committed on the
+                    # drifted branch. ``status --porcelain`` with
+                    # ``--untracked-files=all`` catches both staged,
+                    # unstaged, and untracked files. If any exist, stash
+                    # them (with ``-u`` to include untracked) before the
+                    # ``switch`` so they don't get lost. Pop after the
+                    # fast-forward so they end up on top of the agent's
+                    # commits on the expected branch.
+                    status_r = await _git_in_worktree(
+                        ["status", "--porcelain=v1", "--untracked-files=all"]
                     )
-            # Regardless of whether we just committed, verify HEAD has advanced
-            # past the base commit. If not, the agent produced no change.
-            rev_count = await _git_in_worktree(["rev-list", "--count", f"{base_commit}..HEAD"])
-            if not rev_count.ok or int(rev_count.stdout.strip() or "0") == 0:
-                base_short = base_commit[:10] if base_commit else "unknown"
-                message = (
-                    f"agent exited without producing any commits on the feature branch "
-                    f"(base={base_short})"
-                )
-                if agent_exit_note is not None:
-                    message = f"{message}; {agent_exit_note}"
-                await self._mark_failed(
-                    workspace_id=workspace_id,
-                    from_status=WorkspaceStatus.running,
-                    failure_reason=FailureReason.agent_failure,
-                    message=message,
-                )
-                return
+                    if not status_r.ok:
+                        raise RuntimeError(
+                            f"branch drift recovery: ``git status`` failed: {status_r.stderr!r}"
+                        )
+                    has_wip = bool(status_r.stdout.strip())
+                    stash_created = False
+                    if has_wip:
+                        stash_r = await _git_in_worktree(
+                            [
+                                "stash",
+                                "push",
+                                "--include-untracked",
+                                "--message",
+                                f"awf-drift-recovery-{workspace_id}",
+                            ]
+                        )
+                        if not stash_r.ok:
+                            raise RuntimeError(
+                                f"branch drift recovery: ``git stash push`` failed: "
+                                f"{stash_r.stderr!r} (refusing to switch with dirty "
+                                f"worktree that couldn't be stashed)"
+                            )
+                        stash_created = True
 
-            # Some agents sever git history (e.g. by accidentally running
-            # ``git checkout --orphan`` or by re-initialising the repo).
-            # rev-list counts HIGH in that case (every HEAD commit is "new"
-            # w.r.t. base because there's no shared ancestor), so the
-            # previous check wouldn't notice. Without this guard, the push
-            # succeeds but ``gh pr create`` dies with a cryptic
-            # ``branch has no history in common with <base>`` error.
-            #
-            # Recovery: ``git reset --soft <base>`` moves HEAD to the base
-            # commit while leaving the index untouched — the index still
-            # reflects the orphan's tree. A fresh ``git commit`` then
-            # produces a single commit on top of base that contains the
-            # cumulative diff, and the branch is reattached to a valid
-            # ancestry so the PR can be opened normally.
-            #
-            # Invariant: ``base_commit`` is always populated by
-            # ``_claim_ready`` before this block runs. The ``assert`` both
-            # documents and satisfies mypy.
-            ancestor = await _git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
-            if not ancestor.ok:
-                _log.warning(
-                    "executor.orphan_history_detected",
-                    workspace_id=workspace_id,
-                    base_commit=base_commit,
-                )
-                reset = await _git_in_worktree(["reset", "--soft", base_commit])
-                if reset.ok:
-                    recovery_msg = f"awf: {ws.task_title} (recovered from orphan)"[:72]
-                    recovery_body = (
-                        f"AWF detected orphan history on workspace {workspace_id} "
-                        f"(agent: {ws.agent}) and squashed the cumulative diff "
-                        f"onto base commit {base_commit[:10]}.\n"
+                    # Switch to the expected branch. It should exist
+                    # locally — AWF created it at worktree-add time.
+                    switch_r = await _git_in_worktree(["switch", expected_branch])
+                    if not switch_r.ok:
+                        # Best-effort: try to restore stashed WIP so it's
+                        # not silently lost before bailing out.
+                        if stash_created:
+                            await _git_in_worktree(["stash", "pop"])
+                        raise RuntimeError(
+                            f"branch drift recovery: could not switch back to "
+                            f"{expected_branch}: {switch_r.stderr!r}"
+                        )
+                    # Fast-forward the expected branch to the agent's tip
+                    # using ``merge --ff-only``. The two branches share
+                    # the same base (AWF created the worktree fresh from
+                    # ``origin/<base>``) and the agent only added commits
+                    # on top, so ff must succeed. ``merge --ff-only`` over
+                    # ``reset --hard`` because the latter would also wipe
+                    # any WIP the user has in the working tree if the
+                    # stash step above silently did nothing (e.g. if
+                    # ``status`` missed an edge case).
+                    merge_r = await _git_in_worktree(["merge", "--ff-only", agent_head])
+                    if not merge_r.ok:
+                        if stash_created:
+                            await _git_in_worktree(["stash", "pop"])
+                        raise RuntimeError(
+                            f"branch drift recovery: ``merge --ff-only "
+                            f"{agent_head[:10]}`` failed: {merge_r.stderr!r}"
+                        )
+
+                    if stash_created:
+                        pop_r = await _git_in_worktree(["stash", "pop"])
+                        if not pop_r.ok:
+                            # A pop conflict means the agent's WIP and the
+                            # fast-forwarded commits touch the same
+                            # regions. That's a real problem for the
+                            # workspace — the WIP is left in the stash
+                            # under a named entry, but we can't auto-merge
+                            # it. Fail loudly so the operator knows to
+                            # inspect.
+                            raise RuntimeError(
+                                f"branch drift recovery: ``git stash pop`` failed "
+                                f"(WIP conflicts with recovered commits): "
+                                f"{pop_r.stderr!r}"
+                            )
+
+                    _log.info(
+                        "executor.branch_drift_recovered",
+                        workspace_id=workspace_id,
+                        recovered_from=current_branch,
+                        recovered_to=expected_branch,
+                        head_sha=agent_head,
+                        wip_stashed=has_wip,
                     )
-                    recover_commit = await self._runner.run(
+
+                await _git_in_worktree(["add", "-A"])
+                cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
+                if cached.stdout.strip():
+                    violations = find_protected_quality_gate_changes(
+                        changed_paths=_git_name_lines(cached.stdout),
+                        owned_paths=list(ws.owned_paths),
+                    )
+                    if violations:
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.running,
+                            failure_reason=FailureReason.policy_failure,
+                            reason_code="QUALITY_GATE_POLICY_CHANGED",
+                            message=quality_gate_violation_message(violations)[:2000],
+                        )
+                        return
+                    commit_msg = f"awf: {ws.task_title}"[:72]
+                    commit_body = f"Authored by AWF workspace {workspace_id} (agent: {ws.agent}).\n"
+                    commit_result = await self._runner.run(
                         [
                             "git",
                             *git_safe_directory_config_args(worktree_path),
@@ -616,34 +605,105 @@ class WorkspaceExecutor:
                             *git_identity_config_args(),
                             "commit",
                             "-m",
-                            recovery_msg,
+                            commit_msg,
                             "-m",
-                            recovery_body,
+                            commit_body,
                         ],
                     )
-                    if recover_commit.ok:
-                        ancestor = await _git_in_worktree(
-                            ["merge-base", "--is-ancestor", base_commit, "HEAD"]
+                    if not commit_result.ok:
+                        raise RuntimeError(
+                            f"post-agent commit failed (exit={commit_result.returncode}): "
+                            f"{commit_result.stderr}"
                         )
-                if not ancestor.ok:
+                # Regardless of whether we just committed, verify HEAD has advanced
+                # past the base commit. If not, the agent produced no change.
+                rev_count = await _git_in_worktree(["rev-list", "--count", f"{base_commit}..HEAD"])
+                if not rev_count.ok or int(rev_count.stdout.strip() or "0") == 0:
+                    base_short = base_commit[:10] if base_commit else "unknown"
+                    message = (
+                        f"agent exited without producing any commits on the feature branch "
+                        f"(base={base_short})"
+                    )
+                    if agent_exit_note is not None:
+                        message = f"{message}; {agent_exit_note}"
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
                         failure_reason=FailureReason.agent_failure,
-                        message=(
-                            "agent severed git history — HEAD does not descend from "
-                            f"base commit {base_commit[:10] if base_commit else 'unknown'}, "
-                            "and automatic recovery (reset --soft + fresh commit) also failed. "
-                            "The coding CLI likely ran `git checkout --orphan` or reinitialised "
-                            "the repo; inspect the worktree manually."
-                        ),
+                        message=message,
                     )
                     return
-                _log.info(
-                    "executor.orphan_history_recovered",
-                    workspace_id=workspace_id,
-                    base_commit=base_commit,
-                )
+
+                # Some agents sever git history (e.g. by accidentally running
+                # ``git checkout --orphan`` or by re-initialising the repo).
+                # rev-list counts HIGH in that case (every HEAD commit is "new"
+                # w.r.t. base because there's no shared ancestor), so the
+                # previous check wouldn't notice. Without this guard, the push
+                # succeeds but ``gh pr create`` dies with a cryptic
+                # ``branch has no history in common with <base>`` error.
+                #
+                # Recovery: ``git reset --soft <base>`` moves HEAD to the base
+                # commit while leaving the index untouched — the index still
+                # reflects the orphan's tree. A fresh ``git commit`` then
+                # produces a single commit on top of base that contains the
+                # cumulative diff, and the branch is reattached to a valid
+                # ancestry so the PR can be opened normally.
+                #
+                # Invariant: ``base_commit`` is always populated by
+                # ``_claim_ready`` before this block runs. The ``assert`` both
+                # documents and satisfies mypy.
+                ancestor = await _git_in_worktree(["merge-base", "--is-ancestor", base_commit, "HEAD"])
+                if not ancestor.ok:
+                    _log.warning(
+                        "executor.orphan_history_detected",
+                        workspace_id=workspace_id,
+                        base_commit=base_commit,
+                    )
+                    reset = await _git_in_worktree(["reset", "--soft", base_commit])
+                    if reset.ok:
+                        recovery_msg = f"awf: {ws.task_title} (recovered from orphan)"[:72]
+                        recovery_body = (
+                            f"AWF detected orphan history on workspace {workspace_id} "
+                            f"(agent: {ws.agent}) and squashed the cumulative diff "
+                            f"onto base commit {base_commit[:10]}.\n"
+                        )
+                        recover_commit = await self._runner.run(
+                            [
+                                "git",
+                                *git_safe_directory_config_args(worktree_path),
+                                "-C",
+                                str(worktree_path),
+                                *git_identity_config_args(),
+                                "commit",
+                                "-m",
+                                recovery_msg,
+                                "-m",
+                                recovery_body,
+                            ],
+                        )
+                        if recover_commit.ok:
+                            ancestor = await _git_in_worktree(
+                                ["merge-base", "--is-ancestor", base_commit, "HEAD"]
+                            )
+                    if not ancestor.ok:
+                        await self._mark_failed(
+                            workspace_id=workspace_id,
+                            from_status=WorkspaceStatus.running,
+                            failure_reason=FailureReason.agent_failure,
+                            message=(
+                                "agent severed git history — HEAD does not descend from "
+                                f"base commit {base_commit[:10] if base_commit else 'unknown'}, "
+                                "and automatic recovery (reset --soft + fresh commit) also failed. "
+                                "The coding CLI likely ran `git checkout --orphan` or reinitialised "
+                                "the repo; inspect the worktree manually."
+                            ),
+                        )
+                        return
+                    _log.info(
+                        "executor.orphan_history_recovered",
+                        workspace_id=workspace_id,
+                        base_commit=base_commit,
+                    )
         except Exception as exc:  # unexpected — mark infrastructure
             _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
             await self._mark_failed(
@@ -1776,6 +1836,70 @@ class WorkspaceExecutor:
             )
             await session.commit()
             return run.id
+
+    async def _start_pending_monitor_recovery_operations(
+        self,
+        *,
+        workspace_id: str,
+    ) -> None:
+        """Flush pending pr_monitor recovery operations to ``running``.
+
+        The monitor's RECOVERY_DISPATCH path creates the validate
+        Operation in ``pending``; without an explicit transition the row
+        would jump straight to ``succeeded``/``failed`` with
+        ``started_at == finished_at``, which loses the recovery
+        lifecycle for observability tooling.
+        """
+        async with self._session_factory() as session:
+            repo = OperationRepository(session)
+            pending = await repo.list_for_workspace(
+                workspace_id,
+                status=OperationStatus.pending,
+                limit=100,
+            )
+            now = datetime.now(UTC)
+            for operation in pending:
+                payload = operation.payload
+                if not isinstance(payload, dict) or payload.get("source") != "pr_monitor":
+                    continue
+                operation.status = OperationStatus.running.value
+                if operation.started_at is None:
+                    operation.started_at = now
+            await session.commit()
+
+    async def _finish_pending_monitor_recovery_operations(
+        self,
+        *,
+        workspace_id: str,
+        status: OperationStatus,
+        reason_code: str | None,
+        error_message: str | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = OperationRepository(session)
+            pending = await repo.list_for_workspace(
+                workspace_id,
+                status=OperationStatus.pending,
+                limit=100,
+            )
+            running = await repo.list_for_workspace(
+                workspace_id,
+                status=OperationStatus.running,
+                limit=100,
+            )
+            result = {"reason_code": reason_code}
+            for operation in [*pending, *running]:
+                payload = operation.payload
+                if not isinstance(payload, dict) or payload.get("source") != "pr_monitor":
+                    continue
+                await repo.finish(
+                    operation,
+                    status=status,
+                    result=result,
+                    error_code=reason_code if status == OperationStatus.failed else None,
+                    error_message=error_message,
+                )
+            await session.commit()
 
     async def _finish_pending_validate_operations(
         self,

@@ -45,7 +45,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
-from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.logs import LogStore, WorkspaceLogSink
@@ -633,27 +633,32 @@ class PullRequestMonitorRunner:
             ws = await self._load_workspace(workspace_id)
             stale_reason, req_action = compute_stale_reason(ws)
 
-            if stale_reason is not None:
-                if not ws.auto_merge:
-                    return await self._execute(
-                        action=Abort(AbortReason.stale),
-                        workspace_id=workspace_id,
-                        repo_url=repo_url,
-                        repo=repo,
-                        pr_number=pr_number,
-                        status=status,
-                        state=state,
-                        base_branch=base_branch,
-                        remote_branch=remote_branch,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        monitor_log=monitor_log,
-                    )
+            # Manual-merge mode short-circuits to Abort regardless of
+            # grace state — operator-driven workspaces never dispatch
+            # automated recovery.
+            if stale_reason is not None and not ws.auto_merge:
+                return await self._execute(
+                    action=Abort(AbortReason.stale),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                )
 
+            # An unrecoverable failed rebase still needs human eyes —
+            # grace cannot fix it.
+            if stale_reason is not None and req_action == "rebase":
                 has_failed_rebase = any(
                     op.type == "rebase" and op.status == "failed" for op in ws.operations
                 )
-                if req_action == "rebase" and has_failed_rebase:
+                if has_failed_rebase:
                     return await self._execute(
                         action=NotifyHuman(
                             message=(
@@ -674,15 +679,110 @@ class PullRequestMonitorRunner:
                         monitor_log=monitor_log,
                     )
 
+            # Initial-review grace wins over recovery dispatch. Otherwise
+            # the workspace would leave ``monitoring_pr`` and re-enter
+            # the executor pipeline before slow first-pass reviewers had
+            # any chance to comment — defeating the contract added with
+            # the grace window.
+            grace_wait_seconds = _initial_review_grace_wait_seconds(
+                state,
+                pr_number=pr_number,
+                now=time.monotonic(),
+                grace_seconds=self._config.initial_review_grace_period_seconds,
+                poll_interval_seconds=self._config.poll_interval_seconds,
+            )
+            if grace_wait_seconds > 0:
+                if stale_reason is not None:
+                    grace_defer_payload: dict[str, object] = {
+                        "stale_reason": stale_reason,
+                        "req_action": req_action,
+                        "wait_seconds": grace_wait_seconds,
+                        "grace_seconds": (
+                            self._config.initial_review_grace_period_seconds
+                        ),
+                        "pr_number": pr_number,
+                        "head_sha": status.head_sha,
+                    }
+                    _log.info(
+                        "monitor.grace_defers_recovery",
+                        workspace_id=workspace_id,
+                        **grace_defer_payload,
+                    )
+                    await self._write_monitor_log(
+                        monitor_log,
+                        {
+                            "event": "monitor.grace_defers_recovery",
+                            "workspace_id": workspace_id,
+                            **grace_defer_payload,
+                        },
+                    )
+                    await self._append_workspace_events(
+                        workspace_id=workspace_id,
+                        events=[
+                            WorkspaceEventCreate(
+                                event_type="monitor.grace_defers_recovery",
+                                reason_code="GRACE_DEFERS_RECOVERY",
+                                payload=grace_defer_payload,
+                            )
+                        ],
+                    )
+                else:
+                    _log.info(
+                        "monitor.initial_review_grace_waiting",
+                        workspace_id=workspace_id,
+                        pr_number=pr_number,
+                        wait_seconds=grace_wait_seconds,
+                        grace_seconds=self._config.initial_review_grace_period_seconds,
+                        head_sha=status.head_sha[:10],
+                    )
+                await self._deps.sleep(grace_wait_seconds)
+                return False
+
+            if stale_reason is not None:
+                # Grace has elapsed (or is disabled) — dispatch recovery.
+                # ``recovery_mode`` discriminates how the executor's
+                # recovery branch handles this row: ``validate_only``
+                # runs validation against the already-committed work,
+                # ``rebase_only`` is reserved for a future slice that
+                # routes the rebase path through here as well. Until
+                # that slice lands the executor only runs validation in
+                # the recovery branch, so the operation type is always
+                # ``validate`` — otherwise a ``rebase``-typed row would
+                # leak forever (the validate finisher queries by type).
+                recovery_mode = (
+                    "rebase_only" if req_action == "rebase" else "validate_only"
+                )
+                operation_payload: dict[str, object] = {
+                    "source": "pr_monitor",
+                    "reason": stale_reason,
+                    "recovery_mode": recovery_mode,
+                }
                 async with self._deps.session_factory() as s:
                     from awf.db.repositories import OperationRepository, WorkspaceRepository
 
                     _ws = await WorkspaceRepository(s).get(workspace_id)
                     if _ws is not None:
+                        # Idempotency: if a pr_monitor recovery op is
+                        # already active for this workspace, skip the
+                        # dispatch so a runner restart cannot create a
+                        # duplicate row before the executor finishes
+                        # the prior one.
+                        active_recovery = any(
+                            op.status
+                            in (
+                                OperationStatus.pending.value,
+                                OperationStatus.running.value,
+                            )
+                            and isinstance(op.payload, dict)
+                            and op.payload.get("source") == "pr_monitor"
+                            for op in _ws.operations
+                        )
+                        if active_recovery:
+                            return True
                         await OperationRepository(s).create(
                             workspace_id=workspace_id,
-                            operation_type=req_action or "validate",
-                            payload={"source": "pr_monitor", "reason": stale_reason},
+                            operation_type="validate",
+                            payload=operation_payload,
                         )
                         await WorkspaceRepository(s).transition(
                             _ws,
@@ -690,6 +790,36 @@ class PullRequestMonitorRunner:
                             reason_code="RECOVERY_DISPATCH",
                         )
                         await s.commit()
+                dispatch_payload: dict[str, object] = {
+                    "pr_number": pr_number,
+                    "head_sha": status.head_sha,
+                    "reason": stale_reason,
+                    "req_action": req_action,
+                    "recovery_mode": recovery_mode,
+                }
+                _log.info(
+                    "monitor.recovery_dispatched",
+                    workspace_id=workspace_id,
+                    **dispatch_payload,
+                )
+                await self._write_monitor_log(
+                    monitor_log,
+                    {
+                        "event": "monitor.recovery_dispatched",
+                        "workspace_id": workspace_id,
+                        **dispatch_payload,
+                    },
+                )
+                await self._append_workspace_events(
+                    workspace_id=workspace_id,
+                    events=[
+                        WorkspaceEventCreate(
+                            event_type="monitor.recovery_dispatched",
+                            reason_code="RECOVERY_DISPATCH",
+                            payload=dispatch_payload,
+                        )
+                    ],
+                )
                 return True
 
             policy_blocked = await self._refresh_scope_policy_for_merge(
@@ -716,25 +846,6 @@ class PullRequestMonitorRunner:
                     compose_file=compose_file,
                     monitor_log=monitor_log,
                 )
-
-            grace_wait_seconds = _initial_review_grace_wait_seconds(
-                state,
-                pr_number=pr_number,
-                now=time.monotonic(),
-                grace_seconds=self._config.initial_review_grace_period_seconds,
-                poll_interval_seconds=self._config.poll_interval_seconds,
-            )
-            if grace_wait_seconds > 0:
-                _log.info(
-                    "monitor.initial_review_grace_waiting",
-                    workspace_id=workspace_id,
-                    pr_number=pr_number,
-                    wait_seconds=grace_wait_seconds,
-                    grace_seconds=self._config.initial_review_grace_period_seconds,
-                    head_sha=status.head_sha[:10],
-                )
-                await self._deps.sleep(grace_wait_seconds)
-                return False
 
             queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
             if queue_blockers:
