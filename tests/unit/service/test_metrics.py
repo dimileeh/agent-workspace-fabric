@@ -1074,10 +1074,19 @@ async def test_root_cause_clusters_mixed_rows(
         failure_message="ImportError: No module named xxx",
         agent="opencode",
     )
+    # 9. unknown agent failure
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.agent_failure,
+        failure_message="Agent exited without a structured reason",
+        agent="codex",
+    )
 
     summary = await summarize_failure_analysis(session_factory, now=now)
 
-    assert len(summary.root_cause_clusters) == 7
+    assert len(summary.root_cause_clusters) == 8
     cluster_reasons = [c.likely_cause for c in summary.root_cause_clusters]
 
     assert "Agent Auth Failed" in cluster_reasons
@@ -1086,6 +1095,7 @@ async def test_root_cause_clusters_mixed_rows(
     assert "Coverage Threshold Failure" in cluster_reasons
     assert "Syntax or Import Error" in cluster_reasons
     assert "GitHub Transient/Auth Error" in cluster_reasons
+    assert "Unknown Agent Failure" in cluster_reasons
     assert "Unknown Validation Failure" in cluster_reasons
 
     # Check grouping
@@ -1166,4 +1176,3 @@ async def test_existing_failure_groups_unaffected(
     assert len(summary.failure_groups) == 1
     assert summary.failure_groups[0].failure_reason == FailureReason.agent_failure.value
     assert len(summary.latest_examples) == 1
-

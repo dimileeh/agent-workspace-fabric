@@ -9,7 +9,11 @@ import pytest
 import yaml
 
 from awf.common.config import DEFAULT_MIN_FREE_DISK_BYTES, Settings
-from awf.service.config import resolve_service_settings, service_config_payload
+from awf.service.config import (
+    _redact_database_url,
+    resolve_service_settings,
+    service_config_payload,
+)
 
 
 @pytest.mark.unit
@@ -101,6 +105,12 @@ def test_awf_github_token_precedes_standard_gh_token_fallback() -> None:
     )
 
     assert settings.github_token == "ghp_awf_token"
+
+
+@pytest.mark.unit
+def test_redact_database_url_handles_malformed_secret_values() -> None:
+    assert _redact_database_url("postgresql://user:secret@host:bad/db") == "<redacted>"
+    assert _redact_database_url("") == ""
 
 
 @pytest.mark.unit

@@ -30,13 +30,16 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState, useTransition } from "react";
 import {
   bytes,
+  compactDuration,
   compactId,
+  fallbackLifecycleStages,
   formatDateTime,
   lifecycleStages,
   relativeTime,
   statusTone,
   toneClass,
 } from "@/lib/format";
+import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "@/lib/agent-format";
 import type {
   ApiEnvelope,
   AwfStreamFrame,
@@ -49,6 +52,7 @@ import type {
   RuntimeService,
   Workspace,
   WorkspaceEvent,
+  WorkspaceLifecycleStage,
   WorkspaceLogRead,
   WorkspaceLogStream,
   WorkspaceOverview,
@@ -89,7 +93,17 @@ type LogEntry = {
 
 type LogWorkspaceTarget = Pick<
   WorkspaceOverview,
-  "workspace_id" | "title" | "repo_url" | "base_branch" | "agent" | "agent_model" | "status" | "pr_url"
+  | "workspace_id"
+  | "title"
+  | "repo_url"
+  | "base_branch"
+  | "agent"
+  | "agent_model"
+  | "agent_effort"
+  | "agent_model_source"
+  | "agent_effort_source"
+  | "status"
+  | "pr_url"
 >;
 
 type RetryActionState =
@@ -486,6 +500,7 @@ export function ConsoleDashboard() {
             item.base_branch,
             item.agent,
             item.agent_model ?? "",
+            item.agent_effort ?? "",
             item.status,
           ]
             .join(" ")
@@ -650,7 +665,16 @@ export function ConsoleDashboard() {
                   retryState={retryState}
                   onRetry={retrySelectedWorkspace}
                 />
-                <LifecycleRail status={selectedOverview.status} />
+                <LifecycleRail
+                  status={selectedOverview.status}
+                  lifecycle={detail.workspace?.lifecycle ?? selectedOverview.lifecycle}
+                  terminalSourceStage={terminalLifecycleSourceStage(
+                    selectedOverview.status,
+                    detail.events,
+                    selectedOverview.last_event,
+                    selectedOverview.current_phase,
+                  )}
+                />
                 <RuntimePanel runtime={detail.runtime} />
                 <OperationsPanel operations={detail.operations} />
               </div>
@@ -1087,12 +1111,14 @@ function WorkspaceSummary({
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <Fact label="Workspace" value={overview.workspace_id} mono />
           <Fact label="Agent" value={formatAgentLabel(overview)} />
+          <Fact label="Effort" value={formatAgentEffort(overview)} />
           <Fact label="Branch" value={workspace?.branch_name ?? overview.branch_name ?? "—"} mono />
           <Fact label="Base" value={overview.base_branch} mono />
           <Fact label="Phase" value={overview.current_phase} />
           <Fact label="Operation" value={overview.active_operation ?? "none"} />
           <Fact label="Updated" value={formatDateTime(overview.updated_at)} />
         </div>
+        <UsageSummaryBlock usage={workspace?.llm_usage ?? overview.llm_usage} />
         {overview.failure_reason || overview.failure_message ? (
           <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
             <div className="font-semibold">{overview.failure_reason ?? "failure"}</div>
@@ -1114,6 +1140,37 @@ function WorkspaceSummary({
         ) : null}
       </div>
     </Panel>
+  );
+}
+
+function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] }) {
+  return (
+    <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-semibold text-slate-900">LLM usage</span>
+        <Badge value={usage.status} />
+      </div>
+      <div className="mt-2 grid gap-2 sm:grid-cols-4">
+        <UsageMetric label="Input" value={formatTokenCount(usage.input_tokens)} />
+        <UsageMetric label="Output" value={formatTokenCount(usage.output_tokens)} />
+        <UsageMetric label="Total" value={formatTokenCount(usage.total_tokens)} />
+        <UsageMetric label="Cost" value={formatCost(usage.cost_estimate, usage.currency)} />
+      </div>
+      <div className="mt-2 truncate text-[11px] text-slate-500">
+        {usage.status === "unavailable"
+          ? (usage.reason ?? "usage unavailable")
+          : `${usage.source}${usage.reason ? ` / ${usage.reason}` : ""}`}
+      </div>
+    </div>
+  );
+}
+
+function UsageMetric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-0">
+      <div className="text-[11px] font-medium text-slate-500">{label}</div>
+      <div className="mono truncate text-sm text-slate-950">{value}</div>
+    </div>
   );
 }
 
@@ -1437,35 +1494,53 @@ function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
   );
 }
 
-function LifecycleRail({ status }: { status: WorkspaceStatus }) {
+function LifecycleRail({
+  status,
+  lifecycle,
+  terminalSourceStage,
+}: {
+  status: WorkspaceStatus;
+  lifecycle: WorkspaceLifecycleStage[];
+  terminalSourceStage: string | null;
+}) {
   const terminal = status === "failed" || status === "cancelled";
-  const activeIndex = lifecycleStages.indexOf(status);
+  const stages: WorkspaceLifecycleStage[] =
+    lifecycle.length > 0 ? lifecycle : fallbackLifecycleStages(status, terminalSourceStage);
   return (
     <Panel title="Lifecycle" icon={<GitPullRequest size={16} aria-hidden />}>
       <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-8">
-        {lifecycleStages.map((stage, index) => {
-          const reached = !terminal && activeIndex >= index;
-          const active = status === stage;
+        {stages.map((stage) => {
           return (
             <div
-              key={stage}
+              key={stage.stage}
               className={`min-h-16 rounded-md border p-2 ${
-                active
+                stage.status === "active"
                   ? "border-blue-300 bg-blue-50"
-                  : reached
+                  : stage.status === "completed"
                     ? "border-emerald-200 bg-emerald-50"
-                    : "border-slate-200 bg-white"
+                    : stage.status === "terminal_skipped"
+                      ? "border-amber-200 bg-amber-50"
+                      : "border-slate-200 bg-white"
               }`}
             >
               <div className="flex items-center gap-1.5">
-                {reached ? (
+                {stage.status === "completed" ? (
                   <CheckCircle2 size={14} className="text-emerald-700" aria-hidden />
-                ) : active ? (
+                ) : stage.status === "active" ? (
                   <CircleDot size={14} className="text-blue-700" aria-hidden />
+                ) : stage.status === "terminal_skipped" ? (
+                  <AlertCircle size={14} className="text-amber-700" aria-hidden />
                 ) : (
                   <Clock3 size={14} className="text-slate-400" aria-hidden />
                 )}
-                <span className="text-xs font-medium">{stage}</span>
+                <span className="truncate text-xs font-medium">{stage.stage}</span>
+              </div>
+              <div className="mt-2 grid gap-1 text-[11px] text-slate-600">
+                <div className="truncate">start {formatDateTime(stage.started_at)}</div>
+                <div className="truncate">
+                  end {stage.status === "active" ? "active" : formatDateTime(stage.ended_at)}
+                </div>
+                <div className="mono">{compactDuration(stage.duration_seconds)}</div>
               </div>
             </div>
           );
@@ -1479,6 +1554,23 @@ function LifecycleRail({ status }: { status: WorkspaceStatus }) {
       ) : null}
     </Panel>
   );
+}
+
+function terminalLifecycleSourceStage(
+  status: WorkspaceStatus,
+  events: WorkspaceEvent[],
+  lastEvent: WorkspaceEvent | null,
+  currentPhase: string,
+): string | null {
+  if (status !== "failed" && status !== "cancelled") {
+    return null;
+  }
+  const terminalEvent =
+    events.find((event) => event.event_type === "workspace.state_changed" && event.new_state === status) ??
+    (lastEvent?.event_type === "workspace.state_changed" && lastEvent.new_state === status
+      ? lastEvent
+      : null);
+  return terminalEvent?.old_state ?? currentPhase;
 }
 
 function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
@@ -2497,25 +2589,30 @@ function toLogWorkspaceTarget(workspaceId: string, overview: WorkspaceOverview[]
     base_branch: "unknown",
     agent: "codex",
     agent_model: null,
+    agent_effort: null,
+    agent_model_source: "unavailable",
+    agent_effort_source: "unavailable",
     status: "running",
     pr_url: null,
   };
 }
 
-function formatAgentLabel(workspace: Pick<WorkspaceOverview, "agent" | "agent_model">): string {
-  const model = compactAgentModel(workspace.agent_model);
-  return model ? `${workspace.agent} · ${model}` : workspace.agent;
-}
-
-function formatAgentTitle(workspace: Pick<WorkspaceOverview, "agent" | "agent_model">): string {
-  return workspace.agent_model ? `${workspace.agent} / ${workspace.agent_model}` : workspace.agent;
-}
-
-function compactAgentModel(model: string | null | undefined): string | null {
-  if (!model) {
-    return null;
+function formatTokenCount(value: number | null): string {
+  if (value === null || !Number.isFinite(value)) {
+    return "—";
   }
-  return model.startsWith("ollama/") ? model.slice("ollama/".length) : model;
+  return new Intl.NumberFormat().format(value);
+}
+
+function formatCost(value: number | null, currency: string | null): string {
+  if (value === null || !Number.isFinite(value) || !currency) {
+    return "—";
+  }
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+    maximumFractionDigits: 4,
+  }).format(value);
 }
 
 function toggleWorkspaceSelection(current: string[], workspaceId: string, checked: boolean): string[] {
