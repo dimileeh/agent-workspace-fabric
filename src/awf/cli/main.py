@@ -179,12 +179,33 @@ def worker(
 @service_app.command("status")
 def service_status(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+    provider: list[str] = typer.Option(
+        [],
+        "--provider",
+        help=(
+            "Repeatable provider strictness check: github, claude_code, gemini, "
+            "or opencode."
+        ),
+    ),
 ) -> None:
     """Check local AWF service dependencies."""
     from awf.service.config import resolve_service_settings
+    from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
     from awf.service.status import collect_service_status
 
-    payload = asyncio.run(collect_service_status(resolve_service_settings()))
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    payload = asyncio.run(
+        collect_service_status(
+            resolve_service_settings(),
+            strict_providers=strict_providers,
+            provider_environ=os.environ,
+        )
+    )
     _emit(payload, fmt)
     if payload.get("status") != "ok":
         raise typer.Exit(code=1)

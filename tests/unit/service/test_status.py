@@ -51,6 +51,7 @@ def _settings(tmp_path: Path, *, min_free_disk_bytes: int = 200) -> ServiceSetti
         github_token=None,
         worker_poll_interval_seconds=0.1,
         worker_max_concurrent_provisions=1,
+        host_home=str(tmp_path / "home"),
         min_free_disk_bytes=min_free_disk_bytes,
     )
 
@@ -178,6 +179,7 @@ def test_service_status_includes_ok_disk_check_from_mocked_usage(tmp_path: Path)
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
         )
     )
 
@@ -194,6 +196,51 @@ def test_service_status_includes_ok_disk_check_from_mocked_usage(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_service_status_provider_warnings_do_not_fail_by_default(tmp_path: Path) -> None:
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+        )
+    )
+
+    assert status["status"] == "ok"
+    readiness = status["agent_readiness"]
+    assert readiness["status"] == "ok"
+    assert readiness["providers"]["github"]["status"] == "warn"
+    assert readiness["providers"]["github"]["reason"] == "GITHUB_TOKEN_ENV_MISSING"
+
+
+@pytest.mark.unit
+def test_service_status_strict_provider_failure_sets_top_level_fail(tmp_path: Path) -> None:
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+            strict_providers={"github"},
+        )
+    )
+
+    assert status["status"] == "fail"
+    readiness = status["agent_readiness"]
+    assert readiness["status"] == "fail"
+    assert readiness["providers"]["github"]["status"] == "fail"
+    assert readiness["providers"]["github"]["reason"] == "GITHUB_TOKEN_ENV_MISSING"
+
+
+@pytest.mark.unit
 def test_service_status_fails_when_disk_is_below_threshold(tmp_path: Path) -> None:
     status = asyncio.run(
         collect_service_status(
@@ -204,6 +251,7 @@ def test_service_status_fails_when_disk_is_below_threshold(tmp_path: Path) -> No
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
         )
     )
 
@@ -227,6 +275,7 @@ def test_orphan_check_reports_no_orphans_when_no_awf_containers(tmp_path: Path) 
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
         )
     )
 
@@ -277,6 +326,7 @@ def test_orphan_check_treats_active_workspace_containers_as_expected(tmp_path: P
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_ws_lookup,
+            provider_environ={},
         )
     )
 
@@ -316,6 +366,7 @@ def test_orphan_check_flags_terminal_workspace_with_running_container(tmp_path: 
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_ws_lookup,
+            provider_environ={},
         )
     )
 
@@ -367,6 +418,7 @@ def test_orphan_check_flags_workspace_missing_from_db(tmp_path: Path) -> None:
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_ws_lookup,
+            provider_environ={},
         )
     )
 
@@ -402,6 +454,7 @@ def test_orphan_check_skips_non_awf_compose_projects(tmp_path: Path) -> None:
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
         )
     )
 
@@ -440,6 +493,7 @@ def test_orphan_check_marks_unknown_when_db_unavailable(tmp_path: Path) -> None:
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_ws_lookup,
+            provider_environ={},
         )
     )
 
@@ -486,6 +540,7 @@ def test_orphan_check_unavailable_when_docker_ps_fails(tmp_path: Path) -> None:
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_ws_lookup,
+            provider_environ={},
         )
     )
 
@@ -523,6 +578,7 @@ def test_collect_status_cancels_pending_auxiliary_tasks_on_probe_error(tmp_path:
                 socket_exists=lambda _path: True,
                 disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
                 workspace_id_lookup=slow_workspace_lookup,
+                provider_environ={},
             )
         )
 
@@ -552,6 +608,7 @@ def test_orphan_check_extracts_labels_via_docker_template(tmp_path: Path) -> Non
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
         )
     )
 
@@ -591,6 +648,7 @@ def test_orphan_check_handles_label_value_with_comma(tmp_path: Path) -> None:
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_ws_lookup,
+            provider_environ={},
         )
     )
 
@@ -613,6 +671,7 @@ def test_orphan_check_handles_missing_docker_binary(tmp_path: Path) -> None:
             socket_exists=lambda _path: True,
             disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
             workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
         )
     )
 

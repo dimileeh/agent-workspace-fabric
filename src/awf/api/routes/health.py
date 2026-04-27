@@ -18,13 +18,19 @@ import asyncio
 import contextlib
 from typing import Any
 
-from fastapi import APIRouter, Request, Response, status
+from fastapi import APIRouter, HTTPException, Query, Request, Response, status
 from pydantic import BaseModel
 from sqlalchemy import text
 
 from awf import __version__
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
+from awf.service.config import resolve_service_settings
+from awf.service.provider_readiness import (
+    ProviderReadinessError,
+    collect_agent_readiness,
+    validate_provider_names,
+)
 
 router = APIRouter(tags=["system"])
 
@@ -61,6 +67,7 @@ class ReadyResponse(BaseModel):
     version: str
     status: str
     checks: dict[str, CheckResult]
+    agent_readiness: dict[str, Any]
 
 
 @router.get("/healthz", response_model=HealthResponse)
@@ -248,8 +255,21 @@ async def _check_agent_runtime_image(runner: AsyncCommandRunner, image: str) -> 
 
 
 @router.get("/readyz", response_model=ReadyResponse)
-async def readyz(request: Request, response: Response) -> ReadyResponse:
+async def readyz(
+    request: Request,
+    response: Response,
+    provider: list[str] = Query(default=[]),
+) -> ReadyResponse:
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
     settings = get_settings()
+    service_settings = resolve_service_settings(settings)
     runner = _get_command_runner_for_request(request)
     factory = getattr(request.app.state, "db_session_factory", None)
 
@@ -258,12 +278,24 @@ async def readyz(request: Request, response: Response) -> ReadyResponse:
     # k8s/uptime probe with multiple slow deps would otherwise hit 25s and
     # time out at the orchestrator). Each check already returns a structured
     # CheckResult on failure, so gather() never sees an exception.
-    db_check, cli_check, daemon_check, compose_check, image_check = await asyncio.gather(
+    (
+        db_check,
+        cli_check,
+        daemon_check,
+        compose_check,
+        image_check,
+        agent_readiness,
+    ) = await asyncio.gather(
         _check_db(factory),
         _check_docker_cli(runner),
         _check_docker_daemon(runner),
         _check_docker_compose(runner),
         _check_agent_runtime_image(runner, settings.agent_runtime_image),
+        asyncio.to_thread(
+            collect_agent_readiness,
+            service_settings,
+            validated_strict_providers=strict_providers,
+        ),
     )
     checks = {
         "db": db_check,
@@ -273,7 +305,7 @@ async def readyz(request: Request, response: Response) -> ReadyResponse:
         "agent_runtime_image": image_check,
     }
 
-    overall_ok = all(check.ok for check in checks.values())
+    overall_ok = all(check.ok for check in checks.values()) and agent_readiness["status"] == "ok"
     if not overall_ok:
         response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
 
@@ -282,4 +314,5 @@ async def readyz(request: Request, response: Response) -> ReadyResponse:
         version=__version__,
         status="ok" if overall_ok else "fail",
         checks=checks,
+        agent_readiness=agent_readiness,
     )

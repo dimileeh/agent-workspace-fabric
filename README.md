@@ -673,6 +673,14 @@ Docker Desktop's `/run/host-services/ssh-auth.sock` so service-worker Git
 operations can use the operator's loaded SSH keys. Set `AWF_HOST_HOME` if the
 shell running Docker Compose does not expose the operator home as `${HOME}`.
 
+Credential values used by Compose interpolation must be present in the shell
+that starts the stack or in a Compose env file such as `docker/compose/.env`.
+The repo-root `.env` is still useful for Python `awf` commands, but the
+control-plane containers only see values that Docker Compose injects. On macOS,
+`gh` auth stored only in Keychain-backed `~/.config/gh` is not usable inside the
+containers; set `AWF_GITHUB_TOKEN` or `GH_TOKEN`, commonly from
+`gh auth token`, before starting the stack.
+
 The worker reuses the per-workspace Compose file and project created during
 provisioning. It does not launch a second stack for agent execution,
 validation, PR creation, or PR monitoring; those stages run against the same
@@ -691,8 +699,15 @@ Check the service from another terminal:
 
 ```bash
 uv run --python 3.12 --extra dev awf service status
+uv run --python 3.12 --extra dev awf service status --provider github --format pretty
+curl 'http://localhost:8000/readyz?provider=github'
 uv run --python 3.12 --extra dev awf service logs --follow --service worker
 ```
+
+`awf service status` and `/readyz` include an `agent_readiness` section for
+GitHub, Claude Code, Gemini, and OpenCode/Ollama. Missing optional providers
+are warnings by default. Pass `--provider <name>` or `?provider=<name>` to make
+that provider strict for scheduling or rollout checks.
 
 The service-mode default database URL is local Postgres
 (`postgresql+asyncpg://awf:...@localhost:5433/awf`). SQLite remains supported
@@ -910,6 +925,8 @@ and merges; `AWF_GITHUB_TOKEN` is preferred, while `GH_TOKEN` and
 ```bash
 cp .env.example .env
 export AWF_GITHUB_TOKEN="$(gh auth token)"
+# Optional: mirror Compose-interpolated values into docker/compose/.env.
+printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN" > docker/compose/.env
 docker compose -f docker/compose/local-service.yml up --build
 ```
 
@@ -929,6 +946,9 @@ AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
 AWF_HOST_WORK_DIR=${HOME}/.awf/service
 AWF_HOST_HOME=${HOME}
 AWF_GITHUB_TOKEN=<token from gh auth token>
+ANTHROPIC_API_KEY=<optional Claude env auth>
+GEMINI_API_KEY=<optional Gemini env auth>
+AWF_OPENCODE_OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
 AWF_AGENT_WALL_TIMEOUT_SECONDS=7200
 AWF_AGENT_IDLE_TIMEOUT_SECONDS=900
 ```
@@ -969,6 +989,26 @@ the worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
 `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/...` before
 launching the workspace stack. AWF does not copy `~/.ollama/models`; workspace
 OpenCode runs talk to the host Ollama daemon through `host.docker.internal`.
+
+Readiness checks use the same service-visible signals without reading secret
+file contents:
+
+- GitHub: `AWF_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN`, plus a bounded
+  `gh auth status` check for PR creation, comments, and merges.
+- Claude Code: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
+  `CLAUDE_CODE_OAUTH_TOKEN`, `~/.claude`, or `~/.claude.json`.
+- Gemini: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`,
+  visible `GOOGLE_APPLICATION_CREDENTIALS`, or `~/.gemini`.
+- OpenCode/Ollama: `~/.config/opencode`, selected small `~/.ollama` auth files,
+  `OLLAMA_API_KEY`, and a cheap Ollama `/api/version` reachability probe.
+
+Use strict checks before provider-specific work:
+
+```bash
+uv run --python 3.12 --extra dev awf service status --format pretty
+uv run --python 3.12 --extra dev awf service status --provider claude_code --format pretty
+curl 'http://localhost:8000/readyz?provider=opencode'
+```
 
 Default agent models and effort are centralized in
 `src/awf/adapters/defaults.py`:

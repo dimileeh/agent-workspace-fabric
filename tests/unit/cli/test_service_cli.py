@@ -527,6 +527,7 @@ def test_service_status_uses_mocked_api_db_docker_and_image_checks(tmp_path: Pat
         github_token=None,
         worker_poll_interval_seconds=0.1,
         worker_max_concurrent_provisions=1,
+        host_home=str(tmp_path / "home"),
     )
 
     status = asyncio.run(
@@ -537,6 +538,7 @@ def test_service_status_uses_mocked_api_db_docker_and_image_checks(tmp_path: Pat
             run_subprocess=_run_subprocess,
             socket_exists=lambda _path: True,
             disk_usage=_ok_disk_usage,
+            provider_environ={},
         )
     )
 
@@ -627,6 +629,7 @@ def test_service_status_runs_dependency_checks_concurrently(tmp_path: Path) -> N
         github_token=None,
         worker_poll_interval_seconds=0.1,
         worker_max_concurrent_provisions=1,
+        host_home=str(tmp_path / "home"),
     )
 
     status = asyncio.run(
@@ -637,6 +640,7 @@ def test_service_status_runs_dependency_checks_concurrently(tmp_path: Path) -> N
             run_subprocess=_run_subprocess,
             socket_exists=lambda _path: True,
             disk_usage=_ok_disk_usage,
+            provider_environ={},
         )
     )
 
@@ -678,6 +682,7 @@ def test_service_status_reports_failures_from_mocked_checks(tmp_path: Path) -> N
         github_token=None,
         worker_poll_interval_seconds=0.1,
         worker_max_concurrent_provisions=1,
+        host_home=str(tmp_path / "home"),
     )
 
     status = asyncio.run(
@@ -688,6 +693,7 @@ def test_service_status_reports_failures_from_mocked_checks(tmp_path: Path) -> N
             run_subprocess=_run_subprocess,
             socket_exists=lambda _path: False,
             disk_usage=_ok_disk_usage,
+            provider_environ={},
         )
     )
 
@@ -708,7 +714,7 @@ def test_service_status_pretty_output_includes_disk_check(
     settings = object()
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
 
-    async def _collect(received: object) -> dict[str, object]:
+    async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
         assert received is settings
         return {
             "service": "awf",
@@ -731,6 +737,86 @@ def test_service_status_pretty_output_includes_disk_check(
     assert result.exit_code == 0, result.output
     assert "checks.disk.free_bytes: 300" in result.stdout
     assert "checks.disk.threshold_bytes: 200" in result.stdout
+
+
+@pytest.mark.unit
+def test_service_status_pretty_output_includes_provider_reason(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import status as status_mod
+
+    settings = object()
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+
+    async def _collect(received: object, **kwargs: object) -> dict[str, object]:
+        assert received is settings
+        assert kwargs["strict_providers"] == set()
+        return {
+            "service": "awf",
+            "status": "ok",
+            "checks": {},
+            "agent_readiness": {
+                "status": "ok",
+                "strict_providers": [],
+                "providers": {
+                    "github": {
+                        "ok": False,
+                        "status": "warn",
+                        "reason": "GITHUB_TOKEN_ENV_MISSING",
+                    }
+                },
+            },
+        }
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(app, ["service", "status", "--format", "pretty"])
+
+    assert result.exit_code == 0, result.output
+    assert "agent_readiness.providers.github.reason: GITHUB_TOKEN_ENV_MISSING" in result.stdout
+
+
+@pytest.mark.unit
+def test_service_status_provider_option_requests_strict_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import status as status_mod
+
+    settings = object()
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+
+    async def _collect(received: object, **kwargs: object) -> dict[str, object]:
+        assert received is settings
+        assert kwargs["strict_providers"] == {"github"}
+        return {
+            "service": "awf",
+            "status": "fail",
+            "checks": {},
+            "agent_readiness": {
+                "status": "fail",
+                "strict_providers": ["github"],
+                "providers": {
+                    "github": {
+                        "ok": False,
+                        "status": "fail",
+                        "reason": "GITHUB_TOKEN_ENV_MISSING",
+                    }
+                },
+            },
+        }
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(
+        app,
+        ["service", "status", "--provider", "github", "--format", "pretty"],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "agent_readiness.providers.github.status: fail" in result.stdout
+    assert "GITHUB_TOKEN_ENV_MISSING" in result.stdout
 
 
 @pytest.mark.unit

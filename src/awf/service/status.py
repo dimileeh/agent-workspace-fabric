@@ -7,7 +7,7 @@ import contextlib
 import json
 import os
 import subprocess
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -19,6 +19,8 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.session import make_engine
 from awf.service.config import ServiceSettings
 from awf.service.disk import DiskUsage, check_disk_space
+from awf.service.provider_readiness import HttpGet as ProviderHttpGet
+from awf.service.provider_readiness import collect_agent_readiness
 
 _CHECK_TIMEOUT_SECONDS = 5.0
 _ORPHAN_EXAMPLE_LIMIT = 5
@@ -115,6 +117,9 @@ async def collect_service_status(
     socket_exists: SocketExists | None = None,
     disk_usage: DiskUsage | None = None,
     workspace_id_lookup: WorkspaceIdLookup | None = None,
+    strict_providers: Iterable[str] | None = None,
+    provider_environ: Mapping[str, str] | None = None,
+    provider_http_get: ProviderHttpGet | None = None,
 ) -> dict[str, object]:
     """Collect service dependency status without requiring Docker in tests."""
 
@@ -133,9 +138,26 @@ async def collect_service_status(
     workspace_lookup_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
         _await_workspace_view()
     )
+    provider_task: asyncio.Task[dict[str, Any]] = asyncio.create_task(
+        asyncio.to_thread(
+            collect_agent_readiness,
+            settings,
+            environ=provider_environ,
+            strict_providers=strict_providers,
+            run_subprocess=resolved_run,
+            http_get=provider_http_get,
+        )
+    )
 
     try:
-        api_check, db_check, docker_check, image_check, disk_check = await asyncio.gather(
+        (
+            api_check,
+            db_check,
+            docker_check,
+            image_check,
+            disk_check,
+            agent_readiness,
+        ) = await asyncio.gather(
             _check_api(settings, resolved_api_get),
             resolved_db_probe(settings.database_url),
             asyncio.to_thread(_check_docker, settings, resolved_run, resolved_socket_exists),
@@ -146,11 +168,12 @@ async def collect_service_status(
                 min_free_bytes=settings.min_free_disk_bytes,
                 disk_usage=disk_usage,
             ),
+            provider_task,
         )
         ps_result = await ps_task
         workspace_view = await workspace_lookup_task
     finally:
-        for pending in (ps_task, workspace_lookup_task):
+        for pending in (ps_task, workspace_lookup_task, provider_task):
             if not pending.done():
                 pending.cancel()
             with contextlib.suppress(BaseException):
@@ -164,11 +187,15 @@ async def collect_service_status(
         "disk": disk_check.to_dict(),
         "orphan_workspaces": orphan_check,
     }
-    overall_ok = all(bool(check["ok"]) for check in checks.values())
+    overall_ok = (
+        all(bool(check["ok"]) for check in checks.values())
+        and agent_readiness["status"] == "ok"
+    )
     return {
         "service": settings.service_name,
         "status": "ok" if overall_ok else "fail",
         "checks": checks,
+        "agent_readiness": agent_readiness,
     }
 
 
