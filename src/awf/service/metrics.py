@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import func, select
@@ -20,6 +20,7 @@ MAX_SUMMARY_WINDOW_HOURS = 168
 DEFAULT_FAILURE_EXAMPLE_LIMIT = 5
 MIN_FAILURE_EXAMPLE_LIMIT = 1
 MAX_FAILURE_EXAMPLE_LIMIT = 25
+DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT = 5
 UNKNOWN_FAILURE_REASON = "unknown"
 
 TERMINAL_WORKSPACE_STATUSES = frozenset(
@@ -100,6 +101,17 @@ class FailedWorkspaceExample:
 
 
 @dataclass(frozen=True)
+class RootCauseCluster:
+    agent: str
+    agent_model: str | None
+    failure_reason: str
+    likely_cause: str
+    actionable_next_action: str
+    count: int
+    sample_workspace_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class FailureAnalysisSummary:
     generated_at: datetime
     window_start: datetime
@@ -107,6 +119,7 @@ class FailureAnalysisSummary:
     total_failed_workspaces: int
     failure_groups: list[FailureReasonGroup]
     latest_examples: list[FailedWorkspaceExample]
+    root_cause_clusters: list[RootCauseCluster] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -353,6 +366,7 @@ async def summarize_failure_analysis_for_session(
         window_start=window_start,
         limit=failure_example_limit,
     )
+    clusters = await _cluster_root_causes(session, window_start=window_start)
 
     return FailureAnalysisSummary(
         generated_at=generated_at,
@@ -361,7 +375,75 @@ async def summarize_failure_analysis_for_session(
         total_failed_workspaces=sum(reason_counts.values()),
         failure_groups=_failure_reason_groups(reason_counts),
         latest_examples=latest_examples,
+        root_cause_clusters=clusters,
     )
+
+
+async def _cluster_root_causes(session: AsyncSession, window_start: datetime) -> list[RootCauseCluster]:
+    stmt = select(
+        Workspace.id,
+        Workspace.agent,
+        Workspace.task_policy,
+        Workspace.failure_reason,
+        Workspace.failure_message,
+    ).where(
+        Workspace.status == WorkspaceStatus.failed.value,
+        Workspace.updated_at >= window_start,
+    ).order_by(
+        Workspace.updated_at.desc(),
+        Workspace.id,
+    )
+    result = await session.execute(stmt)
+    rows = result.all()
+
+    clusters: dict[tuple[str, str | None, str, str, str], list[str]] = {}
+
+    for row in rows:
+        agent = row.agent or "unknown"
+        agent_model = row.task_policy.get("agent_model") if row.task_policy else None
+        reason = row.failure_reason or UNKNOWN_FAILURE_REASON
+        msg = row.failure_message or ""
+
+        likely_cause = "Unknown Validation Failure"
+        action = "Review validation logs"
+
+        if "AGENT_AUTH_FAILED" in msg:
+            likely_cause = "Agent Auth Failed"
+            action = "Check agent credentials"
+        elif "GitHub auth/PR creation failed" in msg:
+            likely_cause = "GitHub Transient/Auth Error"
+            action = "Check GitHub App token or retry"
+        elif "model not found" in msg or "404" in msg:
+            likely_cause = "Model Not Found / 404"
+            action = "Verify model configuration or availability"
+        elif "missing managed worktree during fix loop" in msg:
+            likely_cause = "Missing Managed Worktree"
+            action = "Review fix loop configuration or git identity"
+        elif "coverage threshold failure" in msg:
+            likely_cause = "Coverage Threshold Failure"
+            action = "Update tests to improve coverage or adjust baseline"
+        elif "SyntaxError" in msg or "ImportError" in msg:
+            likely_cause = "Syntax or Import Error"
+            action = "Fix syntax/import issues in generated code"
+        elif reason == FailureReason.agent_failure.value:
+            likely_cause = "Unknown Agent Failure"
+            action = "Review agent logs"
+
+        key = (agent, agent_model, reason, likely_cause, action)
+        clusters.setdefault(key, []).append(row.id)
+
+    return [
+        RootCauseCluster(
+            agent=k[0],
+            agent_model=k[1],
+            failure_reason=k[2],
+            likely_cause=k[3],
+            actionable_next_action=k[4],
+            count=len(wids),
+            sample_workspace_ids=tuple(wids[:DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT]),
+        )
+        for k, wids in clusters.items()
+    ]
 
 
 async def summarize_resource_saturation(

@@ -88,6 +88,18 @@ class FailedWorkspaceExampleResponse(BaseModel):
     updated_at: datetime
 
 
+class RootCauseClusterResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    agent: str
+    agent_model: str | None
+    failure_reason: str
+    likely_cause: str
+    actionable_next_action: str
+    count: int
+    sample_workspace_ids: list[str]
+
+
 class FailureAnalysisSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -103,6 +115,10 @@ class FailureAnalysisSummaryResponse(BaseModel):
     )
     latest_examples: list[FailedWorkspaceExampleResponse] = Field(
         description="Most recently updated failed workspaces in the requested window.",
+    )
+    root_cause_clusters: list[RootCauseClusterResponse] = Field(
+        default_factory=list,
+        description="Identified root cause clusters from failure signals.",
     )
 
 
