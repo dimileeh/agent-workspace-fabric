@@ -170,6 +170,24 @@ async def test_dispatch_ready_executions_respects_limit_and_existing_tasks(
 
 
 @pytest.mark.unit
+async def test_dispatch_monitor_resumes_respects_limit_and_existing_tasks(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    worker = _worker(factory)
+    existing = asyncio.create_task(asyncio.sleep(0))
+    worker._execution_tasks["ws_existing"] = existing
+
+    dispatched = worker._dispatch_monitor_resumes(
+        ["ws_existing", "ws_monitor", "ws_extra"],
+        limit=1,
+    )
+    await worker.wait_for_execution_tasks()
+
+    assert dispatched == {"ws_monitor"}
+    assert worker._execution_tasks == {}
+
+
+@pytest.mark.unit
 async def test_claim_monitoring_pr_ids_respects_limit_and_running_tasks(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -219,6 +237,74 @@ async def test_claimed_execution_releases_claim_after_executor_exception(
         assert ws is not None
         assert ws.execution_claimed_by is None
         assert ws.execution_claim_expires_at is None
+
+
+@pytest.mark.unit
+async def test_claimed_monitor_resume_releases_claim_after_executor_exception(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _seed_status(factory, WorkspaceStatus.monitoring_pr, title="monitor")
+    executor = _RecordingExecutor(fail=True)
+    worker = _worker(factory, executor=executor)
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        ws.monitor_claimed_by = worker._worker_id
+        ws.monitor_claim_expires_at = datetime.now(UTC) + timedelta(seconds=30)
+        await s.commit()
+
+    await worker._safely_resume_claimed_pr_monitor(workspace_id)
+
+    assert executor.resumed == [workspace_id]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.monitor_claimed_by is None
+        assert ws.monitor_claim_expires_at is None
+
+
+@pytest.mark.unit
+async def test_refresh_helpers_extend_worker_claims(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    execution_id = await _seed_status(factory, WorkspaceStatus.running, title="execution")
+    monitor_id = await _seed_status(factory, WorkspaceStatus.monitoring_pr, title="monitor")
+    worker = _worker(factory)
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        execution = await repo.get(execution_id)
+        monitor = await repo.get(monitor_id)
+        assert execution is not None
+        assert monitor is not None
+        execution.execution_claimed_by = worker._worker_id
+        execution.execution_claim_expires_at = datetime.now(UTC) + timedelta(seconds=1)
+        monitor.monitor_claimed_by = worker._worker_id
+        monitor.monitor_claim_expires_at = datetime.now(UTC) + timedelta(seconds=1)
+        await s.commit()
+
+    assert await worker._refresh_execution_claim(execution_id) is True
+    assert await worker._refresh_monitoring_pr_claim(monitor_id) is True
+
+    async with factory() as s:
+        execution = await WorkspaceRepository(s).get(execution_id)
+        monitor = await WorkspaceRepository(s).get(monitor_id)
+        assert execution is not None and execution.execution_claimed_by == worker._worker_id
+        assert monitor is not None and monitor.monitor_claimed_by == worker._worker_id
+        assert execution.execution_claim_expires_at is not None
+        assert monitor.monitor_claim_expires_at is not None
+
+
+@pytest.mark.unit
+async def test_release_helpers_swallow_session_failures() -> None:
+    worker = ControlWorker(
+        session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+        provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+        config=WorkerConfig(),
+    )
+
+    await worker._release_execution_claim("ws_missing")
+    await worker._release_monitoring_pr_claim("ws_missing")
 
 
 @pytest.mark.unit

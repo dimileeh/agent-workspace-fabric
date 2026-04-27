@@ -12,11 +12,14 @@ from awf.control.executor import (
     _call_pr_monitor_factory,
     _coverage_preserves_below_threshold_baseline,
     _failure_reason_for_phase,
+    _read_text_if_present,
     _validation_failure_message,
+    _validation_run_command_records,
     _validation_run_coverage_metadata,
     _validation_run_log_stream_refs,
+    _validation_tier_for_workspace,
 )
-from awf.db.enums import FailureReason
+from awf.db.enums import FailureReason, TaskClass
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -96,6 +99,69 @@ def test_validation_run_log_stream_refs_preserve_only_string_stream_ids() -> Non
             {"stdout": None, "stderr": None},
         ]
     }
+
+
+@pytest.mark.unit
+def test_validation_run_command_records_include_healthchecks_and_coverage() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records",
+            "phases": {
+                "post_agent": ["ruff format --check"],
+                "validate": ["pytest -q"],
+            },
+            "validation": {
+                "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+                "coverage": {"command": "pytest --cov=awf --cov-report=term"},
+            },
+        }
+    )
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("post_agent", "validate"),
+        run_healthchecks=True,
+    )
+
+    assert [(record["phase"], record["command_index"]) for record in records] == [
+        ("healthcheck", 1),
+        ("post_agent", 1),
+        ("validate", 1),
+        ("coverage", 1),
+    ]
+    assert records[-1]["stream_ids"] == {
+        "stdout": "validation.01_coverage.stdout",
+        "stderr": "validation.01_coverage.stderr",
+    }
+
+
+@pytest.mark.unit
+def test_validation_tier_for_workspace_uses_task_class_floor() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {"name": "tier", "validation": {"requested_tier": 1}}
+    )
+
+    assert (
+        _validation_tier_for_workspace(
+            SimpleNamespace(task_class=TaskClass.migration_task.value),  # type: ignore[arg-type]
+            profile,
+        )
+        == 3
+    )
+    assert (
+        _validation_tier_for_workspace(
+            SimpleNamespace(task_class=TaskClass.refactor_task.value),  # type: ignore[arg-type]
+            profile,
+        )
+        == 2
+    )
+    assert (
+        _validation_tier_for_workspace(
+            SimpleNamespace(task_class=None),  # type: ignore[arg-type]
+            profile,
+        )
+        == 1
+    )
 
 
 @pytest.mark.unit
@@ -190,6 +256,35 @@ def test_validation_failure_message_carries_coverage_context(tmp_path: Path) -> 
             )
         )
     )
+    assert (
+        _validation_failure_message(
+            ValidationResult(
+                coverage=_coverage(
+                    tmp_path,
+                    percent=None,
+                    minimum=99,
+                    reason_code="COVERAGE_NOT_FOUND",
+                )
+            )
+        )
+        == "validation failed: coverage output was not found"
+    )
+    assert _validation_failure_message(
+        ValidationResult(commands=[_command_result(tmp_path)])
+    ) == "validation failed: pytest --cov"
+
+
+@pytest.mark.unit
+def test_read_text_if_present_handles_empty_missing_and_present_files(tmp_path: Path) -> None:
+    missing = tmp_path / "missing.txt"
+    empty = tmp_path / "empty.txt"
+    present = tmp_path / "present.txt"
+    empty.write_text(" \n", encoding="utf-8")
+    present.write_text(" useful output \n", encoding="utf-8")
+
+    assert _read_text_if_present(missing) is None
+    assert _read_text_if_present(empty) is None
+    assert _read_text_if_present(present) == "useful output"
 
 
 @pytest.mark.unit

@@ -10,9 +10,10 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.github_client import RepoRef
 from awf.db.base import Base
 from awf.db.enums import OperationType, TaskClass, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import OperationRepository, WorkspaceEventCreate, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import (
     CheckState,
@@ -69,6 +70,12 @@ def _status_for_helpers(
         merge_state_status=MergeStateStatus.CLEAN,
         checks=checks,
     )
+
+
+class _FailingLogSink:
+    async def write(self, data: str) -> None:
+        del data
+        raise RuntimeError("log sink unavailable")
 
 
 async def _mark_refactor_task(
@@ -157,6 +164,87 @@ async def test_stale_auto_merge_dispatches_validation_recovery(
             {"source": "pr_monitor", "reason": "validation_insufficient_tier"},
         )
     ]
+
+
+@pytest.mark.unit
+async def test_best_effort_monitor_log_and_missing_workspace_event_append_do_not_raise(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._write_monitor_log(_FailingLogSink(), {"event": "monitor.test"})  # type: ignore[arg-type]
+    await runner._append_workspace_events(
+        workspace_id="ws_missing",
+        events=[
+            WorkspaceEventCreate(
+                event_type="workspace.test",
+                reason_code="TEST",
+                payload={"ok": True},
+            )
+        ],
+    )
+
+
+@pytest.mark.unit
+async def test_post_human_notification_dedup_skips_github_call(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    status = _status_for_helpers()
+    state = MonitorState(threads_addressed_ids={"__awf_notify__:abc123:manual": "notified"})
+
+    await runner._post_human_notification_once(
+        repo=RepoRef(owner="example", name="repo"),
+        pr_number=42,
+        status=status,
+        state=state,
+        blocker_reason="manual",
+    )
+
+    assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_defer_signal_write_failure_is_best_effort(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    artifact_file = tmp_path / "artifacts-file"
+    artifact_file.write_text("not a directory", encoding="utf-8")
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=artifact_file,
+    )
+
+    runner._write_defer_signal(
+        workspace_id="ws_defer",
+        pr_number=42,
+        terminal_action="Abort",
+        merged=False,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+    )
+
+    assert artifact_file.read_text(encoding="utf-8") == "not a directory"
 
 
 @pytest.mark.unit
