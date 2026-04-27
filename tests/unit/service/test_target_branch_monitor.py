@@ -756,6 +756,53 @@ class TestGitCheckoutTargetBranchStateProvider:
                 base_sha="a" * 40,
             )
 
+    @pytest.mark.unit
+    async def test_fetch_caches_head_sha_across_calls(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(stdout="c" * 40 + "\n")
+        runner.queue_result(stdout="3\n")
+        runner.queue_result(stdout="a.py\n")
+        runner.queue_result(stdout="5\n")
+        runner.queue_result(stdout="b.py\n")
+
+        provider = GitCheckoutTargetBranchStateProvider(
+            runner=runner,
+            checkout_path=tmp_path,
+        )
+
+        first = await provider.fetch(
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            base_sha="a" * 40,
+        )
+        second = await provider.fetch(
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            base_sha="b" * 40,
+        )
+
+        assert first.head_sha == "c" * 40
+        assert second.head_sha == "c" * 40
+        assert len(runner.calls) == 5
+        assert runner.calls[0].args == [
+            "git", "-C", str(tmp_path), "rev-parse", "HEAD"
+        ]
+        assert runner.calls[1].args == [
+            "git", "-C", str(tmp_path), "rev-list", "--count", "a" * 40 + "..HEAD"
+        ]
+        assert runner.calls[2].args == [
+            "git", "-C", str(tmp_path), "diff", "--name-only", "a" * 40 + "..HEAD"
+        ]
+        assert runner.calls[3].args == [
+            "git", "-C", str(tmp_path), "rev-list", "--count", "b" * 40 + "..HEAD"
+        ]
+        assert runner.calls[4].args == [
+            "git", "-C", str(tmp_path), "diff", "--name-only", "b" * 40 + "..HEAD"
+        ]
+
 
 class TestCandidateRefreshSummary:
     @pytest.mark.unit

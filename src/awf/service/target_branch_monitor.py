@@ -315,6 +315,7 @@ class GitCheckoutTargetBranchStateProvider(TargetBranchStateProvider):
     ) -> None:
         self._runner = runner
         self._checkout_path = checkout_path
+        self._head_sha: str | None = None
 
     async def fetch(
         self,
@@ -323,11 +324,13 @@ class GitCheckoutTargetBranchStateProvider(TargetBranchStateProvider):
         branch: str,
         base_sha: str,
     ) -> TargetBranchState:
-        head_result = await self._run_git(
-            ["rev-parse", "HEAD"],
-            operation="target_branch_state.rev_parse",
-        )
-        head_sha = head_result.stdout.strip()
+        if self._head_sha is None:
+            head_result = await self._run_git(
+                ["rev-parse", "HEAD"],
+                operation="target_branch_state.rev_parse",
+            )
+            self._head_sha = head_result.stdout.strip()
+        head_sha = self._head_sha
 
         count_result = await self._run_git(
             ["rev-list", "--count", f"{base_sha}..HEAD"],
