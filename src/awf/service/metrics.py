@@ -430,9 +430,7 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
             action = "Review agent logs"
 
         key = (agent, agent_model, reason, likely_cause, action)
-        if key not in clusters:
-            clusters[key] = []
-        clusters[key].append(row.id)
+        clusters.setdefault(key, []).append(row.id)
 
     return [
         RootCauseCluster(
