@@ -29,6 +29,7 @@ from awf.common.commands import (
 from awf.common.compose_exec import (
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
+    cleanup_compose_exec_invocation_after_cancellation,
 )
 from awf.common.logging import get_logger
 from awf.profiles.models import ProfileCommand, ProfileCoverage, WorkspaceProfile
@@ -509,12 +510,10 @@ class ValidationRunner:
                 if sinks is not None:
                     await sinks.write_stderr(result.stderr)
             except asyncio.CancelledError:
-                await asyncio.shield(
-                    cleanup_compose_exec_invocation(
-                        self._runner,
-                        invocation,
-                        workspace_id=artifacts_dir.name,
-                    )
+                await cleanup_compose_exec_invocation_after_cancellation(
+                    self._runner,
+                    invocation,
+                    workspace_id=artifacts_dir.name,
                 )
                 raise
             if timed_out or _compose_exec_timed_out(result):

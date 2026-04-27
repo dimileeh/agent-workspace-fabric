@@ -24,6 +24,7 @@ from awf.common.commands import (
 from awf.common.compose_exec import (
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
+    cleanup_compose_exec_invocation_after_cancellation,
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
@@ -245,12 +246,10 @@ class AgentAdapter(ABC):
                         await sinks.write_stdout(result.stdout)
                         await sinks.write_stderr(result.stderr)
             except asyncio.CancelledError:
-                await asyncio.shield(
-                    cleanup_compose_exec_invocation(
-                        self._runner,
-                        invocation,
-                        workspace_id=workspace_id,
-                    )
+                await cleanup_compose_exec_invocation_after_cancellation(
+                    self._runner,
+                    invocation,
+                    workspace_id=workspace_id,
                 )
                 raise
         finally:

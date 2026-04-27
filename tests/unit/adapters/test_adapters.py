@@ -12,6 +12,7 @@ argv it's handed and returns canned output. We verify:
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -148,6 +149,36 @@ class _CancellingStreamingRunner:
         del input_bytes, cwd
         self.cleanup_calls.append(list(args))
         assert "awf-cleanup" in args
+        return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
+
+    async def run_streaming(
+        self,
+        _args: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        raise asyncio.CancelledError
+
+
+class _SlowCleanupAfterCancelRunner:
+    def __init__(self) -> None:
+        self.cleanup_started = asyncio.Event()
+        self.allow_cleanup = asyncio.Event()
+        self.cleanup_finished = asyncio.Event()
+        self.cleanup_calls: list[list[str]] = []
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        del input_bytes, cwd
+        self.cleanup_calls.append(list(args))
+        assert "awf-cleanup" in args
+        self.cleanup_started.set()
+        await self.allow_cleanup.wait()
+        self.cleanup_finished.set()
         return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
 
     async def run_streaming(
@@ -405,6 +436,32 @@ class TestCodexAdapter:
 
         assert len(runner.cleanup_calls) == 1
         assert runner.cleanup_calls[0][-2] == "awf-cleanup"
+
+    @pytest.mark.unit
+    async def test_cancelled_agent_run_waits_for_cleanup_under_second_cancellation(self) -> None:
+        runner = _SlowCleanupAfterCancelRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        task = asyncio.create_task(
+            adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cancelled_agent",
+            )
+        )
+        await runner.cleanup_started.wait()
+
+        task.cancel()
+        await asyncio.sleep(0)
+
+        try:
+            assert not task.done()
+        finally:
+            runner.allow_cleanup.set()
+            await runner.cleanup_finished.wait()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     @pytest.mark.unit
     async def test_run_only_runner_falls_back_and_still_writes_log_streams(self) -> None:

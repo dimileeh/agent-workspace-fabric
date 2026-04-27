@@ -8,6 +8,7 @@ container commands with an invocation id and uses that id for targeted cleanup.
 
 from __future__ import annotations
 
+import asyncio
 import re
 import uuid
 from dataclasses import dataclass
@@ -181,6 +182,29 @@ async def cleanup_compose_exec_invocation(
         message=stderr,
         cleanup_result=result,
     )
+
+
+async def cleanup_compose_exec_invocation_after_cancellation(
+    runner: AsyncCommandRunner,
+    invocation: TrackedComposeExec,
+    *,
+    workspace_id: str | None = None,
+) -> CommandResult:
+    """Run cleanup to completion even if the caller is cancelled again."""
+
+    cleanup_task = asyncio.create_task(
+        cleanup_compose_exec_invocation(
+            runner,
+            invocation,
+            workspace_id=workspace_id,
+        )
+    )
+    while True:
+        try:
+            return await asyncio.shield(cleanup_task)
+        except asyncio.CancelledError:
+            if cleanup_task.done():
+                return cleanup_task.result()
 
 
 def cleanup_failure_message(exc: ComposeExecCleanupError) -> str:
