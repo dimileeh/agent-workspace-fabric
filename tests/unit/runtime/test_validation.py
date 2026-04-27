@@ -2,13 +2,23 @@
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.profiles.models import WorkspaceProfile
-from awf.runtime.validation import ValidationRunner
+from awf.runtime.logs import LogStore
+from awf.runtime.validation import (
+    ValidationCommandResult,
+    ValidationCoverageResult,
+    ValidationResult,
+    ValidationRunner,
+    _coverage_reason_code,
+    _coverage_status,
+    _parse_python_coverage_percent_from_files,
+)
 
 _COMPOSE_PROJECT = "awf_ws_val"
 _COMPOSE_FILE = Path("/fake/compose.yml")
@@ -133,6 +143,74 @@ class TestFailureStopsEarly:
 
 
 class TestCoverageEnforcement:
+    @pytest.mark.unit
+    async def test_run_profile_coverage_returns_none_when_not_requested(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        _fake, val = runner
+        profile = WorkspaceProfile.model_validate({"name": "no-coverage"})
+
+        result = await val.run_profile_coverage(
+            workspace_id="ws_no_coverage",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+        )
+
+        assert result is None
+
+    @pytest.mark.unit
+    async def test_unsupported_coverage_provider_records_policy_status(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        _fake, val = runner
+        unenforced = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-go-reported",
+                "validation": {
+                    "coverage": {
+                        "provider": "go",
+                        "minimum_percent": 80,
+                        "enforce": False,
+                    }
+                },
+            }
+        )
+        enforced = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-go-failed",
+                "validation": {
+                    "coverage": {
+                        "provider": "go",
+                        "minimum_percent": 80,
+                        "enforce": True,
+                    }
+                },
+            }
+        )
+
+        reported = await val.run_profile_coverage(
+            workspace_id="ws_go_reported",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=unenforced,
+        )
+        failed = await val.run_profile_coverage(
+            workspace_id="ws_go_failed",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=enforced,
+        )
+
+        assert reported is not None
+        assert reported.status == "unsupported"
+        assert reported.reason_code == "COVERAGE_PROVIDER_UNSUPPORTED"
+        assert reported.ok is True
+        assert failed is not None
+        assert failed.status == "failed"
+        assert failed.reason_code == "COVERAGE_PROVIDER_UNSUPPORTED"
+        assert failed.ok is False
+
     @pytest.mark.unit
     async def test_runs_configured_python_coverage_command_and_records_percent(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
@@ -311,6 +389,64 @@ class TestCoverageEnforcement:
         assert result.command_result is not None
         assert result.command_result.stdout_path.name == "01_baseline_coverage.stdout"
 
+    @pytest.mark.unit
+    def test_python_coverage_parser_prefers_total_line_over_summary(
+        self, tmp_path: Path
+    ) -> None:
+        coverage_output = tmp_path / "coverage.txt"
+        coverage_output.write_text(
+            "coverage summary: 91%\n"
+            "Name        Stmts   Miss  Cover\n"
+            "-------------------------------\n"
+            "TOTAL         100      2    98%\n",
+            encoding="utf-8",
+        )
+        summary_only = tmp_path / "summary.txt"
+        summary_only.write_text("Total coverage: 87.5%\n", encoding="utf-8")
+        no_coverage = tmp_path / "none.txt"
+        no_coverage.write_text("tests passed\n", encoding="utf-8")
+
+        assert _parse_python_coverage_percent_from_files([coverage_output]) == 98
+        assert _parse_python_coverage_percent_from_files([summary_only]) == 87.5
+        assert _parse_python_coverage_percent_from_files([no_coverage]) is None
+
+    @pytest.mark.unit
+    def test_coverage_reason_and_status_matrix(self, tmp_path: Path) -> None:
+        command_ok = ValidationCommandResult(
+            command="pytest --cov",
+            returncode=0,
+            duration_seconds=0,
+            stdout_path=tmp_path / "ok.out",
+            stderr_path=tmp_path / "ok.err",
+        )
+        command_failed = ValidationCommandResult(
+            command="pytest --cov",
+            returncode=1,
+            duration_seconds=0,
+            stdout_path=tmp_path / "fail.out",
+            stderr_path=tmp_path / "fail.err",
+        )
+
+        assert (
+            _coverage_reason_code(percent=None, minimum_percent=90, command_result=command_ok)
+            == "COVERAGE_NOT_FOUND"
+        )
+        assert (
+            _coverage_reason_code(percent=89.9, minimum_percent=90, command_result=command_ok)
+            == "COVERAGE_BELOW_THRESHOLD"
+        )
+        assert (
+            _coverage_reason_code(percent=None, minimum_percent=90, command_result=command_failed)
+            == "COVERAGE_COMMAND_FAILED"
+        )
+        assert (
+            _coverage_reason_code(percent=95, minimum_percent=90, command_result=command_failed)
+            == "COVERAGE_COMMAND_FAILED"
+        )
+        assert _coverage_status(reason_code="COVERAGE_OK", enforce=True) == "passed"
+        assert _coverage_status(reason_code="COVERAGE_NOT_FOUND", enforce=False) == "reported"
+        assert _coverage_status(reason_code="COVERAGE_NOT_FOUND", enforce=True) == "failed"
+
 
 class TestMigration:
     @pytest.mark.unit
@@ -422,3 +558,129 @@ class TestDockerInvocation:
         # is embedded inside the full sh -lc payload (last argument).
         assert "sh" in args and "-lc" in args
         assert "echo 'hello | world'" in args[-1]
+
+
+class _SleepingRunner:
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        del args, input_bytes, cwd
+
+        await asyncio.sleep(60)
+        return CommandResult(returncode=0, stdout="late", stderr="")
+
+
+class TestValidationResultHelpers:
+    @pytest.mark.unit
+    def test_first_failure_prefers_migration_then_commands_then_coverage(
+        self, tmp_path: Path
+    ) -> None:
+        migration_failure = ValidationCommandResult(
+            command="alembic upgrade head",
+            returncode=1,
+            duration_seconds=0,
+            stdout_path=tmp_path / "migration.out",
+            stderr_path=tmp_path / "migration.err",
+        )
+        command_failure = ValidationCommandResult(
+            command="pytest -q",
+            returncode=1,
+            duration_seconds=0,
+            stdout_path=tmp_path / "pytest.out",
+            stderr_path=tmp_path / "pytest.err",
+        )
+        coverage_command = ValidationCommandResult(
+            command="pytest --cov",
+            returncode=0,
+            duration_seconds=0,
+            stdout_path=tmp_path / "coverage.out",
+            stderr_path=tmp_path / "coverage.err",
+            policy_failed=True,
+        )
+        coverage_failure = ValidationCoverageResult(
+            provider="python",
+            percent=88,
+            minimum_percent=90,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_BELOW_THRESHOLD",
+            command_result=coverage_command,
+        )
+
+        assert (
+            ValidationResult(
+                migration=migration_failure,
+                commands=[command_failure],
+                coverage=coverage_failure,
+            ).first_failure
+            is migration_failure
+        )
+        assert (
+            ValidationResult(commands=[command_failure], coverage=coverage_failure).first_failure
+            is command_failure
+        )
+        assert ValidationResult(commands=[], coverage=coverage_failure).first_failure is coverage_command
+
+    @pytest.mark.unit
+    async def test_exec_streams_to_log_store_and_artifacts(self, tmp_path: Path) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="out\n", stderr="err\n")
+        log_store = LogStore(root=tmp_path / "logs")
+        val = ValidationRunner(
+            runner=fake,
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=log_store,
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_stream"
+        artifacts_dir.mkdir(parents=True)
+
+        result = await val._exec(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            cli_args=["sh", "-lc", "pytest -q"],
+            label="01_validate",
+            artifacts_dir=artifacts_dir,
+            phase="validate",
+        )
+
+        assert result.ok
+        assert result.stdout_path.read_text(encoding="utf-8") == "out\n"
+        assert result.stderr_path.read_text(encoding="utf-8") == "err\n"
+        assert (tmp_path / "logs" / "ws_stream" / "validation.01_validate.stdout.log").read_text(
+            encoding="utf-8"
+        ) == "out\n"
+        assert (tmp_path / "logs" / "ws_stream" / "validation.01_validate.stderr.log").read_text(
+            encoding="utf-8"
+        ) == "err\n"
+
+    @pytest.mark.unit
+    async def test_exec_timeout_writes_artifacts_and_log_sink(self, tmp_path: Path) -> None:
+        log_store = LogStore(root=tmp_path / "logs")
+        val = ValidationRunner(
+            runner=_SleepingRunner(),
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=log_store,
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_timeout"
+        artifacts_dir.mkdir(parents=True)
+
+        result = await val._exec(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            cli_args=["pytest", "-q"],
+            label="01_timeout",
+            artifacts_dir=artifacts_dir,
+            phase="validate",
+            timeout_seconds=0.01,
+        )
+
+        assert result.returncode == 124
+        assert result.reason_code == "PHASE_TIMEOUT"
+        assert result.stderr_path.read_text(encoding="utf-8") == "command timed out after 0.01s"
+        assert (
+            tmp_path / "logs" / "ws_timeout" / "validation.01_timeout.stderr.log"
+        ).read_text(encoding="utf-8") == "command timed out after 0.01s"

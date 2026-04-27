@@ -223,6 +223,72 @@ async def test_log_broadcaster_delivers_workspace_frames() -> None:
 
 
 @pytest.mark.unit
+async def test_log_broadcaster_removes_empty_workspace_bucket() -> None:
+    broadcaster = LogBroadcaster()
+
+    async with broadcaster.subscribe("ws_cleanup") as queue:
+        assert queue in broadcaster._subscribers["ws_cleanup"]
+
+    assert "ws_cleanup" not in broadcaster._subscribers
+
+
+@pytest.mark.unit
+async def test_open_stream_without_session_factory_sanitizes_path(tmp_path: Path) -> None:
+    store = LogStore(root=tmp_path)
+
+    sink = await store.open_stream(
+        workspace_id="ws_logs",
+        stream_id="agent/stdout:live",
+        source="agent",
+        name="Agent stdout",
+        kind="stdout",
+    )
+
+    assert sink.path == tmp_path / "ws_logs" / "agent_stdout_live.log"
+    assert sink.path.exists()
+
+
+@pytest.mark.unit
+async def test_log_store_read_clamps_offsets_and_zero_limits(tmp_path: Path) -> None:
+    path = tmp_path / "ws" / "agent.log"
+    path.parent.mkdir()
+    path.write_text("abcdef", encoding="utf-8")
+    store = LogStore(root=tmp_path)
+
+    data, next_offset, eof = await store.read(path=path, offset=-10, limit_bytes=2)
+    assert (data, next_offset, eof) == ("ab", 2, False)
+
+    data, next_offset, eof = await store.read(path=path, offset=99, limit_bytes=4)
+    assert (data, next_offset, eof) == ("", 6, True)
+
+    data, next_offset, eof = await store.read(path=path, offset=2, limit_bytes=0)
+    assert (data, next_offset, eof) == ("", 2, False)
+
+
+@pytest.mark.unit
+async def test_log_sink_empty_write_and_close_without_session_are_noops(tmp_path: Path) -> None:
+    path = tmp_path / "workspace.log"
+    path.write_text("seed", encoding="utf-8")
+    broadcaster = LogBroadcaster()
+    sink = WorkspaceLogSink(
+        workspace_id="ws_empty",
+        stream_id="agent.stdout",
+        source="agent",
+        fd="stdout",
+        path=path,
+        session_factory=None,
+        broadcaster=broadcaster,
+    )
+
+    async with broadcaster.subscribe("ws_empty") as queue:
+        await sink.write("")
+        await sink.close()
+
+    assert path.read_text(encoding="utf-8") == "seed"
+    assert queue.empty()
+
+
+@pytest.mark.unit
 async def test_agent_and_validation_runners_create_indexed_log_streams(
     engine: AsyncEngine,
     tmp_path,
