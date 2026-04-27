@@ -565,7 +565,7 @@ class TestServiceStatusOrphanReporting:
         settings = object()
         monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
 
-        async def _collect(received: object) -> dict[str, object]:
+        async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
             assert received is settings
             return {
                 "service": "awf",

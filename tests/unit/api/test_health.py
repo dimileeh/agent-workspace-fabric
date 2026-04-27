@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -26,6 +27,22 @@ from awf import __version__
 from awf.api.app import configure_database, create_app
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.db.session import make_session_factory
+
+_PROVIDER_ENV_KEYS = (
+    "AWF_GITHUB_TOKEN",
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "ANTHROPIC_API_KEY",
+    "ANTHROPIC_AUTH_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN",
+    "GEMINI_API_KEY",
+    "GOOGLE_API_KEY",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+    "GOOGLE_CLOUD_ACCESS_TOKEN",
+    "OLLAMA_API_KEY",
+    "AWF_OPENCODE_OLLAMA_BASE_URL",
+    "OLLAMA_HOST",
+)
 
 # ---- /healthz ---------------------------------------------------------------
 
@@ -72,12 +89,23 @@ def _queue_all_ok(runner: FakeCommandRunner) -> None:
 
 
 @pytest.fixture
-async def ready_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[Any, AsyncClient]]:
+async def ready_app_and_client(
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> AsyncIterator[tuple[Any, AsyncClient]]:
     """App + client pair so tests can mutate ``app.state`` (inject command runner)."""
+    for key in _PROVIDER_ENV_KEYS:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("AWF_HOST_HOME", str(tmp_path / "home"))
+    health_route.get_settings.cache_clear()
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
-    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
-        yield app, c
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+            yield app, c
+    finally:
+        health_route.get_settings.cache_clear()
 
 
 # ---- /readyz: happy path ----------------------------------------------------
@@ -125,6 +153,49 @@ async def test_readyz_response_shape_matches_contract(
         assert check["ok"] is True, f"{name} should be ok"
         assert check["status"] == "ok"
         assert check.get("reason") is None
+    assert body["agent_readiness"]["status"] == "ok"
+    assert body["agent_readiness"]["providers"]["github"]["reason"] == (
+        "GITHUB_TOKEN_ENV_MISSING"
+    )
+
+
+@pytest.mark.unit
+async def test_readyz_provider_warnings_remain_200(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["status"] == "ok"
+    assert body["agent_readiness"]["status"] == "ok"
+    assert body["agent_readiness"]["providers"]["github"]["status"] == "warn"
+
+
+@pytest.mark.unit
+async def test_readyz_strict_github_provider_missing_auth_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz?provider=github")
+    body = response.json()
+
+    assert response.status_code == 503
+    assert body["status"] == "fail"
+    assert body["agent_readiness"]["status"] == "fail"
+    assert body["agent_readiness"]["providers"]["github"]["status"] == "fail"
+    assert body["agent_readiness"]["providers"]["github"]["reason"] == (
+        "GITHUB_TOKEN_ENV_MISSING"
+    )
 
 
 @pytest.mark.unit
