@@ -36,6 +36,8 @@ from awf.runtime.validation import (
     ValidationRunner,
 )
 
+from .executor_paths import _test_worktrees_root
+
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
@@ -224,13 +226,6 @@ async def _seed_ready_workspace(
         if create_worktree:
             (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
         return ws.id
-
-
-def _test_worktrees_root(factory: async_sessionmaker[AsyncSession]) -> Path:
-    bind = factory.kw["bind"]
-    database_path = Path(str(bind.url.database))
-    return database_path.parent / "work" / "worktrees"
-
 
 class TestHappyPath:
     @pytest.mark.unit

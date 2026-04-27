@@ -38,6 +38,8 @@ from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import ValidationResult, ValidationRunner
 
+from .executor_paths import _test_worktree_path, _test_worktrees_root
+
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
@@ -271,17 +273,6 @@ async def _seed_ready(
         if create_worktree:
             (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
         return ws.id
-
-
-def _test_worktrees_root(factory: async_sessionmaker[AsyncSession]) -> Path:
-    bind = factory.kw["bind"]
-    database_path = Path(str(bind.url.database))
-    return database_path.parent / "work" / "worktrees"
-
-
-def _test_worktree_path(factory: async_sessionmaker[AsyncSession], workspace_id: str) -> Path:
-    return _test_worktrees_root(factory) / workspace_id
-
 
 async def _seed_monitoring_pr(
     factory: async_sessionmaker[AsyncSession],
