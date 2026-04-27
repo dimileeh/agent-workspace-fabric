@@ -23,6 +23,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.health as health_route
+import awf.service.provider_readiness as provider_readiness
 from awf import __version__
 from awf.api.app import configure_database, create_app
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
@@ -196,6 +197,31 @@ async def test_readyz_strict_github_provider_missing_auth_returns_503(
     assert body["agent_readiness"]["providers"]["github"]["reason"] == (
         "GITHUB_TOKEN_ENV_MISSING"
     )
+
+
+@pytest.mark.unit
+async def test_readyz_reuses_validated_provider_names(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+    validation_calls: list[tuple[str, ...]] = []
+    original_validate = provider_readiness.validate_provider_names
+
+    def _count_validation(values: Any) -> set[provider_readiness.ProviderName]:
+        validation_calls.append(tuple(values))
+        return original_validate(values)
+
+    monkeypatch.setattr(health_route, "validate_provider_names", _count_validation)
+    monkeypatch.setattr(provider_readiness, "validate_provider_names", _count_validation)
+
+    response = await client.get("/readyz?provider=github")
+
+    assert response.status_code == 503
+    assert validation_calls == [("github",)]
 
 
 @pytest.mark.unit

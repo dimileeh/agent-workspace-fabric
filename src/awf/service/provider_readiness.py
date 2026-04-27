@@ -108,13 +108,23 @@ def collect_agent_readiness(
     *,
     environ: Mapping[str, str] | None = None,
     strict_providers: Iterable[str] | None = None,
+    validated_strict_providers: set[ProviderName] | None = None,
     run_subprocess: SubprocessRun | None = None,
     http_get: HttpGet | None = None,
 ) -> dict[str, Any]:
-    """Return redacted local-service readiness for agent provider credentials."""
+    """Return redacted local-service readiness for agent provider credentials.
+
+    ``strict_providers`` accepts raw operator input and is validated here.
+    ``validated_strict_providers`` is for callers that already validated the
+    names before entering a concurrent readiness fan-out.
+    """
 
     env = os.environ if environ is None else environ
-    strict = validate_provider_names(strict_providers or ())
+    strict = (
+        set(validated_strict_providers)
+        if validated_strict_providers is not None
+        else validate_provider_names(strict_providers or ())
+    )
     host_home = Path(settings.host_home or "~").expanduser()
     secrets = _secret_values(settings, env)
     resolved_run = run_subprocess or _run_subprocess

@@ -294,7 +294,7 @@ async def readyz(
         asyncio.to_thread(
             collect_agent_readiness,
             service_settings,
-            strict_providers=strict_providers,
+            validated_strict_providers=strict_providers,
         ),
     )
     checks = {
