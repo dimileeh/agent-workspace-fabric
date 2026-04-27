@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.base import Base
-from awf.db.enums import OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import (
@@ -382,3 +382,87 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
         # Only the seeded rebase op exists.
         ops = await OperationRepository(s).list_all(workspace_id=workspace_id)
         assert [op.type for op in ops] == [OperationType.rebase.value]
+
+
+@pytest.mark.unit
+async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A second dispatch must NOT create a duplicate pr_monitor op when
+    one is already active. Defends against a runner restart re-entering
+    the dispatch branch before the executor has finished the prior op.
+    """
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+
+    # Pre-seed an active (pending) pr_monitor recovery op so the runner
+    # finds it on entry to the dispatch block.
+    async with factory() as s:
+        await OperationRepository(s).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.validate,
+            payload={
+                "source": "pr_monitor",
+                "reason": "validation_insufficient_tier",
+                "recovery_mode": "validate_only",
+            },
+        )
+        await s.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=900,
+    )
+
+    # Pre-mark grace as elapsed so the dispatch block runs.
+    state = MonitorState(started_at=0.0)
+    state.mark_addressed(
+        _initial_review_grace_started_key(42),
+        f"{0.0:.6f}",
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_pr_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        # Workspace stays in monitoring_pr — the existing pending op is
+        # owned by an earlier dispatch that already transitioned (or is
+        # racing to transition); the duplicate-create guard MUST NOT
+        # transition again or it would corrupt state.
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        # Only the pre-seeded operation exists — no duplicate was created.
+        assert len(operations) == 1
+        assert operations[0].payload == {
+            "source": "pr_monitor",
+            "reason": "validation_insufficient_tier",
+            "recovery_mode": "validate_only",
+        }
+        assert operations[0].status == OperationStatus.pending.value
+        # No monitor.recovery_dispatched event fires the second time
+        # (the original dispatch already emitted it).
+        events = [e for e in ws.events if e.event_type == "monitor.recovery_dispatched"]
+        assert events == []

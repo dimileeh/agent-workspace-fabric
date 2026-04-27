@@ -45,7 +45,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
-from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.logs import LogStore, WorkspaceLogSink
@@ -758,6 +758,23 @@ class PullRequestMonitorRunner:
 
                     _ws = await WorkspaceRepository(s).get(workspace_id)
                     if _ws is not None:
+                        # Idempotency: if a pr_monitor recovery op is
+                        # already active for this workspace, skip the
+                        # dispatch so a runner restart cannot create a
+                        # duplicate row before the executor finishes
+                        # the prior one.
+                        active_recovery = any(
+                            op.status
+                            in (
+                                OperationStatus.pending.value,
+                                OperationStatus.running.value,
+                            )
+                            and isinstance(op.payload, dict)
+                            and op.payload.get("source") == "pr_monitor"
+                            for op in _ws.operations
+                        )
+                        if active_recovery:
+                            return True
                         await OperationRepository(s).create(
                             workspace_id=workspace_id,
                             operation_type=req_action or "validate",
