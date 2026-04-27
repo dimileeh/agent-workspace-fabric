@@ -600,7 +600,7 @@ def test_database_probe_and_workspace_lookup_read_sqlite_rows(tmp_path: Path) ->
             factory = make_session_factory(engine)
             async with factory() as session:
                 repo = WorkspaceRepository(session)
-                active = await repo.create(
+                await repo.create(
                     repo_url="git@github.com:example/active.git",
                     branch_base="main",
                     task_title="Active",
