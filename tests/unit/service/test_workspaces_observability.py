@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -27,7 +27,9 @@ from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.workspace_observability import (
     effective_agent_identity,
+    workspace_identity_usage_payload,
     workspace_lifecycle_summary,
+    workspace_observability_payload,
     workspace_usage_summary,
 )
 from awf.service.workspaces import (
@@ -704,6 +706,29 @@ def test_effective_agent_identity_prefers_explicit_requested_model() -> None:
     assert identity.effort_source == "default"
 
 
+@pytest.mark.unit
+def test_effective_agent_identity_prefers_explicit_effort_policy() -> None:
+    identity = effective_agent_identity(
+        agent=AgentRuntime.claude_code,
+        task_policy={"agent_effort": "max"},
+    )
+
+    assert identity.model == "claude-opus-4-7"
+    assert identity.model_source == "default"
+    assert identity.effort == "max"
+    assert identity.effort_source == "task_policy"
+
+
+@pytest.mark.unit
+def test_effective_agent_identity_returns_unavailable_for_unknown_agent() -> None:
+    identity = effective_agent_identity(agent="future_agent", task_policy=None)
+
+    assert identity.model is None
+    assert identity.model_source == "unavailable"
+    assert identity.effort is None
+    assert identity.effort_source == "unavailable"
+
+
 def _lifecycle_event(
     *,
     event_type: str,
@@ -869,6 +894,322 @@ def test_lifecycle_summary_marks_new_workspace_requested_active() -> None:
     assert stages["requested"].duration_seconds == 5
     assert stages["requested"].status == "active"
     assert stages["provisioning"].status == "pending"
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_ignores_malformed_created_and_non_state_events() -> None:
+    base = datetime(2026, 4, 27, 15, 0, tzinfo=UTC)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.requested,
+        created_at=base,
+        events=[
+            _lifecycle_event(
+                event_type="workspace.created",
+                occurred_at=base + timedelta(seconds=10),
+                new_state="not-a-workspace-state",
+            ),
+            _lifecycle_event(
+                event_type="workspace.log_attached",
+                occurred_at=base + timedelta(seconds=20),
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.provisioning.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=30),
+                old_state=None,
+                new_state=None,
+            ),
+        ],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=base + timedelta(seconds=45),
+        )
+    }
+
+    assert stages["requested"].started_at == base
+    assert stages["requested"].duration_seconds == 45
+    assert stages["requested"].status == "active"
+    assert stages["provisioning"].status == "pending"
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_closes_completed_stage_at_start_time() -> None:
+    base = datetime(2026, 4, 27, 16, 0, tzinfo=UTC)
+    completed_at = base + timedelta(seconds=90)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.completed,
+        created_at=base,
+        events=[
+            _lifecycle_event(
+                event_type="workspace.created",
+                occurred_at=base,
+                new_state=WorkspaceStatus.requested.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=10),
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.monitoring_pr.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=completed_at,
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.completed.value,
+            ),
+        ],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=completed_at + timedelta(seconds=30),
+        )
+    }
+
+    assert stages["completed"].started_at == completed_at
+    assert stages["completed"].ended_at == completed_at
+    assert stages["completed"].duration_seconds == 0
+    assert stages["completed"].status == "completed"
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_uses_latest_started_stage_for_malformed_terminal_event() -> None:
+    base = datetime(2026, 4, 27, 17, 0, tzinfo=UTC)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.failed,
+        created_at=base,
+        events=[
+            _lifecycle_event(
+                event_type="workspace.created",
+                occurred_at=base,
+                new_state=WorkspaceStatus.requested.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=10),
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.provisioning.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=20),
+                old_state="unknown_state",
+                new_state=WorkspaceStatus.failed.value,
+            ),
+        ],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=base + timedelta(seconds=40),
+        )
+    }
+
+    assert stages["provisioning"].started_at == base + timedelta(seconds=10)
+    assert stages["provisioning"].ended_at is None
+    assert stages["provisioning"].duration_seconds is None
+    assert stages["provisioning"].status == "completed"
+    assert stages["ready"].status == "terminal_skipped"
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_tolerates_repeated_and_inferred_transitions() -> None:
+    base = datetime(2026, 4, 27, 17, 30, tzinfo=UTC)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.running,
+        created_at=base,
+        events=[
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=10),
+                old_state=WorkspaceStatus.ready.value,
+                new_state=WorkspaceStatus.provisioning.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=20),
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.provisioning.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=30),
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.running.value,
+            ),
+        ],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=base + timedelta(seconds=45),
+        )
+    }
+
+    assert stages["ready"].started_at == base + timedelta(seconds=10)
+    assert stages["ready"].ended_at == base + timedelta(seconds=10)
+    assert stages["requested"].ended_at == base + timedelta(seconds=20)
+    assert stages["provisioning"].started_at == base + timedelta(seconds=10)
+    assert stages["running"].duration_seconds == 15
+    assert stages["running"].status == "active"
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_keeps_completed_stage_pending_without_completion_event() -> None:
+    base = datetime(2026, 4, 27, 17, 45, tzinfo=UTC)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.completed,
+        created_at=base,
+        events=[],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=base + timedelta(seconds=20),
+        )
+    }
+
+    assert stages["requested"].status == "completed"
+    assert stages["requested"].ended_at is None
+    assert stages["requested"].duration_seconds is None
+    assert stages["completed"].status == "pending"
+
+
+@pytest.mark.unit
+def test_lifecycle_terminal_fallback_prefers_latest_started_timestamp() -> None:
+    base = datetime(2026, 4, 27, 17, 50, tzinfo=UTC)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.failed,
+        created_at=base,
+        events=[
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=20),
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.validating.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=30),
+                old_state="unknown_state",
+                new_state=WorkspaceStatus.running.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=40),
+                old_state=None,
+                new_state=WorkspaceStatus.failed.value,
+            ),
+        ],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=base + timedelta(seconds=60),
+        )
+    }
+
+    assert stages["running"].started_at == base + timedelta(seconds=30)
+    assert stages["running"].status == "completed"
+    assert stages["validating"].started_at == base + timedelta(seconds=20)
+    assert stages["validating"].status == "completed"
+    assert stages["pushing"].status == "terminal_skipped"
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_coerces_naive_and_offset_datetimes_to_utc() -> None:
+    naive_base = datetime(2026, 4, 27, 18, 0)
+    requested_end = datetime(
+        2026,
+        4,
+        27,
+        11,
+        0,
+        30,
+        tzinfo=timezone(timedelta(hours=-7)),
+    )
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.provisioning,
+        created_at=naive_base,
+        events=[
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=requested_end,
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.provisioning.value,
+            )
+        ],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=datetime(2026, 4, 27, 18, 1, tzinfo=UTC),
+        )
+    }
+
+    assert stages["requested"].started_at == naive_base.replace(tzinfo=UTC)
+    assert stages["requested"].ended_at == datetime(2026, 4, 27, 18, 0, 30, tzinfo=UTC)
+    assert stages["requested"].duration_seconds == 30
+    assert stages["provisioning"].started_at == datetime(
+        2026,
+        4,
+        27,
+        18,
+        0,
+        30,
+        tzinfo=UTC,
+    )
+    assert stages["provisioning"].duration_seconds == 30
+
+
+@pytest.mark.unit
+def test_observability_payloads_include_identity_lifecycle_and_usage() -> None:
+    base = datetime(2026, 4, 27, 19, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_payload",
+        agent=AgentRuntime.opencode.value,
+        task_policy={"agent_effort": "max"},
+        status=WorkspaceStatus.requested.value,
+        created_at=base,
+        events=[],
+    )
+
+    observability = workspace_observability_payload(
+        workspace,
+        now=base + timedelta(seconds=12),
+    )
+    identity_usage = workspace_identity_usage_payload(workspace)
+
+    assert observability["agent_model"] == "ollama/kimi-k2.6:cloud"
+    assert observability["agent_effort"] == "max"
+    assert observability["agent_effort_source"] == "task_policy"
+    assert observability["lifecycle"][0] == {
+        "stage": "requested",
+        "started_at": base,
+        "ended_at": None,
+        "duration_seconds": 12,
+        "status": "active",
+    }
+    assert observability["llm_usage"]["status"] == "unavailable"
+    assert identity_usage["agent_model"] == "ollama/kimi-k2.6:cloud"
+    assert identity_usage["llm_usage"]["reason"] == "usage_not_reported"
 
 
 @pytest.mark.unit
