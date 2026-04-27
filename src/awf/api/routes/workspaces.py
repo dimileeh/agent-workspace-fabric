@@ -46,6 +46,7 @@ from awf.db.repositories import (
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.disk import DiskCheck, check_disk_space
 from awf.service.workspace_observability import (
+    workspace_events_by_occurrence,
     workspace_observability_payload,
 )
 from awf.service.workspaces import (
@@ -238,8 +239,12 @@ async def list_workspace_overview(
     )
     items: list[WorkspaceOverviewResponse] = []
     for ws in rows:
-        observability = workspace_observability_payload(ws)
-        latest_event = max(ws.events, key=lambda e: e.occurred_at, default=None)
+        ordered_events = workspace_events_by_occurrence(ws)
+        observability = workspace_observability_payload(
+            ws,
+            ordered_events=ordered_events,
+        )
+        latest_event = ordered_events[-1] if ordered_events else None
         active_operation = next(
             (
                 op
@@ -485,4 +490,3 @@ def _stored_task_out_of_scope_policy(existing: Workspace) -> dict[str, object] |
 def _stored_task_agent_model(existing: Workspace) -> str | None:
     model = existing.task_policy.get("agent_model")
     return model if isinstance(model, str) and model else None
-

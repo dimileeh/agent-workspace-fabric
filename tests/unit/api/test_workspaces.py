@@ -8,7 +8,7 @@ true integration + E2E tests live under tests/integration/ and tests/e2e/.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -1284,6 +1284,89 @@ class TestWorkspaceDirectRoutes:
         assert item.title == "overview direct"
         assert item.active_operation is None
         assert item.last_event is not None
+
+    @pytest.mark.unit
+    async def test_overview_route_reuses_ordered_events_for_last_event(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class SinglePassEvents:
+            def __init__(self, events: list[SimpleNamespace]) -> None:
+                self._events = events
+                self.iterations = 0
+
+            def __iter__(self) -> Iterator[SimpleNamespace]:
+                self.iterations += 1
+                if self.iterations > 1:
+                    raise AssertionError("workspace events were iterated more than once")
+                return iter(self._events)
+
+        base = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+        workspace_id = "ws_singlepass"
+        created_event = SimpleNamespace(
+            id="evt_created",
+            workspace_id=workspace_id,
+            event_type="workspace.created",
+            old_state=None,
+            new_state=WorkspaceStatus.requested.value,
+            reason_code="CREATED",
+            payload=None,
+            occurred_at=base,
+        )
+        latest_event = SimpleNamespace(
+            id="evt_latest",
+            workspace_id=workspace_id,
+            event_type="workspace.test_marker",
+            old_state=None,
+            new_state=None,
+            reason_code="TEST",
+            payload={"source": "unit"},
+            occurred_at=base + timedelta(seconds=5),
+        )
+        events = SinglePassEvents([latest_event, created_event])
+        workspace = SimpleNamespace(
+            id=workspace_id,
+            task_external_id=None,
+            task_title="single pass overview",
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            branch_name="awf/ws-singlepass",
+            task_class=None,
+            owned_paths=[],
+            agent="codex",
+            task_policy={},
+            events=events,
+            operations=[],
+            status=WorkspaceStatus.requested.value,
+            pr_url=None,
+            failure_reason=None,
+            failure_message=None,
+            created_at=base,
+            updated_at=base,
+        )
+
+        class FakeWorkspaceRepository:
+            def __init__(self, session: object) -> None:
+                del session
+
+            async def list(self, **kwargs: object) -> list[SimpleNamespace]:
+                del kwargs
+                return [workspace]
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "WorkspaceRepository",
+            FakeWorkspaceRepository,
+        )
+
+        response = await workspaces_route.list_workspace_overview(
+            session=SimpleNamespace(),
+        )
+
+        item = response.items[0]
+        assert item.last_event is not None
+        assert item.last_event.event_type == "workspace.test_marker"
+        assert events.iterations == 1
 
     @pytest.mark.unit
     async def test_existing_events_stale_reasons_get_retry_and_list_routes_directly(

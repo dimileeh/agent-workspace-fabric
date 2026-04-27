@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, TypedDict
@@ -148,10 +148,15 @@ def effective_agent_identity_for_workspace(workspace: Workspace) -> AgentIdentit
     )
 
 
+def workspace_events_by_occurrence(workspace: Workspace) -> list[WorkspaceEvent]:
+    return sorted(workspace.events, key=_event_sort_key)
+
+
 def workspace_lifecycle_summary(
     workspace: Workspace,
     *,
     now: datetime | None = None,
+    ordered_events: Sequence[WorkspaceEvent] | None = None,
 ) -> list[LifecycleStageSummary]:
     current_status = _coerce_workspace_status(workspace.status)
     current_time = _ensure_utc(now or datetime.now(UTC))
@@ -160,7 +165,12 @@ def workspace_lifecycle_summary(
     requested.started_at = _created_at(workspace)
     terminal_after_stage: WorkspaceStatus | None = None
 
-    for event in sorted(workspace.events, key=_event_sort_key):
+    events = (
+        ordered_events
+        if ordered_events is not None
+        else workspace_events_by_occurrence(workspace)
+    )
+    for event in events:
         event_status = _coerce_workspace_status(event.new_state)
         occurred_at = _ensure_utc(event.occurred_at)
         if event.event_type == "workspace.created":
@@ -246,6 +256,7 @@ def lifecycle_payload(
     workspace: Workspace,
     *,
     now: datetime | None = None,
+    ordered_events: Sequence[WorkspaceEvent] | None = None,
 ) -> list[LifecycleStagePayload]:
     return [
         {
@@ -255,7 +266,11 @@ def lifecycle_payload(
             "duration_seconds": item.duration_seconds,
             "status": item.status,
         }
-        for item in workspace_lifecycle_summary(workspace, now=now)
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=now,
+            ordered_events=ordered_events,
+        )
     ]
 
 
@@ -277,10 +292,15 @@ def workspace_observability_payload(
     workspace: Workspace,
     *,
     now: datetime | None = None,
+    ordered_events: Sequence[WorkspaceEvent] | None = None,
 ) -> WorkspaceObservabilityPayload:
     return {
         **agent_identity_payload(workspace),
-        "lifecycle": lifecycle_payload(workspace, now=now),
+        "lifecycle": lifecycle_payload(
+            workspace,
+            now=now,
+            ordered_events=ordered_events,
+        ),
         "llm_usage": usage_payload(workspace),
     }
 
