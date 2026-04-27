@@ -25,6 +25,7 @@ async def _workspace(
     agent: str = "codex",
     failure_message: str | None = None,
     pr_url: str | None = None,
+    task_policy: dict | None = None,
 ) -> str:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -43,6 +44,8 @@ async def _workspace(
         )
         workspace.failure_message = failure_message
         workspace.pr_url = pr_url
+        if task_policy is not None:
+            workspace.task_policy = task_policy
         await session.commit()
         return workspace.id
 
@@ -182,3 +185,41 @@ async def test_failure_summary_validates_limit_bounds(
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.unit
+async def test_api_route_serialization(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    from awf.db.enums import WorkspaceStatus, FailureReason
+    
+    now = datetime.now(UTC)
+    
+    workspace = await _workspace(
+        engine,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+        failure_message="missing managed worktree during fix loop",
+        agent="gemini",
+        task_policy={"agent_model": "gemini-1.5-pro"},
+    )
+        
+    response = await client.get("/v1/metrics/failures/summary")
+    
+    assert response.status_code == 200
+    body = response.json()
+    
+    assert "root_cause_clusters" in body
+    clusters = body["root_cause_clusters"]
+    assert len(clusters) == 1
+    cluster = clusters[0]
+    
+    assert cluster["agent"] == "gemini"
+    assert cluster["agent_model"] == "gemini-1.5-pro"
+    assert cluster["failure_reason"] == "validation_failure"
+    assert cluster["likely_cause"] == "Missing Managed Worktree"
+    assert cluster["actionable_next_action"] == "Review fix loop configuration or git identity"
+    assert cluster["count"] == 1
+    assert workspace in cluster["sample_workspace_ids"]

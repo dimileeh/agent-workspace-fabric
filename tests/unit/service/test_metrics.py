@@ -42,6 +42,7 @@ async def _workspace(
     agent: str = "codex",
     failure_message: str | None = None,
     pr_url: str | None = None,
+    task_policy: dict | None = None,
 ) -> str:
     async with session_factory() as session:
         workspace = await WorkspaceRepository(session).create(
@@ -61,6 +62,8 @@ async def _workspace(
         )
         workspace.failure_message = failure_message
         workspace.pr_url = pr_url
+        if task_policy is not None:
+            workspace.task_policy = task_policy
         await session.commit()
         return workspace.id
 
@@ -989,3 +992,178 @@ async def test_workspace_reliability_validates_since_hours(
             settings=Settings(_env_file=None),
             since_hours=since_hours,
         )
+
+
+@pytest.mark.unit
+async def test_root_cause_clusters_mixed_rows(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    
+    # 1. AGENT_AUTH_FAILED
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.agent_failure,
+        failure_message="Some error ... AGENT_AUTH_FAILED ...",
+        agent="gemini",
+    )
+    # 2. model not found or 404
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.agent_failure,
+        failure_message="404 model not found",
+        agent="claude",
+    )
+    # 3. missing worktree
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+        failure_message="missing managed worktree during fix loop",
+        agent="gemini",
+    )
+    # 4. coverage threshold failure
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+        failure_message="coverage threshold failure: expected 80%, got 75%",
+        agent="gemini",
+    )
+    # 5. syntax/import errors during validation
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+        failure_message="SyntaxError: invalid syntax",
+        agent="opencode",
+    )
+    # 6. GitHub transient/auth errors
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.agent_failure,
+        failure_message="GitHub auth/PR creation failed",
+        agent="gemini",
+    )
+    # 7. unknown validation failure
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+        failure_message="Some random pytest failure",
+        agent="gemini",
+    )
+    # 8. Another syntax error to test grouping
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+        failure_message="ImportError: No module named xxx",
+        agent="opencode",
+    )
+
+    summary = await summarize_failure_analysis(session_factory, now=now)
+    
+    assert len(summary.root_cause_clusters) == 7
+    cluster_reasons = [c.likely_cause for c in summary.root_cause_clusters]
+    
+    assert "Agent Auth Failed" in cluster_reasons
+    assert "Model Not Found / 404" in cluster_reasons
+    assert "Missing Managed Worktree" in cluster_reasons
+    assert "Coverage Threshold Failure" in cluster_reasons
+    assert "Syntax or Import Error" in cluster_reasons
+    assert "GitHub Transient/Auth Error" in cluster_reasons
+    assert "Unknown Validation Failure" in cluster_reasons
+
+    # Check grouping
+    syntax_cluster = next(c for c in summary.root_cause_clusters if c.likely_cause == "Syntax or Import Error")
+    assert syntax_cluster.count == 2
+    assert syntax_cluster.agent == "opencode"
+
+
+@pytest.mark.unit
+async def test_root_cause_clusters_agent_model_extraction(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+        failure_message="SyntaxError",
+        agent="gemini",
+        task_policy={"agent_model": "gemini-1.5-pro"},
+    )
+    
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+        failure_message="SyntaxError",
+        agent="gemini",
+        task_policy={},
+    )
+    
+    summary = await summarize_failure_analysis(session_factory, now=now)
+    
+    # Groups should be split by agent_model
+    syntax_clusters = [c for c in summary.root_cause_clusters if c.likely_cause == "Syntax or Import Error"]
+    assert len(syntax_clusters) == 2
+    
+    models = {c.agent_model for c in syntax_clusters}
+    assert models == {"gemini-1.5-pro", None}
+
+
+@pytest.mark.unit
+async def test_root_cause_clusters_empty_history(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    summary = await summarize_failure_analysis(session_factory, now=now)
+    
+    assert summary.root_cause_clusters == []
+
+
+@pytest.mark.unit
+async def test_existing_failure_groups_unaffected(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.agent_failure,
+        failure_message="AGENT_AUTH_FAILED",
+        agent="gemini",
+    )
+    
+    summary = await summarize_failure_analysis(session_factory, now=now)
+    
+    assert len(summary.failure_groups) == 1
+    assert summary.failure_groups[0].failure_reason == FailureReason.agent_failure.value
+    assert len(summary.latest_examples) == 1
+
