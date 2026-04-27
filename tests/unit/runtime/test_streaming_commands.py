@@ -92,3 +92,32 @@ async def test_fake_runner_replays_streaming_callbacks() -> None:
     assert stderr == ["err\n"]
     assert runner.calls[0].args == ["example"]
     assert runner.calls[0].cwd == "/tmp/work"
+
+
+@pytest.mark.unit
+async def test_fake_runner_replays_async_streaming_callbacks_and_records_input() -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="out\n", stderr="err\n")
+    frames: list[tuple[str, str]] = []
+
+    async def on_stdout(data: str) -> None:
+        frames.append(("stdout", data))
+
+    async def on_stderr(data: str) -> None:
+        frames.append(("stderr", data))
+
+    result = await runner.run_streaming(
+        ["example", "--flag"],
+        on_stdout=on_stdout,
+        on_stderr=on_stderr,
+        input_bytes=b"payload",
+        cwd="/tmp/work",
+        wall_timeout_seconds=10,
+        idle_timeout_seconds=5,
+    )
+
+    assert result.returncode == 0
+    assert frames == [("stdout", "out\n"), ("stderr", "err\n")]
+    assert runner.calls[0].args == ["example", "--flag"]
+    assert runner.calls[0].input_bytes == b"payload"
+    assert runner.calls[0].cwd == "/tmp/work"

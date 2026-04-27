@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from awf.node.compose_manager import ComposeManager, WorkspaceComposeSpec
+from awf.node.compose_manager import (
+    CompanionService,
+    ComposeManager,
+    ComposeService,
+    WorkspaceComposeSpec,
+)
 from awf.profiles.registry import docker_compose_profile
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
@@ -99,6 +104,33 @@ class TestRender:
         assert parsed["volumes"]["postgres_data"]["name"] == "awf-ws_test123-postgres_data"
 
     @pytest.mark.unit
+    def test_companion_service_password_placeholders_are_resolved(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        spec = _spec(
+            tmp_path,
+            postgres_password="companion-secret",
+            companions=(
+                CompanionService(
+                    name="backend",
+                    build_context="/host/backend",
+                    environment=(
+                        (
+                            "DATABASE_URL",
+                            "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres/awf",
+                        ),
+                    ),
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        assert parsed["services"]["backend"]["environment"] == {
+            "DATABASE_URL": "postgresql://awf:companion-secret@postgres/awf"
+        }
+
+    @pytest.mark.unit
     def test_project_name_is_deterministic(self, manager: ComposeManager, tmp_path: Path) -> None:
         # Container names embed the workspace_id so operators can ``docker ps
         # --filter name=awf-ws_test123`` to find the stack.
@@ -163,6 +195,26 @@ class TestRender:
         assert parsed["services"]["agent"]["deploy"]["resources"]["limits"] == {
             "cpus": "4",
             "memory": "8g",
+        }
+
+    @pytest.mark.unit
+    def test_resource_limits_apply_default_pair_when_only_one_limit_is_set(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        cpu_only = yaml.safe_load(
+            manager.render(_spec(tmp_path, cpu_limit="2")).compose_file.read_text()
+        )
+        memory_only = yaml.safe_load(
+            manager.render(_spec(tmp_path, memory_limit="2g")).compose_file.read_text()
+        )
+
+        assert cpu_only["services"]["agent"]["deploy"]["resources"]["limits"] == {
+            "cpus": "2",
+            "memory": "8g",
+        }
+        assert memory_only["services"]["agent"]["deploy"]["resources"]["limits"] == {
+            "cpus": "4",
+            "memory": "2g",
         }
 
     @pytest.mark.unit
@@ -276,6 +328,46 @@ class TestRender:
         assert "depends_on" not in parsed["services"]["agent"]
 
     @pytest.mark.unit
+    def test_named_volume_detection_ignores_bind_sources(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        spec = _spec(
+            tmp_path,
+            services=(
+                ComposeService(
+                    name="cache",
+                    image="busybox",
+                    volumes=(
+                        ("cache_data", "/cache"),
+                        (str(tmp_path / "host-cache"), "/host-cache"),
+                        ("./relative-cache", "/relative-cache"),
+                        (".hidden-cache", "/hidden-cache"),
+                    ),
+                ),
+            ),
+        )
+
+        parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+        assert parsed["volumes"] == {
+            "cache_data": {"name": "awf-ws_test123-cache_data"}
+        }
+
+    @pytest.mark.unit
+    def test_named_volume_detection_skips_malformed_volume_entries(
+        self, manager: ComposeManager
+    ) -> None:
+        names = manager._named_volumes_for(  # noqa: SLF001 - direct helper contract test
+            [
+                {"name": "not-a-list", "volumes": "cache_data:/cache"},
+                {"name": "bad-items", "volumes": ["cache_data:/cache", ("too", "long", "x")]},
+                {"name": "good", "volumes": [("cache_data", "/cache")]},
+            ]
+        )
+
+        assert names == ["cache_data"]
+
+    @pytest.mark.unit
     def test_dind_profile_adds_docker_daemon(self, manager: ComposeManager, tmp_path: Path) -> None:
         profile = docker_compose_profile()
         spec = _spec(
@@ -338,3 +430,33 @@ class TestRender:
         tmpl = env.from_string("name: {{ only_in_template }}")
         with pytest.raises(UndefinedError):
             tmpl.render()
+
+    @pytest.mark.unit
+    async def test_down_project_is_noop_when_compose_file_is_missing(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingComposeManager(ComposeManager):
+            def __init__(self) -> None:
+                super().__init__(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+                self.calls: list[tuple[str, Path, list[str], str]] = []
+
+            async def _compose(
+                self,
+                project_name: str,
+                compose_file: Path,
+                args: list[str],
+                *,
+                operation: str,
+            ) -> None:
+                self.calls.append((project_name, compose_file, args, operation))
+
+        manager = _RecordingComposeManager()
+
+        await manager.down_project(
+            project_name="awf_ws_missing",
+            compose_file=tmp_path / "missing-compose.yml",
+            workspace_id="ws_missing",
+        )
+
+        assert manager.calls == []

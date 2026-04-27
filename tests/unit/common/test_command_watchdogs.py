@@ -14,6 +14,24 @@ from awf.common.commands import AsyncioSubprocessRunner
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"wall_timeout_seconds": 0.0}, "wall_timeout_seconds must be positive"),
+        ({"idle_timeout_seconds": -0.1}, "idle_timeout_seconds must be positive"),
+    ],
+)
+async def test_asyncio_runner_rejects_non_positive_streaming_timeouts(
+    kwargs: dict[str, float],
+    message: str,
+) -> None:
+    runner = AsyncioSubprocessRunner()
+
+    with pytest.raises(ValueError, match=message):
+        await runner.run_streaming([sys.executable, "-c", "print('unused')"], **kwargs)
+
+
+@pytest.mark.unit
 async def test_asyncio_runner_wall_timeout_terminates_and_preserves_partial_output() -> None:
     runner = AsyncioSubprocessRunner()
     stdout: list[str] = []
@@ -104,6 +122,26 @@ async def test_asyncio_runner_cancellation_terminates_subprocess(tmp_path: Path)
     finally:
         if _pid_exists(pid):
             os.kill(pid, signal.SIGKILL)
+
+
+@pytest.mark.unit
+async def test_asyncio_runner_ignores_child_that_closes_stdin_early() -> None:
+    runner = AsyncioSubprocessRunner()
+    stdout: list[str] = []
+
+    result = await runner.run_streaming(
+        [
+            sys.executable,
+            "-c",
+            "import sys; sys.stdin.close(); print('closed')",
+        ],
+        input_bytes=b"input the child will not read",
+        on_stdout=stdout.append,
+    )
+
+    assert result.returncode == 0
+    assert result.stdout == "closed\n"
+    assert stdout == ["closed\n"]
 
 
 async def _wait_for_file(path: Path) -> None:

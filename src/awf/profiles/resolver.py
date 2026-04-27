@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
+from pydantic import ValidationError
 
 from awf.profiles.models import ProfileResolution, WorkspaceProfile
 from awf.profiles.registry import detect_profile, generic_profile, get_builtin_profile
@@ -39,11 +40,14 @@ class ProfileResolver:
 
         if inline_profile is not None:
             considered.append("inline")
-            profile = (
-                inline_profile
-                if isinstance(inline_profile, WorkspaceProfile)
-                else WorkspaceProfile.model_validate(inline_profile)
-            )
+            try:
+                profile = (
+                    inline_profile
+                    if isinstance(inline_profile, WorkspaceProfile)
+                    else WorkspaceProfile.model_validate(inline_profile)
+                )
+            except ValidationError as exc:
+                raise ProfileResolutionError(f"invalid inline workspace profile: {exc}") from exc
             reason = "inline profile supplied by request"
         elif worktree_path is not None:
             repo_profile = self._load_repo_profile(worktree_path, considered)
@@ -100,7 +104,10 @@ class ProfileResolver:
                 raise ProfileResolutionError(
                     f"workspace profile {path} awf section must be a mapping"
                 )
-            parsed = WorkspaceProfile.model_validate(profile)
+            try:
+                parsed = WorkspaceProfile.model_validate(profile)
+            except ValidationError as exc:
+                raise ProfileResolutionError(f"invalid workspace profile {path}: {exc}") from exc
             return parsed.model_copy(update={"source": f"repo:{rel}"})
         return None
 

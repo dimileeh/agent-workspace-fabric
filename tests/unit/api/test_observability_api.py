@@ -211,6 +211,19 @@ class TestConsoleViews:
         assert body["services"][0]["name"] == "agent"
         assert body["services"][0]["health"] == "healthy"
 
+    @pytest.mark.unit
+    async def test_runtime_endpoint_returns_404_for_unknown_workspace(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        response = await client.get("/v1/workspaces/ws_missing/runtime")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == {
+            "error_code": "NOT_FOUND",
+            "message": "No workspace with id ws_missing",
+        }
+
 
 class TestLogs:
     @pytest.mark.unit

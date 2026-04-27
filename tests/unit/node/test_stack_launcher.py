@@ -54,6 +54,24 @@ class _RecordingAuthMountResolver:
         )
 
 
+class _EmptyAuthMountResolver:
+    def __init__(self) -> None:
+        self.workspace_ids: list[str] = []
+
+    def resolve(self, *, workspace_id: str) -> tuple[AuthMount, ...]:
+        self.workspace_ids.append(workspace_id)
+        return ()
+
+
+class _FailingAuthMountResolver:
+    def __init__(self) -> None:
+        self.workspace_ids: list[str] = []
+
+    def resolve(self, *, workspace_id: str) -> tuple[AuthMount, ...]:
+        self.workspace_ids.append(workspace_id)
+        raise RuntimeError("auth mount resolution failed")
+
+
 @pytest.mark.unit
 async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     compose = _RecordingCompose()
@@ -272,6 +290,63 @@ async def test_compose_stack_launcher_appends_service_auth_mounts() -> None:
             mode="rw",
         ),
     )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_keeps_mirror_mount_when_auth_resolver_returns_empty() -> None:
+    compose = _RecordingCompose()
+    auth_mount_resolver = _EmptyAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        auth_mount_resolver=auth_mount_resolver,
+    )
+    layout = WorktreeLayout(
+        mirror_path=Path("/host/awf/git/mirrors/repo.git"),
+        worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
+        branch_name="awf/ws_launcher",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=WorkspaceProfile(name="generic"),
+        )
+    )
+
+    assert auth_mount_resolver.workspace_ids == ["ws_launcher"]
+    assert compose.specs[0].auth_mounts == (
+        AuthMount(source=str(layout.mirror_path), target=str(layout.mirror_path), mode="rw"),
+    )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_propagates_auth_resolution_errors() -> None:
+    compose = _RecordingCompose()
+    auth_mount_resolver = _FailingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        auth_mount_resolver=auth_mount_resolver,
+    )
+    layout = WorktreeLayout(
+        mirror_path=Path("/host/awf/git/mirrors/repo.git"),
+        worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
+        branch_name="awf/ws_launcher",
+    )
+
+    with pytest.raises(RuntimeError, match="auth mount resolution failed"):
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=layout,
+                profile=WorkspaceProfile(name="generic"),
+            )
+        )
+
+    assert auth_mount_resolver.workspace_ids == ["ws_launcher"]
+    assert compose.specs == []
 
 
 @pytest.mark.unit

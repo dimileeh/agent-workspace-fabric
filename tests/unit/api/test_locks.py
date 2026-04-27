@@ -209,6 +209,17 @@ async def test_get_locks_reports_has_more_and_accepts_next_cursor(
 
 
 @pytest.mark.unit
+async def test_get_locks_invalid_cursor_returns_structured_400(client: AsyncClient) -> None:
+    response = await client.get("/v1/locks", params={"cursor": "not-json"})
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "error_code": "INVALID_CURSOR",
+        "message": "Invalid lock list cursor.",
+    }
+
+
+@pytest.mark.unit
 async def test_get_locks_exposes_owned_path_overlap_risks(
     client: AsyncClient,
 ) -> None:

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from awf.node.auth_mounts import resolve_service_auth_mounts
+from awf.node.auth_mounts import ServiceAuthMountResolver, resolve_service_auth_mounts
 
 
 @pytest.mark.unit
@@ -264,6 +264,71 @@ def test_service_auth_mounts_include_google_application_credentials_file(
     by_target = {m.target: m for m in mounts}
     assert by_target[str(credentials)].source == str(credentials)
     assert by_target[str(credentials)].mode == "ro"
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_skip_missing_google_application_credentials_file(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    missing_credentials = tmp_path / "missing-service-account.json"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        workspace_id="ws_auth",
+        host_env={"GOOGLE_APPLICATION_CREDENTIALS": str(missing_credentials)},
+    )
+
+    assert all(m.target != str(missing_credentials) for m in mounts)
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_create_empty_ollama_auth_without_copying_models(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_ollama = host_home / ".ollama"
+    host_ollama.mkdir(parents=True)
+    (host_ollama / "models").mkdir()
+    (host_ollama / "models" / "large-blob").write_text("do not copy\n")
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    by_target = {m.target: m for m in mounts}
+    ollama_dir = Path(by_target["/home/agent/.ollama"].source)
+    assert by_target["/home/agent/.ollama"].mode == "rw"
+    assert ollama_dir == work_dir / "auth" / "ws_auth" / "ollama" / ".ollama"
+    assert ollama_dir.is_dir()
+    assert not (ollama_dir / "models").exists()
+    assert list(ollama_dir.iterdir()) == []
+
+
+@pytest.mark.unit
+def test_service_auth_mount_resolver_delegates_to_service_mount_resolution(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[user]\n  name = Test\n")
+    resolver = ServiceAuthMountResolver(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        host_env={},
+    )
+
+    mounts = resolver.resolve(workspace_id="ws_auth")
+
+    by_target = {m.target: m for m in mounts}
+    assert by_target["/home/agent/.gitconfig"].source == str(host_home / ".gitconfig")
+    assert by_target["/home/agent/.gitconfig"].mode == "ro"
 
 
 @pytest.mark.unit

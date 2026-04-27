@@ -22,7 +22,7 @@ from awf.common.github_client import (
     GitHubClientError,
     RepoRef,
 )
-from awf.runtime.pr_monitor import CheckState, MergeableState
+from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
 
 # ── RepoRef parsing ────────────────────────────────────────────────────────
 
@@ -285,6 +285,108 @@ class TestFetchPrStatus:
             for a in next_page_args
         )
         assert "cursor=cursor-1" in next_page_args
+
+    @pytest.mark.unit
+    async def test_pr_files_pagination_requires_end_cursor_when_more_pages_exist(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                files=[{"path": "src/first.py"}],
+                files_has_next_page=True,
+                files_end_cursor=None,
+            ),
+        )
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError, match="without an endCursor"):
+            await client.fetch_pr_status(
+                repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+            )
+
+        assert len(fake.calls) == 1
+
+    @pytest.mark.unit
+    async def test_pr_files_pagination_requires_files_object_on_next_page(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                files=[{"path": "src/first.py"}],
+                files_has_next_page=True,
+                files_end_cursor="cursor-1",
+            ),
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=json.dumps({"data": {"repository": {"pullRequest": {}}}}),
+        )
+        client = GitHubClient(fake)
+
+        with pytest.raises(GitHubClientError, match="did not include files"):
+            await client.fetch_pr_status(
+                repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+            )
+
+        assert len(fake.calls) == 2
+
+    @pytest.mark.unit
+    async def test_fetch_pr_status_ignores_malformed_optional_nodes(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                merge_state_status="NEW_GITHUB_STATE",
+                check_contexts=[
+                    None,  # type: ignore[list-item]
+                    {"__typename": "StatusContext", "context": "   "},
+                    {"__typename": "CheckRun", "name": ""},
+                    {
+                        "__typename": "CheckRun",
+                        "name": "build",
+                        "status": "COMPLETED",
+                        "conclusion": "SUCCESS",
+                        "startedAt": "not-a-date",
+                        "completedAt": "2026-04-26T12:34:56",
+                        "detailsUrl": "https://checks.example/build",
+                    },
+                ],
+                comments=[
+                    {
+                        "databaseId": 10,
+                        "body": "minimized",
+                        "isMinimized": True,
+                        "author": {"login": "octocat"},
+                    },
+                    {
+                        "databaseId": 11,
+                        "body": "   ",
+                        "isMinimized": False,
+                        "author": {"login": "octocat"},
+                    },
+                ],
+                files=[
+                    None,  # type: ignore[list-item]
+                    {"path": "   "},
+                    {"path": "src/ok.py"},
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert status.merge_state_status == MergeStateStatus.UNKNOWN
+        assert status.unresolved_review_comments == ()
+        assert status.changed_paths == ("src/ok.py",)
+        assert len(status.checks) == 1
+        check = status.checks[0]
+        assert check.name == "build"
+        assert check.started_at is None
+        assert check.completed_at is not None
+        assert check.completed_at.isoformat() == "2026-04-26T12:34:56+00:00"
 
     @pytest.mark.unit
     async def test_ignores_non_actionable_review_disabled_issue_comment(self) -> None:
@@ -830,6 +932,19 @@ class TestFetchFailingCheckLogs:
         )
         assert failures == ()
 
+    @pytest.mark.unit
+    async def test_empty_run_list_stdout_returns_no_failures_without_fetching_logs(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="")
+        client = GitHubClient(fake)
+
+        failures = await client.fetch_failing_check_logs(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, head_sha="abc"
+        )
+
+        assert failures == ()
+        assert len(fake.calls) == 1
+
 
 # ── resolve_thread / post_comment / merge_pr ───────────────────────────────
 
@@ -892,6 +1007,26 @@ class TestMutations:
         assert merge_args[:3] == ["gh", "pr", "merge"]
         assert "--squash" in merge_args
         assert "--delete-branch" in merge_args
+        assert sha == "MERGESHA123"
+
+    @pytest.mark.unit
+    async def test_merge_pr_honors_method_and_omits_delete_branch_flag(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="MERGESHA123\n")
+        client = GitHubClient(fake)
+
+        sha = await client.merge_pr(
+            repo=RepoRef(owner="o", name="r"),
+            pr_number=42,
+            method="merge",
+            delete_branch=False,
+        )
+
+        merge_args = fake.calls[0].args
+        assert "--merge" in merge_args
+        assert "--squash" not in merge_args
+        assert "--delete-branch" not in merge_args
         assert sha == "MERGESHA123"
 
     @pytest.mark.unit

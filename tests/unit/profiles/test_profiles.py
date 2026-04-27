@@ -9,8 +9,12 @@ import pytest
 from pydantic import ValidationError
 
 from awf.profiles.models import DockerMode, WorkspaceProfile
-from awf.profiles.registry import aira_profile, docker_compose_profile
-from awf.profiles.resolver import ProfileResolver
+from awf.profiles.registry import aira_profile, detect_profile, docker_compose_profile
+from awf.profiles.resolver import (
+    ProfileResolutionError,
+    ProfileResolver,
+    resolve_workspace_profile,
+)
 
 
 @pytest.mark.unit
@@ -67,6 +71,26 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_coerces_string_coverage_command() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "awf-self",
+            "validation": {
+                "coverage": {
+                    "command": "uv run pytest --cov=awf --cov-report=term-missing",
+                }
+            },
+        }
+    )
+
+    assert profile.validation.coverage.command is not None
+    assert (
+        profile.validation.coverage.command.command
+        == "uv run pytest --cov=awf --cov-report=term-missing"
+    )
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_planning_policy() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -84,6 +108,30 @@ def test_profile_schema_accepts_planning_policy() -> None:
     assert profile.planning.required is True
     assert profile.planning.max_iterations == 2
     assert profile.planning.plan_path == "docs/awf-plans/{workspace_id}.md"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("field", "value", "message"),
+    [
+        ("plan_path", "/tmp/{workspace_id}.md", "workspace-relative"),
+        ("plan_path", "../plans/{workspace_id}.md", "workspace-relative"),
+        ("conformance_report_path", "docs/awf-plans/report.json", "workspace_id"),
+    ],
+)
+def test_profile_planning_rejects_unsafe_or_non_workspace_scoped_paths(
+    field: str,
+    value: str,
+    message: str,
+) -> None:
+    planning = {
+        "plan_path": "docs/awf-plans/{workspace_id}.md",
+        "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+        field: value,
+    }
+
+    with pytest.raises(ValidationError, match=message):
+        WorkspaceProfile.model_validate({"name": "awf-self", "planning": planning})
 
 
 @pytest.mark.unit
@@ -113,6 +161,46 @@ def test_profile_schema_rejects_service_without_image_or_build() -> None:
                 "services": [{"name": "db"}],
             }
         )
+
+
+@pytest.mark.unit
+def test_profile_schema_rejects_service_with_both_image_and_build_context() -> None:
+    with pytest.raises(ValidationError, match="cannot set both"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad",
+                "services": [
+                    {
+                        "name": "api",
+                        "image": "example/api:latest",
+                        "build_context": ".",
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_profile_phase_set_commands_for_maps_validate_alias() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "phases",
+            "phases": {
+                "setup": ["uv sync"],
+                "validate": ["pytest -q"],
+                "cleanup": ["docker compose down"],
+            },
+        }
+    )
+
+    assert [
+        (phase, command.command)
+        for phase, command in profile.phases.commands_for(("setup", "validate", "cleanup"))
+    ] == [
+        ("setup", "uv sync"),
+        ("validate", "pytest -q"),
+        ("cleanup", "docker compose down"),
+    ]
 
 
 @pytest.mark.unit
@@ -241,6 +329,48 @@ def test_auto_detection_detects_nextjs(tmp_path: Path) -> None:
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
     assert result.profile.name == "nextjs"
     assert result.profile.phases.setup[0].command == "pnpm install --frozen-lockfile"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("lockfile", "setup_command", "validate_command"),
+    [
+        ("yarn.lock", "yarn install --frozen-lockfile", "yarn test"),
+        ("bun.lockb", "bun install --frozen-lockfile", "bun test"),
+    ],
+)
+def test_auto_detection_selects_node_package_manager_from_lockfiles(
+    tmp_path: Path,
+    lockfile: str,
+    setup_command: str,
+    validate_command: str,
+) -> None:
+    (tmp_path / "package.json").write_text(
+        json.dumps({"scripts": {"test": "vitest"}}),
+        encoding="utf-8",
+    )
+    (tmp_path / lockfile).write_text("", encoding="utf-8")
+
+    profile = detect_profile(tmp_path)
+
+    assert profile is not None
+    assert profile.name == "node"
+    assert profile.phases.setup[0].command == setup_command
+    assert [c.command for c in profile.phases.validate_commands] == [validate_command]
+
+
+@pytest.mark.unit
+def test_auto_detection_malformed_package_json_falls_back_to_plain_node(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "package.json").write_text("{not-json", encoding="utf-8")
+
+    profile = detect_profile(tmp_path)
+
+    assert profile is not None
+    assert profile.name == "node"
+    assert profile.phases.setup[0].command == "npm ci"
+    assert [c.command for c in profile.phases.validate_commands] == ["npm test"]
 
 
 @pytest.mark.unit
@@ -393,6 +523,44 @@ def test_auto_detection_falls_back_to_generic(tmp_path: Path) -> None:
     result = ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
     assert result.profile.name == "generic"
     assert result.profile.confidence == "low"
+
+
+@pytest.mark.unit
+def test_unknown_profile_ref_raises_resolution_error(tmp_path: Path) -> None:
+    with pytest.raises(ProfileResolutionError, match="unknown workspace profile_ref"):
+        ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="missing-profile")
+
+
+@pytest.mark.unit
+def test_repo_profile_top_level_must_be_mapping(tmp_path: Path) -> None:
+    (tmp_path / ".awf").mkdir()
+    (tmp_path / ".awf" / "workspace.yml").write_text("- not\n- a mapping\n")
+
+    with pytest.raises(ProfileResolutionError, match="must be a mapping"):
+        ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+
+
+@pytest.mark.unit
+def test_repo_profile_awf_section_must_be_mapping(tmp_path: Path) -> None:
+    (tmp_path / ".awf").mkdir()
+    (tmp_path / ".awf" / "workspace.yml").write_text("awf:\n  - not\n  - a mapping\n")
+
+    with pytest.raises(ProfileResolutionError, match="awf section must be a mapping"):
+        ProfileResolver().resolve(worktree_path=tmp_path, profile_ref="auto")
+
+
+@pytest.mark.unit
+def test_resolve_workspace_profile_wrapper_appends_request_validation_commands() -> None:
+    result = resolve_workspace_profile(
+        worktree_path=None,
+        profile_ref="generic",
+        validation_commands=["ruff check src/awf"],
+    )
+
+    assert result.reason == "central registry profile generic; request validation commands appended"
+    assert [c.command for c in result.profile.phases.validate_commands] == [
+        "ruff check src/awf"
+    ]
 
 
 @pytest.mark.unit

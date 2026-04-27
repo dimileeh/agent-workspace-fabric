@@ -21,6 +21,7 @@ from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.profiles.resolver import ProfileResolutionError
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -145,6 +146,65 @@ class TestSuccess:
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
 
     @pytest.mark.unit
+    async def test_uses_persisted_resolved_profile_without_rewriting_it(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        resolved_profile = {
+            "name": "persisted-profile",
+            "source": "repo:.awf/workspace.yml",
+            "phases": {"validate": [{"command": "pytest -q"}]},
+        }
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=["ruff check"],
+                profile_ref="python",
+                requested_profile={"name": ""},
+                resolved_profile=resolved_profile,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert len(launcher.requests) == 1
+        assert launcher.requests[0].profile.name == "persisted-profile"
+        assert [c.command for c in launcher.requests[0].profile.phases.validate_commands] == [
+            "pytest -q"
+        ]
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.profile_ref == "python"
+            assert reloaded.resolved_profile == resolved_profile
+
+    @pytest.mark.unit
     async def test_transitions_requested_to_ready(
         self,
         provisioner: Provisioner,
@@ -206,6 +266,37 @@ class TestSuccess:
 
 
 class TestFailureHandling:
+    @pytest.mark.unit
+    async def test_invalid_inline_profile_marks_workspace_failed_as_profile_resolution(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requested_profile={"name": ""},
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ProfileResolutionError):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "profile_resolution_failure"
+            assert reloaded.failure_message is not None
+            assert "name" in reloaded.failure_message
+
     @pytest.mark.unit
     async def test_stack_startup_failure_marks_workspace_failed_with_actionable_message(
         self,
@@ -387,6 +478,92 @@ class TestOperatorControlRaces:
 
         assert fake_git.add_worktree_calls == []
         assert fake_git.head_calls == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value
+            skip_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_action_skipped"
+            ]
+            assert skip_events
+            assert skip_events[-1].reason_code == "PROVISIONER_STALE_STATUS"
+            assert skip_events[-1].payload == {
+                "action": "provision",
+                "expected_status": WorkspaceStatus.provisioning.value,
+                "actual_status": WorkspaceStatus.destroyed.value,
+            }
+
+    @pytest.mark.unit
+    async def test_destroy_after_git_add_skips_head_sha_and_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        class _DestroyingGit:
+            def __init__(self) -> None:
+                self.add_worktree_calls: list[str] = []
+                self.head_calls: list[str] = []
+
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del repo_url, base_branch
+                self.add_worktree_calls.append(workspace_id)
+                await _force_destroy_provisioning_workspace(session_factory, workspace_id)
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                self.head_calls.append(workspace_id)
+                return "c" * 40
+
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        fake_git = _DestroyingGit()
+        launcher = _RecordingStackLauncher()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=fake_git,  # type: ignore[arg-type]
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert fake_git.add_worktree_calls == [ws_id]
+        assert fake_git.head_calls == []
+        assert launcher.requests == []
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None

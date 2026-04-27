@@ -111,6 +111,17 @@ async def test_list_workspace_operations_not_found(client: AsyncClient):
 
 
 @pytest.mark.unit
+async def test_get_operation_not_found(client: AsyncClient):
+    response = await client.get("/v1/operations/op_missing")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "error_code": "NOT_FOUND",
+        "message": "No operation with id op_missing",
+    }
+
+
+@pytest.mark.unit
 async def test_list_operations_limit_validation(client: AsyncClient):
     response = await client.get("/v1/operations?limit=0")
     assert response.status_code == 422
