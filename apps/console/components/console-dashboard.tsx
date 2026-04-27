@@ -32,6 +32,7 @@ import {
   bytes,
   compactDuration,
   compactId,
+  fallbackLifecycleStages,
   formatDateTime,
   lifecycleStages,
   relativeTime,
@@ -667,6 +668,12 @@ export function ConsoleDashboard() {
                 <LifecycleRail
                   status={selectedOverview.status}
                   lifecycle={detail.workspace?.lifecycle ?? selectedOverview.lifecycle}
+                  terminalSourceStage={terminalLifecycleSourceStage(
+                    selectedOverview.status,
+                    detail.events,
+                    selectedOverview.last_event,
+                    selectedOverview.current_phase,
+                  )}
                 />
                 <RuntimePanel runtime={detail.runtime} />
                 <OperationsPanel operations={detail.operations} />
@@ -1490,26 +1497,15 @@ function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
 function LifecycleRail({
   status,
   lifecycle,
+  terminalSourceStage,
 }: {
   status: WorkspaceStatus;
   lifecycle: WorkspaceLifecycleStage[];
+  terminalSourceStage: string | null;
 }) {
   const terminal = status === "failed" || status === "cancelled";
   const stages: WorkspaceLifecycleStage[] =
-    lifecycle.length > 0
-      ? lifecycle
-      : lifecycleStages.map((stage): WorkspaceLifecycleStage => ({
-          stage,
-          started_at: null,
-          ended_at: null,
-          duration_seconds: null,
-          status:
-            stage === status
-              ? ("active" as const)
-              : lifecycleStages.indexOf(status) > lifecycleStages.indexOf(stage)
-                ? ("completed" as const)
-                : ("pending" as const),
-        }));
+    lifecycle.length > 0 ? lifecycle : fallbackLifecycleStages(status, terminalSourceStage);
   return (
     <Panel title="Lifecycle" icon={<GitPullRequest size={16} aria-hidden />}>
       <div className="grid gap-2 md:grid-cols-4 xl:grid-cols-8">
@@ -1558,6 +1554,23 @@ function LifecycleRail({
       ) : null}
     </Panel>
   );
+}
+
+function terminalLifecycleSourceStage(
+  status: WorkspaceStatus,
+  events: WorkspaceEvent[],
+  lastEvent: WorkspaceEvent | null,
+  currentPhase: string,
+): string | null {
+  if (status !== "failed" && status !== "cancelled") {
+    return null;
+  }
+  const terminalEvent =
+    events.find((event) => event.event_type === "workspace.state_changed" && event.new_state === status) ??
+    (lastEvent?.event_type === "workspace.state_changed" && lastEvent.new_state === status
+      ? lastEvent
+      : null);
+  return terminalEvent?.old_state ?? currentPhase;
 }
 
 function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
