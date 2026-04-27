@@ -229,6 +229,8 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "post_merge_target_reconciler" in created["feature_monitor_kwargs"]
+    reconciler = created["feature_monitor_kwargs"]["post_merge_target_reconciler"]
+    assert callable(reconciler)
     assert "merge_coordinator" in created["feature_monitor_kwargs"]
     assert isinstance(
         created["feature_monitor_kwargs"]["merge_coordinator"],

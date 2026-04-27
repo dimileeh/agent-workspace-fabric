@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from pathlib import Path
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -24,6 +24,7 @@ from awf.service.alembic_resolver import (
     AlembicResolveResult,
     AlembicResolveStatus,
 )
+from awf.service.staleness import TargetBranchState
 from awf.service.target_branch_monitor import (
     CandidateRefreshSummary,
     GitCheckoutTargetBranchStateProvider,
@@ -35,7 +36,12 @@ from awf.service.target_branch_monitor import (
     reconcile_and_refresh_stale_candidates,
     run_target_branch_reconcile_once,
 )
-from awf.service.staleness import TargetBranchState
+
+
+def async_lambda(value: TargetBranchState) -> Any:
+    async def _fn(_base_sha: str) -> TargetBranchState:
+        return value
+    return _fn
 
 
 class _StubResolver:
@@ -361,6 +367,9 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         await engine.dispose()
 
 
+_pr_counter = 0
+
+
 async def _seed_open_candidate(
     factory: async_sessionmaker[AsyncSession],
     *,
@@ -370,6 +379,8 @@ async def _seed_open_candidate(
     repo_url: str = _REPO_URL,
     base_branch: str = _BASE_BRANCH,
 ) -> tuple[str, str, str]:
+    global _pr_counter
+    _pr_counter += 1
     async with factory() as session:
         repo = WorkspaceRepository(session)
         workspace = await repo.create(
@@ -377,7 +388,7 @@ async def _seed_open_candidate(
             branch_base=base_branch,
             task_title="Reconcile fixture",
             task_prompt="Implement.",
-            task_external_id="TICKET-RECONCILE",
+            task_external_id=f"TICKET-RECONCILE-{_pr_counter}",
             agent=AgentRuntime.codex.value,
             test_commands=[],
             owned_paths=owned_paths,
@@ -388,7 +399,7 @@ async def _seed_open_candidate(
             base_branch=workspace.branch_base,
             title=workspace.task_title,
             prompt=workspace.task_prompt,
-            external_id=workspace.task_external_id,
+            external_id=f"TICKET-RECONCILE-{_pr_counter}",
             idempotency_key=None,
             task_class=task_class,
             owned_paths=owned_paths,
@@ -408,8 +419,9 @@ async def _seed_open_candidate(
         workspace.branch_name = f"awf/{workspace.id}"
         workspace.remote_push_branch = workspace.branch_name
         workspace.base_commit = base_sha
-        workspace.pr_url = f"https://github.com/example/svc/pull/{hash(workspace.id) % 1000}"
-        workspace.pr_number = hash(workspace.id) % 1000
+        pr_num = 1000 + _pr_counter
+        workspace.pr_url = f"https://github.com/example/svc/pull/{pr_num}"
+        workspace.pr_number = pr_num
         await repo.transition(
             workspace,
             to=WorkspaceStatus.monitoring_pr,
@@ -477,7 +489,7 @@ class TestReconcileAndRefreshStaleCandidates:
             repo_url=_REPO_URL,
             branch=_BASE_BRANCH,
             session_factory=factory,
-            target_state_for_base_sha=lambda _base_sha: target_state,
+            target_state_for_base_sha=async_lambda(target_state),
         )
 
         assert isinstance(result, ReconcileAndRefreshResult)
@@ -520,7 +532,7 @@ class TestReconcileAndRefreshStaleCandidates:
 
         call_count = 0
 
-        def _target_state_partial(base_sha: str) -> TargetBranchState:
+        async def _target_state_partial(base_sha: str) -> TargetBranchState:
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -581,7 +593,7 @@ class TestReconcileAndRefreshStaleCandidates:
             repo_url=_REPO_URL,
             branch=_BASE_BRANCH,
             session_factory=factory,
-            target_state_for_base_sha=lambda _base_sha: target_state,
+            target_state_for_base_sha=async_lambda(target_state),
             exclude_workspace_ids={ws_id_1},
         )
 
@@ -618,7 +630,7 @@ class TestReconcileAndRefreshStaleCandidates:
             repo_url=_REPO_URL,
             branch=_BASE_BRANCH,
             session_factory=factory,
-            target_state_for_base_sha=lambda _base_sha: target_state,
+            target_state_for_base_sha=async_lambda(target_state),
         )
 
         assert isinstance(result, ReconcileAndRefreshResult)
@@ -660,12 +672,12 @@ class TestReconcileAndRefreshStaleCandidates:
                 repo_url=_REPO_URL,
                 branch=_BASE_BRANCH,
                 session_factory=factory,
-                target_state_for_base_sha=lambda _base_sha: TargetBranchState(
+                target_state_for_base_sha=async_lambda(TargetBranchState(
                     branch=_BASE_BRANCH,
                     head_sha="c" * 40,
                     changed_paths=(),
                     advanced_commits=0,
-                ),
+                )),
             )
 
     @pytest.mark.unit
@@ -684,12 +696,12 @@ class TestReconcileAndRefreshStaleCandidates:
             repo_url=_REPO_URL,
             branch=_BASE_BRANCH,
             session_factory=factory,
-            target_state_for_base_sha=lambda _base_sha: TargetBranchState(
+            target_state_for_base_sha=async_lambda(TargetBranchState(
                 branch=_BASE_BRANCH,
                 head_sha="c" * 40,
                 changed_paths=(),
                 advanced_commits=0,
-            ),
+            )),
         )
 
         assert result.candidate_refreshes == ()

@@ -11,17 +11,27 @@ from __future__ import annotations
 
 import hashlib
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
 from awf.common.commands import AsyncCommandRunner, CommandResult
+from awf.common.logging import get_logger
 from awf.service.alembic_resolver import (
     AlembicMergeResolver,
     AlembicResolveResult,
 )
+from awf.service.staleness import (
+    StalenessRefreshService,
+    TargetBranchState,
+    TargetBranchStateProvider,
+)
+
+_log = get_logger(__name__)
 
 
 class BranchResolver(Protocol):
@@ -59,6 +69,40 @@ class TargetBranchMonitorResult:
             "resolver_results": [result.to_dict() for result in self.resolver_results],
             "commit_sha": self.commit_sha,
             "pushed": self.pushed,
+        }
+
+
+@dataclass(frozen=True)
+class CandidateRefreshSummary:
+    """Per-candidate staleness refresh outcome."""
+
+    candidate_id: str
+    workspace_id: str
+    stale: bool
+    findings_count: int
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "candidate_id": self.candidate_id,
+            "workspace_id": self.workspace_id,
+            "stale": self.stale,
+            "findings_count": self.findings_count,
+            "error": self.error,
+        }
+
+
+@dataclass(frozen=True)
+class ReconcileAndRefreshResult:
+    """Combined result of target-branch reconciliation + staleness refresh."""
+
+    reconcile: TargetBranchMonitorResult
+    candidate_refreshes: tuple[CandidateRefreshSummary, ...]
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "reconcile": self.reconcile.to_dict(),
+            "candidate_refreshes": [s.to_dict() for s in self.candidate_refreshes],
         }
 
 
@@ -253,6 +297,169 @@ class TargetBranchReconcileMonitor:
         digest = hashlib.sha256(repo_url.encode("utf-8")).hexdigest()[:12]
         branch_slug = _slugify_branch(branch)
         return self._work_dir / "target-branches" / f"{slug}-{digest}-{branch_slug}"
+
+
+class GitCheckoutTargetBranchStateProvider(TargetBranchStateProvider):
+    """Builds ``TargetBranchState`` from a local git checkout using git commands.
+
+    Expects the checkout to already be at the latest target HEAD (e.g. after
+    ``TargetBranchReconcileMonitor.reconcile()`` has run).  Uses an injected
+    ``AsyncCommandRunner`` so it is testable with ``FakeCommandRunner``.
+    """
+
+    def __init__(
+        self,
+        *,
+        runner: AsyncCommandRunner,
+        checkout_path: Path,
+    ) -> None:
+        self._runner = runner
+        self._checkout_path = checkout_path
+
+    async def fetch(
+        self,
+        *,
+        repo_url: str,  # noqa: ARG002 — part of the Protocol signature
+        branch: str,
+        base_sha: str,
+    ) -> TargetBranchState:
+        head_result = await self._run_git(
+            ["rev-parse", "HEAD"],
+            operation="target_branch_state.rev_parse",
+        )
+        head_sha = head_result.stdout.strip()
+
+        count_result = await self._run_git(
+            ["rev-list", "--count", f"{base_sha}..HEAD"],
+            operation="target_branch_state.rev_list",
+        )
+        advanced_commits = int(count_result.stdout.strip())
+
+        diff_result = await self._run_git(
+            ["diff", "--name-only", f"{base_sha}..HEAD"],
+            operation="target_branch_state.diff_name_only",
+        )
+        changed_paths = tuple(
+            line for line in diff_result.stdout.strip().split("\n") if line
+        )
+
+        return TargetBranchState(
+            branch=branch,
+            head_sha=head_sha,
+            changed_paths=changed_paths,
+            advanced_commits=advanced_commits,
+        )
+
+    async def _run_git(
+        self,
+        args: list[str],
+        *,
+        operation: str,
+    ) -> CommandResult:
+        result = await self._runner.run(
+            ["git", "-C", str(self._checkout_path), *args],
+        )
+        if not result.ok:
+            raise TargetBranchMonitorError(operation=operation, result=result)
+        return result
+
+
+async def reconcile_and_refresh_stale_candidates(
+    *,
+    reconcile_fn: Callable[..., Awaitable[TargetBranchMonitorResult]],
+    repo_url: str,
+    branch: str,
+    session_factory: async_sessionmaker[AsyncSession],
+    target_state_for_base_sha: Callable[[str], Awaitable[TargetBranchState]],
+    exclude_workspace_ids: set[str] | None = None,
+    dry_run: bool = False,
+) -> ReconcileAndRefreshResult:
+    """Run target-branch reconciliation, then refresh staleness for open candidates.
+
+    1. Calls ``reconcile_fn`` (typically ``TargetBranchReconcileMonitor.reconcile``).
+    2. If reconciliation succeeds, opens a DB session and queries all open merge
+       candidates for the same ``repo_url``/``base_branch``.
+    3. For each open candidate (excluding ``exclude_workspace_ids``), calls
+       ``StalenessRefreshService.refresh_candidate()`` with the appropriate
+       ``TargetBranchState`` supplied by ``target_state_for_base_sha``.
+    4. Individual candidate refresh failures are recorded in the result but do
+       not prevent other candidates from being refreshed or hide the successful
+       reconciliation.
+    5. Returns ``ReconcileAndRefreshResult`` with both the reconciliation
+       outcome and per-candidate summaries.
+    """
+
+    reconcile_result = await reconcile_fn(
+        repo_url=repo_url,
+        branch=branch,
+        dry_run=dry_run,
+    )
+
+    excluded = exclude_workspace_ids or set()
+
+    summaries: list[CandidateRefreshSummary] = []
+    async with session_factory() as session:
+        from awf.db.repositories import MergeCandidateRepository
+
+        mc_repo = MergeCandidateRepository(session)
+        candidates = await mc_repo.list_queue(
+            repo_url=repo_url,
+            base_branch=branch,
+        )
+
+        for candidate in candidates:
+            if candidate.workspace_id in excluded:
+                continue
+
+            try:
+                if candidate.base_sha is None:
+                    summaries.append(
+                        CandidateRefreshSummary(
+                            candidate_id=candidate.id,
+                            workspace_id=candidate.workspace_id,
+                            stale=False,
+                            findings_count=0,
+                        )
+                    )
+                    continue
+
+                target = await target_state_for_base_sha(candidate.base_sha)
+                service = StalenessRefreshService(session)
+                refresh_result = await service.refresh_candidate(
+                    candidate.id,
+                    target=target,
+                )
+                summaries.append(
+                    CandidateRefreshSummary(
+                        candidate_id=candidate.id,
+                        workspace_id=candidate.workspace_id,
+                        stale=refresh_result.stale,
+                        findings_count=len(refresh_result.findings),
+                    )
+                )
+            except Exception as exc:
+                _log.warning(
+                    "target_branch.candidate_refresh_failed",
+                    candidate_id=candidate.id,
+                    workspace_id=candidate.workspace_id,
+                    error=str(exc)[:500],
+                )
+                summaries.append(
+                    CandidateRefreshSummary(
+                        candidate_id=candidate.id,
+                        workspace_id=candidate.workspace_id,
+                        stale=False,
+                        findings_count=0,
+                        error=str(exc)[:1000],
+                    )
+                )
+
+        await session.commit()
+
+    return ReconcileAndRefreshResult(
+        reconcile=reconcile_result,
+        candidate_refreshes=tuple(summaries),
+    )
 
 
 async def run_target_branch_reconcile_once(
