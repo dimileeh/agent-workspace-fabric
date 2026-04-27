@@ -584,6 +584,46 @@ class TestExecProcessCleanupSafety:
         ]
 
     @pytest.mark.unit
+    async def test_fix_pass_cleanup_failure_fails_infrastructure_before_commit(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory)
+        _queue_initial_pass(fake)
+        fake.queue_result(returncode=1, stderr="pytest: 1 failed")
+        fake.queue_result(
+            returncode=124,
+            stderr="agent idle timeout",
+            reason_code="COMMAND_IDLE_TIMEOUT",
+        )
+        fake.queue_result(returncode=1, stderr="tagged process still alive")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "EXEC_PROCESS_CLEANUP_FAILED" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert runs[-1].status == "failed"
+
+        adapter_calls = [call for call in fake.calls if "codex" in call.args]
+        assert len(adapter_calls) == 2
+        assert fake.calls[-1].args[-1] == fake.calls[-2].args[
+            fake.calls[-2].args.index("awf-exec") + 1
+        ]
+        assert not any(
+            call.args[:2] == ["git", "-C"] and "commit" in call.args
+            for call in fake.calls[8:]
+        )
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "terminal_status",
         [WorkspaceStatus.cancelled, WorkspaceStatus.destroying],
