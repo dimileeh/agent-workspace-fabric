@@ -1,0 +1,10 @@
+{
+  "status": "needs_iteration",
+  "summary": "The API route/WebSocket coverage work is materially improved and current validation passes, but the implementation does not fully achieve the saved plan or the original 99%+ branch-coverage campaign target. Ruff passed, mypy passed, and the full branch-coverage pytest run passed with 1515 passed and 4 skipped; total coverage is 92.24%. The requested focus files now report 99% aggregate coverage, with most focus routes at 100%.",
+  "gaps": [
+    "Continue coverage work until full AWF branch coverage reaches 99%+. The current highest remaining gaps include src/awf/service/controls.py at 71%, src/awf/control/worker.py at 82%, src/awf/control/executor.py at 85%, src/awf/db/repositories.py at 85%, src/awf/service/alembic_resolver.py at 85%, src/awf/service/status.py at 86%, and src/awf/runtime/validation.py at 87%.",
+    "Close the remaining focus-file coverage gaps from the saved API plan: src/awf/api/routes/workspaces.py still misses the idempotency-key-with-new-workspace path (branch 128->148), the default disk-check provider path (line 184), and retry success response line 343.",
+    "Resolve or document the remaining src/awf/api/deps.py branch gap at branch 72->76. Because _sqlite_file_path() only allows sqlite URLs into the reconnect block, this appears to be a defensive or impossible non-SQLite branch that should be removed, covered through a real seam, or marked with a justified no-cover comment.",
+    "Preserve red/green TDD evidence in the next iteration for any production change. The current local history has green test commits and a production validation.py change in the final green commit, but no separate red-test commit or note showing the planned failing narrow test run before the fix."
+  ]
+}
