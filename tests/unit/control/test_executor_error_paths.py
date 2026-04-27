@@ -675,7 +675,8 @@ class TestMissingWorktreeFailure:
 
         executor._recheck_status = _recheck_then_operator_status  # type: ignore[method-assign]
 
-        await executor.execute(ws_id)
+        with structlog.testing.capture_logs() as captured:
+            await executor.execute(ws_id)
 
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(ws_id)
@@ -683,6 +684,12 @@ class TestMissingWorktreeFailure:
 
         assert ws.status == final_status.value
         assert ws.failure_reason is None
+        assert any(
+            event.get("event") == "executor.skip_stale_status"
+            and event.get("action") == "post_agent_commit"
+            for event in captured
+        )
+        assert not any(event.get("event") == "executor.worktree_missing" for event in captured)
         assert not any(
             event.event_type == "workspace.state_changed"
             and event.reason_code == "WORKTREE_MISSING"

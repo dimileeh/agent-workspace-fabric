@@ -1272,14 +1272,6 @@ class WorkspaceExecutor:
         if worktree_path.is_dir():
             return True
 
-        message = _worktree_missing_message(worktree_path, action)
-        _log.error(
-            "executor.worktree_missing",
-            workspace_id=workspace_id,
-            action=action,
-            worktree_path=str(worktree_path),
-            reason_code=WORKTREE_MISSING_REASON_CODE,
-        )
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             ws = await repo.get(workspace_id)
@@ -1296,6 +1288,14 @@ class WorkspaceExecutor:
                 await session.commit()
                 return False
 
+            message = _worktree_missing_message(worktree_path, action)
+            _log.error(
+                "executor.worktree_missing",
+                workspace_id=workspace_id,
+                action=action,
+                worktree_path=str(worktree_path),
+                reason_code=WORKTREE_MISSING_REASON_CODE,
+            )
             await repo.add_event(
                 ws,
                 event_type="workspace.executor_worktree_missing",
