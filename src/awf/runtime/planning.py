@@ -41,11 +41,11 @@ def render_workspace_path(template: str, *, workspace_id: str) -> Path:
     """Render a workspace-relative artifact path from profile config."""
 
     rendered = template.format(workspace_id=workspace_id)
+    if not rendered.strip():
+        raise ValueError("path template rendered an empty path")
     path = Path(rendered)
     if path.is_absolute() or ".." in path.parts:
         raise ValueError(f"path template must stay inside the workspace: {template!r}")
-    if not str(path):
-        raise ValueError("path template rendered an empty path")
     return path
 
 
