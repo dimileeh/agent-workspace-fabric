@@ -588,7 +588,7 @@ def test_default_workspace_id_lookup_returns_unavailable_for_malformed_url() -> 
 
 
 @pytest.mark.unit
-def test_database_probe_and_workspace_lookup_read_sqlite_rows(tmp_path: Path) -> None:
+async def test_database_probe_and_workspace_lookup_read_sqlite_rows(tmp_path: Path) -> None:
     db_path = tmp_path / "awf-status.db"
     database_url = f"sqlite+aiosqlite:///{db_path}"
 
@@ -630,11 +630,11 @@ def test_database_probe_and_workspace_lookup_read_sqlite_rows(tmp_path: Path) ->
         finally:
             await engine.dispose()
 
-    asyncio.run(seed())
+    await seed()
 
-    db_check = asyncio.run(check_database(database_url))
-    view = asyncio.run(_default_workspace_id_lookup(database_url))
-    failed = asyncio.run(check_database("sqlite+aiosqlite:////no/such/parent/awf.db"))
+    db_check = await check_database(database_url)
+    view = await _default_workspace_id_lookup(database_url)
+    failed = await check_database("sqlite+aiosqlite:////no/such/parent/awf.db")
 
     assert db_check == {"ok": True, "status": "ok"}
     assert view.available is True
