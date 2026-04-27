@@ -292,6 +292,7 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
     must NOT suppress that, since the workspace is unrecoverable
     without operator help."""
     import datetime
+
     from sqlalchemy.exc import StatementError  # noqa: F401
 
     cmd = FakeCommandRunner()
@@ -309,8 +310,9 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
         )
         # Mark it failed via direct UPDATE, bypassing the .finish() helper
         # which expects an existing operation object.
+        from sqlalchemy import update
+
         from awf.db.models import Operation
-        from sqlalchemy import select, update
 
         await s.execute(
             update(Operation)

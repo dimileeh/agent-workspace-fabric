@@ -12,7 +12,6 @@ feature task prompt.
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
