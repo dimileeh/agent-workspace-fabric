@@ -58,8 +58,7 @@ _TOKEN_RE = re.compile(
     r"github_pat_[A-Za-z0-9_]{8,}|"
     r"sk-ant-[A-Za-z0-9_-]{8,}|"
     r"AIza[A-Za-z0-9_-]{12,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{8,}|"
-    r"[A-Za-z0-9_-]{40,}"
+    r"xox[baprs]-[A-Za-z0-9-]{8,}"
     r")(?![A-Za-z0-9])"
 )
 

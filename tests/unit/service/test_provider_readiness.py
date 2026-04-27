@@ -531,3 +531,38 @@ def test_provider_readiness_redacts_secret_values_from_details(tmp_path: Path) -
     assert "anthropic_secret" not in serialized
     assert "gemini_secret" not in serialized
     assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_preserves_long_diagnostic_ids_in_details(
+    tmp_path: Path,
+) -> None:
+    github_secret = "ghp_diagnostic_secret"
+    image_digest = "a" * 64
+    container_id = "b" * 40
+    error_payload_id = "payload_" + ("c" * 40)
+
+    def _run(args: list[str], **_kwargs: object) -> Any:
+        assert args == ["gh", "auth", "status", "--hostname", "github.com"]
+        return _completed(
+            returncode=1,
+            stderr=(
+                f"failed for token {github_secret}; "
+                f"image sha256:{image_digest}; "
+                f"container {container_id}; "
+                f"payload {error_payload_id}"
+            ),
+        )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"AWF_GITHUB_TOKEN": github_secret},
+        run_subprocess=_run,
+    )
+
+    detail = payload["providers"]["github"]["detail"]
+    assert github_secret not in detail
+    assert "<redacted>" in detail
+    assert image_digest in detail
+    assert container_id in detail
+    assert error_payload_id in detail
