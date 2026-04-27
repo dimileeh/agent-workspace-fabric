@@ -80,13 +80,15 @@ class TestExecutorFixPassWarnings:
 
     @pytest.mark.unit
     async def test_fix_pass_add_and_commit_failures_log_and_continue(self, tmp_path: Path) -> None:
+        from awf.adapters import base as _adapter_base
         from awf.adapters import registry as _registry  # noqa: F401
+        from awf.adapters.codex import CodexAdapter
         from awf.common.commands import FakeCommandRunner
         from awf.control.executor import ExecutorConfig, WorkspaceExecutor
         from awf.db.enums import AgentRuntime
         from awf.node.compose_manager import ComposeManager
-        from awf.runtime.pr_creator import PullRequestCreator
-        from awf.runtime.validation import ValidationRunner
+        from awf.runtime.pr_creator import PullRequestResult
+        from awf.runtime.validation import ValidationCommandResult, ValidationResult
 
         template = (
             Path(__file__).resolve().parents[2] / "docker" / "compose" / "workspace.base.yml.j2"
@@ -125,28 +127,85 @@ class TestExecutorFixPassWarnings:
         fake.queue_result(returncode=0)  # commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
-        # Validation pass 0: FAIL (triggers fix cycle).
-        fake.queue_result(returncode=1, stderr="pytest: 1 failed")
         # Fix pass 1: adapter → fix_add FAILS (warning) → cached diff →
         # commit FAILS (warning) → validation GREEN.
         fake.queue_result(returncode=0)  # adapter (fix pass)
         fake.queue_result(returncode=1, stderr="index.lock held")  # fix_add FAILS
         fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (hack: still has change)
         fake.queue_result(returncode=1, stderr="commit would be empty")  # fix_commit FAILS
-        fake.queue_result(returncode=0)  # validation pass 1 green
-        # Pre-push diagnostics + push + gh pr create.
-        fake.queue_result(returncode=0, stdout="sha\n")
-        fake.queue_result(returncode=0, stdout="awf/x\n")
-        fake.queue_result(returncode=0, stdout="ab commit\n")
-        fake.queue_result(returncode=0)  # push
-        fake.queue_result(returncode=0, stdout="https://github.com/x/y/pull/1\n")
+        class _FixPassValidation:
+            def __init__(self, artifacts_dir: Path) -> None:
+                self.artifacts_dir = artifacts_dir
+                self.validation_calls = 0
+
+            async def run_profile_coverage(self, **_kwargs: Any) -> None:
+                return None
+
+            async def run_profile_phases(
+                self,
+                *,
+                workspace_id: str,
+                phase_names: tuple[str, ...],
+                **_kwargs: Any,
+            ) -> ValidationResult:
+                if phase_names == ("setup", "pre_agent"):
+                    return ValidationResult()
+                assert phase_names == ("post_agent", "validate")
+                self.validation_calls += 1
+                artifacts = self.artifacts_dir / workspace_id
+                artifacts.mkdir(parents=True, exist_ok=True)
+                stdout = artifacts / f"validate_{self.validation_calls}.stdout"
+                stderr = artifacts / f"validate_{self.validation_calls}.stderr"
+                if self.validation_calls == 1:
+                    stdout.write_text("", encoding="utf-8")
+                    stderr.write_text("pytest: 1 failed", encoding="utf-8")
+                    return ValidationResult(
+                        commands=[
+                            ValidationCommandResult(
+                                command="pytest -q",
+                                returncode=1,
+                                duration_seconds=0.1,
+                                stdout_path=stdout,
+                                stderr_path=stderr,
+                                phase="validate",
+                                reason_code="COMMAND_FAILED",
+                            )
+                        ]
+                    )
+                stdout.write_text("passed", encoding="utf-8")
+                stderr.write_text("", encoding="utf-8")
+                return ValidationResult(
+                    commands=[
+                        ValidationCommandResult(
+                            command="pytest -q",
+                            returncode=0,
+                            duration_seconds=0.1,
+                            stdout_path=stdout,
+                            stderr_path=stderr,
+                            phase="validate",
+                        )
+                    ]
+                )
+
+        class _SuccessfulPrCreator:
+            async def push_and_open(
+                self,
+                *,
+                branch_name: str,
+                **_kwargs: Any,
+            ) -> PullRequestResult:
+                return PullRequestResult(
+                    url="https://github.com/x/y/pull/1",
+                    branch=branch_name,
+                    head_sha="c" * 40,
+                )
 
         executor = WorkspaceExecutor(
             session_factory=factory,
             runner=fake,
             compose=ComposeManager(work_dir=tmp_path / "w", template_path=template),
-            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "a"),
-            pr_creator=PullRequestCreator(fake),
+            validation=_FixPassValidation(tmp_path / "a"),  # type: ignore[arg-type]
+            pr_creator=_SuccessfulPrCreator(),  # type: ignore[arg-type]
             config=ExecutorConfig(
                 worktrees_root=tmp_path / "w" / "wt",
                 compose_projects_root=tmp_path / "w" / "c",
@@ -156,14 +215,25 @@ class TestExecutorFixPassWarnings:
                 max_validation_fix_passes=3,
             ),
         )
-        with structlog.testing.capture_logs() as captured:
-            await executor.execute(ws_id)
+        original_adapter_registry = dict(_adapter_base._REGISTRY)
+        _adapter_base._REGISTRY[AgentRuntime.codex] = CodexAdapter
+        try:
+            with structlog.testing.capture_logs() as captured:
+                await executor.execute(ws_id)
+        finally:
+            _adapter_base._REGISTRY.clear()
+            _adapter_base._REGISTRY.update(original_adapter_registry)
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             # Landed at completed despite fix-pass sub-failures.
-            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.status == WorkspaceStatus.completed.value, {
+                "failure_reason": ws.failure_reason,
+                "failure_message": ws.failure_message,
+                "events": [(event.event_type, event.reason_code) for event in ws.events],
+                "calls": [call.args for call in fake.calls],
+            }
         assert any(
             event.get("event") == "executor.fix_pass_add_failed"
             and event.get("stderr") == "index.lock held"
