@@ -159,19 +159,19 @@ class TestMonitorActionLogging:
         thread = thread_node(tid="T_recov", author="reviewer")
         # Outer iter 1
         cmd.queue_result(returncode=0)  # git fetch origin <base>
-        cmd.queue_result(returncode=0, stdout="0\\n")
+        cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload(threads=[thread]))
         adapter.queue(stdout="fixed it")
         cmd.queue_result(returncode=0, stdout=pr_payload())  # settle fetch
         cmd.queue_result(returncode=0)  # push
-        cmd.queue_result(returncode=0, stdout="head2\\n")  # rev-parse
+        cmd.queue_result(returncode=0, stdout="head2\n")  # rev-parse
         cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve
         # Outer iter 2: clean -> Merge.
         cmd.queue_result(returncode=0)  # git fetch origin <base>
-        cmd.queue_result(returncode=0, stdout="0\\n")
+        cmd.queue_result(returncode=0, stdout="0\n")
         cmd.queue_result(returncode=0, stdout=pr_payload())
         cmd.queue_result(returncode=0)  # merge
-        cmd.queue_result(returncode=0, stdout="MERGESHA\\n")
+        cmd.queue_result(returncode=0, stdout="MERGESHA\n")
 
         log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
         adapter._log_store = log_store

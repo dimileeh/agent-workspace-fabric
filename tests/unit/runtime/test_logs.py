@@ -379,7 +379,7 @@ async def test_workspace_log_sink_reopen_behavior(
         source="monitor",
         name="PR monitor",
     )
-    await sinks.write_stdout("first line\\n")
+    await sinks.write_stdout("first line\n")
     await sinks.close()
 
     async with factory() as session:
@@ -388,14 +388,14 @@ async def test_workspace_log_sink_reopen_behavior(
         assert stream is not None
         assert stream.closed_at is not None
 
-    await sinks.write_stdout("second line\\n")
+    await sinks.write_stdout("second line\n")
 
     async with factory() as session:
         repo = WorkspaceLogStreamRepository(session)
         stream = await repo.get(workspace_id=workspace.id, stream_id="monitor.log.stdout")
         assert stream is not None
         assert stream.closed_at is None
-        assert stream.byte_count == len("first line\\nsecond line\\n")
+        assert stream.byte_count == len("first line\nsecond line\n")
 
 
 @pytest.mark.unit

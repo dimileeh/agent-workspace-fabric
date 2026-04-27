@@ -1059,8 +1059,8 @@ class TestWorkspaceWebSocket:
                 factory = make_session_factory(engine)
                 mon_log = tmp_path / "monitor.log"
                 rec_log = tmp_path / "recovery.log"
-                mon_log.write_text("monitor data\\n", encoding="utf-8")
-                rec_log.write_text("recovery data\\n", encoding="utf-8")
+                mon_log.write_text("monitor data\n", encoding="utf-8")
+                rec_log.write_text("recovery data\n", encoding="utf-8")
 
                 async def setup():
                     async with factory() as session:

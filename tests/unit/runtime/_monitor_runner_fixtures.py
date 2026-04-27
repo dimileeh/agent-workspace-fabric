@@ -74,7 +74,7 @@ class FakeAdapter(AgentAdapter):
                 source=log_source,
                 name=log_source,
             )
-            await sinks.write_stdout("mock output\\n")
+            await sinks.write_stdout("mock output\n")
             await sinks.close()
         if not self._queued:
             raise AssertionError(
