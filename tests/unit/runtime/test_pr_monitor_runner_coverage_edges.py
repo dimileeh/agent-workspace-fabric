@@ -25,9 +25,9 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_done_key,
+    _initial_review_grace_started_key,
     _initial_review_grace_state_for_persistence,
     _initial_review_grace_state_for_runtime,
-    _initial_review_grace_started_key,
     _merge_rejection_reason,
     _notify_human_reason,
     _stale_pending_check_warnings,
