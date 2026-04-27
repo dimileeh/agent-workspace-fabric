@@ -14,7 +14,7 @@ from awf.adapters.codex import CodexAdapter
 from awf.common.commands import FakeCommandRunner
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.logs import LogBroadcaster, LogStore, WorkspaceLogSink
+from awf.runtime.logs import LogBroadcaster, LogStore, WorkspaceLogSink, stream_compose_service_logs
 from awf.runtime.validation import ValidationRunner
 
 
@@ -343,3 +343,96 @@ async def test_agent_and_validation_runners_create_indexed_log_streams(
     assert (
         tmp_path / "logs" / workspace.id / "validation.cmd_01.stderr.log"
     ).read_text() == "validation err\n"
+
+
+class _FakeComposeLogsProcess:
+    def __init__(self, *, exit_after_terminate: bool) -> None:
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stdout.feed_data(b"service out\n")
+        self.stderr.feed_data(b"service err\n")
+        self.stdout.feed_eof()
+        self.stderr.feed_eof()
+        self.returncode: int | None = None
+        self.terminated = False
+        self.killed = False
+        self._exit_after_terminate = exit_after_terminate
+        self._exit_event = asyncio.Event()
+
+    def terminate(self) -> None:
+        self.terminated = True
+        if self._exit_after_terminate:
+            self.returncode = 0
+            self._exit_event.set()
+
+    def kill(self) -> None:
+        self.killed = True
+        self.returncode = -9
+        self._exit_event.set()
+
+    async def wait(self) -> int:
+        if self.returncode is None:
+            await self._exit_event.wait()
+        assert self.returncode is not None
+        return self.returncode
+
+
+@pytest.mark.unit
+async def test_stream_compose_service_logs_terminates_process_on_cancel(tmp_path: Path) -> None:
+    process = _FakeComposeLogsProcess(exit_after_terminate=True)
+
+    async def process_factory(*_args: object, **_kwargs: object) -> _FakeComposeLogsProcess:
+        return process
+
+    task = asyncio.create_task(
+        stream_compose_service_logs(
+            workspace_id="ws_compose_logs",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            log_store=LogStore(root=tmp_path / "logs"),
+            process_factory=process_factory,
+        )
+    )
+    await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert process.killed is False
+    assert (
+        tmp_path / "logs" / "ws_compose_logs" / "services.compose.stdout.log"
+    ).read_text(encoding="utf-8") == "service out\n"
+    assert (
+        tmp_path / "logs" / "ws_compose_logs" / "services.compose.stderr.log"
+    ).read_text(encoding="utf-8") == "service err\n"
+
+
+@pytest.mark.unit
+async def test_stream_compose_service_logs_kills_process_after_terminate_timeout(
+    tmp_path: Path,
+) -> None:
+    process = _FakeComposeLogsProcess(exit_after_terminate=False)
+
+    async def process_factory(*_args: object, **_kwargs: object) -> _FakeComposeLogsProcess:
+        return process
+
+    task = asyncio.create_task(
+        stream_compose_service_logs(
+            workspace_id="ws_compose_logs_kill",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            log_store=LogStore(root=tmp_path / "logs"),
+            process_factory=process_factory,
+            terminate_timeout_seconds=0.01,
+        )
+    )
+    await asyncio.sleep(0)
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is True
+    assert process.killed is True
