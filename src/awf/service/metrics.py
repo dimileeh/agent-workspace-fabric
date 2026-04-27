@@ -388,6 +388,9 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
     ).where(
         Workspace.status == WorkspaceStatus.failed.value,
         Workspace.updated_at >= window_start,
+    ).order_by(
+        Workspace.updated_at.desc(),
+        Workspace.id,
     )
     result = await session.execute(stmt)
     rows = result.all()
