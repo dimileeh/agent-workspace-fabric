@@ -20,7 +20,16 @@ import time
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 
-from awf.common.commands import AsyncCommandRunner, CommandResult
+from awf.common.commands import (
+    COMMAND_IDLE_TIMEOUT_REASON,
+    COMMAND_TIMEOUT_REASON,
+    AsyncCommandRunner,
+    CommandResult,
+)
+from awf.common.compose_exec import (
+    build_tracked_compose_exec,
+    cleanup_compose_exec_invocation,
+)
 from awf.common.logging import get_logger
 from awf.profiles.models import ProfileCommand, ProfileCoverage, WorkspaceProfile
 from awf.runtime.logs import LogStore
@@ -434,20 +443,14 @@ class ValidationRunner:
         timeout_seconds: int | None = None,
         is_retry: bool = False,
     ) -> ValidationCommandResult:
-        docker_args = [
-            "docker",
-            "compose",
-            "--project-name",
-            compose_project,
-            "--file",
-            str(compose_file),
-            "exec",
-            "-T",
-            "-w",
-            "/workspace",
-            "agent",
-            *cli_args,
-        ]
+        invocation = build_tracked_compose_exec(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            cli_args=cli_args,
+            source="validation",
+            label=label,
+        )
+        docker_args = invocation.args
         started = time.monotonic()
         reason_code = "COMMAND_FAILED"
         base_stream_id = f"validation.{label}"
@@ -456,6 +459,7 @@ class ValidationRunner:
             "stderr": f"{base_stream_id}.stderr",
         }
         sinks = None
+        timed_out = False
         if self._log_store is not None:
             sinks = await self._log_store.open_command_streams(
                 workspace_id=artifacts_dir.name,
@@ -465,45 +469,61 @@ class ValidationRunner:
             )
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
-            if timeout_seconds is None:
-                if sinks is not None and run_streaming is not None:
-                    result: CommandResult = await run_streaming(
-                        docker_args,
-                        on_stdout=sinks.write_stdout,
-                        on_stderr=sinks.write_stderr,
-                    )
-                else:
-                    result = await self._runner.run(docker_args)
-                    if sinks is not None:
-                        await sinks.write_stdout(result.stdout)
-                        await sinks.write_stderr(result.stderr)
-            else:
-                if sinks is not None and run_streaming is not None:
-                    result = await asyncio.wait_for(
-                        run_streaming(
+            try:
+                if timeout_seconds is None:
+                    if sinks is not None and run_streaming is not None:
+                        result: CommandResult = await run_streaming(
                             docker_args,
                             on_stdout=sinks.write_stdout,
                             on_stderr=sinks.write_stderr,
-                        ),
-                        timeout=timeout_seconds,
-                    )
+                        )
+                    else:
+                        result = await self._runner.run(docker_args)
+                        if sinks is not None:
+                            await sinks.write_stdout(result.stdout)
+                            await sinks.write_stderr(result.stderr)
                 else:
-                    result = await asyncio.wait_for(
-                        self._runner.run(docker_args),
-                        timeout=timeout_seconds,
+                    if run_streaming is not None:
+                        result = await run_streaming(
+                            docker_args,
+                            on_stdout=sinks.write_stdout if sinks is not None else None,
+                            on_stderr=sinks.write_stderr if sinks is not None else None,
+                            wall_timeout_seconds=timeout_seconds,
+                        )
+                    else:
+                        result = await asyncio.wait_for(
+                            self._runner.run(docker_args),
+                            timeout=timeout_seconds,
+                        )
+                        if sinks is not None:
+                            await sinks.write_stdout(result.stdout)
+                            await sinks.write_stderr(result.stderr)
+            except TimeoutError:
+                timed_out = True
+                result = CommandResult(
+                    returncode=124,
+                    stdout="",
+                    stderr=f"command timed out after {timeout_seconds}s",
+                )
+                reason_code = "PHASE_TIMEOUT"
+                if sinks is not None:
+                    await sinks.write_stderr(result.stderr)
+            except asyncio.CancelledError:
+                await asyncio.shield(
+                    cleanup_compose_exec_invocation(
+                        self._runner,
+                        invocation,
+                        workspace_id=artifacts_dir.name,
                     )
-                    if sinks is not None:
-                        await sinks.write_stdout(result.stdout)
-                        await sinks.write_stderr(result.stderr)
-        except TimeoutError:
-            result = CommandResult(
-                returncode=124,
-                stdout="",
-                stderr=f"command timed out after {timeout_seconds}s",
-            )
-            reason_code = "PHASE_TIMEOUT"
-            if sinks is not None:
-                await sinks.write_stderr(result.stderr)
+                )
+                raise
+            if timed_out or _compose_exec_timed_out(result):
+                reason_code = "PHASE_TIMEOUT"
+                await cleanup_compose_exec_invocation(
+                    self._runner,
+                    invocation,
+                    workspace_id=artifacts_dir.name,
+                )
         finally:
             if sinks is not None:
                 await sinks.close()
@@ -528,6 +548,10 @@ class ValidationRunner:
             reason_code=reason_code,
             stream_ids=stream_ids,
         )
+
+
+def _compose_exec_timed_out(result: CommandResult) -> bool:
+    return result.reason_code in {COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON}
 
 
 def _display_command(cli_args: list[str]) -> str:

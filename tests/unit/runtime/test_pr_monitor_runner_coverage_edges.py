@@ -11,12 +11,14 @@ import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.base import Base
 from awf.db.enums import OperationType, TaskClass, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceEventCreate, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import (
+    AddressComments,
     CheckFailure,
     CheckState,
     CheckTiming,
@@ -30,6 +32,7 @@ from awf.runtime.pr_monitor import (
     ReportCiFailure,
     ReviewComment,
     ReviewThread,
+    SyncBase,
 )
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
@@ -101,6 +104,16 @@ class _ExplodingRunner:
     async def run(self, args: list[str], **_kwargs: object) -> object:
         del args
         raise RuntimeError("runner unavailable")
+
+
+class _CleanupFailingAdapter(FakeAdapter):
+    async def run(self, **_kwargs: object) -> object:  # type: ignore[override]
+        raise ComposeExecCleanupError(
+            invocation_id="awf_monitor_cleanup_failed",
+            source="agent",
+            label="monitor",
+            message="tagged process still alive",
+        )
 
 
 class _QueueAfterLockRunner(PullRequestMonitorRunner):
@@ -1098,6 +1111,143 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
     assert state.iter_count == 1
     assert "traceback" in adapter.calls[0]
     assert cmd.calls[-1].args[-2:] == ["origin", f"HEAD:refs/heads/awf/{workspace_id}"]
+
+
+@pytest.mark.unit
+async def test_monitor_adapter_cleanup_failure_terminates_without_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=_CleanupFailingAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    terminal = await runner._execute(
+        action=ReportCiFailure(
+            failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="traceback"),)
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert cmd.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == "infrastructure_failure"
+        assert "EXEC_PROCESS_CLEANUP_FAILED" in (ws.failure_message or "")
+        assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+
+@pytest.mark.unit
+async def test_monitor_comment_cleanup_failure_terminates_without_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    thread = ReviewThread(
+        thread_id="T1",
+        path="src/app.py",
+        line=12,
+        body_excerpt="please fix",
+        author="reviewer",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=_CleanupFailingAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    terminal = await runner._execute(
+        action=AddressComments(threads=(thread,), review_comments=()),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(threads=(thread,)),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert cmd.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+
+@pytest.mark.unit
+async def test_monitor_sync_base_cleanup_failure_terminates_without_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch
+    cmd.queue_result(returncode=1, stderr="conflict")  # merge
+    cmd.queue_result(returncode=0, stdout="UU src/app.py\n")  # status
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=_CleanupFailingAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert [call.args[-2:] for call in cmd.calls] == [
+        ["merge", "--abort"],
+        ["origin", "development"],
+        ["--no-edit", "origin/development"],
+        ["status", "--porcelain"],
+    ]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
 
 
 @pytest.mark.unit

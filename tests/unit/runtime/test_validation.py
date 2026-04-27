@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
 from awf.runtime.validation import (
@@ -568,10 +569,31 @@ class _SleepingRunner:
         input_bytes: bytes | None = None,
         cwd: str | None = None,
     ) -> CommandResult:
-        del args, input_bytes, cwd
+        del input_bytes, cwd
+
+        if "awf-cleanup" in args:
+            return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
 
         await asyncio.sleep(60)
         return CommandResult(returncode=0, stdout="late", stderr="")
+
+
+class _CancellingRunner:
+    def __init__(self) -> None:
+        self.cleanup_calls: list[list[str]] = []
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        del input_bytes, cwd
+        if "awf-cleanup" in args:
+            self.cleanup_calls.append(list(args))
+            return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
+        raise asyncio.CancelledError
 
 
 class _NonStreamingRunner:
@@ -615,8 +637,10 @@ class _StreamingRunner:
         on_stderr: object = None,
         input_bytes: bytes | None = None,
         cwd: str | None = None,
+        wall_timeout_seconds: float | None = None,
+        idle_timeout_seconds: float | None = None,
     ) -> CommandResult:
-        del input_bytes, cwd
+        del input_bytes, cwd, wall_timeout_seconds, idle_timeout_seconds
         self.calls.append(list(args))
         if on_stdout is not None:
             await on_stdout(self.result.stdout)  # type: ignore[misc]
@@ -679,6 +703,7 @@ class TestValidationResultHelpers:
     @pytest.mark.unit
     def test_coverage_metadata_and_result_helpers_handle_absent_percent_and_command(
         self,
+        tmp_path: Path,
     ) -> None:
         coverage_without_percent = ValidationCoverageResult(
             provider="python",
@@ -702,6 +727,20 @@ class TestValidationResultHelpers:
         assert "percent" not in metadata
         assert not ValidationResult(migration=migration_failure).all_passed
         assert ValidationResult(coverage=coverage_without_percent).first_failure is None
+        assert (
+            ValidationResult(
+                commands=[
+                    ValidationCommandResult(
+                        command="pytest -q",
+                        returncode=0,
+                        duration_seconds=0,
+                        stdout_path=tmp_path / "ok.out",
+                        stderr_path=tmp_path / "ok.err",
+                    )
+                ]
+            ).first_failure
+            is None
+        )
 
     @pytest.mark.unit
     async def test_exec_streams_to_log_store_and_artifacts(self, tmp_path: Path) -> None:
@@ -764,6 +803,125 @@ class TestValidationResultHelpers:
         ).read_text(encoding="utf-8") == "command timed out after 0.01s"
 
     @pytest.mark.unit
+    async def test_exec_timeout_invokes_targeted_cleanup_before_phase_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=124,
+            stderr="command wall timeout",
+            reason_code="COMMAND_TIMEOUT",
+        )
+        fake.queue_result(returncode=0, stdout="cleanup ok")
+        val = ValidationRunner(
+            runner=fake,
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_exec_timeout_cleanup"
+        artifacts_dir.mkdir(parents=True)
+
+        result = await val._exec(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            cli_args=["pytest", "-q"],
+            label="01_validate",
+            artifacts_dir=artifacts_dir,
+            phase="validate",
+            timeout_seconds=1,
+        )
+
+        assert result.returncode == 124
+        assert result.reason_code == "PHASE_TIMEOUT"
+        assert len(fake.calls) == 2
+        exec_args = fake.calls[0].args
+        cleanup_args = fake.calls[1].args
+        invocation_id = exec_args[exec_args.index("awf-exec") + 1]
+        assert cleanup_args[-1] == invocation_id
+        assert "AWF_EXEC_INVOCATION_ID" in cleanup_args[cleanup_args.index("-lc") + 1]
+        assert "pkill pytest" not in cleanup_args[cleanup_args.index("-lc") + 1]
+
+    @pytest.mark.unit
+    async def test_exec_cleanup_failure_raises_infrastructure_cleanup_error(
+        self, tmp_path: Path
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=124,
+            stderr="command wall timeout",
+            reason_code="COMMAND_TIMEOUT",
+        )
+        fake.queue_result(returncode=1, stderr="tagged process still alive")
+        val = ValidationRunner(
+            runner=fake,
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_exec_cleanup_failed"
+        artifacts_dir.mkdir(parents=True)
+
+        with pytest.raises(ComposeExecCleanupError) as exc:
+            await val._exec(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                cli_args=["pytest", "-q"],
+                label="01_validate",
+                artifacts_dir=artifacts_dir,
+                phase="validate",
+                timeout_seconds=1,
+            )
+
+        assert exc.value.reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+        assert "tagged process still alive" in str(exc.value)
+        assert len(fake.calls) == 2
+
+    @pytest.mark.unit
+    async def test_exec_success_does_not_cleanup(self, tmp_path: Path) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout="ok")
+        val = ValidationRunner(
+            runner=fake,
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_exec_success"
+        artifacts_dir.mkdir(parents=True)
+
+        result = await val._exec(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            cli_args=["pytest", "-q"],
+            label="01_validate",
+            artifacts_dir=artifacts_dir,
+            phase="validate",
+            timeout_seconds=1,
+        )
+
+        assert result.ok
+        assert len(fake.calls) == 1
+        assert "awf-cleanup" not in fake.calls[0].args
+
+    @pytest.mark.unit
+    async def test_exec_cancelled_invokes_targeted_cleanup(self, tmp_path: Path) -> None:
+        runner = _CancellingRunner()
+        val = ValidationRunner(
+            runner=runner,
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_exec_cancelled"
+        artifacts_dir.mkdir(parents=True)
+
+        with pytest.raises(asyncio.CancelledError):
+            await val._exec(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                cli_args=["pytest", "-q"],
+                label="01_validate",
+                artifacts_dir=artifacts_dir,
+                phase="validate",
+            )
+
+        assert len(runner.cleanup_calls) == 1
+        assert runner.cleanup_calls[0][-2] == "awf-cleanup"
+
+    @pytest.mark.unit
     async def test_exec_streaming_runner_with_timeout_writes_through_log_sink(
         self, tmp_path: Path
     ) -> None:
@@ -787,23 +945,17 @@ class TestValidationResultHelpers:
         )
 
         assert result.ok
-        assert runner.calls == [
-            [
-                "docker",
-                "compose",
-                "--project-name",
-                _COMPOSE_PROJECT,
-                "--file",
-                str(_COMPOSE_FILE),
-                "exec",
-                "-T",
-                "-w",
-                "/workspace",
-                "agent",
-                "pytest",
-                "-q",
-            ]
+        assert len(runner.calls) == 1
+        args = runner.calls[0]
+        assert args[:2] == ["docker", "compose"]
+        assert args[args.index("exec") : args.index("exec") + 5] == [
+            "exec",
+            "-T",
+            "-w",
+            "/workspace",
+            "agent",
         ]
+        assert args[args.index("awf-exec") + 2 :] == ["pytest", "-q"]
         assert result.stdout_path.read_text(encoding="utf-8") == "out\n"
         assert (
             tmp_path
@@ -908,3 +1060,29 @@ class TestValidationResultHelpers:
             / "ws_non_streaming_timeout"
             / "validation.01_validate.stderr.log"
         ).read_text(encoding="utf-8") == "late err\n"
+
+    @pytest.mark.unit
+    async def test_exec_non_streaming_timeout_wrapper_without_log_store(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _NonStreamingRunner(CommandResult(returncode=0, stdout="out\n", stderr=""))
+        val = ValidationRunner(
+            runner=runner,
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_non_streaming_timeout_no_logs"
+        artifacts_dir.mkdir(parents=True)
+
+        result = await val._exec(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            cli_args=["pytest", "-q"],
+            label="01_validate",
+            artifacts_dir=artifacts_dir,
+            phase="validate",
+            timeout_seconds=1,
+        )
+
+        assert result.ok
+        assert len(runner.calls) == 1
+        assert result.stdout_path.read_text(encoding="utf-8") == "out\n"

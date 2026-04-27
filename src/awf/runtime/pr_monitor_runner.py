@@ -38,6 +38,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError
 from awf.common.commands import AsyncCommandRunner
+from awf.common.compose_exec import (
+    EXEC_PROCESS_CLEANUP_FAILED,
+    ComposeExecCleanupError,
+    cleanup_failure_message,
+)
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, WorkspaceStatus
@@ -558,43 +563,67 @@ class PullRequestMonitorRunner:
             return False
 
         if isinstance(action, SyncBase):
-            await self._run_sync_base(
-                workspace_id=workspace_id,
-                repo=repo,
-                pr_number=pr_number,
-                base_branch=base_branch,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
-            )
+            try:
+                await self._run_sync_base(
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                )
+            except ComposeExecCleanupError as exc:
+                await self._terminate_failed(
+                    workspace_id,
+                    message=cleanup_failure_message(exc),
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                )
+                return True
             state.iter_count += 1
             return False
 
         if isinstance(action, ReportCiFailure):
-            await self._run_ci_fix(
-                repo=repo,
-                pr_number=pr_number,
-                failures=action.failures,
-                compose_project=compose_project,
-                compose_file=compose_file,
-                workspace_id=workspace_id,
-                remote_branch=remote_branch,
-            )
+            try:
+                await self._run_ci_fix(
+                    repo=repo,
+                    pr_number=pr_number,
+                    failures=action.failures,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    workspace_id=workspace_id,
+                    remote_branch=remote_branch,
+                )
+            except ComposeExecCleanupError as exc:
+                await self._terminate_failed(
+                    workspace_id,
+                    message=cleanup_failure_message(exc),
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                )
+                return True
             state.iter_count += 1
             return False
 
         if isinstance(action, AddressComments):
-            await self._run_fix_cycle(
-                workspace_id=workspace_id,
-                repo=repo,
-                pr_number=pr_number,
-                initial_threads=action.threads,
-                initial_reviews=action.review_comments,
-                state=state,
-                remote_branch=remote_branch,
-                compose_project=compose_project,
-                compose_file=compose_file,
-            )
+            try:
+                await self._run_fix_cycle(
+                    workspace_id=workspace_id,
+                    repo=repo,
+                    pr_number=pr_number,
+                    initial_threads=action.threads,
+                    initial_reviews=action.review_comments,
+                    state=state,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                )
+            except ComposeExecCleanupError as exc:
+                await self._terminate_failed(
+                    workspace_id,
+                    message=cleanup_failure_message(exc),
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                )
+                return True
             state.iter_count += 1
             return False
 
@@ -1933,7 +1962,7 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         *,
         message: str,
-        reason_code: AbortReason | None = None,
+        reason_code: AbortReason | str | None = None,
     ) -> None:
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
@@ -1942,7 +1971,15 @@ class PullRequestMonitorRunner:
                 return
             ws.failure_reason = FailureReason.infrastructure_failure.value
             ws.failure_message = message
-            rc = reason_code.value if reason_code else "MONITOR_ABORT"
+            rc = reason_code.value if isinstance(reason_code, AbortReason) else reason_code
+            rc = rc or "MONITOR_ABORT"
+            if rc == EXEC_PROCESS_CLEANUP_FAILED:
+                await repo.add_event(
+                    ws,
+                    event_type="workspace.exec_process_cleanup_failed",
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    payload={"message": message[:1000]},
+                )
             await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc)
             await s.commit()
 

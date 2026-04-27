@@ -31,11 +31,11 @@ from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
-from awf.runtime.validation import ValidationRunner
+from awf.runtime.validation import ValidationCommandResult, ValidationResult, ValidationRunner
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
@@ -62,15 +62,18 @@ def _make_executor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     max_fix_passes: int,
+    validation: object | None = None,
 ) -> WorkspaceExecutor:
     compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
-    validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+    validation_runner = validation or ValidationRunner(
+        runner=fake, artifacts_dir=tmp_path / "artifacts"
+    )
     pr = PullRequestCreator(fake)
     return WorkspaceExecutor(
         session_factory=factory,
         runner=fake,
         compose=compose,
-        validation=validation,
+        validation=validation_runner,  # type: ignore[arg-type]
         pr_creator=pr,
         config=ExecutorConfig(
             worktrees_root=tmp_path / "work" / "worktrees",
@@ -149,6 +152,64 @@ def _queue_push_and_pr(
     fake.queue_result(returncode=0, stdout="abc1234 work\n")  # log ahead-of-base
     fake.queue_result(returncode=0)  # git push
     fake.queue_result(returncode=0, stdout=pr_url)  # gh pr create
+
+
+class _CancelBeforeFixValidation:
+    def __init__(
+        self,
+        *,
+        factory: async_sessionmaker[AsyncSession],
+        artifacts_dir: Path,
+        terminal_status: WorkspaceStatus,
+    ) -> None:
+        self._factory = factory
+        self._artifacts_dir = artifacts_dir
+        self._terminal_status = terminal_status
+        self.calls = 0
+
+    async def run_profile_coverage(self, **_kwargs: object) -> None:
+        return None
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...] | list[str],
+        **_kwargs: object,
+    ) -> ValidationResult:
+        self.calls += 1
+        if tuple(phase_names) == ("setup", "pre_agent"):
+            return ValidationResult()
+
+        artifacts = self._artifacts_dir / workspace_id
+        artifacts.mkdir(parents=True, exist_ok=True)
+        stdout = artifacts / "01_validate.stdout"
+        stderr = artifacts / "01_validate.stderr"
+        stdout.write_text("FAILED tests/test_app.py::test_flow\n", encoding="utf-8")
+        stderr.write_text("AssertionError: expected ok\n", encoding="utf-8")
+        async with self._factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            if self._terminal_status == WorkspaceStatus.cancelled:
+                await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_CANCEL")
+            else:
+                # The destroy path can race in from the control plane while the executor is
+                # between awaits; set the observed status directly to model that stale read.
+                ws.status = WorkspaceStatus.destroying.value
+            await s.commit()
+        return ValidationResult(
+            commands=[
+                ValidationCommandResult(
+                    command="pytest -q",
+                    returncode=1,
+                    duration_seconds=0.1,
+                    stdout_path=stdout,
+                    stderr_path=stderr,
+                    reason_code="COMMAND_FAILED",
+                )
+            ]
+        )
 
 
 class TestValidationPassesOnFirstTry:
@@ -454,3 +515,107 @@ class TestFailureMessage:
             assert ws.failure_reason == "validation_failure"
             assert "3 fix attempts" in (ws.failure_message or "")
             assert "pytest -q" in (ws.failure_message or "")
+
+
+class TestExecProcessCleanupSafety:
+    @pytest.mark.unit
+    async def test_agent_cleanup_failure_fails_infrastructure_before_validation(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(
+            returncode=124,
+            stderr="agent idle timeout",
+            reason_code="COMMAND_IDLE_TIMEOUT",
+        )
+        fake.queue_result(returncode=1, stderr="tagged process still alive")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "EXEC_PROCESS_CLEANUP_FAILED" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+        assert len(fake.calls) == 2
+        assert not any(call.args and call.args[0] == "git" for call in fake.calls)
+        assert fake.calls[1].args[-1] == fake.calls[0].args[fake.calls[0].args.index("awf-exec") + 1]
+
+    @pytest.mark.unit
+    async def test_validation_cleanup_failure_does_not_start_fix_pass(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=5)
+        ws_id = await _seed_ready_workspace(factory)
+        _queue_initial_pass(fake)
+        fake.queue_result(
+            returncode=124,
+            stderr="validation timed out",
+            reason_code="COMMAND_TIMEOUT",
+        )
+        fake.queue_result(returncode=1, stderr="tagged process still alive")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "EXEC_PROCESS_CLEANUP_FAILED" in (ws.failure_message or "")
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert runs[-1].status == "failed"
+            assert runs[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+        adapter_calls = [call for call in fake.calls if "codex" in call.args]
+        assert len(adapter_calls) == 1
+        assert fake.calls[-1].args[-1] == fake.calls[-2].args[
+            fake.calls[-2].args.index("awf-exec") + 1
+        ]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "terminal_status",
+        [WorkspaceStatus.cancelled, WorkspaceStatus.destroying],
+    )
+    async def test_cancelled_or_destroying_status_wins_before_fix_pass(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        terminal_status: WorkspaceStatus,
+    ) -> None:
+        validation = _CancelBeforeFixValidation(
+            factory=factory,
+            artifacts_dir=tmp_path / "artifacts",
+            terminal_status=terminal_status,
+        )
+        executor = _make_executor(
+            fake=fake,
+            factory=factory,
+            tmp_path=tmp_path,
+            max_fix_passes=5,
+            validation=validation,
+        )
+        ws_id = await _seed_ready_workspace(factory)
+        _queue_initial_pass(fake)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == terminal_status.value
+
+        adapter_calls = [call for call in fake.calls if "codex" in call.args]
+        assert len(adapter_calls) == 1

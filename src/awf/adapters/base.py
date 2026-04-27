@@ -10,6 +10,7 @@ It just runs the CLI, captures stdout/stderr, and returns a structured result.
 
 from __future__ import annotations
 
+import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,6 +20,10 @@ from awf.common.commands import (
     COMMAND_TIMEOUT_REASON,
     AsyncCommandRunner,
     CommandResult,
+)
+from awf.common.compose_exec import (
+    build_tracked_compose_exec,
+    cleanup_compose_exec_invocation,
 )
 from awf.common.logging import get_logger
 from awf.db.enums import AgentRuntime
@@ -184,20 +189,14 @@ class AgentAdapter(ABC):
         """
         wrapped_prompt = _AWF_PROMPT_PREAMBLE + prompt
         cli_args = self._cli_args(prompt=wrapped_prompt, model=model or self._default_model)
-        args = [
-            "docker",
-            "compose",
-            "--project-name",
-            compose_project,
-            "--file",
-            str(compose_file),
-            "exec",
-            "-T",  # no tty; we're not attached
-            "-w",
-            "/workspace",
-            "agent",
-            *cli_args,
-        ]
+        invocation = build_tracked_compose_exec(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            cli_args=cli_args,
+            source="agent",
+            label=self.name.value,
+        )
+        args = invocation.args
         _log.info(
             "agent.run.start",
             agent=self.name.value,
@@ -223,33 +222,49 @@ class AgentAdapter(ABC):
 
         try:
             run_streaming = getattr(self._runner, "run_streaming", None)
-            if run_streaming is not None:
-                result = await run_streaming(
-                    args,
-                    input_bytes=b"",
-                    on_stdout=sinks.write_stdout if sinks is not None else None,
-                    on_stderr=sinks.write_stderr if sinks is not None else None,
-                    wall_timeout_seconds=self._agent_wall_timeout_seconds,
-                    idle_timeout_seconds=self._agent_idle_timeout_seconds,
+            try:
+                if run_streaming is not None:
+                    result = await run_streaming(
+                        args,
+                        input_bytes=b"",
+                        on_stdout=sinks.write_stdout if sinks is not None else None,
+                        on_stderr=sinks.write_stderr if sinks is not None else None,
+                        wall_timeout_seconds=self._agent_wall_timeout_seconds,
+                        idle_timeout_seconds=self._agent_idle_timeout_seconds,
+                    )
+                else:
+                    _log.warning(
+                        "agent.run.watchdog_unavailable",
+                        agent=self.name.value,
+                        compose_project=compose_project,
+                        workspace_id=workspace_id,
+                        reason="runner does not support run_streaming",
+                    )
+                    result = await self._runner.run(args, input_bytes=b"")
+                    if sinks is not None:
+                        await sinks.write_stdout(result.stdout)
+                        await sinks.write_stderr(result.stderr)
+            except asyncio.CancelledError:
+                await asyncio.shield(
+                    cleanup_compose_exec_invocation(
+                        self._runner,
+                        invocation,
+                        workspace_id=workspace_id,
+                    )
                 )
-            else:
-                _log.warning(
-                    "agent.run.watchdog_unavailable",
-                    agent=self.name.value,
-                    compose_project=compose_project,
-                    workspace_id=workspace_id,
-                    reason="runner does not support run_streaming",
-                )
-                result = await self._runner.run(args, input_bytes=b"")
-                if sinks is not None:
-                    await sinks.write_stdout(result.stdout)
-                    await sinks.write_stderr(result.stderr)
+                raise
         finally:
             if sinks is not None:
                 await sinks.close()
 
         if not result.ok:
             reason_code = _failure_reason_for_result(result)
+            if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}:
+                await cleanup_compose_exec_invocation(
+                    self._runner,
+                    invocation,
+                    workspace_id=workspace_id,
+                )
             log_event = (
                 "agent.run.timeout"
                 if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}

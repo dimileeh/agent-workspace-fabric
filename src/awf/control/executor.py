@@ -35,6 +35,11 @@ from awf.adapters.base import (
 )
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
 from awf.common.commands import AsyncCommandRunner
+from awf.common.compose_exec import (
+    EXEC_PROCESS_CLEANUP_FAILED,
+    ComposeExecCleanupError,
+    cleanup_failure_message,
+)
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.control.quality_gates import (
@@ -266,6 +271,23 @@ class WorkspaceExecutor:
                 )
                 return
             agent_exit_note = None
+        except ComposeExecCleanupError as exc:
+            _log.error(
+                "executor.exec_process_cleanup_failed",
+                workspace_id=workspace_id,
+                source=exc.source,
+                label=exc.label,
+                invocation_id=exc.invocation_id,
+                reason_code=exc.reason_code,
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=cleanup_failure_message(exc),
+                reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+            )
+            return
         except AgentRunError as exc:
             # Do NOT bail out yet. A CLI that exits non-zero — typically
             # ``claude_code`` hitting a 1-hour internal session cap and
@@ -670,6 +692,38 @@ class WorkspaceExecutor:
                     phase_names=("post_agent", "validate"),
                     run_healthchecks=True,
                 )
+            except ComposeExecCleanupError as exc:
+                message = cleanup_failure_message(exc)
+                _log.error(
+                    "executor.validation_cleanup_failed",
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                    source=exc.source,
+                    label=exc.label,
+                    invocation_id=exc.invocation_id,
+                    reason_code=exc.reason_code,
+                )
+                await self._finish_validation_run(
+                    validation_run_id,
+                    status="failed",
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                )
+                await self._finish_pending_validate_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    validation_run_id=validation_run_id,
+                    requested_tier=validation_tier,
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    error_message=message,
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=message,
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                )
+                return
             except Exception as exc:
                 _log.exception(
                     "executor.validation_run_unexpected_failed",
@@ -805,6 +859,37 @@ class WorkspaceExecutor:
                     model=default_model,
                     workspace_id=workspace_id,
                 )
+            except ComposeExecCleanupError as exc:
+                message = cleanup_failure_message(exc)
+                _log.error(
+                    "executor.fix_pass_cleanup_failed",
+                    workspace_id=workspace_id,
+                    pass_number=pass_number + 1,
+                    source=exc.source,
+                    label=exc.label,
+                    invocation_id=exc.invocation_id,
+                    reason_code=exc.reason_code,
+                )
+                await self._finish_pending_validate_operations(
+                    workspace_id=workspace_id,
+                    status=OperationStatus.failed,
+                    validation_run_id=validation_run_id,
+                    requested_tier=validation_tier,
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    coverage=_validation_run_coverage_metadata(
+                        val_result,
+                        baseline_coverage=baseline_coverage,
+                    ),
+                    error_message=message,
+                )
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.validating,
+                    failure_reason=FailureReason.infrastructure_failure,
+                    message=message,
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                )
+                return
             except AgentRunError as exc:
                 # Coding CLI exited non-zero on the fix pass. Mirrors the
                 # initial-run behaviour: log, remember the note, fall
@@ -1530,6 +1615,13 @@ class WorkspaceExecutor:
                 return
             ws.failure_reason = failure_reason.value
             ws.failure_message = message
+            if reason_code == EXEC_PROCESS_CLEANUP_FAILED:
+                await repo.add_event(
+                    ws,
+                    event_type="workspace.exec_process_cleanup_failed",
+                    reason_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    payload={"message": message[:1000]},
+                )
             await repo.transition(
                 ws,
                 to=WorkspaceStatus.failed,
