@@ -1,0 +1,5 @@
+{
+  "status": "satisfied",
+  "summary": "All planned behaviors are implemented and regression-tested: the executor recovery branch skips push/PR creation when a PR already exists for both validate-only and rebase-only recovery, zero adapter calls are issued on a clean validation pass, the recovery operation row is closed with validation_run_id and a reason_code, stale callbacks block recovery for cancelled and destroyed workspaces, and the state machine allows validating → monitoring_pr/completed transitions. Validation commands (ruff, mypy, targeted pytest) all pass. Non-goals respected.",
+  "gaps": []
+}
