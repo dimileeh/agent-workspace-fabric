@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import types
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -231,6 +232,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert "post_merge_target_reconciler" in created["feature_monitor_kwargs"]
     reconciler = created["feature_monitor_kwargs"]["post_merge_target_reconciler"]
     assert callable(reconciler)
+    assert not isinstance(reconciler, types.MethodType), (
+        "post_merge_target_reconciler must be the _post_merge_reconciler closure "
+        "that wraps reconcile_and_refresh_stale_candidates, not the bare "
+        "TargetBranchReconcileMonitor.reconcile bound method"
+    )
     assert "merge_coordinator" in created["feature_monitor_kwargs"]
     assert isinstance(
         created["feature_monitor_kwargs"]["merge_coordinator"],

@@ -149,7 +149,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "initial_review_grace_period_seconds": grace_seconds,
             "log_store": log_store,
             "merge_coordinator": merge_coordinator,
-            "post_merge_target_reconciler": target_branch_reconciler.reconcile,
+            "post_merge_target_reconciler": _post_merge_reconciler,
         }
         return monitor_builder(**monitor_kwargs)
 
