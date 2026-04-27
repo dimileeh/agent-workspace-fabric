@@ -303,6 +303,67 @@ def service_gc(
         raise typer.Exit(code=1)
 
 
+@service_app.command("reconcile-target")
+def service_reconcile_target(
+    repo_url: str = typer.Option(..., "--repo-url", help="Repository Git URL."),
+    branch: str = typer.Option(
+        "development",
+        "--branch",
+        help="Target branch to inspect and repair.",
+    ),
+    work_dir: Path | None = typer.Option(
+        None,
+        "--work-dir",
+        help="Override AWF_WORK_DIR for target-branch checkout state.",
+    ),
+    dry_run: bool = typer.Option(
+        False,
+        "--dry-run",
+        help="Detect and render resolver output without committing or pushing.",
+    ),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Run one target-branch reconciliation pass.
+
+    The first resolver is Python/Alembic-specific: if the integrated branch
+    has multiple Alembic heads, AWF writes and pushes a merge revision.
+    """
+    from awf.common.commands import AsyncioSubprocessRunner
+    from awf.service.config import resolve_service_settings
+    from awf.service.target_branch_monitor import (
+        TargetBranchMonitorError,
+        TargetBranchMonitorResult,
+        run_target_branch_reconcile_once,
+    )
+
+    settings = resolve_service_settings()
+    state_dir = (work_dir or Path(settings.work_dir)).expanduser().resolve()
+
+    async def _run() -> TargetBranchMonitorResult:
+        return await run_target_branch_reconcile_once(
+            runner=AsyncioSubprocessRunner(),
+            work_dir=state_dir,
+            repo_url=repo_url,
+            branch=branch,
+            dry_run=dry_run,
+        )
+
+    try:
+        result = asyncio.run(_run())
+    except TargetBranchMonitorError as exc:
+        payload = {
+            "status": "failed",
+            "operation": exc.operation,
+            "returncode": exc.result.returncode,
+            "stdout": exc.result.stdout,
+            "stderr": exc.result.stderr,
+        }
+        _emit(payload, fmt)
+        raise typer.Exit(code=1) from None
+
+    _emit(result.to_dict(), fmt)
+
+
 @workspace_app.command("create")
 def workspace_create(
     repo_url: str = typer.Option(..., "--repo", help="Git URL."),

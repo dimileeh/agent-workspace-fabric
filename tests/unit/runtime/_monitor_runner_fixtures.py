@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -227,6 +228,7 @@ def make_runner(
     artifacts_root: Path | None = None,
     log_store: LogStore | None = None,
     merge_coordinator: object | None = None,
+    post_merge_target_reconciler: Any | None = None,
 ) -> PullRequestMonitorRunner:
     kwargs: dict = {
         "session_factory": factory,
@@ -253,4 +255,6 @@ def make_runner(
         kwargs["artifacts_root"] = artifacts_root
     if merge_coordinator is not None:
         kwargs["merge_coordinator"] = merge_coordinator
+    if post_merge_target_reconciler is not None:
+        kwargs["post_merge_target_reconciler"] = post_merge_target_reconciler
     return PullRequestMonitorRunner(**kwargs)

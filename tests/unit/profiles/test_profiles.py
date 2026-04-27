@@ -60,8 +60,30 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
     assert profile.validation.coverage.minimum_percent == 99
     assert profile.validation.coverage.enforce is True
     assert profile.validation.coverage.command is not None
-    assert profile.validation.coverage.command.command == "uv run pytest --cov=awf --cov-report=term"
+    assert (
+        profile.validation.coverage.command.command == "uv run pytest --cov=awf --cov-report=term"
+    )
     assert profile.validation.coverage.command.timeout_seconds == 900
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_planning_policy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "awf-self",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                "max_iterations": 2,
+                "enforce_plan_only_changes": True,
+            },
+        }
+    )
+
+    assert profile.planning.required is True
+    assert profile.planning.max_iterations == 2
+    assert profile.planning.plan_path == "docs/awf-plans/{workspace_id}.md"
 
 
 @pytest.mark.unit
@@ -79,9 +101,7 @@ def test_profile_schema_accepts_out_of_scope_change_policy() -> None:
     )
 
     assert profile.quality.out_of_scope_changes.mode == "block"
-    assert profile.quality.out_of_scope_changes.allowlist_patterns == [
-        "docs/generated/**"
-    ]
+    assert profile.quality.out_of_scope_changes.allowlist_patterns == ["docs/generated/**"]
 
 
 @pytest.mark.unit

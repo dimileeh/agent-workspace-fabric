@@ -61,6 +61,15 @@ from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.logs import LogStore
+from awf.runtime.planning import (
+    PlanConformanceReport,
+    build_conformance_prompt,
+    build_execution_prompt,
+    build_planning_prompt,
+    changed_paths_from_porcelain,
+    parse_conformance_report,
+    render_workspace_path,
+)
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationResult, ValidationRunner
 
@@ -228,13 +237,23 @@ class WorkspaceExecutor:
                 action="agent_run",
             ):
                 return
-            await adapter.run(
+            planning_error = await self._run_agent_task_with_optional_planning(
+                adapter=adapter,
+                workspace=ws,
+                profile=profile,
                 compose_project=compose_project,
                 compose_file=compose_file,
-                prompt=ws.task_prompt,
+                worktree_path=worktree_path,
                 model=default_model,
-                workspace_id=workspace_id,
             )
+            if planning_error is not None:
+                await self._mark_failed(
+                    workspace_id=workspace_id,
+                    from_status=WorkspaceStatus.running,
+                    failure_reason=FailureReason.agent_failure,
+                    message=planning_error[:2000],
+                )
+                return
             agent_exit_note = None
         except AgentRunError as exc:
             # Do NOT bail out yet. A CLI that exits non-zero — typically
@@ -1121,6 +1140,141 @@ class WorkspaceExecutor:
         )
         return defaults.get(agent)
 
+    async def _run_agent_task_with_optional_planning(
+        self,
+        *,
+        adapter: AgentAdapter,
+        workspace: Workspace,
+        profile: WorkspaceProfile,
+        compose_project: str,
+        compose_file: Path,
+        worktree_path: Path,
+        model: str | None,
+    ) -> str | None:
+        planning = profile.planning
+        if not planning.required:
+            await adapter.run(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=workspace.task_prompt,
+                model=model,
+                workspace_id=workspace.id,
+            )
+            return None
+
+        try:
+            plan_path = render_workspace_path(planning.plan_path, workspace_id=workspace.id)
+            report_path = render_workspace_path(
+                planning.conformance_report_path,
+                workspace_id=workspace.id,
+            )
+        except ValueError as exc:
+            return f"planning profile is invalid: {exc}"
+
+        before_plan = await self._changed_paths(worktree_path)
+        await adapter.run(
+            compose_project=compose_project,
+            compose_file=compose_file,
+            prompt=build_planning_prompt(
+                task_prompt=workspace.task_prompt,
+                plan_path=plan_path,
+            ),
+            model=model,
+            workspace_id=workspace.id,
+        )
+        after_plan = await self._changed_paths(worktree_path)
+        if plan_path not in after_plan:
+            return f"planning phase did not create or modify required plan file `{plan_path}`"
+        if planning.enforce_plan_only_changes:
+            extra = sorted(after_plan - before_plan - {plan_path})
+            if extra:
+                changed = ", ".join(path.as_posix() for path in extra[:10])
+                return f"planning phase changed files outside `{plan_path}`: {changed}"
+
+        gaps: tuple[str, ...] = ()
+        last_report: PlanConformanceReport | None = None
+        for iteration in range(planning.max_iterations + 1):
+            await adapter.run(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=build_execution_prompt(
+                    task_prompt=workspace.task_prompt,
+                    plan_path=plan_path,
+                    iteration=iteration,
+                    gaps=gaps,
+                ),
+                model=model,
+                workspace_id=workspace.id,
+            )
+            before_compare = await self._changed_paths(worktree_path)
+            compare_result = await adapter.run(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=build_conformance_prompt(
+                    task_prompt=workspace.task_prompt,
+                    plan_path=plan_path,
+                    report_path=report_path,
+                    iteration=iteration,
+                ),
+                model=model,
+                workspace_id=workspace.id,
+            )
+            after_compare = await self._changed_paths(worktree_path)
+            if planning.fail_on_unexplained_deviation:
+                extra = sorted(after_compare - before_compare - {report_path})
+                if extra:
+                    changed = ", ".join(path.as_posix() for path in extra[:10])
+                    return f"conformance phase changed files outside `{report_path}`: {changed}"
+
+            report_text = (
+                _read_text_if_present(worktree_path / report_path) or compare_result.stdout
+            )
+            report = parse_conformance_report(report_text)
+            last_report = report
+            if report.satisfied:
+                _log.info(
+                    "executor.planning_conformance_satisfied",
+                    workspace_id=workspace.id,
+                    iteration=iteration,
+                    summary=report.summary,
+                )
+                return None
+            gaps = report.gaps or (report.summary,)
+            _log.info(
+                "executor.planning_conformance_needs_iteration",
+                workspace_id=workspace.id,
+                iteration=iteration,
+                max_iterations=planning.max_iterations,
+                gaps=list(gaps),
+                reason_code=report.reason_code,
+            )
+
+        if last_report is None:  # pragma: no cover - defensive
+            return "planning conformance did not run"
+        gap_text = "; ".join(last_report.gaps) or last_report.summary
+        return (
+            "plan conformance was not satisfied after "
+            f"{planning.max_iterations} iteration(s): {gap_text}"
+        )
+
+    async def _changed_paths(self, worktree_path: Path) -> set[Path]:
+        result = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "status",
+                "--porcelain=v1",
+                "--untracked-files=all",
+            ]
+        )
+        if not result.ok:
+            raise RuntimeError(
+                f"git status failed while checking workspace changes: {result.stderr}"
+            )
+        return changed_paths_from_porcelain(result.stdout)
+
     async def _claim_ready(
         self,
         workspace_id: str,
@@ -1493,8 +1647,20 @@ def _validation_command_count(ws: Workspace) -> int:
     if ws.resolved_profile:
         profile = WorkspaceProfile.model_validate(ws.resolved_profile)
         coverage_count = 1 if profile.validation.coverage.command is not None else 0
-        return len(profile.phases.post_agent) + len(profile.phases.validate_commands) + coverage_count
+        return (
+            len(profile.phases.post_agent) + len(profile.phases.validate_commands) + coverage_count
+        )
     return len(ws.test_commands)
+
+
+def _read_text_if_present(path: Path) -> str | None:
+    try:
+        if path.is_file():
+            text = path.read_text(encoding="utf-8").strip()
+            return text or None
+    except OSError:
+        return None
+    return None
 
 
 def _validation_run_command_records(

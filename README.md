@@ -8,8 +8,9 @@ workspace, a clean checkout, declared services, validation, PR creation, PR
 review monitoring, comment-fix loops, merge gates, artifacts, events, and
 cleanup.
 
-AWF is not a chatbot and not a planner. It is the execution substrate beneath a
-planner such as Aira, a human operator, or an MCP client.
+AWF is not a chatbot and not a product-planning brain. It is the execution
+substrate beneath a planner such as Aira, a human operator, or an MCP client;
+inside a workspace it can enforce a concrete implementation-plan lifecycle.
 
 ## The Problem
 
@@ -45,16 +46,17 @@ AWF turns one coding task into a durable, observable lifecycle:
 3. Resolve a workspace profile that describes the project runtime.
 4. Render and launch a per-workspace Docker Compose stack.
 5. Run profile setup phases.
-6. Run the selected coding agent inside the workspace container.
-7. Run profile validation phases and explicit request validation commands.
-8. Commit, push, and open a pull request.
-9. Monitor the PR until it is merged, closed, or failed.
-10. Address meaningful review comments by invoking the same agent again.
-11. Fix CI failures when logs are available.
-12. Sync the base branch into the PR branch when needed.
-13. Respect reviewer timing through an initial review grace window.
-14. Auto-merge only after all gates pass.
-15. Tear down successful workspaces and preserve failed ones for inspection.
+6. Optionally run AWF-owned Plan -> Execute -> Compare iterations.
+7. Run the selected coding agent inside the workspace container.
+8. Run profile validation phases and explicit request validation commands.
+9. Commit, push, and open a pull request.
+10. Monitor the PR until it is merged, closed, or failed.
+11. Address meaningful review comments by invoking the same agent again.
+12. Fix CI failures when logs are available.
+13. Sync the base branch into the PR branch when needed.
+14. Respect reviewer timing through an initial review grace window.
+15. Auto-merge only after all gates pass.
+16. Tear down successful workspaces and preserve failed ones for inspection.
 
 Project-specific knowledge belongs in workspace profiles. The AWF control plane
 owns generic lifecycle concerns: git isolation, agent execution, service
@@ -76,11 +78,13 @@ Implemented now:
 - Per-workspace Docker Compose stack generation.
 - Codex, Claude Code, and Gemini adapters.
 - Central default model/effort map for agent adapters.
+- AWF-owned Plan -> Execute -> Compare lifecycle policy.
 - Generic phase-based validation.
 - Git worktree provisioning.
 - PR creation.
 - Feature PR monitor with automated comment handling and auto-merge.
 - Release/sync PR monitor variants that keep workspaces alive until human merge.
+- Post-merge target-branch reconciliation for Python/Alembic multi-head repair.
 - Initial PR review grace period before auto-merge.
 - Durable v2 task policy metadata (`task_class`, `owned_paths`) for later lock scheduling.
 - Non-actionable bot status comment filtering.
@@ -171,6 +175,7 @@ A `WorkspaceProfile` can describe:
 - `docker`: no Docker or per-workspace DinD.
 - `services`: profile-declared sidecars.
 - `phases`: setup, pre-agent, post-agent, validate, cleanup commands.
+- `planning`: optional Plan -> Execute -> Compare policy and artifact paths.
 - `validation`: health checks, artifact paths, timeout and tier hints.
 - `monitor`: PR-monitor policy such as initial review grace.
 - `secrets`: named mounts or env leases.
@@ -211,6 +216,13 @@ awf:
   runtime:
     environment:
       PYTHONUNBUFFERED: "1"
+  planning:
+    required: true
+    plan_path: docs/awf-plans/{workspace_id}.md
+    conformance_report_path: docs/awf-plans/{workspace_id}.conformance.json
+    max_iterations: 2
+    enforce_plan_only_changes: true
+    fail_on_unexplained_deviation: true
   phases:
     setup:
       - command: uv sync --extra dev
@@ -226,6 +238,19 @@ awf:
 
 Omitted fields use model defaults. For example, the PR monitor grace window is
 900 seconds even though this self-profile does not spell it out.
+
+When `planning.required` is true, AWF owns a provider-neutral planning lifecycle
+instead of relying on an agent-specific interactive plan mode:
+
+1. Ask the agent to write a plan artifact and refuse planning-phase code changes.
+2. Ask the agent to implement the saved plan.
+3. Ask the agent to write a structured conformance report.
+4. Iterate execution while the report says plan gaps remain.
+5. Fail the workspace if the plan is not satisfied within the configured budget.
+
+This works the same way for Codex, Claude Code, Gemini, and future adapters
+because the control plane invokes normal non-interactive agent runs for each
+phase and stores the plan/report inside the workspace.
 
 Preview the profile AWF would resolve for a checkout:
 
@@ -516,6 +541,21 @@ uv run --python 3.12 --extra dev awf service logs --follow --service api --servi
 `docker compose -f docker/compose/local-service.yml logs`. By default it tails
 the `api` and `worker` services. Repeat `--service` to select `api`, `worker`,
 `migrate`, or `postgres`.
+
+Run one target-branch reconciliation pass:
+
+```bash
+uv run --python 3.12 --extra dev awf service reconcile-target \
+  --repo-url git@github.com:owner/repo.git \
+  --branch development
+```
+
+The service worker also invokes this reconciliation hook after a monitored PR
+reaches `completed`. The first resolver is Python/Alembic-specific: if several
+merged workspace PRs leave the integrated target branch with multiple Alembic
+heads, AWF writes an empty Alembic merge revision and pushes it as a follow-up
+commit to the target branch. Use `--dry-run` to inspect the resolver result
+without committing or pushing.
 
 Plan terminal workspace filesystem garbage collection:
 

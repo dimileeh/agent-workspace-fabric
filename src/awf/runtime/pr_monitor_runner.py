@@ -32,6 +32,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -87,6 +88,12 @@ _log = get_logger(__name__)
 Verdict = str  # "fix_committed" | "false_positive" | "defer" | "agent_failed"
 
 
+class PostMergeTargetReconciler(Protocol):
+    """Best-effort target-branch repair hook invoked after a PR is merged."""
+
+    async def __call__(self, *, repo_url: str, branch: str) -> object: ...
+
+
 @dataclass(frozen=True)
 class MonitorRunnerConfig:
     """Operational knobs for the runner (separate from MonitorConfig so
@@ -111,6 +118,7 @@ class _RunnerDeps:
     gh: GitHubClient
     sleep: Callable[[float], Awaitable[None]]
     log_store: LogStore | None = None
+    post_merge_target_reconciler: PostMergeTargetReconciler | None = None
 
 
 class PullRequestMonitorRunner:
@@ -130,6 +138,7 @@ class PullRequestMonitorRunner:
         artifacts_root: Path | None = None,
         log_store: LogStore | None = None,
         merge_coordinator: MergeCoordinator | None = None,
+        post_merge_target_reconciler: PostMergeTargetReconciler | None = None,
     ) -> None:
         self._deps = _RunnerDeps(
             session_factory=session_factory,
@@ -138,6 +147,7 @@ class PullRequestMonitorRunner:
             gh=gh,
             sleep=sleep,
             log_store=log_store,
+            post_merge_target_reconciler=post_merge_target_reconciler,
         )
         self._config = monitor_config or MonitorConfig()
         self._runner_config = runner_config or MonitorRunnerConfig()
@@ -465,6 +475,8 @@ class PullRequestMonitorRunner:
             await self._terminate_completed(
                 workspace_id,
                 pr_merge_sha=None,
+                repo_url=repo_url,
+                base_branch=base_branch,
                 compose_project=compose_project,
                 compose_file=compose_file,
             )
@@ -714,12 +726,8 @@ class PullRequestMonitorRunner:
                                 original_action="Merge",
                                 fresh_action=type(checked_action).__name__,
                                 head_sha=checked_status.head_sha[:10],
-                                unresolved_threads=len(
-                                    checked_status.unresolved_inline_threads
-                                ),
-                                unresolved_reviews=len(
-                                    checked_status.unresolved_review_comments
-                                ),
+                                unresolved_threads=len(checked_status.unresolved_inline_threads),
+                                unresolved_reviews=len(checked_status.unresolved_review_comments),
                                 check_state=checked_status.check_state.value,
                                 merge_state=(
                                     checked_status.merge_state_status.value
@@ -731,14 +739,12 @@ class PullRequestMonitorRunner:
                             merge_status = checked_status
 
                 if recheck_error is None and fresh_action is None:
-                    queue_blockers_after_lock = (
-                        await self._merge_queue_blockers_for_workspace(workspace_id)
+                    queue_blockers_after_lock = await self._merge_queue_blockers_for_workspace(
+                        workspace_id
                     )
                     if not queue_blockers_after_lock:
                         try:
-                            merge_sha = await self._deps.gh.merge_pr(
-                                repo=repo, pr_number=pr_number
-                            )
+                            merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
                         except GitHubClientError as exc:
                             merge_blocker = exc
 
@@ -758,9 +764,9 @@ class PullRequestMonitorRunner:
             if recheck_error is not None:
                 await self._terminate_failed(
                     workspace_id,
-                    message=(
-                        f"monitor: github error during pre-merge recheck: {recheck_error}"
-                    )[:2000],
+                    message=(f"monitor: github error during pre-merge recheck: {recheck_error}")[
+                        :2000
+                    ],
                 )
                 return True
 
@@ -819,6 +825,8 @@ class PullRequestMonitorRunner:
             await self._terminate_completed(
                 workspace_id,
                 pr_merge_sha=merge_sha,
+                repo_url=repo_url,
+                base_branch=base_branch,
                 compose_project=compose_project,
                 compose_file=compose_file,
             )
@@ -1590,6 +1598,8 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         *,
         pr_merge_sha: str | None,
+        repo_url: str | None = None,
+        base_branch: str | None = None,
         compose_project: str | None = None,
         compose_file: Path | None = None,
     ) -> None:
@@ -1602,6 +1612,12 @@ class PullRequestMonitorRunner:
                 ws.pr_merge_sha = pr_merge_sha
             await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
             await s.commit()
+        if repo_url and base_branch:
+            await self._reconcile_target_branch_after_merge(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                base_branch=base_branch,
+            )
         # Tear down the workspace's compose stack now that its PR was
         # merged (or short-circuited because it was already merged).
         # Running stacks hold network subnets from Docker's finite
@@ -1628,6 +1644,61 @@ class PullRequestMonitorRunner:
                 workspace_id=workspace_id,
                 reason="compose_teardown_failed",
             )
+
+    async def _reconcile_target_branch_after_merge(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+    ) -> None:
+        reconciler = self._deps.post_merge_target_reconciler
+        if reconciler is None:
+            return
+        try:
+            result = await reconciler(repo_url=repo_url, branch=base_branch)
+        except Exception as exc:
+            _log.warning(
+                "monitor.target_branch_reconcile_failed",
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                base_branch=base_branch,
+                error=str(exc)[:500],
+            )
+            await self._append_workspace_events(
+                workspace_id=workspace_id,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="target_branch.reconcile_failed",
+                        reason_code="TARGET_BRANCH_RECONCILE_FAILED",
+                        payload={
+                            "repo_url": repo_url,
+                            "base_branch": base_branch,
+                            "error": str(exc)[:1000],
+                        },
+                    )
+                ],
+            )
+            return
+
+        payload = _target_reconcile_payload(result)
+        _log.info(
+            "monitor.target_branch_reconciled",
+            workspace_id=workspace_id,
+            repo_url=repo_url,
+            base_branch=base_branch,
+            status=payload.get("status"),
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="target_branch.reconciled",
+                    reason_code=str(payload.get("status") or "TARGET_BRANCH_RECONCILED"),
+                    payload=payload,
+                )
+            ],
+        )
 
     async def _teardown_compose_stack(
         self,
@@ -2116,3 +2187,14 @@ def _collect_defer_items(
             }
         )
     return bot_items, human_items
+
+
+def _target_reconcile_payload(result: object) -> dict[str, object]:
+    if isinstance(result, dict):
+        return dict(result)
+    to_dict = getattr(result, "to_dict", None)
+    if callable(to_dict):
+        payload = to_dict()
+        if isinstance(payload, dict):
+            return dict(payload)
+    return {"result": str(result)}

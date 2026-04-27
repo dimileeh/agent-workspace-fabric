@@ -102,6 +102,45 @@ async def test_completed_monitor_deletes_workspace_pressure_dirs(
 
 
 @pytest.mark.unit
+async def test_completed_monitor_invokes_target_branch_reconciler(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktrees_root = work_dir / "git" / "worktrees"
+    ws_id = await seed_monitoring_workspace(factory)
+    calls: list[tuple[str, str]] = []
+
+    async def _reconcile(*, repo_url: str, branch: str) -> object:
+        calls.append((repo_url, branch))
+        return {"status": "clean"}
+
+    cmd.queue_result(returncode=0)  # git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload(merged=True))
+    cmd.queue_result(returncode=0)  # docker compose down
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=worktrees_root,
+        post_merge_target_reconciler=_reconcile,
+    )
+    await runner.run(
+        workspace_id=ws_id,
+        compose_project="proj",
+        compose_file=work_dir / "compose" / ws_id / "compose.yml",
+    )
+
+    assert calls == [("git@github.com:dimileeh/aira-web.git", "development")]
+
+
+@pytest.mark.unit
 async def test_completed_monitor_skips_filesystem_gc_when_compose_teardown_fails(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,

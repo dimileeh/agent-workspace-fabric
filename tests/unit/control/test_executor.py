@@ -195,6 +195,167 @@ class TestHappyPath:
             assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/123"
 
     @pytest.mark.unit
+    async def test_planning_profile_runs_plan_execute_compare_before_validation(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "plan_path": "docs/awf-plans/{workspace_id}.md",
+                    "conformance_report_path": "docs/awf-plans/{workspace_id}.conformance.json",
+                    "max_iterations": 1,
+                    "enforce_plan_only_changes": True,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # changed paths before planning
+        fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
+        fake.queue_result(  # changed paths after planning
+            returncode=0,
+            stdout=f"?? docs/awf-plans/{ws_id}.md\n",
+        )
+        fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
+        fake.queue_result(  # changed paths before compare
+            returncode=0,
+            stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/foo.py\n",
+        )
+        fake.queue_result(  # conformance adapter
+            returncode=0,
+            stdout='{"status":"satisfied","summary":"plan achieved","gaps":[]}',
+        )
+        fake.queue_result(  # changed paths after compare
+            returncode=0,
+            stdout=(
+                f"?? docs/awf-plans/{ws_id}.md\n"
+                f"?? docs/awf-plans/{ws_id}.conformance.json\n"
+                " M src/awf/foo.py\n"
+            ),
+        )
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        adapter_prompts = [
+            call.args[-1]
+            for call in fake.calls
+            if call.args[:2] == ["docker", "compose"] and call.args[-1].startswith("## ")
+        ]
+        assert len(adapter_prompts) == 3
+        assert "Planning phase" in adapter_prompts[0]
+        assert "Execution phase" in adapter_prompts[1]
+        assert "Conformance phase" in adapter_prompts[2]
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+
+    @pytest.mark.unit
+    async def test_planning_profile_iterates_when_conformance_reports_gaps(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 1,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="plan written")  # planning
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(  # compare says not done
+            returncode=0,
+            stdout='{"status":"needs_iteration","summary":"gap","gaps":["add tests"]}',
+        )
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="fixed gap")  # iteration execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(  # compare satisfied
+            returncode=0,
+            stdout='{"status":"satisfied","summary":"done","gaps":[]}',
+        )
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="src/x.py\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="tests ok")
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        adapter_prompts = [
+            call.args[-1]
+            for call in fake.calls
+            if call.args[:2] == ["docker", "compose"] and call.args[-1].startswith("## ")
+        ]
+        assert len(adapter_prompts) == 5
+        assert "Iteration 1" in adapter_prompts[3]
+
+    @pytest.mark.unit
+    async def test_planning_profile_fails_when_plan_phase_changes_code(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {"required": True, "enforce_plan_only_changes": True},
+            },
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="plan plus code")  # planning
+        fake.queue_result(  # after planning
+            returncode=0,
+            stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/oops.py\n",
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert "planning phase changed files outside" in (ws.failure_message or "")
+
+    @pytest.mark.unit
     async def test_records_all_expected_transitions(
         self,
         executor: WorkspaceExecutor,
@@ -253,9 +414,10 @@ class TestHappyPath:
 
         async with factory() as session:
             rows = (
-                await session.execute(
-                    text(
-                        """
+                (
+                    await session.execute(
+                        text(
+                            """
                         SELECT
                             workspace_id,
                             attempt_id,
@@ -273,10 +435,13 @@ class TestHappyPath:
                         FROM validation_runs
                         WHERE workspace_id = :workspace_id
                         """
-                    ),
-                    {"workspace_id": ws_id},
+                        ),
+                        {"workspace_id": ws_id},
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
 
         assert len(rows) == 1
         run = rows[0]
@@ -387,28 +552,36 @@ class TestHappyPath:
 
         async with factory() as session:
             rows = (
-                await session.execute(
-                    text(
-                        """
+                (
+                    await session.execute(
+                        text(
+                            """
                         SELECT tier, status
                         FROM validation_runs
                         WHERE workspace_id = :workspace_id
                         """
-                    ),
-                    {"workspace_id": ws_id},
+                        ),
+                        {"workspace_id": ws_id},
+                    )
                 )
-            ).mappings().all()
+                .mappings()
+                .all()
+            )
             operations = (
-                await session.execute(
-                    text(
-                        """
+                (
+                    await session.execute(
+                        text(
+                            """
                         SELECT status, payload, result, finished_at
                         FROM operations
                         WHERE id = 'op_validate_recovery'
                         """
+                        )
                     )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
 
         assert rows == [{"tier": 2, "status": "succeeded"}]
         assert operations["status"] == "succeeded"
@@ -623,28 +796,36 @@ class TestFailurePaths:
             workspace = await WorkspaceRepository(session).get(ws_id)
             assert workspace is not None
             run = (
-                await session.execute(
-                    text(
-                        """
+                (
+                    await session.execute(
+                        text(
+                            """
                         SELECT status, reason_code, log_stream_refs
                         FROM validation_runs
                         WHERE workspace_id = :workspace_id
                         """
-                    ),
-                    {"workspace_id": ws_id},
+                        ),
+                        {"workspace_id": ws_id},
+                    )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
             operation = (
-                await session.execute(
-                    text(
-                        """
+                (
+                    await session.execute(
+                        text(
+                            """
                         SELECT status, error_code, result
                         FROM operations
                         WHERE id = 'op_validate_coverage'
                         """
+                        )
                     )
                 )
-            ).mappings().one()
+                .mappings()
+                .one()
+            )
 
         assert workspace.status == WorkspaceStatus.failed.value
         assert workspace.failure_reason == "validation_failure"

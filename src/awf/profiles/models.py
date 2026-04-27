@@ -146,9 +146,7 @@ class ProfileQuality(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    out_of_scope_changes: OutOfScopeChangePolicy = Field(
-        default_factory=OutOfScopeChangePolicy
-    )
+    out_of_scope_changes: OutOfScopeChangePolicy = Field(default_factory=OutOfScopeChangePolicy)
 
 
 class ProfileValidation(BaseModel):
@@ -170,6 +168,32 @@ class ProfileMonitor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     initial_review_grace_period_seconds: float = Field(default=900.0, ge=0, le=86400)
+
+
+class ProfilePlanning(BaseModel):
+    """Plan → execute → compare policy supplied by the workspace profile."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    required: bool = False
+    plan_path: str = Field(default="docs/awf-plans/{workspace_id}.md", max_length=512)
+    conformance_report_path: str = Field(
+        default="docs/awf-plans/{workspace_id}.conformance.json",
+        max_length=512,
+    )
+    max_iterations: int = Field(default=1, ge=0, le=5)
+    enforce_plan_only_changes: bool = True
+    fail_on_unexplained_deviation: bool = True
+
+    @model_validator(mode="after")
+    def _validate_paths(self) -> ProfilePlanning:
+        for field_name in ("plan_path", "conformance_report_path"):
+            value = getattr(self, field_name)
+            if not value or value.startswith("/") or ".." in value.split("/"):
+                raise ValueError(f"{field_name} must be a workspace-relative path")
+            if "{workspace_id}" not in value:
+                raise ValueError(f"{field_name} must include '{{workspace_id}}'")
+        return self
 
 
 class ProfileService(BaseModel):
@@ -221,7 +245,17 @@ class ProfileSecret(BaseModel):
         # Broad targets check
         if self.kind == "mount":
             target_norm = self.target.rstrip("/")
-            if target_norm in ("", "/tmp", "/var", "/etc", "/root", "/home", "/dev", "/proc", "/sys"):
+            if target_norm in (
+                "",
+                "/tmp",
+                "/var",
+                "/etc",
+                "/root",
+                "/home",
+                "/dev",
+                "/proc",
+                "/sys",
+            ):
                 raise ValueError(f"secret target '{self.target}' is too broad")
         elif self.kind == "env":
             if self.target in ("PATH", "HOME", "USER", ""):
@@ -306,6 +340,7 @@ class WorkspaceProfile(BaseModel):
     validation: ProfileValidation = Field(default_factory=ProfileValidation)
     quality: ProfileQuality = Field(default_factory=ProfileQuality)
     monitor: ProfileMonitor = Field(default_factory=ProfileMonitor)
+    planning: ProfilePlanning = Field(default_factory=ProfilePlanning)
     secrets: list[ProfileSecret] = Field(default_factory=list)
     security: ProfileSecurity = Field(default_factory=ProfileSecurity)
     ports: dict[str, str] = Field(default_factory=dict)
@@ -322,7 +357,6 @@ class WorkspaceProfile(BaseModel):
             deep=True,
             update={"phases": self.phases.model_copy(update={"validate_commands": phase_commands})},
         )
-
 
 
 class ProfileResolution(BaseModel):

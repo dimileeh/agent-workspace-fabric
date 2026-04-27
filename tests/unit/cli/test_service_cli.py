@@ -17,6 +17,10 @@ from typer.testing import CliRunner
 
 from awf.cli.main import app
 from awf.common.config import Settings
+from awf.service.target_branch_monitor import (
+    TargetBranchMonitorResult,
+    TargetBranchMonitorStatus,
+)
 
 _runner = CliRunner()
 
@@ -238,6 +242,53 @@ def test_service_logs_docker_compose_failure_is_clean_typer_error(
     assert result.exit_code == 1
     assert 'error: docker compose logs failed (exit 17): service "api" is not running' in output
     assert "Traceback" not in output
+
+
+@pytest.mark.unit
+def test_service_reconcile_target_invokes_target_branch_monitor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    from awf.service import target_branch_monitor
+
+    calls: list[dict[str, object]] = []
+
+    async def _fake_reconcile_once(**kwargs: object) -> TargetBranchMonitorResult:
+        calls.append(kwargs)
+        return TargetBranchMonitorResult(
+            repo_url=str(kwargs["repo_url"]),
+            branch=str(kwargs["branch"]),
+            checkout_path=tmp_path / "checkout",
+            status=TargetBranchMonitorStatus.clean,
+            resolver_results=(),
+        )
+
+    monkeypatch.setattr(
+        target_branch_monitor,
+        "run_target_branch_reconcile_once",
+        _fake_reconcile_once,
+    )
+
+    result = _runner.invoke(
+        app,
+        [
+            "service",
+            "reconcile-target",
+            "--repo-url",
+            "git@github.com:example/repo.git",
+            "--branch",
+            "development",
+            "--work-dir",
+            str(tmp_path / "state"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "clean"
+    assert calls[0]["repo_url"] == "git@github.com:example/repo.git"
+    assert calls[0]["branch"] == "development"
+    assert calls[0]["work_dir"] == (tmp_path / "state").resolve()
 
 
 @pytest.mark.unit
