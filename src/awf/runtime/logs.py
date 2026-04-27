@@ -5,12 +5,13 @@ from __future__ import annotations
 import asyncio
 import os
 from collections import defaultdict
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from itertools import count
 from pathlib import Path
+from typing import Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -86,6 +87,21 @@ class LogBroadcaster:
 
 
 LOG_BROADCASTER = LogBroadcaster()
+
+
+class _ComposeLogsProcess(Protocol):
+    stdout: asyncio.StreamReader | None
+    stderr: asyncio.StreamReader | None
+    returncode: int | None
+
+    def terminate(self) -> None: ...
+
+    def kill(self) -> None: ...
+
+    async def wait(self) -> int: ...
+
+
+_ComposeLogsProcessFactory = Callable[..., Awaitable[_ComposeLogsProcess]]
 
 
 class LogStore:
@@ -211,6 +227,8 @@ async def stream_compose_service_logs(
     compose_project: str,
     compose_file: Path,
     log_store: LogStore,
+    process_factory: _ComposeLogsProcessFactory | None = None,
+    terminate_timeout_seconds: float = 5,
 ) -> None:
     """Tail compose service logs into durable workspace streams until cancelled."""
     sinks = await log_store.open_command_streams(
@@ -219,7 +237,8 @@ async def stream_compose_service_logs(
         source="service",
         name="Compose services",
     )
-    proc = await asyncio.create_subprocess_exec(
+    factory = process_factory or cast(_ComposeLogsProcessFactory, asyncio.create_subprocess_exec)
+    proc = await factory(
         "docker",
         "compose",
         "--project-name",
@@ -253,7 +272,7 @@ async def stream_compose_service_logs(
         if proc.returncode is None:
             proc.terminate()
             try:
-                await asyncio.wait_for(proc.wait(), timeout=5)
+                await asyncio.wait_for(proc.wait(), timeout=terminate_timeout_seconds)
             except TimeoutError:
                 proc.kill()
                 await proc.wait()

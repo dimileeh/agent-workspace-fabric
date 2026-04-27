@@ -8,6 +8,7 @@ import pytest
 
 from awf.runtime.planning import (
     PlanConformanceStatus,
+    _gaps_from_payload,
     build_conformance_prompt,
     build_execution_prompt,
     build_planning_prompt,
@@ -92,6 +93,7 @@ def test_parse_conformance_report_filters_blank_gap_items() -> None:
     )
 
     assert report.gaps == ("fix tests",)
+    assert _gaps_from_payload({"unexpected": "shape"}) == ()
 
 
 @pytest.mark.unit
@@ -101,6 +103,7 @@ def test_changed_paths_from_porcelain_handles_renames_and_short_lines() -> None:
         " M src/awf/runtime/planning.py\n"
         "R  docs/old.md -> docs/new.md\n"
         "?? tests/unit/runtime/test_planning.py\n"
+        "   \n"
         "A\n"
     )
 

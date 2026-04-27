@@ -358,6 +358,7 @@ class _FakeComposeLogsProcess:
         self.killed = False
         self._exit_after_terminate = exit_after_terminate
         self._exit_event = asyncio.Event()
+        self.wait_started = asyncio.Event()
 
     def terminate(self) -> None:
         self.terminated = True
@@ -371,6 +372,7 @@ class _FakeComposeLogsProcess:
         self._exit_event.set()
 
     async def wait(self) -> int:
+        self.wait_started.set()
         if self.returncode is None:
             await self._exit_event.wait()
         assert self.returncode is not None
@@ -393,7 +395,7 @@ async def test_stream_compose_service_logs_terminates_process_on_cancel(tmp_path
             process_factory=process_factory,
         )
     )
-    await asyncio.sleep(0)
+    await asyncio.wait_for(process.wait_started.wait(), timeout=1)
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -428,7 +430,7 @@ async def test_stream_compose_service_logs_kills_process_after_terminate_timeout
             terminate_timeout_seconds=0.01,
         )
     )
-    await asyncio.sleep(0)
+    await asyncio.wait_for(process.wait_started.wait(), timeout=1)
 
     task.cancel()
     with pytest.raises(asyncio.CancelledError):

@@ -574,6 +574,23 @@ class _SleepingRunner:
         return CommandResult(returncode=0, stdout="late", stderr="")
 
 
+class _NonStreamingRunner:
+    def __init__(self, result: CommandResult) -> None:
+        self.result = result
+        self.calls: list[list[str]] = []
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        del input_bytes, cwd
+        self.calls.append(list(args))
+        return self.result
+
+
 class TestValidationResultHelpers:
     @pytest.mark.unit
     def test_first_failure_prefers_migration_then_commands_then_coverage(
@@ -684,3 +701,76 @@ class TestValidationResultHelpers:
         assert (
             tmp_path / "logs" / "ws_timeout" / "validation.01_timeout.stderr.log"
         ).read_text(encoding="utf-8") == "command timed out after 0.01s"
+
+    @pytest.mark.unit
+    async def test_exec_non_streaming_runner_writes_sink_without_timeout(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _NonStreamingRunner(CommandResult(returncode=0, stdout="out\n", stderr="err\n"))
+        val = ValidationRunner(
+            runner=runner,
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=LogStore(root=tmp_path / "logs"),
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_non_streaming"
+        artifacts_dir.mkdir(parents=True)
+
+        result = await val._exec(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            cli_args=["pytest", "-q"],
+            label="01_validate",
+            artifacts_dir=artifacts_dir,
+            phase="validate",
+        )
+
+        assert result.ok
+        assert result.stdout_path.read_text(encoding="utf-8") == "out\n"
+        assert result.stderr_path.read_text(encoding="utf-8") == "err\n"
+        assert (
+            tmp_path / "logs" / "ws_non_streaming" / "validation.01_validate.stdout.log"
+        ).read_text(encoding="utf-8") == "out\n"
+        assert (
+            tmp_path / "logs" / "ws_non_streaming" / "validation.01_validate.stderr.log"
+        ).read_text(encoding="utf-8") == "err\n"
+
+    @pytest.mark.unit
+    async def test_exec_non_streaming_runner_writes_sink_with_timeout_wrapper(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _NonStreamingRunner(
+            CommandResult(returncode=1, stdout="late out\n", stderr="late err\n")
+        )
+        val = ValidationRunner(
+            runner=runner,
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=LogStore(root=tmp_path / "logs"),
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_non_streaming_timeout"
+        artifacts_dir.mkdir(parents=True)
+
+        result = await val._exec(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            cli_args=["pytest", "-q"],
+            label="01_validate",
+            artifacts_dir=artifacts_dir,
+            phase="validate",
+            timeout_seconds=1,
+        )
+
+        assert not result.ok
+        assert result.stdout_path.read_text(encoding="utf-8") == "late out\n"
+        assert result.stderr_path.read_text(encoding="utf-8") == "late err\n"
+        assert (
+            tmp_path
+            / "logs"
+            / "ws_non_streaming_timeout"
+            / "validation.01_validate.stdout.log"
+        ).read_text(encoding="utf-8") == "late out\n"
+        assert (
+            tmp_path
+            / "logs"
+            / "ws_non_streaming_timeout"
+            / "validation.01_validate.stderr.log"
+        ).read_text(encoding="utf-8") == "late err\n"

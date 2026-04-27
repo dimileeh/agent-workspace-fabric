@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import structlog
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, GitHubClientError
@@ -78,16 +79,6 @@ class TestExecutorFixPassWarnings:
     useful work — but we still want the operator to see the warning."""
 
     @pytest.mark.unit
-    @pytest.mark.skip(
-        reason=(
-            "Complex FakeCommandRunner queue setup with the fix-cycle's"
-            " validation retry proved brittle across test orderings — "
-            " the executor's fix-pass warning paths are reached via"
-            " existing test_executor_validation_fix_cycle.py integration"
-            " flows in practice. Left in skipped state as a specification"
-            " marker for the invariant."
-        )
-    )
     async def test_fix_pass_add_and_commit_failures_log_and_continue(self, tmp_path: Path) -> None:
         from awf.adapters import registry as _registry  # noqa: F401
         from awf.common.commands import FakeCommandRunner
@@ -127,7 +118,8 @@ class TestExecutorFixPassWarnings:
         fake = FakeCommandRunner()
         # adapter.run is via subprocess.
         fake.queue_result(returncode=0)  # adapter
-        # Initial commit block: add, cached diff (non-empty), commit, rev-list.
+        # Initial commit block: branch check, add, cached diff (non-empty), commit, rev-list.
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # rev-parse --abbrev-ref HEAD
         fake.queue_result(returncode=0)  # git add -A
         fake.queue_result(returncode=0, stdout="a\n")  # diff --cached
         fake.queue_result(returncode=0)  # commit
@@ -164,13 +156,24 @@ class TestExecutorFixPassWarnings:
                 max_validation_fix_passes=3,
             ),
         )
-        await executor.execute(ws_id)
+        with structlog.testing.capture_logs() as captured:
+            await executor.execute(ws_id)
 
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             # Landed at completed despite fix-pass sub-failures.
             assert ws.status == WorkspaceStatus.completed.value
+        assert any(
+            event.get("event") == "executor.fix_pass_add_failed"
+            and event.get("stderr") == "index.lock held"
+            for event in captured
+        )
+        assert any(
+            event.get("event") == "executor.fix_pass_commit_failed"
+            and event.get("stderr") == "commit would be empty"
+            for event in captured
+        )
         await engine.dispose()
 
 

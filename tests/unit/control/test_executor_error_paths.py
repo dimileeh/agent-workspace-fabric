@@ -32,9 +32,9 @@ from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.node.compose_manager import ComposeManager
+from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
-from awf.runtime.pr_creator import PullRequestCreator
+from awf.runtime.pr_creator import PullRequestCreator, PullRequestResult
 from awf.runtime.validation import ValidationRunner
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
@@ -64,10 +64,11 @@ def _make_executor(
     pr_monitor_factory: Any = None,
     compose: Any = None,
     validation: Any = None,
+    pr_creator: Any = None,
 ) -> WorkspaceExecutor:
     compose = compose or _NoopResumeCompose()
     validation = validation or ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
-    pr = PullRequestCreator(fake)
+    pr = pr_creator or PullRequestCreator(fake)
     return WorkspaceExecutor(
         session_factory=factory,
         runner=fake,
@@ -129,6 +130,49 @@ class _ExplodingValidation:
         return SimpleNamespace(all_passed=True, first_failure=None)
 
 
+class _CancellingSetupValidation:
+    def __init__(self, factory: async_sessionmaker[AsyncSession]) -> None:
+        self._factory = factory
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...],
+        **_kwargs: Any,
+    ) -> SimpleNamespace:
+        assert phase_names == ("setup", "pre_agent")
+        async with self._factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="TEST_CANCELLED")
+            await s.commit()
+        return SimpleNamespace(all_passed=True, first_failure=None)
+
+    async def run_profile_coverage(self, **_kwargs: Any) -> None:
+        return None
+
+
+class _DivergingPrCreator:
+    def __init__(self, factory: async_sessionmaker[AsyncSession], workspace_id: str) -> None:
+        self._factory = factory
+        self._workspace_id = workspace_id
+
+    async def push_and_open(self, *, branch_name: str, **_kwargs: Any) -> PullRequestResult:
+        async with self._factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(self._workspace_id)
+            assert ws is not None
+            await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="TEST_DIVERGED")
+            await s.commit()
+        return PullRequestResult(
+            url="https://github.com/x/y/pull/42",
+            branch=branch_name,
+            head_sha="b" * 40,
+        )
+
+
 async def _move_to_operator_control_status(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -153,6 +197,7 @@ async def _seed_ready(
     agent: str = "codex",
     base_commit: str | None = "a" * 40,
     auto_merge: bool | None = None,
+    resolved_profile: dict[str, Any] | None = None,
 ) -> str:
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -164,6 +209,7 @@ async def _seed_ready(
             agent=agent,
             test_commands=["pytest -q"],
             requires_database=False,
+            resolved_profile=resolved_profile,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = "awf/x"
@@ -1396,6 +1442,204 @@ class TestPrMonitorResume:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.remote_push_branch is None
+
+
+class TestExecutorCoverageEdges:
+    @pytest.mark.unit
+    async def test_setup_phase_failure_marks_service_startup_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(
+            factory,
+            resolved_profile={
+                "name": "setup-fails",
+                "phases": {"setup": ["./scripts/setup.sh"]},
+            },
+        )
+        fake.queue_result(returncode=1, stderr="setup exploded")
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "service_startup_failure"
+            assert ws.failure_message == "profile setup failed: ./scripts/setup.sh"
+            assert ws.events[-1].reason_code == "SERVICE_STARTUP_FAILURE"
+
+    @pytest.mark.unit
+    async def test_transition_if_current_records_stale_skip_for_diverged_status(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        executor = _make_executor(fake, factory, tmp_path)
+
+        transitioned = await executor._transition_if_current(
+            ws_id,
+            from_status=WorkspaceStatus.running,
+            to=WorkspaceStatus.validating,
+            reason="TEST",
+            action="start_validation",
+        )
+
+        assert transitioned is False
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ready.value
+            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+            assert ws.events[-1].payload["action"] == "start_validation"
+
+    @pytest.mark.unit
+    async def test_recheck_after_setup_stops_when_workspace_was_cancelled(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=_CancellingSetupValidation(factory),
+        )
+
+        await executor.execute(ws_id)
+
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.cancelled.value
+            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+            assert ws.events[-1].payload["action"] == "agent_run"
+
+    @pytest.mark.unit
+    async def test_persist_pr_records_stale_skip_when_status_changed_after_push(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_ready(factory)
+        fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # branch drift check
+        fake.queue_result(returncode=0)  # add
+        fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff
+        fake.queue_result(returncode=0)  # commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base
+        fake.queue_result(returncode=0)  # validation
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            pr_creator=_DivergingPrCreator(factory, ws_id),
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert ws.pr_url is None
+            assert ws.events[-1].event_type == "workspace.stale_action_skipped"
+            assert ws.events[-1].reason_code == "EXECUTOR_STALE_STATUS"
+            assert ws.events[-1].payload["action"] == "persist_pr"
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_compose_failure_marks_infrastructure_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _FailingCompose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+            ) -> None:
+                del project_name, compose_file, workspace_id, wait
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=1,
+                    stdout="",
+                    stderr="network unavailable",
+                    reason_code="COMPOSE_UP_FAILED",
+                )
+
+        ws_id = await _seed_monitoring_pr(factory)
+        executor = _make_executor(fake, factory, tmp_path, compose=_FailingCompose())
+
+        await executor.resume_pr_monitor(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "compose stack failed to start" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_factory_failure_marks_recovery_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+
+        def _factory(*_args: Any) -> object:
+            raise RuntimeError("factory broke")
+
+        executor = _make_executor(fake, factory, tmp_path, pr_monitor_factory=_factory)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert "failed to build PR monitor" in (ws.failure_message or "")
+            assert ws.events[-1].reason_code == "MONITOR_RECOVERY_FAILED"
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_without_configured_monitor_fails_cleanly(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        ws_id = await _seed_monitoring_pr(factory)
+        executor = _make_executor(fake, factory, tmp_path)
+
+        await executor.resume_pr_monitor(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message == "monitor recovery: no PR monitor configured"
+            assert ws.events[-1].reason_code == "MONITOR_RECOVERY_FAILED"
             assert not [
                 event
                 for event in ws.events

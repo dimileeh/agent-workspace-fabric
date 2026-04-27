@@ -184,6 +184,31 @@ def test_baseline_coverage_ratchet_accepts_no_regression(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
+def test_baseline_coverage_ratchet_accepts_no_regression_without_command_result(
+    tmp_path: Path,
+) -> None:
+    result = ValidationResult(
+        coverage=ValidationCoverageResult(
+            provider="python",
+            percent=90,
+            minimum_percent=99,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_BELOW_THRESHOLD",
+            command_result=None,
+        ),
+    )
+    baseline = _coverage(tmp_path, percent=90, status="failed")
+
+    adjusted = _apply_baseline_coverage_ratchet(result, baseline_coverage=baseline)
+
+    assert adjusted.all_passed
+    assert adjusted.coverage is not None
+    assert adjusted.coverage.command_result is None
+    assert adjusted.coverage.reason_code == "COVERAGE_BASELINE_DEBT_NO_REGRESSION"
+
+
+@pytest.mark.unit
 def test_baseline_coverage_ratchet_rejects_missing_or_regressed_measurements(
     tmp_path: Path,
 ) -> None:
@@ -285,6 +310,19 @@ def test_read_text_if_present_handles_empty_missing_and_present_files(tmp_path: 
     assert _read_text_if_present(missing) is None
     assert _read_text_if_present(empty) is None
     assert _read_text_if_present(present) == "useful output"
+
+
+@pytest.mark.unit
+def test_read_text_if_present_returns_none_when_file_read_raises() -> None:
+    class _UnreadablePath:
+        def is_file(self) -> bool:
+            return True
+
+        def read_text(self, *, encoding: str) -> str:
+            assert encoding == "utf-8"
+            raise OSError("permission denied")
+
+    assert _read_text_if_present(_UnreadablePath()) is None  # type: ignore[arg-type]
 
 
 @pytest.mark.unit

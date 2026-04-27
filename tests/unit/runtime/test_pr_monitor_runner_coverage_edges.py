@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -245,6 +246,69 @@ async def test_defer_signal_write_failure_is_best_effort(
     )
 
     assert artifact_file.read_text(encoding="utf-8") == "not a directory"
+
+
+@pytest.mark.unit
+async def test_target_branch_reconcile_failure_appends_workspace_event(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+
+    async def failing_reconciler(*, repo_url: str, branch: str) -> object:
+        assert repo_url == "git@github.com:dimileeh/aira-web.git"
+        assert branch == "development"
+        raise RuntimeError("target branch locked")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        post_merge_target_reconciler=failing_reconciler,
+    )
+
+    await runner._reconcile_target_branch_after_merge(
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        base_branch="development",
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.events[-1].event_type == "target_branch.reconcile_failed"
+        assert ws.events[-1].reason_code == "TARGET_BRANCH_RECONCILE_FAILED"
+        assert ws.events[-1].payload["error"] == "target branch locked"
+
+
+@pytest.mark.unit
+async def test_completed_filesystem_gc_exception_is_logged_and_swallowed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    class _ExplodingSessionFactory:
+        def __call__(self) -> object:
+            raise RuntimeError("database unavailable")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    runner._deps.session_factory = _ExplodingSessionFactory()  # type: ignore[assignment]
+
+    with structlog.testing.capture_logs() as captured:
+        await runner._gc_completed_workspace_filesystem("ws_gc")
+
+    assert any(
+        event.get("event") == "monitor.filesystem_gc_raised"
+        and event.get("workspace_id") == "ws_gc"
+        for event in captured
+    )
 
 
 @pytest.mark.unit

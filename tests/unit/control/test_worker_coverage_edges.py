@@ -9,13 +9,21 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.control.worker import ControlWorker, WorkerConfig, _execution_claim_is_stale
+from awf.control.worker import (
+    ControlWorker,
+    WorkerConfig,
+    _ActiveExecutionCandidate,
+    _execution_claim_is_stale,
+    _stale_active_execution_failure_message,
+)
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.runtime.inspection import RuntimeSnapshot
 
 
 class _NoopProvisioner:
@@ -137,6 +145,36 @@ class _ExplodingSessionFactory:
     def __call__(self) -> object:
         self.calls += 1
         raise AssertionError("session factory should not be opened for empty limits")
+
+
+class _RefreshLoopWorker(ControlWorker):
+    def __init__(self, *, raises: bool, refreshed: bool) -> None:
+        super().__init__(
+            session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+            provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+            config=WorkerConfig(
+                monitor_claim_lease_seconds=3,
+                execution_claim_lease_seconds=3,
+            ),
+        )
+        self.raises = raises
+        self.refreshed = refreshed
+        self.monitor_refresh_calls = 0
+        self.execution_refresh_calls = 0
+
+    async def _refresh_monitoring_pr_claim(self, workspace_id: str) -> bool:
+        assert workspace_id == "ws_loop"
+        self.monitor_refresh_calls += 1
+        if self.raises:
+            raise RuntimeError("monitor refresh failed")
+        return self.refreshed
+
+    async def _refresh_execution_claim(self, workspace_id: str) -> bool:
+        assert workspace_id == "ws_loop"
+        self.execution_refresh_calls += 1
+        if self.raises:
+            raise RuntimeError("execution refresh failed")
+        return self.refreshed
 
 
 @pytest.mark.unit
@@ -320,6 +358,53 @@ async def test_safely_execute_and_resume_noop_without_executor(
 
 
 @pytest.mark.unit
+async def test_record_stale_active_execution_detected_skips_diverged_or_fresh_claims(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    diverged_id = await _seed_status(factory, WorkspaceStatus.running, title="diverged")
+    claimed_id = await _seed_status(factory, WorkspaceStatus.running, title="claimed")
+    worker = _worker(factory)
+    snapshot = RuntimeSnapshot(stack_state="running", services=[])
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(claimed_id)
+        assert ws is not None
+        ws.execution_claimed_by = "worker-a"
+        ws.execution_claim_expires_at = datetime.now(UTC) + timedelta(seconds=30)
+        await s.commit()
+
+    await worker._record_stale_active_execution_detected(
+        _ActiveExecutionCandidate(
+            workspace_id=diverged_id,
+            status=WorkspaceStatus.validating,
+            compose_project_name="awf_diverged",
+        ),
+        snapshot,
+    )
+    await worker._record_stale_active_execution_detected(
+        _ActiveExecutionCandidate(
+            workspace_id=claimed_id,
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_claimed",
+        ),
+        snapshot,
+    )
+
+    async with factory() as s:
+        diverged = await WorkspaceRepository(s).get(diverged_id)
+        claimed = await WorkspaceRepository(s).get(claimed_id)
+        assert diverged is not None
+        assert claimed is not None
+        assert all(
+            event.event_type != "workspace.stale_active_execution_detected"
+            for event in diverged.events
+        )
+        assert all(
+            event.event_type != "workspace.stale_active_execution_detected"
+            for event in claimed.events
+        )
+
+
+@pytest.mark.unit
 def test_execution_claim_is_stale_handles_missing_and_naive_datetimes() -> None:
     cutoff = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
 
@@ -345,3 +430,67 @@ def test_execution_claim_is_stale_handles_missing_and_naive_datetimes() -> None:
         ),
         cutoff,
     )
+    assert not _execution_claim_is_stale(
+        SimpleNamespace(
+            execution_claimed_by="worker",
+            execution_claim_expires_at=datetime(2026, 4, 27, 12, 1, tzinfo=UTC),
+        ),
+        cutoff,
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("loop_name", "raises", "expected_event"),
+    [
+        ("monitor", True, "worker.monitor_claim_refresh_failed"),
+        ("monitor", False, "worker.monitor_claim_lost"),
+        ("execution", True, "worker.execution_claim_refresh_failed"),
+        ("execution", False, "worker.execution_claim_lost"),
+    ],
+)
+async def test_claim_refresh_loops_stop_after_refresh_failure_or_lost_claim(
+    loop_name: str,
+    raises: bool,
+    expected_event: str,
+) -> None:
+    worker = _RefreshLoopWorker(raises=raises, refreshed=False)
+    loop = (
+        worker._refresh_monitoring_pr_claim_loop
+        if loop_name == "monitor"
+        else worker._refresh_execution_claim_loop
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await asyncio.wait_for(loop("ws_loop"), timeout=2)
+
+    assert any(event.get("event") == expected_event for event in captured)
+    if loop_name == "monitor":
+        assert worker.monitor_refresh_calls == 1
+        assert worker.execution_refresh_calls == 0
+    else:
+        assert worker.execution_refresh_calls == 1
+        assert worker.monitor_refresh_calls == 0
+
+
+@pytest.mark.unit
+def test_stale_active_execution_failure_message_includes_runtime_reason() -> None:
+    message = _stale_active_execution_failure_message(
+        _ActiveExecutionCandidate(
+            workspace_id="ws_runtime",
+            status=WorkspaceStatus.running,
+            compose_project_name="awf_ws_runtime",
+        ),
+        RuntimeSnapshot(stack_state="unavailable", reason=" docker unavailable \n", services=[]),
+    )
+
+    assert "compose runtime state is unavailable: docker unavailable" in message
+    no_reason_message = _stale_active_execution_failure_message(
+        _ActiveExecutionCandidate(
+            workspace_id="ws_runtime",
+            status=WorkspaceStatus.validating,
+            compose_project_name="awf_ws_runtime",
+        ),
+        RuntimeSnapshot(stack_state="stopped", services=[]),
+    )
+    assert "compose runtime state is stopped." in no_reason_message
