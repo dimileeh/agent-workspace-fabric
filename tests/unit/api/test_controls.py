@@ -6,8 +6,11 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.controls as controls
+from awf.api.schemas import WorkspaceControlRequest
+from awf.db.session import make_session_factory
 from awf.service.controls import (
     IdempotencyConflictError,
     VersionConflictError,
@@ -93,3 +96,56 @@ def test_http_error_maps_control_errors_to_structured_responses(
     assert http_error.status_code == status_code
     assert http_error.detail["error_code"]
     assert http_error.detail["message"]
+
+
+@pytest.mark.unit
+async def test_control_route_functions_map_missing_workspace_errors(
+    engine: AsyncEngine,
+) -> None:
+    payload = WorkspaceControlRequest(reason="operator requested", stop_stack=False)
+    factory = make_session_factory(engine)
+
+    async with factory() as session:
+        with pytest.raises(HTTPException) as cancel_error:
+            await controls.cancel_workspace(
+                "ws_missing",
+                payload,
+                idempotency_key="cancel-missing",
+                if_match=None,
+                session=session,
+            )
+    async with factory() as session:
+        with pytest.raises(HTTPException) as stop_error:
+            await controls.stop_workspace(
+                "ws_missing",
+                payload,
+                idempotency_key="stop-missing",
+                if_match=None,
+                session=session,
+            )
+    async with factory() as session:
+        with pytest.raises(HTTPException) as remonitor_error:
+            await controls.remonitor_workspace(
+                "ws_missing",
+                payload,
+                idempotency_key="remonitor-missing",
+                if_match=None,
+                session=session,
+            )
+    async with factory() as session:
+        with pytest.raises(HTTPException) as destroy_error:
+            await controls.destroy_workspace(
+                "ws_missing",
+                idempotency_key="destroy-missing",
+                if_match=None,
+                session=session,
+            )
+
+    errors = [
+        cancel_error.value,
+        stop_error.value,
+        remonitor_error.value,
+        destroy_error.value,
+    ]
+    assert [error.status_code for error in errors] == [404, 404, 404, 404]
+    assert [error.detail["error_code"] for error in errors] == ["NOT_FOUND"] * 4

@@ -4,15 +4,19 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
+from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.api.routes import artifacts
 from awf.common.config import get_settings
+from awf.db.session import make_session_factory
 
 _MINIMAL_BODY = {
     "repo_url": "git@github.com:example/artifacts.git",
@@ -46,6 +50,21 @@ def _configure_artifact_api(
     monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
     get_settings.cache_clear()
     return work_dir, {"Authorization": "Bearer secret"}
+
+
+@contextmanager
+def _temporary_work_dir(work_dir: Path) -> object:
+    previous = os.environ.get("AWF_WORK_DIR")
+    try:
+        os.environ["AWF_WORK_DIR"] = str(work_dir)
+        get_settings.cache_clear()
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop("AWF_WORK_DIR", None)
+        else:
+            os.environ["AWF_WORK_DIR"] = previous
+        get_settings.cache_clear()
 
 
 class TestWorkspaceArtifacts:
@@ -262,3 +281,44 @@ class TestWorkspaceArtifacts:
                 (workspace_id, artifacts._workspace_artifact_dir(workspace_id)),
             )
         ]
+
+    @pytest.mark.unit
+    async def test_route_function_resolves_artifact_directory_for_existing_workspace(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        work_dir = tmp_path / "awf-state"
+        artifact_dir = work_dir / "artifacts" / workspace_id
+        artifact_dir.mkdir(parents=True)
+        readme = artifact_dir / "README"
+        readme.write_text("artifact notes\n", encoding="utf-8")
+
+        with _temporary_work_dir(work_dir):
+            async with make_session_factory(engine)() as session:
+                response = await artifacts.list_workspace_artifacts(
+                    workspace_id,
+                    session=session,
+                )
+
+        assert [item.relative_path for item in response.items] == ["README"]
+        assert response.items[0].workspace_id == workspace_id
+        assert response.items[0].kind == "file"
+        assert response.items[0].size_bytes == len("artifact notes\n")
+
+    @pytest.mark.unit
+    async def test_require_workspace_raises_structured_404_for_missing_workspace(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        async with make_session_factory(engine)() as session:
+            with pytest.raises(HTTPException) as exc_info:
+                await artifacts._require_workspace(session, "ws_missing")
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == {
+            "error_code": "NOT_FOUND",
+            "message": "No workspace with id ws_missing",
+        }

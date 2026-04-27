@@ -519,6 +519,47 @@ class TestMergeQueueList:
         assert second_body["next_cursor"] is None
 
     @pytest.mark.unit
+    async def test_route_function_paginates_candidate_rows_directly(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        older_id = await _create_queue_workspace(
+            engine,
+            title="Older direct route PR",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/108",
+            updated_at=datetime(2026, 4, 22, 12, 0, tzinfo=UTC),
+        )
+        newer_id = await _create_queue_workspace(
+            engine,
+            title="Newer direct route PR",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/109",
+            updated_at=datetime(2026, 4, 23, 12, 0, tzinfo=UTC),
+        )
+
+        async with make_session_factory(engine)() as session:
+            first_page = await merge_queue_route.list_merge_queue(
+                limit=1,
+                session=session,
+            )
+
+        assert [item.workspace_id for item in first_page.items] == [newer_id]
+        assert first_page.has_more is True
+        assert first_page.next_cursor is not None
+
+        async with make_session_factory(engine)() as session:
+            second_page = await merge_queue_route.list_merge_queue(
+                limit=1,
+                cursor=first_page.next_cursor,
+                session=session,
+            )
+
+        assert [item.workspace_id for item in second_page.items] == [older_id]
+        assert second_page.has_more is False
+        assert second_page.next_cursor is None
+
+    @pytest.mark.unit
     async def test_rejects_invalid_cursor(self, client: AsyncClient) -> None:
         response = await client.get("/v1/merge-queue", params={"cursor": "not-a-cursor"})
 

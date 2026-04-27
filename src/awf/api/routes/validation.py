@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -227,7 +227,10 @@ def _current_target_head_sha(workspace: Workspace) -> str | None:
 
 
 def _run_commands(run: ValidationRun) -> list[dict[str, Any]]:
-    return list(run.commands)
+    commands = cast(Any, run.commands)
+    if not isinstance(commands, list):
+        return []
+    return [command for command in commands if isinstance(command, dict)]
 
 
 def _command_stream_ids(command: dict[str, Any]) -> dict[str, str | None]:

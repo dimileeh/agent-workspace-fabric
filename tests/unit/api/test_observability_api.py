@@ -426,6 +426,30 @@ class TestWorkspaceWebSocket:
         assert exc_info.value.code == 1008
 
     @pytest.mark.unit
+    def test_websocket_no_events_path_sends_error_frame_for_missing_workspace(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with _temporary_api_token("secret"):
+            client, engine = _make_empty_sync_test_client(tmp_path)
+            try:
+                with client.websocket_connect(
+                    "/v1/workspaces/ws_missing/ws?channels=agent",
+                    headers={"Authorization": "Bearer secret"},
+                ) as websocket:
+                    assert websocket.receive_json() == {
+                        "type": "error",
+                        "error_code": "NOT_FOUND",
+                        "message": "workspace not found",
+                    }
+                    with pytest.raises(WebSocketDisconnect) as exc_info:
+                        websocket.receive_json()
+            finally:
+                asyncio.run(engine.dispose())
+
+        assert exc_info.value.code == 1008
+
+    @pytest.mark.unit
     def test_websocket_requires_token(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -490,6 +514,144 @@ class TestWorkspaceWebSocket:
         assert tail["type"] == "log"
         assert tail["stream_id"] == "agent.stdout"
         assert tail["data"] == "hello websocket\n"
+
+    @pytest.mark.unit
+    def test_websocket_public_route_tails_logs_without_events_channel(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        with _temporary_api_token("secret"):
+            client, engine = _make_empty_sync_test_client(tmp_path)
+            try:
+                workspace_id = asyncio.run(_seed_websocket_workspace(engine, tmp_path))
+                with client.websocket_connect(
+                    f"/v1/workspaces/{workspace_id}/ws?channels=agent&tail_bytes=100",
+                    headers={"Authorization": "Bearer secret"},
+                ) as websocket:
+                    snapshot = websocket.receive_json()
+                    tail = websocket.receive_json()
+            finally:
+                asyncio.run(engine.dispose())
+
+        assert snapshot["type"] == "snapshot"
+        assert snapshot["workspace"]["id"] == workspace_id
+        assert tail["type"] == "log"
+        assert tail["source"] == "agent"
+        assert tail["data"] == "hello websocket\n"
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("channels", "expected_selected", "expects_event_queue"),
+        [
+            ("events", {"events"}, True),
+            ("agent", {"agent"}, False),
+        ],
+    )
+    async def test_workspace_socket_handles_disconnect_from_live_stream(
+        self,
+        channels: str,
+        expected_selected: set[str],
+        expects_event_queue: bool,
+    ) -> None:
+        class DisconnectingWebSocket:
+            def __init__(self) -> None:
+                self.app = type(
+                    "App",
+                    (),
+                    {"state": type("State", (), {"db_session_factory": object()})()},
+                )()
+                self.accepted = False
+
+            async def accept(self) -> None:
+                self.accepted = True
+
+        async def fake_send_initial_state(
+            websocket: object,
+            factory: object,
+            workspace_id: str,
+            selected: set[str],
+            seen_event_ids: set[str],
+            tail_bytes: int,
+        ) -> bool:
+            assert workspace_id == "ws_disconnect"
+            assert selected == expected_selected
+            assert seen_event_ids == set()
+            assert tail_bytes == 65_536
+            assert factory is not None
+            assert websocket is fake_websocket
+            return True
+
+        async def fake_stream_live_frames(websocket: object, **_kwargs: object) -> None:
+            assert websocket is fake_websocket
+            assert (_kwargs["event_queue"] is not None) is expects_event_queue
+            raise WebSocketDisconnect(code=1000)
+
+        fake_websocket = DisconnectingWebSocket()
+        original_send_initial_state = ws_route._send_initial_state
+        original_stream_live_frames = ws_route._stream_live_frames
+        try:
+            ws_route._send_initial_state = fake_send_initial_state  # type: ignore[assignment]
+            ws_route._stream_live_frames = fake_stream_live_frames  # type: ignore[assignment]
+            await ws_route.workspace_socket(
+                fake_websocket,  # type: ignore[arg-type]
+                "ws_disconnect",
+                channels=channels,
+            )
+        finally:
+            ws_route._send_initial_state = original_send_initial_state
+            ws_route._stream_live_frames = original_stream_live_frames
+
+        assert fake_websocket.accepted is True
+
+    @pytest.mark.unit
+    async def test_workspace_socket_returns_when_events_initial_state_fails(self) -> None:
+        class ClosingWebSocket:
+            def __init__(self) -> None:
+                self.app = type(
+                    "App",
+                    (),
+                    {"state": type("State", (), {"db_session_factory": object()})()},
+                )()
+                self.accepted = False
+
+            async def accept(self) -> None:
+                self.accepted = True
+
+        async def fake_send_initial_state(
+            websocket: object,
+            factory: object,
+            workspace_id: str,
+            selected: set[str],
+            seen_event_ids: set[str],
+            tail_bytes: int,
+        ) -> bool:
+            assert websocket is fake_websocket
+            assert factory is not None
+            assert workspace_id == "ws_missing"
+            assert selected == {"events"}
+            assert seen_event_ids == set()
+            assert tail_bytes == 65_536
+            return False
+
+        async def fail_stream_live_frames(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("live streaming should not start after initial-state failure")
+
+        fake_websocket = ClosingWebSocket()
+        original_send_initial_state = ws_route._send_initial_state
+        original_stream_live_frames = ws_route._stream_live_frames
+        try:
+            ws_route._send_initial_state = fake_send_initial_state  # type: ignore[assignment]
+            ws_route._stream_live_frames = fail_stream_live_frames  # type: ignore[assignment]
+            await ws_route.workspace_socket(
+                fake_websocket,  # type: ignore[arg-type]
+                "ws_missing",
+                channels="events",
+            )
+        finally:
+            ws_route._send_initial_state = original_send_initial_state
+            ws_route._stream_live_frames = original_stream_live_frames
+
+        assert fake_websocket.accepted is True
 
     @pytest.mark.unit
     async def test_live_events_are_not_starved_by_steady_logs(self) -> None:
@@ -593,6 +755,16 @@ class TestWorkspaceWebSocket:
                 name="missing validation stdout",
                 kind="stdout",
                 path=str(tmp_path / "missing.log"),
+            )
+            empty_path = tmp_path / "custom.empty.log"
+            empty_path.write_text("", encoding="utf-8")
+            await log_repo.create_or_get(
+                workspace_id=workspace.id,
+                stream_id="custom.empty",
+                source="custom",
+                name="empty custom stdout",
+                kind="stdout",
+                path=str(empty_path),
             )
             await session.commit()
             workspace_id = workspace.id
@@ -999,6 +1171,39 @@ def _make_empty_sync_test_client(tmp_path: Path) -> tuple[TestClient, AsyncEngin
     app = create_app(use_lifespan=False)
     configure_database(app, factory)
     return TestClient(app), engine
+
+
+async def _seed_websocket_workspace(engine: AsyncEngine, tmp_path: Path) -> str:
+    factory = make_session_factory(engine)
+    log_path = tmp_path / "agent.log"
+    log_path.write_text("hello websocket\n", encoding="utf-8")
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url=str(_BODY["repo_url"]),
+            branch_base=str(_BODY["branch_base"]),
+            task_title=str(_BODY["task_title"]),
+            task_prompt=str(_BODY["task_prompt"]),
+            task_external_id=str(_BODY["task_external_id"]),
+            agent=str(_BODY["agent"]),
+            test_commands=[],
+        )
+        repo = WorkspaceLogStreamRepository(session)
+        await repo.create_or_get(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+            source="agent",
+            name="Agent stdout",
+            kind="stdout",
+            path=str(log_path),
+        )
+        await repo.append_metadata(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+            byte_delta=log_path.stat().st_size,
+            line_delta=1,
+        )
+        await session.commit()
+        return workspace.id
 
 
 @contextmanager

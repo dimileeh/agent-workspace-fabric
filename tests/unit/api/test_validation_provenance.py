@@ -6,10 +6,12 @@ import json
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.api.routes.validation as validation_route
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -921,6 +923,38 @@ async def test_validation_provenance_marks_failed_command_from_workspace_failure
 
 
 @pytest.mark.unit
+async def test_validation_provenance_keeps_records_after_failed_command_unknown(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace_with_commands(
+        client,
+        ["pytest -q", "ruff check", "mypy src"],
+    )
+    await _mark_workspace_validation_failed(engine, workspace_id)
+    for command_index in (1, 2, 3):
+        await _create_stream_pair(
+            engine,
+            workspace_id=workspace_id,
+            base_stream_id=f"validation.cmd_0{command_index}",
+            phase="validate",
+            stdout_bytes=20,
+            stdout_lines=1,
+            stderr_bytes=0,
+            stderr_lines=0,
+        )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    assert [(item["command"], item["status"]) for item in response.json()["items"]] == [
+        ("pytest -q", "succeeded"),
+        ("ruff check", "failed"),
+        ("mypy src", "unknown"),
+    ]
+
+
+@pytest.mark.unit
 async def test_validation_provenance_failed_workspace_without_message_keeps_status_unknown(
     client: AsyncClient,
     engine: AsyncEngine,
@@ -1006,3 +1040,119 @@ async def test_validation_provenance_missing_workspace_returns_404(
 
     assert response.status_code == 404
     assert response.json()["detail"]["error_code"] == "NOT_FOUND"
+
+
+@pytest.mark.unit
+async def test_validation_route_function_raises_structured_404_for_missing_workspace(
+    engine: AsyncEngine,
+) -> None:
+    async with make_session_factory(engine)() as session:
+        with pytest.raises(HTTPException) as exc_info:
+            await validation_route.list_validation_provenance("ws_missing", session=session)
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == {
+        "error_code": "NOT_FOUND",
+        "message": "No workspace with id ws_missing",
+    }
+
+
+@pytest.mark.unit
+async def test_validation_route_function_returns_stream_derived_items(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace_with_commands(client, ["pytest -q"])
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.cmd_01",
+        phase="validate",
+        stdout_bytes=20,
+        stdout_lines=1,
+        stderr_bytes=0,
+        stderr_lines=0,
+    )
+
+    async with make_session_factory(engine)() as session:
+        response = await validation_route.list_validation_provenance(
+            workspace_id,
+            session=session,
+        )
+
+    assert [(item.phase, item.command_index, item.command) for item in response.items] == [
+        ("validate", 1, "pytest -q")
+    ]
+
+
+@pytest.mark.unit
+async def test_validation_route_function_returns_persisted_run_items(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _insert_validation_run(
+        engine,
+        run_id="vr_direct_route_000000001",
+        workspace_id=workspace_id,
+        commands=[
+            {
+                "phase": "validate",
+                "command_index": 1,
+                "command": "pytest -q",
+                "stream_ids": {},
+            }
+        ],
+    )
+
+    async with make_session_factory(engine)() as session:
+        response = await validation_route.list_validation_provenance(
+            workspace_id,
+            session=session,
+        )
+
+    assert [(item.validation_run_id, item.phase, item.command) for item in response.items] == [
+        ("vr_direct_route_000000001", "validate", "pytest -q")
+    ]
+
+
+@pytest.mark.unit
+def test_current_target_head_sha_skips_newer_candidates_without_head_sha() -> None:
+    newer_without_head = type(
+        "Candidate",
+        (),
+        {
+            "updated_at": datetime(2026, 4, 26, 13, 0, tzinfo=UTC),
+            "id": "mc_newer",
+            "head_sha": None,
+        },
+    )()
+    older_with_head = type(
+        "Candidate",
+        (),
+        {
+            "updated_at": datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+            "id": "mc_older",
+            "head_sha": "older-head",
+        },
+    )()
+    workspace = type(
+        "Workspace",
+        (),
+        {
+            "merge_candidates": [newer_without_head, older_with_head],
+            "monitor_last_commit_sha": "monitor-head",
+        },
+    )()
+
+    assert validation_route._current_target_head_sha(workspace) == "older-head"  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_stream_pair_add_ignores_unknown_file_descriptors() -> None:
+    stream = type("Stream", (), {})()
+    pair = validation_route._StreamPair(base_stream_id="validation.cmd_01")
+
+    pair.add("stdin", stream)  # type: ignore[arg-type]
+
+    assert pair.streams() == []

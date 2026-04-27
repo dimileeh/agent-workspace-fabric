@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine
@@ -433,3 +434,52 @@ class TestTaskList:
         response = await client.get("/v1/tasks/NO-SUCH-TASK/attempts", params={"limit": 0})
 
         assert response.status_code == 422
+
+    @pytest.mark.unit
+    async def test_task_attempts_route_function_raises_404_for_missing_task(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        async with make_session_factory(engine)() as session:
+            with pytest.raises(HTTPException) as exc_info:
+                await tasks_route.list_task_attempts(
+                    "NO-SUCH-TASK",
+                    session=session,
+                )
+
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == {
+            "error_code": "NOT_FOUND",
+            "message": "No task with ref NO-SUCH-TASK",
+        }
+
+    @pytest.mark.unit
+    async def test_task_attempts_route_function_returns_empty_attempt_list(
+        self,
+        engine: AsyncEngine,
+    ) -> None:
+        from awf.db.repositories import TaskRepository
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            task = await TaskRepository(session).create_or_get(
+                repo_url="git@github.com:example/console.git",
+                base_branch="main",
+                title="No attempts",
+                prompt="Do not create attempts.",
+                external_id="TICKET-NO-ATTEMPTS",
+                idempotency_key=None,
+                task_class="test_task",
+                owned_paths=[],
+            )
+            await session.commit()
+
+        async with factory() as session:
+            response = await tasks_route.list_task_attempts(
+                "TICKET-NO-ATTEMPTS",
+                session=session,
+            )
+
+        assert response.task_id == task.id
+        assert response.task_ref == "TICKET-NO-ATTEMPTS"
+        assert response.items == []

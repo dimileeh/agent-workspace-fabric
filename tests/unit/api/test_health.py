@@ -12,16 +12,19 @@ specific failing check rather than a generic 503.
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.api.routes.health as health_route
 from awf import __version__
 from awf.api.app import configure_database, create_app
-from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
 from awf.db.session import make_session_factory
 
 # ---- /healthz ---------------------------------------------------------------
@@ -217,6 +220,93 @@ async def test_readyz_db_factory_raises_returns_503(
     assert db_check["ok"] is False
     assert db_check["reason"] == "DB_CONNECTION_FAILED"
     assert "QueuePool" in (db_check["detail"] or "")
+
+
+@pytest.mark.unit
+def test_readyz_command_runner_falls_back_to_asyncio_subprocess_runner() -> None:
+    request = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+
+    runner = health_route._get_command_runner_for_request(request)  # type: ignore[arg-type]
+
+    assert isinstance(runner, AsyncioSubprocessRunner)
+
+
+@pytest.mark.unit
+def test_readyz_truncates_verbose_dependency_details() -> None:
+    detail = "x" * 20
+
+    truncated = health_route._truncate(detail, limit=8)
+
+    assert len(truncated) == 8
+    assert truncated.startswith("x" * 7)
+    assert truncated.endswith("\N{HORIZONTAL ELLIPSIS}")
+
+
+@pytest.mark.unit
+async def test_readyz_db_timeout_returns_structured_failure() -> None:
+    class _SlowSession:
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            await asyncio.sleep(1)
+
+        async def close(self) -> None:
+            return None
+
+    previous_timeout = health_route._CHECK_TIMEOUT_SECONDS
+    health_route._CHECK_TIMEOUT_SECONDS = 0.001
+    try:
+        result = await health_route._check_db(lambda: _SlowSession())
+    finally:
+        health_route._CHECK_TIMEOUT_SECONDS = previous_timeout
+
+    assert result.ok is False
+    assert result.reason == "DB_TIMEOUT"
+    assert "SELECT 1 exceeded" in (result.detail or "")
+
+
+@pytest.mark.unit
+async def test_readyz_db_success_allows_sessions_without_close_method() -> None:
+    class _SessionWithoutClose:
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            return None
+
+    result = await health_route._check_db(lambda: _SessionWithoutClose())
+
+    assert result.ok is True
+    assert result.status == "ok"
+
+
+@pytest.mark.unit
+async def test_docker_check_maps_runner_timeout_to_configured_reason() -> None:
+    class _SlowRunner:
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+        ) -> CommandResult:
+            assert args == ["docker", "compose", "version", "--short"]
+            assert input_bytes is None
+            assert cwd is None
+            await asyncio.sleep(1)
+            return CommandResult(returncode=0, stdout="", stderr="")
+
+    previous_timeout = health_route._CHECK_TIMEOUT_SECONDS
+    health_route._CHECK_TIMEOUT_SECONDS = 0.001
+    try:
+        result = await health_route._docker_check(
+            _SlowRunner(),
+            args=["docker", "compose", "version", "--short"],
+            description="docker compose version",
+            fail_reason="DOCKER_COMPOSE_NOT_AVAILABLE",
+            timeout_reason="DOCKER_COMPOSE_TIMEOUT",
+        )
+    finally:
+        health_route._CHECK_TIMEOUT_SECONDS = previous_timeout
+
+    assert result.ok is False
+    assert result.reason == "DOCKER_COMPOSE_TIMEOUT"
+    assert "docker compose version exceeded" in (result.detail or "")
 
 
 # ---- /readyz: Docker CLI / daemon failures ----------------------------------
