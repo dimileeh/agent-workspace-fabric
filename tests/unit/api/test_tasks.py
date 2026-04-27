@@ -29,21 +29,26 @@ def _v2_body(
     external_id: str | None = "TICKET-123",
     title: str = "Add task attempts",
     owned_paths: list[str] | None = None,
+    agent: str = "codex",
+    model: str | None = None,
 ) -> dict[str, object]:
+    task = {
+        "title": title,
+        "prompt": "Persist first-class task attempts.",
+        "kind": "feature_branch_pr",
+        "agent": agent,
+        "external_id": external_id,
+        "task_class": "test_task",
+        "owned_paths": [] if owned_paths is None else owned_paths,
+    }
+    if model is not None:
+        task["model"] = model
     return {
         "repo": {
             "url": "git@github.com:example/console.git",
             "base_branch": "main",
         },
-        "task": {
-            "title": title,
-            "prompt": "Persist first-class task attempts.",
-            "kind": "feature_branch_pr",
-            "agent": "codex",
-            "external_id": external_id,
-            "task_class": "test_task",
-            "owned_paths": [] if owned_paths is None else owned_paths,
-        },
+        "task": task,
         "workspace": {"profile_ref": "auto", "profile": None},
         "validation": {"commands": ["pytest -q"], "requested_tier": 1},
         "resources": {},
@@ -61,11 +66,13 @@ async def _create_v2_workspace(
     *,
     external_id: str | None = "TICKET-123",
     title: str = "Add task attempts",
+    agent: str = "codex",
+    model: str | None = None,
     headers: dict[str, str] | None = None,
 ) -> str:
     response = await client.post(
         "/v2/workspaces",
-        json=_v2_body(external_id=external_id, title=title),
+        json=_v2_body(external_id=external_id, title=title, agent=agent, model=model),
         headers=headers,
     )
     assert response.status_code == 202
@@ -106,6 +113,47 @@ class TestTaskList:
         assert new["base_branch"] == "main"
         assert new["task_class"] == "test_task"
         assert new["status"] == WorkspaceStatus.requested.value
+
+    @pytest.mark.unit
+    async def test_task_rows_expose_effective_identity_and_usage_summary(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        legacy_workspace_id = await _create_v1_workspace(client)
+        attempt_workspace_id = await _create_v2_workspace(
+            client,
+            external_id="TICKET-OBSERVE",
+            title="Observe model identity",
+            agent="opencode",
+        )
+
+        response = await client.get("/v1/tasks")
+
+        assert response.status_code == 200
+        items_by_workspace = {
+            item["workspace_id"]: item for item in response.json()["items"]
+        }
+        legacy = items_by_workspace[legacy_workspace_id]
+        attempt = items_by_workspace[attempt_workspace_id]
+        assert legacy["agent_model"] == "gpt-5.5"
+        assert legacy["agent_effort"] == "xhigh"
+        assert legacy["agent_model_source"] == "default"
+        assert legacy["agent_effort_source"] == "default"
+        assert attempt["agent_model"] == "ollama/kimi-k2.6:cloud"
+        assert attempt["agent_effort"] == "xhigh"
+        assert attempt["agent_model_source"] == "default"
+        assert attempt["agent_effort_source"] == "default"
+        for row in (legacy, attempt):
+            assert row["llm_usage"] == {
+                "input_tokens": None,
+                "output_tokens": None,
+                "total_tokens": None,
+                "cost_estimate": None,
+                "currency": None,
+                "status": "unavailable",
+                "source": "none",
+                "reason": "usage_not_reported",
+            }
 
     @pytest.mark.unit
     async def test_list_tasks_route_merges_attempt_and_legacy_rows_directly(

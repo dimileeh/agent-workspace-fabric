@@ -5,6 +5,7 @@ from __future__ import annotations
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -35,6 +36,11 @@ from awf.service.workspaces import (
     profile_with_requested_tier,
     retry_workspace_row,
     v2_task_policy_snapshot,
+)
+from awf.service.workspace_observability import (
+    effective_agent_identity,
+    workspace_lifecycle_summary,
+    workspace_usage_summary,
 )
 
 
@@ -638,3 +644,242 @@ def test_parse_memory_gb_handles_blank_units_and_invalid_values(
     expected: float | None,
 ) -> None:
     assert _parse_memory_gb(raw) == expected
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("agent", "model"),
+    [
+        (AgentRuntime.codex, "gpt-5.5"),
+        (AgentRuntime.gemini, "gemini-3-pro-preview"),
+        (AgentRuntime.claude_code, "claude-opus-4-7"),
+        (AgentRuntime.opencode, "ollama/kimi-k2.6:cloud"),
+    ],
+)
+def test_effective_agent_identity_uses_central_defaults(
+    agent: AgentRuntime,
+    model: str,
+) -> None:
+    identity = effective_agent_identity(agent=agent, task_policy={})
+
+    assert identity.model == model
+    assert identity.effort == "xhigh"
+    assert identity.model_source == "default"
+    assert identity.effort_source == "default"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "task_policy",
+    [
+        {"agent_model": ""},
+        {"agent_model": "   "},
+        {"agent_model": 123},
+        {"agent_model": None},
+    ],
+)
+def test_effective_agent_identity_ignores_blank_or_malformed_model_policy(
+    task_policy: dict[str, object],
+) -> None:
+    identity = effective_agent_identity(
+        agent=AgentRuntime.codex,
+        task_policy=task_policy,
+    )
+
+    assert identity.model == "gpt-5.5"
+    assert identity.model_source == "default"
+    assert identity.effort == "xhigh"
+
+
+@pytest.mark.unit
+def test_effective_agent_identity_prefers_explicit_requested_model() -> None:
+    identity = effective_agent_identity(
+        agent=AgentRuntime.codex,
+        task_policy={"agent_model": "gpt-custom"},
+    )
+
+    assert identity.model == "gpt-custom"
+    assert identity.model_source == "task_policy"
+    assert identity.effort == "xhigh"
+    assert identity.effort_source == "default"
+
+
+def _lifecycle_event(
+    *,
+    event_type: str,
+    occurred_at: datetime,
+    old_state: str | None = None,
+    new_state: str | None = None,
+) -> object:
+    return SimpleNamespace(
+        event_type=event_type,
+        old_state=old_state,
+        new_state=new_state,
+        reason_code="TEST",
+        payload=None,
+        occurred_at=occurred_at,
+    )
+
+
+def _workspace_for_lifecycle(
+    *,
+    status: WorkspaceStatus,
+    created_at: datetime,
+    events: list[object],
+) -> object:
+    return SimpleNamespace(
+        id="ws_lifecycle",
+        status=status.value,
+        created_at=created_at,
+        events=events,
+    )
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_closes_reached_stages_and_tracks_active_duration() -> None:
+    base = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.running,
+        created_at=base,
+        events=[
+            _lifecycle_event(
+                event_type="workspace.created",
+                occurred_at=base,
+                new_state=WorkspaceStatus.requested.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=10),
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.provisioning.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=25),
+                old_state=WorkspaceStatus.provisioning.value,
+                new_state=WorkspaceStatus.ready.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=40),
+                old_state=WorkspaceStatus.ready.value,
+                new_state=WorkspaceStatus.running.value,
+            ),
+        ],
+    )
+
+    summary = workspace_lifecycle_summary(
+        workspace,
+        now=base + timedelta(seconds=70),
+    )
+    stages = {item.stage: item for item in summary}
+
+    assert stages["requested"].started_at == base
+    assert stages["requested"].ended_at == base + timedelta(seconds=10)
+    assert stages["requested"].duration_seconds == 10
+    assert stages["requested"].status == "completed"
+    assert stages["running"].started_at == base + timedelta(seconds=40)
+    assert stages["running"].ended_at is None
+    assert stages["running"].duration_seconds == 30
+    assert stages["running"].status == "active"
+    assert stages["validating"].status == "pending"
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_marks_future_stages_terminal_skipped() -> None:
+    base = datetime(2026, 4, 27, 13, 0, tzinfo=UTC)
+    failed_at = base + timedelta(seconds=75)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.failed,
+        created_at=base,
+        events=[
+            _lifecycle_event(
+                event_type="workspace.created",
+                occurred_at=base,
+                new_state=WorkspaceStatus.requested.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=10),
+                old_state=WorkspaceStatus.requested.value,
+                new_state=WorkspaceStatus.provisioning.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=25),
+                old_state=WorkspaceStatus.provisioning.value,
+                new_state=WorkspaceStatus.ready.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=40),
+                old_state=WorkspaceStatus.ready.value,
+                new_state=WorkspaceStatus.running.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=60),
+                old_state=WorkspaceStatus.running.value,
+                new_state=WorkspaceStatus.validating.value,
+            ),
+            _lifecycle_event(
+                event_type="workspace.state_changed",
+                occurred_at=failed_at,
+                old_state=WorkspaceStatus.validating.value,
+                new_state=WorkspaceStatus.failed.value,
+            ),
+        ],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=base + timedelta(seconds=90),
+        )
+    }
+
+    assert stages["validating"].ended_at == failed_at
+    assert stages["validating"].duration_seconds == 15
+    assert stages["validating"].status == "completed"
+    assert stages["pushing"].status == "terminal_skipped"
+    assert stages["monitoring_pr"].status == "terminal_skipped"
+    assert stages["completed"].status == "terminal_skipped"
+
+
+@pytest.mark.unit
+def test_lifecycle_summary_marks_new_workspace_requested_active() -> None:
+    base = datetime(2026, 4, 27, 14, 0, tzinfo=UTC)
+    workspace = _workspace_for_lifecycle(
+        status=WorkspaceStatus.requested,
+        created_at=base,
+        events=[],
+    )
+
+    stages = {
+        item.stage: item
+        for item in workspace_lifecycle_summary(
+            workspace,
+            now=base + timedelta(seconds=5),
+        )
+    }
+
+    assert stages["requested"].started_at == base
+    assert stages["requested"].ended_at is None
+    assert stages["requested"].duration_seconds == 5
+    assert stages["requested"].status == "active"
+    assert stages["provisioning"].status == "pending"
+
+
+@pytest.mark.unit
+def test_workspace_usage_summary_is_explicitly_unavailable_without_adapter_usage() -> None:
+    usage = workspace_usage_summary(SimpleNamespace(id="ws_usage"))
+
+    assert usage.input_tokens is None
+    assert usage.output_tokens is None
+    assert usage.total_tokens is None
+    assert usage.cost_estimate is None
+    assert usage.currency is None
+    assert usage.status == "unavailable"
+    assert usage.source == "none"
+    assert usage.reason == "usage_not_reported"
