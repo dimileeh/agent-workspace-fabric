@@ -591,6 +591,40 @@ class _NonStreamingRunner:
         return self.result
 
 
+class _StreamingRunner:
+    def __init__(self, result: CommandResult) -> None:
+        self.result = result
+        self.calls: list[list[str]] = []
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        del input_bytes, cwd
+        self.calls.append(list(args))
+        return self.result
+
+    async def run_streaming(
+        self,
+        args: list[str],
+        *,
+        on_stdout: object = None,
+        on_stderr: object = None,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        del input_bytes, cwd
+        self.calls.append(list(args))
+        if on_stdout is not None:
+            await on_stdout(self.result.stdout)  # type: ignore[misc]
+        if on_stderr is not None:
+            await on_stderr(self.result.stderr)  # type: ignore[misc]
+        return self.result
+
+
 class TestValidationResultHelpers:
     @pytest.mark.unit
     def test_first_failure_prefers_migration_then_commands_then_coverage(
@@ -641,6 +675,33 @@ class TestValidationResultHelpers:
             is command_failure
         )
         assert ValidationResult(commands=[], coverage=coverage_failure).first_failure is coverage_command
+
+    @pytest.mark.unit
+    def test_coverage_metadata_and_result_helpers_handle_absent_percent_and_command(
+        self,
+    ) -> None:
+        coverage_without_percent = ValidationCoverageResult(
+            provider="python",
+            percent=None,
+            minimum_percent=90,
+            enforce=True,
+            status="failed",
+            reason_code="COVERAGE_NOT_FOUND",
+            command_result=None,
+        )
+        migration_failure = ValidationCommandResult(
+            command="alembic upgrade head",
+            returncode=1,
+            duration_seconds=0,
+            stdout_path=Path("migration.out"),
+            stderr_path=Path("migration.err"),
+        )
+
+        metadata = coverage_without_percent.as_metadata()
+
+        assert "percent" not in metadata
+        assert not ValidationResult(migration=migration_failure).all_passed
+        assert ValidationResult(coverage=coverage_without_percent).first_failure is None
 
     @pytest.mark.unit
     async def test_exec_streams_to_log_store_and_artifacts(self, tmp_path: Path) -> None:
@@ -701,6 +762,79 @@ class TestValidationResultHelpers:
         assert (
             tmp_path / "logs" / "ws_timeout" / "validation.01_timeout.stderr.log"
         ).read_text(encoding="utf-8") == "command timed out after 0.01s"
+
+    @pytest.mark.unit
+    async def test_exec_streaming_runner_with_timeout_writes_through_log_sink(
+        self, tmp_path: Path
+    ) -> None:
+        runner = _StreamingRunner(CommandResult(returncode=0, stdout="out\n", stderr="err\n"))
+        val = ValidationRunner(
+            runner=runner,
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=LogStore(root=tmp_path / "logs"),
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_streaming_timeout"
+        artifacts_dir.mkdir(parents=True)
+
+        result = await val._exec(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            cli_args=["pytest", "-q"],
+            label="01_validate",
+            artifacts_dir=artifacts_dir,
+            phase="validate",
+            timeout_seconds=1,
+        )
+
+        assert result.ok
+        assert runner.calls == [
+            [
+                "docker",
+                "compose",
+                "--project-name",
+                _COMPOSE_PROJECT,
+                "--file",
+                str(_COMPOSE_FILE),
+                "exec",
+                "-T",
+                "-w",
+                "/workspace",
+                "agent",
+                "pytest",
+                "-q",
+            ]
+        ]
+        assert result.stdout_path.read_text(encoding="utf-8") == "out\n"
+        assert (
+            tmp_path
+            / "logs"
+            / "ws_streaming_timeout"
+            / "validation.01_validate.stdout.log"
+        ).read_text(encoding="utf-8") == "out\n"
+
+    @pytest.mark.unit
+    async def test_exec_timeout_without_log_store_still_writes_artifact(
+        self, tmp_path: Path
+    ) -> None:
+        val = ValidationRunner(
+            runner=_SleepingRunner(),
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        artifacts_dir = tmp_path / "artifacts" / "ws_timeout_no_logs"
+        artifacts_dir.mkdir(parents=True)
+
+        result = await val._exec(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            cli_args=["pytest", "-q"],
+            label="01_timeout",
+            artifacts_dir=artifacts_dir,
+            phase="validate",
+            timeout_seconds=0.01,
+        )
+
+        assert result.returncode == 124
+        assert result.stderr_path.read_text(encoding="utf-8") == "command timed out after 0.01s"
 
     @pytest.mark.unit
     async def test_exec_non_streaming_runner_writes_sink_without_timeout(

@@ -7,7 +7,11 @@ from types import SimpleNamespace
 
 import pytest
 
+from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
+    ExecutorConfig,
+    WorkspaceExecutor,
+    _agent_model_for_workspace,
     _apply_baseline_coverage_ratchet,
     _call_pr_monitor_factory,
     _coverage_preserves_below_threshold_baseline,
@@ -17,6 +21,7 @@ from awf.control.executor import (
     _validation_run_command_records,
     _validation_run_coverage_metadata,
     _validation_run_log_stream_refs,
+    _validation_run_reason_code,
     _validation_tier_for_workspace,
 )
 from awf.db.enums import FailureReason, TaskClass
@@ -62,6 +67,48 @@ def _coverage(
         status=status,
         reason_code=reason_code,
         command_result=command_result if command_result is not None else _command_result(tmp_path),
+    )
+
+
+class _PlanningAdapter:
+    def __init__(self, *stdout_values: str) -> None:
+        self.stdout_values = list(stdout_values)
+        self.prompts: list[str] = []
+
+    async def run(self, **kwargs: object) -> SimpleNamespace:
+        prompt = kwargs.get("prompt")
+        assert isinstance(prompt, str)
+        self.prompts.append(prompt)
+        stdout = self.stdout_values.pop(0) if self.stdout_values else ""
+        return SimpleNamespace(stdout=stdout)
+
+
+class _CoverageValidation:
+    def __init__(self, coverage: ValidationCoverageResult | None) -> None:
+        self.coverage = coverage
+        self.calls: list[str] = []
+
+    async def run_profile_coverage(self, *, phase: str, **_kwargs: object) -> ValidationCoverageResult | None:
+        self.calls.append(phase)
+        return self.coverage
+
+
+def _executor_with_runner(
+    runner: FakeCommandRunner,
+    tmp_path: Path,
+    *,
+    validation: object | None = None,
+) -> WorkspaceExecutor:
+    return WorkspaceExecutor(
+        session_factory=object(),  # type: ignore[arg-type]
+        runner=runner,
+        compose=object(),  # type: ignore[arg-type]
+        validation=validation or object(),  # type: ignore[arg-type]
+        pr_creator=object(),  # type: ignore[arg-type]
+        config=ExecutorConfig(
+            worktrees_root=tmp_path / "worktrees",
+            compose_projects_root=tmp_path / "compose",
+        ),
     )
 
 
@@ -136,6 +183,31 @@ def test_validation_run_command_records_include_healthchecks_and_coverage() -> N
 
 
 @pytest.mark.unit
+def test_validation_run_command_records_can_skip_healthchecks_and_coverage() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-no-healthchecks",
+            "phases": {
+                "setup": ["uv sync"],
+                "validate": ["pytest -q"],
+            },
+            "validation": {
+                "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+                "coverage": {"command": "pytest --cov=awf --cov-report=term"},
+            },
+        }
+    )
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("setup",),
+        run_healthchecks=False,
+    )
+
+    assert [(record["phase"], record["command"]) for record in records] == [("setup", "uv sync")]
+
+
+@pytest.mark.unit
 def test_validation_tier_for_workspace_uses_task_class_floor() -> None:
     profile = WorkspaceProfile.model_validate(
         {"name": "tier", "validation": {"requested_tier": 1}}
@@ -162,6 +234,160 @@ def test_validation_tier_for_workspace_uses_task_class_floor() -> None:
         )
         == 1
     )
+
+
+@pytest.mark.unit
+async def test_baseline_coverage_preflight_returns_logged_policy_result(
+    tmp_path: Path,
+) -> None:
+    baseline = _coverage(tmp_path, percent=88, minimum=99)
+    validation = _CoverageValidation(baseline)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path, validation=validation)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "coverage-preflight",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99,
+                    "enforce": True,
+                    "command": "pytest --cov=awf",
+                }
+            },
+        }
+    )
+
+    result = await executor._run_baseline_coverage_preflight(
+        workspace_id="ws_preflight",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+    )
+
+    assert result is baseline
+    assert validation.calls == ["baseline_coverage"]
+
+
+@pytest.mark.unit
+async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0, stdout="")
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("plan written elsewhere")
+    profile = WorkspaceProfile.model_validate(
+        {"name": "planning-missing", "planning": {"required": True}}
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_missing", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message == (
+        "planning phase did not create or modify required plan file "
+        "`docs/awf-plans/ws_plan_missing.md`"
+    )
+    assert len(adapter.prompts) == 1
+
+
+@pytest.mark.unit
+async def test_planning_required_rejects_extra_plan_phase_changes(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_plan_extra.md\n?? src/changed.py\n",
+    )
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("plan plus code")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-extra",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_extra", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message == (
+        "planning phase changed files outside `docs/awf-plans/ws_plan_extra.md`: "
+        "src/changed.py"
+    )
+
+
+@pytest.mark.unit
+async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")
+    runner.queue_result(
+        returncode=0,
+        stdout=(
+            "?? docs/awf-plans/ws_compare.md\n"
+            "?? docs/awf-plans/ws_compare.json\n"
+            "?? src/side_effect.py\n"
+        ),
+    )
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-conformance-extra",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_compare", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message == (
+        "conformance phase changed files outside `docs/awf-plans/ws_compare.json`: "
+        "src/side_effect.py"
+    )
+
+
+@pytest.mark.unit
+async def test_changed_paths_raises_when_git_status_fails(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="not a git repository")
+    executor = _executor_with_runner(runner, tmp_path)
+
+    with pytest.raises(RuntimeError, match="git status failed"):
+        await executor._changed_paths(tmp_path / "worktree")
 
 
 @pytest.mark.unit
@@ -245,6 +471,26 @@ def test_validation_coverage_metadata_includes_baseline_fields(tmp_path: Path) -
     assert metadata["baseline_reason_code"] == "COVERAGE_NOT_FOUND"
     assert _validation_run_coverage_metadata(ValidationResult()) is None
 
+    no_baseline = _validation_run_coverage_metadata(
+        ValidationResult(
+            coverage=ValidationCoverageResult(
+                provider="python",
+                percent=None,
+                minimum_percent=99,
+                enforce=True,
+                status="failed",
+                reason_code="COVERAGE_NOT_FOUND",
+            )
+        )
+    )
+    assert no_baseline == {
+        "provider": "python",
+        "minimum_percent": 99.0,
+        "enforce": True,
+        "status": "failed",
+        "reason_code": "COVERAGE_NOT_FOUND",
+    }
+
 
 @pytest.mark.unit
 def test_validation_failure_message_carries_coverage_context(tmp_path: Path) -> None:
@@ -297,6 +543,66 @@ def test_validation_failure_message_carries_coverage_context(tmp_path: Path) -> 
     assert _validation_failure_message(
         ValidationResult(commands=[_command_result(tmp_path)])
     ) == "validation failed: pytest --cov"
+    assert (
+        _validation_failure_message(
+            ValidationResult(
+                coverage=ValidationCoverageResult(
+                    provider="python",
+                    percent=None,
+                    minimum_percent=90,
+                    enforce=True,
+                    status="failed",
+                    reason_code="COVERAGE_UNKNOWN",
+                    command_result=None,
+                )
+            )
+        )
+        == "validation failed"
+    )
+
+
+@pytest.mark.unit
+def test_validation_run_reason_code_defaults_when_no_failure_detail(tmp_path: Path) -> None:
+    assert _validation_run_reason_code(ValidationResult()) == "VALIDATION_OK"
+    assert (
+        _validation_run_reason_code(  # type: ignore[arg-type]
+            SimpleNamespace(all_passed=False, coverage=None, first_failure=None)
+        )
+        == "VALIDATION_FAILED"
+    )
+    assert (
+        _validation_run_reason_code(
+            ValidationResult(
+                coverage=ValidationCoverageResult(
+                    provider="python",
+                    percent=None,
+                    minimum_percent=90,
+                    enforce=True,
+                    status="failed",
+                    reason_code="COVERAGE_UNKNOWN",
+                    command_result=None,
+                )
+            )
+        )
+        == "COVERAGE_UNKNOWN"
+    )
+    assert (
+        _validation_run_reason_code(
+            ValidationResult(
+                commands=[
+                    ValidationCommandResult(
+                        command="pytest -q",
+                        returncode=1,
+                        duration_seconds=0,
+                        stdout_path=tmp_path / "pytest.out",
+                        stderr_path=tmp_path / "pytest.err",
+                        reason_code="COMMAND_FAILED",
+                    )
+                ]
+            )
+        )
+        == "COMMAND_FAILED"
+    )
 
 
 @pytest.mark.unit
@@ -349,6 +655,27 @@ def test_call_pr_monitor_factory_uses_widest_supported_signature() -> None:
 
 
 @pytest.mark.unit
+def test_call_pr_monitor_factory_uses_two_argument_fallback_when_signature_is_opaque() -> None:
+    class _OpaqueFactory:
+        @property
+        def __signature__(self) -> object:
+            raise ValueError("opaque callable")
+
+        def __call__(self, adapter_arg: object, profile_arg: object) -> object:
+            return (adapter_arg, profile_arg)
+
+    adapter = object()
+    profile = WorkspaceProfile.model_validate({"name": "factory-profile"})
+
+    assert _call_pr_monitor_factory(
+        _OpaqueFactory(),
+        adapter=adapter,  # type: ignore[arg-type]
+        profile=profile,
+        workspace=object(),  # type: ignore[arg-type]
+    ) == (adapter, profile)
+
+
+@pytest.mark.unit
 def test_call_pr_monitor_factory_surfaces_bind_error() -> None:
     adapter = object()
     profile = WorkspaceProfile.model_validate({"name": "factory-profile"})
@@ -363,3 +690,30 @@ def test_call_pr_monitor_factory_surfaces_bind_error() -> None:
             profile=profile,
             workspace=object(),  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.unit
+def test_agent_model_for_workspace_prefers_nonblank_policy_override() -> None:
+    defaults = SimpleNamespace(model="default-model")
+
+    assert (
+        _agent_model_for_workspace(  # type: ignore[arg-type]
+            SimpleNamespace(task_policy={"agent_model": "  gpt-special  "}),
+            defaults,
+        )
+        == "gpt-special"
+    )
+    assert (
+        _agent_model_for_workspace(  # type: ignore[arg-type]
+            SimpleNamespace(task_policy={"agent_model": "   "}),
+            defaults,
+        )
+        == "default-model"
+    )
+    assert (
+        _agent_model_for_workspace(  # type: ignore[arg-type]
+            SimpleNamespace(task_policy=None),
+            None,
+        )
+        is None
+    )

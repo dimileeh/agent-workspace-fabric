@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -233,6 +234,20 @@ async def test_log_broadcaster_removes_empty_workspace_bucket() -> None:
 
 
 @pytest.mark.unit
+async def test_log_broadcaster_keeps_workspace_bucket_while_other_subscribers_remain() -> None:
+    broadcaster = LogBroadcaster()
+
+    async with broadcaster.subscribe("ws_shared") as first:
+        async with broadcaster.subscribe("ws_shared") as second:
+            assert first in broadcaster._subscribers["ws_shared"]
+            assert second in broadcaster._subscribers["ws_shared"]
+        assert "ws_shared" in broadcaster._subscribers
+        assert broadcaster._subscribers["ws_shared"] == {first}
+
+    assert "ws_shared" not in broadcaster._subscribers
+
+
+@pytest.mark.unit
 async def test_open_stream_without_session_factory_sanitizes_path(tmp_path: Path) -> None:
     store = LogStore(root=tmp_path)
 
@@ -257,6 +272,12 @@ async def test_log_store_read_clamps_offsets_and_zero_limits(tmp_path: Path) -> 
 
     data, next_offset, eof = await store.read(path=path, offset=-10, limit_bytes=2)
     assert (data, next_offset, eof) == ("ab", 2, False)
+
+    data, next_offset, eof = await store.read(path=path, offset=999, limit_bytes=5)
+    assert (data, next_offset, eof) == ("", 6, True)
+
+    data, next_offset, eof = await store.read(path=path, offset=2, limit_bytes=0)
+    assert (data, next_offset, eof) == ("", 2, False)
 
     data, next_offset, eof = await store.read(path=path, offset=99, limit_bytes=4)
     assert (data, next_offset, eof) == ("", 6, True)
@@ -379,6 +400,25 @@ class _FakeComposeLogsProcess:
         return self.returncode
 
 
+class _AlreadyExitedComposeLogsProcess:
+    def __init__(self) -> None:
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.returncode: int | None = 0
+        self.terminated = False
+        self.killed = False
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def kill(self) -> None:
+        self.killed = True
+
+    async def wait(self) -> int:
+        assert self.returncode is not None
+        return self.returncode
+
+
 @pytest.mark.unit
 async def test_stream_compose_service_logs_terminates_process_on_cancel(tmp_path: Path) -> None:
     process = _FakeComposeLogsProcess(exit_after_terminate=True)
@@ -438,3 +478,31 @@ async def test_stream_compose_service_logs_kills_process_after_terminate_timeout
 
     assert process.terminated is True
     assert process.killed is True
+
+
+@pytest.mark.unit
+async def test_stream_compose_service_logs_cancel_does_not_signal_already_exited_process(
+    tmp_path: Path,
+) -> None:
+    process = _AlreadyExitedComposeLogsProcess()
+
+    async def process_factory(*_args: object, **_kwargs: object) -> _AlreadyExitedComposeLogsProcess:
+        return process
+
+    task = asyncio.create_task(
+        stream_compose_service_logs(
+            workspace_id="ws_compose_logs_exited",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            log_store=LogStore(root=tmp_path / "logs"),
+            process_factory=process_factory,
+        )
+    )
+    await asyncio.sleep(0)
+
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+    assert process.terminated is False
+    assert process.killed is False

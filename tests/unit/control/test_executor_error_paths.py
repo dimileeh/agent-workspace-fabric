@@ -1387,6 +1387,53 @@ class TestPrMonitorResume:
             }
 
     @pytest.mark.unit
+    async def test_recover_feature_branch_remote_push_branch_skips_ineligible_rows(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake, factory, tmp_path)
+        ready_id = await _seed_ready(factory)
+        existing_id = await _seed_monitoring_pr(
+            factory,
+            branch_name="awf/existing",
+            remote_push_branch="awf/persisted",
+        )
+        sync_id = await _seed_monitoring_pr(
+            factory,
+            task_kind="sync_feature_pr",
+            branch_name="feature-sync/local",
+            remote_push_branch=None,
+        )
+
+        assert (
+            await executor._recover_feature_branch_remote_push_branch(
+                workspace_id="ws_missing",
+                remote_push_branch="awf/missing",
+            )
+            is None
+        )
+        assert (
+            await executor._recover_feature_branch_remote_push_branch(
+                workspace_id=ready_id,
+                remote_push_branch="awf/ready",
+            )
+            is None
+        )
+        assert await executor._recover_feature_branch_remote_push_branch(
+            workspace_id=existing_id,
+            remote_push_branch="awf/recovered",
+        ) == "awf/persisted"
+        assert (
+            await executor._recover_feature_branch_remote_push_branch(
+                workspace_id=sync_id,
+                remote_push_branch="feature-sync/local",
+            )
+            is None
+        )
+
+    @pytest.mark.unit
     async def test_resume_pr_monitor_does_not_use_stale_recovery_when_status_changed(
         self,
         fake: FakeCommandRunner,

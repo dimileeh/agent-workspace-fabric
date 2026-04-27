@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -159,12 +160,14 @@ class _RefreshLoopWorker(ControlWorker):
         )
         self.raises = raises
         self.refreshed = refreshed
+        self.refreshed_once = asyncio.Event()
         self.monitor_refresh_calls = 0
         self.execution_refresh_calls = 0
 
     async def _refresh_monitoring_pr_claim(self, workspace_id: str) -> bool:
         assert workspace_id == "ws_loop"
         self.monitor_refresh_calls += 1
+        self.refreshed_once.set()
         if self.raises:
             raise RuntimeError("monitor refresh failed")
         return self.refreshed
@@ -172,6 +175,7 @@ class _RefreshLoopWorker(ControlWorker):
     async def _refresh_execution_claim(self, workspace_id: str) -> bool:
         assert workspace_id == "ws_loop"
         self.execution_refresh_calls += 1
+        self.refreshed_once.set()
         if self.raises:
             raise RuntimeError("execution refresh failed")
         return self.refreshed
@@ -187,6 +191,27 @@ async def test_list_by_status_returns_empty_for_non_positive_limits() -> None:
 
     assert await worker._list_by_status(WorkspaceStatus.ready, limit=0) == []
     assert await worker._list_by_status(WorkspaceStatus.ready, limit=-1) == []
+
+
+@pytest.mark.unit
+async def test_list_pending_delegates_to_requested_query_without_extra_filter() -> None:
+    class _PendingAliasWorker(ControlWorker):
+        def __init__(self) -> None:
+            super().__init__(
+                session_factory=_ExplodingSessionFactory(),  # type: ignore[arg-type]
+                provisioner=_NoopProvisioner(),  # type: ignore[arg-type]
+                config=WorkerConfig(),
+            )
+            self.requested_calls = 0
+
+        async def _list_requested(self) -> list[str]:
+            self.requested_calls += 1
+            return ["ws_requested"]
+
+    worker = _PendingAliasWorker()
+
+    assert await worker._list_pending() == ["ws_requested"]
+    assert worker.requested_calls == 1
 
 
 @pytest.mark.unit
@@ -465,6 +490,31 @@ async def test_claim_refresh_loops_stop_after_refresh_failure_or_lost_claim(
         await asyncio.wait_for(loop("ws_loop"), timeout=2)
 
     assert any(event.get("event") == expected_event for event in captured)
+    if loop_name == "monitor":
+        assert worker.monitor_refresh_calls == 1
+        assert worker.execution_refresh_calls == 0
+    else:
+        assert worker.execution_refresh_calls == 1
+        assert worker.monitor_refresh_calls == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("loop_name", ["monitor", "execution"])
+async def test_claim_refresh_loops_continue_after_successful_refresh(loop_name: str) -> None:
+    worker = _RefreshLoopWorker(raises=False, refreshed=True)
+    loop = (
+        worker._refresh_monitoring_pr_claim_loop
+        if loop_name == "monitor"
+        else worker._refresh_execution_claim_loop
+    )
+
+    task = asyncio.create_task(loop("ws_loop"))
+    await asyncio.wait_for(worker.refreshed_once.wait(), timeout=2)
+    await asyncio.sleep(0)
+    task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
     if loop_name == "monitor":
         assert worker.monitor_refresh_calls == 1
         assert worker.execution_refresh_calls == 0
