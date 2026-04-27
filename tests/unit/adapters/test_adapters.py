@@ -11,6 +11,8 @@ argv it's handed and returns canned output. We verify:
 
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +38,7 @@ from awf.adapters.opencode import (
     _variant_for_effort,
 )
 from awf.common.commands import CommandResult, FakeCommandRunner
+from awf.common.compose_exec import ComposeExecCleanupError
 from awf.db.enums import AgentRuntime
 
 _PROMPT = "Add a one-line docstring to src/module/__init__.py."
@@ -59,9 +62,12 @@ class _TimeoutStreamingRunner:
         self.used_streaming = False
         self.wall_timeout_seconds: float | None = None
         self.idle_timeout_seconds: float | None = None
+        self.cleanup_calls: list[list[str]] = []
 
-    async def run(self, *_args: Any, **_kwargs: Any) -> CommandResult:
-        raise AssertionError("agent watchdogs require the streaming runner path")
+    async def run(self, args: list[str], **_kwargs: Any) -> CommandResult:
+        self.cleanup_calls.append(list(args))
+        assert "awf-cleanup" in args
+        return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
 
     async def run_streaming(
         self,
@@ -127,6 +133,60 @@ class _RunOnlyRunner:
     ) -> CommandResult:
         self.calls.append({"args": args, "input_bytes": input_bytes, "cwd": cwd})
         return CommandResult(returncode=0, stdout="legacy stdout", stderr="legacy stderr")
+
+
+class _CancellingStreamingRunner:
+    def __init__(self) -> None:
+        self.cleanup_calls: list[list[str]] = []
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        del input_bytes, cwd
+        self.cleanup_calls.append(list(args))
+        assert "awf-cleanup" in args
+        return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
+
+    async def run_streaming(
+        self,
+        _args: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        raise asyncio.CancelledError
+
+
+class _SlowCleanupAfterCancelRunner:
+    def __init__(self) -> None:
+        self.cleanup_started = asyncio.Event()
+        self.allow_cleanup = asyncio.Event()
+        self.cleanup_finished = asyncio.Event()
+        self.cleanup_calls: list[list[str]] = []
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        del input_bytes, cwd
+        self.cleanup_calls.append(list(args))
+        assert "awf-cleanup" in args
+        self.cleanup_started.set()
+        await self.allow_cleanup.wait()
+        self.cleanup_finished.set()
+        return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
+
+    async def run_streaming(
+        self,
+        _args: list[str],
+        **_kwargs: Any,
+    ) -> CommandResult:
+        raise asyncio.CancelledError
 
 
 class TestCodexAdapter:
@@ -252,6 +312,7 @@ class TestCodexAdapter:
         assert exc.value.result.stdout == "partial work\n"
         assert runner.wall_timeout_seconds == 12.0
         assert runner.idle_timeout_seconds == 3.0
+        assert len(runner.cleanup_calls) == 1
         assert log_store.sinks.stdout_data == ["partial work\n"]
         assert log_store.sinks.stderr_data == ["watchdog fired\n"]
         assert log_store.sinks.closed is True
@@ -282,6 +343,125 @@ class TestCodexAdapter:
         assert runner.used_streaming is True
         assert runner.wall_timeout_seconds == 12.0
         assert runner.idle_timeout_seconds == 3.0
+        assert len(runner.cleanup_calls) == 1
+
+    @pytest.mark.unit
+    async def test_timeout_invokes_targeted_in_container_cleanup(self) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=124,
+            stderr="command idle timeout",
+            reason_code="COMMAND_IDLE_TIMEOUT",
+        )
+        runner.queue_result(returncode=0, stdout="cleanup ok")
+        adapter = CodexAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_agent_timeout",
+            )
+
+        assert exc.value.reason_code == "AGENT_IDLE_TIMEOUT"
+        assert len(runner.calls) == 2
+        agent_args = runner.calls[0].args
+        cleanup_args = runner.calls[1].args
+        invocation_id = agent_args[agent_args.index("awf-exec") + 1]
+        assert cleanup_args[-1] == invocation_id
+        assert cleanup_args[cleanup_args.index("exec") : cleanup_args.index("exec") + 5] == [
+            "exec",
+            "-T",
+            "-w",
+            "/workspace",
+            "agent",
+        ]
+        assert "AWF_EXEC_INVOCATION_ID" in agent_args[agent_args.index("-lc") + 1]
+        assert "pkill codex" not in cleanup_args[cleanup_args.index("-lc") + 1]
+        assert "pkill claude" not in cleanup_args[cleanup_args.index("-lc") + 1]
+
+    @pytest.mark.unit
+    async def test_cleanup_failure_surfaces_distinct_error(self) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=124,
+            stderr="command wall timeout",
+            reason_code="COMMAND_TIMEOUT",
+        )
+        runner.queue_result(returncode=1, stderr="tagged process still alive")
+        adapter = CodexAdapter(runner=runner)
+
+        with pytest.raises(ComposeExecCleanupError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cleanup_failed",
+            )
+
+        assert exc.value.reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+        assert "tagged process still alive" in str(exc.value)
+        assert len(runner.calls) == 2
+
+    @pytest.mark.unit
+    async def test_successful_agent_run_does_not_invoke_cleanup(self) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=0, stdout="done")
+        adapter = CodexAdapter(runner=runner)
+
+        result = await adapter.run(
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            prompt=_PROMPT,
+            workspace_id="ws_agent_success",
+        )
+
+        assert result.ok
+        assert len(runner.calls) == 1
+        assert "awf-cleanup" not in runner.calls[0].args
+
+    @pytest.mark.unit
+    async def test_cancelled_agent_run_cleans_up_in_container_invocation(self) -> None:
+        runner = _CancellingStreamingRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        with pytest.raises(asyncio.CancelledError):
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cancelled_agent",
+            )
+
+        assert len(runner.cleanup_calls) == 1
+        assert runner.cleanup_calls[0][-2] == "awf-cleanup"
+
+    @pytest.mark.unit
+    async def test_cancelled_agent_run_waits_for_cleanup_under_second_cancellation(self) -> None:
+        runner = _SlowCleanupAfterCancelRunner()
+        adapter = CodexAdapter(runner=runner)
+
+        task = asyncio.create_task(
+            adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                workspace_id="ws_cancelled_agent",
+            )
+        )
+        await runner.cleanup_started.wait()
+
+        task.cancel()
+        await asyncio.sleep(0)
+
+        try:
+            assert not task.done()
+        finally:
+            runner.allow_cleanup.set()
+            await runner.cleanup_finished.wait()
+            with contextlib.suppress(asyncio.CancelledError):
+                await task
 
     @pytest.mark.unit
     async def test_run_only_runner_falls_back_and_still_writes_log_streams(self) -> None:
@@ -401,7 +581,7 @@ class TestGeminiAdapter:
             prompt=_PROMPT,
         )
         args = runner.calls[0].args
-        sh_start = args.index("sh")
+        sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
         assert args[sh_start : sh_start + 3] == ["sh", "-lc", args[sh_start + 2]]
         script = args[sh_start + 2]
         assert "GEMINI_CLI_SYSTEM_SETTINGS_PATH" in script
@@ -451,7 +631,7 @@ class TestOpenCodeAdapter:
 
         args = runner.calls[0].args
         _assert_docker_exec_prefix(args)
-        sh_start = args.index("sh")
+        sh_start = [i for i, arg in enumerate(args) if arg == "sh"][-1]
         assert args[sh_start : sh_start + 3] == ["sh", "-lc", args[sh_start + 2]]
         script = args[sh_start + 2]
         assert "OPENCODE_CONFIG_CONTENT" in script
