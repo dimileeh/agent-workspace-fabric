@@ -40,7 +40,13 @@ _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
         }
     ),
     WorkspaceStatus.validating: frozenset(
-        {WorkspaceStatus.pushing, WorkspaceStatus.failed, WorkspaceStatus.cancelled}
+        {
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+            WorkspaceStatus.completed,
+            WorkspaceStatus.failed,
+            WorkspaceStatus.cancelled,
+        }
     ),
     WorkspaceStatus.pushing: frozenset(
         {

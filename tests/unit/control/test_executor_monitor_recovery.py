@@ -15,6 +15,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populates registry
@@ -26,6 +27,7 @@ from awf.control.executor import (
 )
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Workspace as WorkspaceModel
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
@@ -414,6 +416,40 @@ async def test_executor_recovery_marks_validate_operation_failed_when_validation
 
 
 @pytest.mark.unit
+async def test_failed_recovery_operation_includes_reason_code(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A failed recovery operation row must carry the validation failure
+    reason_code in its result so observability tooling can classify the
+    failure without parsing the error_message."""
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=0)
+    ws_id = await _seed_ready_workspace_with_recovery(factory)
+
+    fake.queue_result(
+        returncode=1,
+        stdout="FAILED tests/foo.py::test_bar",
+        stderr="AssertionError",
+    )
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    pr_monitor_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(pr_monitor_ops) == 1
+    assert pr_monitor_ops[0].status == OperationStatus.failed.value
+    assert isinstance(pr_monitor_ops[0].result, dict)
+    # Phase-level command failures surface the concrete reason code.
+    assert pr_monitor_ops[0].result.get("reason_code") == "COMMAND_FAILED"
+
+
+@pytest.mark.unit
 async def test_executor_normal_path_unchanged_when_no_recovery_op(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
@@ -511,9 +547,8 @@ async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
     adapter_invocations = _all_adapter_args(fake)
     assert adapter_invocations == []
 
-    # Also zero docker compose exec calls at all (belt-and-braces).
-    exec_calls = [c.args for c in fake.calls if "exec" in c.args]
-    assert exec_calls == []
+    # Note: validation legitimately issues ``docker compose exec`` for profile
+    # phase commands; only the *agent adapter* (coding CLI) must be absent.
 
 
 @pytest.mark.unit
@@ -544,8 +579,6 @@ async def test_rebase_only_recovery_skips_push(
         }
 
 
-from sqlalchemy import update as sa_update
-from awf.db.models import Workspace as WorkspaceModel
 
 
 @pytest.mark.unit
