@@ -1284,6 +1284,14 @@ class WorkspaceRepository:
     async def get(self, workspace_id: str) -> Workspace | None:
         return await self._session.get(Workspace, workspace_id)
 
+    async def get_with_validation_runs(self, workspace_id: str) -> Workspace | None:
+        stmt = (
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .options(selectinload(Workspace.validation_runs))
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def get_for_update(self, workspace_id: str) -> Workspace | None:
         """Load one workspace with a row lock when the database supports it."""
         stmt = select(Workspace).where(Workspace.id == workspace_id)

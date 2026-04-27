@@ -1797,7 +1797,7 @@ class PullRequestMonitorRunner:
 
     async def _load_workspace(self, workspace_id: str) -> Workspace:
         async with self._deps.session_factory() as s:
-            ws = await WorkspaceRepository(s).get(workspace_id)
+            ws = await WorkspaceRepository(s).get_with_validation_runs(workspace_id)
             if ws is None:
                 raise RuntimeError(f"workspace {workspace_id} disappeared mid-monitor")
             return ws

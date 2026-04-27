@@ -3,7 +3,7 @@ from __future__ import annotations
 from sqlalchemy import inspect
 
 from awf.db.enums import TaskClass
-from awf.db.models import Workspace
+from awf.db.models import ValidationRun, Workspace
 
 DOCS_TASK_SCOPE_VIOLATION_STALE_REASON = "docs_task_scope_violation"
 VALIDATION_INSUFFICIENT_TIER_STALE_REASON = "validation_insufficient_tier"
@@ -25,6 +25,7 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
     """Return (stale_reason, required_next_action)."""
     state = inspect(workspace)
     operations = workspace.operations if "operations" not in state.unloaded else []
+    validation_runs = workspace.validation_runs if "validation_runs" not in state.unloaded else []
 
     rebase_time = None
     for op in operations:
@@ -63,7 +64,24 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
 
             actual_tier = max(actual_tier, op_tier)
 
+    for run in validation_runs:
+        run_tier = _successful_validation_run_tier(run)
+        if run_tier is None:
+            continue
+
+        completed_at = run.finished_at or run.started_at
+        if rebase_time and completed_at <= rebase_time:
+            continue
+
+        actual_tier = max(actual_tier, run_tier)
+
     if actual_tier < required_tier:
         return VALIDATION_INSUFFICIENT_TIER_STALE_REASON, "validate"
 
     return None, None
+
+
+def _successful_validation_run_tier(run: ValidationRun) -> int | None:
+    if run.status != "succeeded":
+        return None
+    return run.tier

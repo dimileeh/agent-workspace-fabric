@@ -3,7 +3,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from awf.db.enums import TaskClass, WorkspaceStatus
-from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace
+from awf.db.models import MergeCandidate, Operation, TaskAttempt, ValidationRun, Workspace
 from awf.db.repositories import sync_candidate_readiness
 from awf.runtime.merge_eligibility import (
     VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
@@ -112,6 +112,47 @@ def _operation(
         payload=payload,
         created_at=created_at,
     )
+
+
+def _validation_run(
+    *,
+    tier: int,
+    status: str = "succeeded",
+    started_at: datetime,
+    finished_at: datetime | None = None,
+) -> ValidationRun:
+    return ValidationRun(
+        id=f"vr_{tier}_{started_at.timestamp()}",
+        workspace_id="ws_tier",
+        attempt_id="att_1",
+        tier=tier,
+        command_set_hash="hash",
+        commands=[],
+        base_commit="base",
+        target_branch="awf/ws_tier",
+        target_head_sha="head",
+        status=status,
+        reason_code="VALIDATION_OK" if status == "succeeded" else "COMMAND_FAILED",
+        started_at=started_at,
+        finished_at=finished_at or started_at + timedelta(minutes=1),
+        log_stream_refs={},
+    )
+
+
+@pytest.mark.unit
+def test_compute_stale_reason_uses_persisted_validation_run_tier() -> None:
+    workspace = _workspace_with_operations(
+        task_class=TaskClass.refactor_task.value,
+        operations=[],
+    )
+    workspace.validation_runs = [
+        _validation_run(
+            tier=2,
+            started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        )
+    ]
+
+    assert compute_stale_reason(workspace) == (None, None)
 
 
 @pytest.mark.unit
