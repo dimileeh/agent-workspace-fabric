@@ -705,6 +705,13 @@ class WorkspaceControlRequest(BaseModel):
     stop_stack: bool = True
 
 
+class WorkspaceOperationRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    reason: Annotated[str | None, Field(default=None, max_length=1024)]
+    requested_tier: Annotated[int | None, Field(default=None, ge=1, le=3)]
+
+
 class WorkspaceControlResponse(BaseModel):
     workspace_id: str
     operation_id: str
