@@ -14,10 +14,12 @@ from datetime import datetime
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import set_committed_value
 
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
+    OperationRepository,
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceRepository,
@@ -40,6 +42,7 @@ async def _seed_candidate(
     task_class: str | None = "refactor_task",
     base_sha: str = "a" * 40,
     updated_at: datetime | None = None,
+    successful_validate_tier: int | None = None,
 ) -> tuple[str, str, str]:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -86,6 +89,14 @@ async def _seed_candidate(
             to=WorkspaceStatus.monitoring_pr,
             reason_code="PR_OPENED",
         )
+        if successful_validate_tier is not None:
+            operation = await OperationRepository(session).create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.succeeded,
+                payload={"requested_tier": successful_validate_tier},
+            )
+            set_committed_value(workspace, "operations", [operation])
         attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
         assert attempt is not None
         candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
@@ -173,6 +184,7 @@ class TestMergeQueueExposesStaleReasons:
             branch_name="awf/dependency-stale",
             owned_paths=["src/awf/service/**"],
             task_class="dependency_task",
+            successful_validate_tier=2,
         )
 
         async with factory() as session:

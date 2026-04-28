@@ -360,9 +360,15 @@ def _stale_reason_for_action(
     *,
     stale_reasons: list[StaleReason],
 ) -> str:
+    legacy_reason = candidate.stale_reason or ""
+    if legacy_reason in (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
+    ):
+        return legacy_reason
     if stale_reasons:
         return stale_reasons[0].reason_code
-    return candidate.stale_reason or "stale"
+    return legacy_reason or "stale"
 
 
 def _required_stale_action(reason: str) -> str:
