@@ -1580,6 +1580,91 @@ async def test_missing_workspace_terminal_helpers_return_without_side_effects(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "operator_status",
+    [
+        WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroying,
+        WorkspaceStatus.destroyed,
+    ],
+)
+@pytest.mark.parametrize("callback", ["completed", "failed"])
+async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    operator_status: WorkspaceStatus,
+    callback: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.cancelled,
+            reason_code="OPERATOR_CANCEL",
+        )
+        if operator_status in {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}:
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.destroying,
+                reason_code="OPERATOR_DESTROY",
+            )
+        if operator_status == WorkspaceStatus.destroyed:
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.destroyed,
+                reason_code="OPERATOR_DESTROY",
+            )
+        await s.commit()
+    cmd = FakeCommandRunner()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    if callback == "completed":
+        await runner._terminate_completed(
+            workspace_id,
+            pr_merge_sha="stale-merge-sha",
+            repo_url="git@github.com:example/repo.git",
+            base_branch="development",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+    else:
+        await runner._terminate_failed(
+            workspace_id,
+            message="stale monitor failure",
+            reason_code="STALE_MONITOR",
+        )
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        ignored_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.monitor_terminal_ignored"
+        ]
+
+    assert workspace.status == operator_status.value
+    assert workspace.pr_merge_sha is None
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+    assert cmd.calls == []
+    assert ignored_events[-1].payload == {
+        "current_status": operator_status.value,
+        "requested_status": "completed" if callback == "completed" else "failed",
+        "reason_code": "MONITOR_DONE" if callback == "completed" else "STALE_MONITOR",
+    }
+
+
+@pytest.mark.unit
 async def test_load_and_persist_state_convert_monitor_timestamps(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
