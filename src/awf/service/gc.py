@@ -15,8 +15,9 @@ from inspect import isawaitable
 from pathlib import Path
 from typing import Literal
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.sql.elements import ColumnElement
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
@@ -385,17 +386,49 @@ async def plan_terminal_workspace_gc(
             cleanup_enabled=cleanup_enabled,
         )
 
+    row_limit = None if limit is None else max(limit, 0)
+    candidate_predicate = _workspace_gc_candidate_predicate(
+        eligible_statuses=eligible_statuses,
+        cutoff_at=cutoff_at,
+        default_policy=default_policy,
+        cleanup_enabled=cleanup_enabled,
+    )
+    preserved_predicate = _workspace_gc_preserved_predicate(
+        eligible_statuses=eligible_statuses,
+        cutoff_at=cutoff_at,
+        default_policy=default_policy,
+        cleanup_enabled=cleanup_enabled,
+    )
+
+    candidate_rows: list[Workspace] = []
+    preserved_rows: list[Workspace] = []
     async with session_factory() as session:
-        stmt = (
-            select(Workspace)
-            .where(Workspace.status.in_(sorted(eligible_statuses)))
-            .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
-        )
-        rows = list((await session.execute(stmt)).scalars())
+        if candidate_predicate is not None:
+            candidate_stmt = (
+                select(Workspace)
+                .where(Workspace.status.in_(sorted(eligible_statuses)))
+                .where(candidate_predicate)
+                .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
+            )
+            if row_limit is not None:
+                candidate_stmt = candidate_stmt.limit(row_limit)
+            candidate_rows = list((await session.execute(candidate_stmt)).scalars())
+
+        if preserved_predicate is not None:
+            preserved_stmt = (
+                select(Workspace)
+                .where(Workspace.status.in_(sorted(eligible_statuses)))
+                .where(preserved_predicate)
+                .order_by(Workspace.updated_at.asc(), Workspace.id.asc())
+            )
+            if row_limit is not None:
+                preserved_stmt = preserved_stmt.limit(row_limit)
+            preserved_rows = list((await session.execute(preserved_stmt)).scalars())
 
     candidates: list[WorkspaceGCCandidate] = []
     preserved: list[WorkspaceGCPreserved] = []
-    for workspace in rows:
+    candidate_ids: set[str] = set()
+    for workspace in candidate_rows:
         classification = _classify_workspace_for_gc(
             workspace,
             work_dir=normalized_work_dir,
@@ -405,10 +438,22 @@ async def plan_terminal_workspace_gc(
             cleanup_enabled=cleanup_enabled,
         )
         if isinstance(classification, WorkspaceGCCandidate):
-            if limit is not None and len(candidates) >= limit:
-                continue
             candidates.append(classification)
+            candidate_ids.add(workspace.id)
         elif classification is not None:
+            preserved.append(classification)
+    for workspace in preserved_rows:
+        if workspace.id in candidate_ids:
+            continue
+        classification = _classify_workspace_for_gc(
+            workspace,
+            work_dir=normalized_work_dir,
+            now=current_time,
+            cutoff_at=cutoff_at,
+            default_policy=default_policy,
+            cleanup_enabled=cleanup_enabled,
+        )
+        if isinstance(classification, WorkspaceGCPreserved):
             preserved.append(classification)
     return WorkspaceGCPlan(
         work_dir=normalized_work_dir,
@@ -419,6 +464,75 @@ async def plan_terminal_workspace_gc(
         candidates=candidates,
         preserved=preserved,
         cleanup_enabled=cleanup_enabled,
+    )
+
+
+def _workspace_gc_candidate_predicate(
+    *,
+    eligible_statuses: set[str],
+    cutoff_at: datetime,
+    default_policy: bool,
+    cleanup_enabled: bool,
+) -> ColumnElement[bool] | None:
+    if not cleanup_enabled:
+        return None
+    if default_policy:
+        if WorkspaceStatus.completed.value not in eligible_statuses:
+            return None
+        return and_(
+            Workspace.status == WorkspaceStatus.completed.value,
+            Workspace.updated_at <= cutoff_at,
+            _workspace_has_pr_metadata_predicate(),
+        )
+    return and_(
+        Workspace.status.in_(sorted(eligible_statuses)),
+        Workspace.updated_at <= cutoff_at,
+    )
+
+
+def _workspace_gc_preserved_predicate(
+    *,
+    eligible_statuses: set[str],
+    cutoff_at: datetime,
+    default_policy: bool,
+    cleanup_enabled: bool,
+) -> ColumnElement[bool] | None:
+    if not cleanup_enabled:
+        return Workspace.status.in_(sorted(eligible_statuses))
+    if default_policy:
+        clauses: list[ColumnElement[bool]] = []
+        if WorkspaceStatus.failed.value in eligible_statuses:
+            clauses.append(Workspace.status == WorkspaceStatus.failed.value)
+        if WorkspaceStatus.completed.value in eligible_statuses:
+            clauses.append(
+                and_(
+                    Workspace.status == WorkspaceStatus.completed.value,
+                    or_(
+                        _workspace_lacks_pr_metadata_predicate(),
+                        Workspace.updated_at > cutoff_at,
+                    ),
+                )
+            )
+        if not clauses:
+            return None
+        return or_(*clauses)
+    return and_(
+        Workspace.status.in_(sorted(eligible_statuses)),
+        Workspace.updated_at > cutoff_at,
+    )
+
+
+def _workspace_has_pr_metadata_predicate() -> ColumnElement[bool]:
+    return or_(
+        Workspace.pr_number.is_not(None),
+        and_(Workspace.pr_url.is_not(None), Workspace.pr_url != ""),
+    )
+
+
+def _workspace_lacks_pr_metadata_predicate() -> ColumnElement[bool]:
+    return and_(
+        Workspace.pr_number.is_(None),
+        or_(Workspace.pr_url.is_(None), Workspace.pr_url == ""),
     )
 
 

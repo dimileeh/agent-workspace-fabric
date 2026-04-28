@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.db.enums import WorkspaceStatus
@@ -232,6 +232,53 @@ async def test_plan_applies_min_age_filter_and_limit_oldest_first(
         now=now,
     )
     assert [candidate.workspace_id for candidate in older_than_120h.candidates] == [oldest]
+
+
+@pytest.mark.unit
+async def test_plan_applies_limit_to_workspace_queries(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    for index in range(3):
+        await _workspace(
+            session_factory,
+            status=WorkspaceStatus.completed,
+            updated_at=now - timedelta(hours=300 - index),
+            title=f"candidate {index}",
+            pr=True,
+        )
+
+    workspace_selects: list[str] = []
+
+    def _capture_workspace_select(
+        _conn: object,
+        _cursor: object,
+        statement: str,
+        _parameters: object,
+        _context: object,
+        _executemany: bool,
+    ) -> None:
+        normalized = statement.upper()
+        if normalized.lstrip().startswith("SELECT") and "FROM WORKSPACES" in normalized:
+            workspace_selects.append(statement)
+
+    event.listen(engine.sync_engine, "before_cursor_execute", _capture_workspace_select)
+    try:
+        plan = await plan_terminal_workspace_gc(
+            session_factory,
+            work_dir=tmp_path / "service",
+            min_age_hours=24,
+            limit=1,
+            now=now,
+        )
+    finally:
+        event.remove(engine.sync_engine, "before_cursor_execute", _capture_workspace_select)
+
+    assert len(plan.candidates) == 1
+    assert workspace_selects
+    assert all("LIMIT" in statement.upper() for statement in workspace_selects)
 
 
 @pytest.mark.unit
