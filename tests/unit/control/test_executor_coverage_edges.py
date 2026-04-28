@@ -474,6 +474,16 @@ async def test_changed_paths_raises_when_git_status_fails(tmp_path: Path) -> Non
 
 
 @pytest.mark.unit
+async def test_committed_paths_since_raises_when_git_diff_fails(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="bad object")
+    executor = _executor_with_runner(runner, tmp_path)
+
+    with pytest.raises(RuntimeError, match="git diff --name-only failed"):
+        await executor._committed_paths_since(tmp_path / "worktree", "baseline-sha")
+
+
+@pytest.mark.unit
 def test_baseline_coverage_ratchet_accepts_no_regression(tmp_path: Path) -> None:
     command = _command_result(tmp_path, returncode=1)
     result = ValidationResult(

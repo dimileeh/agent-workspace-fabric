@@ -1752,7 +1752,9 @@ class WorkspaceExecutor:
             ]
         )
         if not result.ok:
-            return set()
+            raise RuntimeError(
+                f"git diff --name-only failed while checking committed paths: {result.stderr}"
+            )
         return {Path(line.strip()) for line in result.stdout.splitlines() if line.strip()}
 
     async def _claim_ready(
