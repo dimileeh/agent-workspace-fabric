@@ -41,6 +41,27 @@ export interface LlmUsageSummary {
   reason: string | null;
 }
 
+export interface WorkspaceRecoveryCurrentOperation {
+  id: string;
+  type: string;
+  status: string;
+  created_at: string;
+  started_at: string | null;
+  payload: Record<string, unknown> | null;
+}
+
+export interface WorkspaceRecoverySummary {
+  from_state: string | null;
+  to_state: string | null;
+  reason_code: string | null;
+  action: string | null;
+  recovery_mode: string | null;
+  started_at: string;
+  current_operation: WorkspaceRecoveryCurrentOperation | null;
+  summary: string;
+  payload: Record<string, unknown> | null;
+}
+
 export type ApiEnvelope<T> =
   | { ok: true; data: T }
   | { ok: false; status: number; message: string; errorCode?: string; detail?: unknown };
@@ -70,6 +91,7 @@ export interface WorkspaceOverview {
   agent_effort_source: AgentIdentitySource;
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
+  recovery?: WorkspaceRecoverySummary | null;
   status: WorkspaceStatus;
   current_phase: string;
   active_operation: string | null;
@@ -249,6 +271,7 @@ export interface Workspace {
   agent_effort_source: AgentIdentitySource;
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
+  recovery?: WorkspaceRecoverySummary | null;
   env_profile: string | null;
   profile_ref: string | null;
   requested_profile: Record<string, unknown> | null;

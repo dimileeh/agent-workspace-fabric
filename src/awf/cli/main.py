@@ -25,7 +25,6 @@ import httpx
 import typer
 
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
-from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 app = typer.Typer(
@@ -267,11 +266,15 @@ def service_gc(
         "--execute",
         help="Delete selected worktree, compose, and auth directories. Defaults to dry-run.",
     ),
-    min_age_hours: int = typer.Option(
-        DEFAULT_MIN_AGE_HOURS,
+    min_age_hours: float | None = typer.Option(
+        None,
         "--min-age-hours",
+        "--retention-hours",
         min=0,
-        help="Only consider terminal workspaces whose last update is at least this old.",
+        help=(
+            "Only consider workspaces whose last update is at least this old. "
+            "Defaults to AWF_COMPLETED_WORKSPACE_RETENTION_HOURS."
+        ),
     ),
     limit: int | None = typer.Option(
         None,
@@ -302,17 +305,24 @@ def service_gc(
     settings = resolve_service_settings()
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
+    retention_hours = (
+        settings.completed_workspace_retention_hours
+        if min_age_hours is None
+        else min_age_hours
+    )
+    candidate_limit = limit if limit is not None else settings.workspace_cleanup_batch_limit
 
     async def _run() -> object:
         try:
             result = await run_terminal_workspace_gc(
                 session_factory,
                 work_dir=Path(settings.work_dir).expanduser().resolve(),
-                min_age_hours=min_age_hours,
-                limit=limit,
+                min_age_hours=retention_hours,
+                limit=candidate_limit,
                 include_statuses=status or None,
                 exclude_statuses=exclude_status or None,
                 execute=execute,
+                cleanup_enabled=settings.workspace_cleanup_enabled,
             )
             return result.to_dict()
         finally:
@@ -320,7 +330,7 @@ def service_gc(
 
     payload = asyncio.run(_run())
     _emit(payload, fmt)
-    if isinstance(payload, dict) and payload.get("delete_errors"):
+    if isinstance(payload, dict) and payload.get("status") == "partial":
         raise typer.Exit(code=1)
 
 

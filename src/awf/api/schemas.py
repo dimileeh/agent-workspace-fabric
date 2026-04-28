@@ -218,6 +218,31 @@ class WorkspaceLlmUsageSummaryResponse(BaseModel):
     reason: str | None = "usage_not_reported"
 
 
+class WorkspaceRecoveryCurrentOperationResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    id: str
+    type: str
+    status: str
+    created_at: datetime
+    started_at: datetime | None = None
+    payload: dict[str, Any] | None = None
+
+
+class WorkspaceRecoverySummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    from_state: str | None = None
+    to_state: str | None = None
+    reason_code: str | None = None
+    action: str | None = None
+    recovery_mode: str | None = None
+    started_at: datetime
+    current_operation: WorkspaceRecoveryCurrentOperationResponse | None = None
+    summary: str
+    payload: dict[str, Any] | None = None
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -272,6 +297,7 @@ class WorkspaceResponse(BaseModel):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    recovery: WorkspaceRecoverySummaryResponse | None = None
 
     created_at: datetime
     updated_at: datetime
@@ -436,6 +462,7 @@ class WorkspaceOverviewResponse(BaseModel):
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
+    recovery: WorkspaceRecoverySummaryResponse | None = None
     status: WorkspaceStatus
     current_phase: str
     active_operation: str | None

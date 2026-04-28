@@ -270,6 +270,7 @@ async def list_workspace_overview(
                 agent_effort_source=observability["agent_effort_source"],
                 lifecycle=observability["lifecycle"],
                 llm_usage=observability["llm_usage"],
+                recovery=observability["recovery"],
                 status=WorkspaceStatus(ws.status),
                 current_phase=ws.status,
                 active_operation=active_operation.type if active_operation is not None else None,
