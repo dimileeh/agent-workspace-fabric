@@ -1345,7 +1345,6 @@ class WorkspaceExecutor:
                 await self._set_validation_run_target_head_sha(
                     validation_run_id=successful_validation_run_id,
                     target_head_sha=pr.head_sha,
-                    workspace_head_sha=pr.head_sha,
                 )
             except Exception:
                 _log.exception(
