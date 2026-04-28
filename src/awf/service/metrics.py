@@ -1092,24 +1092,22 @@ async def _count_recovery_operations(
     window_start: datetime,
 ) -> dict[str, int]:
     stmt = (
-        select(Operation.status, func.count())
+        select(
+            func.count().label("total"),
+            func.sum(case((Operation.status == OperationStatus.succeeded.value, 1), else_=0)).label("succeeded"),
+            func.sum(case((Operation.status == OperationStatus.failed.value, 1), else_=0)).label("failed"),
+        )
         .where(
             Operation.type.in_(_RECOVERY_OPERATION_TYPES),
             Operation.created_at >= window_start,
         )
-        .group_by(Operation.status)
     )
-    rows = await session.execute(stmt)
-    total = 0
-    succeeded = 0
-    failed = 0
-    for status, count in rows.all():
-        total += int(count)
-        if status == OperationStatus.succeeded.value:
-            succeeded += int(count)
-        elif status == OperationStatus.failed.value:
-            failed += int(count)
-    return {"total": total, "succeeded": succeeded, "failed": failed}
+    row = (await session.execute(stmt)).one()
+    return {
+        "total": int(row.total or 0),
+        "succeeded": int(row.succeeded or 0),
+        "failed": int(row.failed or 0),
+    }
 
 
 async def _count_monitor_completions(
