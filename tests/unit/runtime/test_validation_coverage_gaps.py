@@ -128,6 +128,29 @@ def test_parse_term_missing_sorts_by_most_missing_and_caps_at_ten(
 
 
 @pytest.mark.unit
+def test_parse_term_missing_sorts_by_line_count_not_tokens(
+    tmp_path: Path,
+) -> None:
+    """Ranges count as many lines, not one token."""
+    coverage_output = tmp_path / "coverage.txt"
+    coverage_output.write_text(
+        "Name                                      Stmts   Miss  Cover   Missing\n"
+        "---------------------------------------------------------------------\n"
+        "src/awf/big_range.py                        200    191    4%   10-200\n"
+        "src/awf/small_tokens.py                     200      4   98%   10, 11, 12, 13\n"
+        "---------------------------------------------------------------------\n"
+        "TOTAL                                      400    195    51%\n",
+        encoding="utf-8",
+    )
+
+    gaps = _parse_term_missing_gaps([coverage_output])
+
+    assert len(gaps) == 2
+    assert gaps[0]["file"] == "src/awf/big_range.py"
+    assert gaps[1]["file"] == "src/awf/small_tokens.py"
+
+
+@pytest.mark.unit
 def test_coverage_result_metadata_includes_gaps(tmp_path: Path) -> None:
     gaps: list[dict[str, object]] = [
         {"file": "src/a.py", "missing_lines": ["10-20", "50"]},

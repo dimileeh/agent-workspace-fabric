@@ -615,6 +615,29 @@ def _coverage_reason_code(
     return "COVERAGE_OK"
 
 
+def _missing_line_count(tokens: list[object]) -> int:
+    total = 0
+    for token in tokens:
+        if not isinstance(token, str):
+            continue
+        token = token.strip()
+        if "-" in token:
+            parts = token.split("-", 1)
+            try:
+                start = int(parts[0])
+                end = int(parts[1])
+                total += max(0, end - start + 1)
+            except (ValueError, IndexError):
+                total += 1
+        else:
+            try:
+                int(token)
+                total += 1
+            except ValueError:
+                total += 1
+    return total
+
+
 def _parse_term_missing_gaps(paths: list[Path]) -> list[dict[str, object]]:
     gaps: list[dict[str, object]] = []
     for path in paths:
@@ -642,7 +665,7 @@ def _parse_term_missing_gaps(paths: list[Path]) -> list[dict[str, object]]:
             missing_lines = [m.strip() for m in missing_str.split(",")] if missing_str else []
             gaps.append({"file": file_name, "missing_lines": missing_lines})
 
-    gaps.sort(key=lambda g: len(g.get("missing_lines", [])), reverse=True)  # type: ignore[arg-type]
+    gaps.sort(key=lambda g: _missing_line_count(g.get("missing_lines", [])), reverse=True)  # type: ignore[arg-type]
     return gaps[:10]
 
 
