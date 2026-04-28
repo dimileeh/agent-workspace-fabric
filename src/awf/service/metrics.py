@@ -1067,8 +1067,11 @@ async def _count_stuck_detailed(
     now: datetime,
 ) -> tuple[int, int]:
     cutoff = now - timedelta(seconds=2 * sla_seconds)
-    base_filter = (
-        select(func.count())
+    stmt = (
+        select(
+            func.sum(case((Workspace.failure_reason.is_(None), 1), else_=0)).label("stuck_running"),
+            func.sum(case((Workspace.failure_reason.is_not(None), 1), else_=0)).label("stuck_with_reason"),
+        )
         .select_from(Workspace)
         .where(
             ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
@@ -1077,12 +1080,9 @@ async def _count_stuck_detailed(
             Workspace.created_at < cutoff,
         )
     )
-    stuck_running_stmt = base_filter.where(Workspace.failure_reason.is_(None))
-    stuck_running = int(await session.scalar(stuck_running_stmt) or 0)
-
-    stuck_with_reason_stmt = base_filter.where(Workspace.failure_reason.is_not(None))
-    stuck_with_reason = int(await session.scalar(stuck_with_reason_stmt) or 0)
-
+    row = (await session.execute(stmt)).one()
+    stuck_running = int(row.stuck_running or 0)
+    stuck_with_reason = int(row.stuck_with_reason or 0)
     return stuck_running, stuck_with_reason
 
 
