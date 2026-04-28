@@ -1,4 +1,5 @@
 import type { MergeBlockerReason, MergeQueueBlocker, MergeQueueItem, StaleReason } from "@/lib/types";
+import { compactId } from "@/lib/format";
 
 export interface StaleReasonSummary {
   count: number;
@@ -157,8 +158,8 @@ export function summarizeReadiness(
   const canonicalLabel: ReadinessSummary["canonicalLabel"] = item.canonical ? "canonical" : "superseded";
   const base = {
     canonicalLabel,
-    candidateLabel: item.candidate_id ? compactToken(item.candidate_id, 10) : "legacy",
-    attemptLabel: item.attempt_id ? compactToken(item.attempt_id, 10) : "none",
+    candidateLabel: item.candidate_id ? compactId(item.candidate_id, 10) : "legacy",
+    attemptLabel: item.attempt_id ? compactId(item.attempt_id, 10) : "none",
   };
 
   if (!readiness) {
@@ -279,13 +280,6 @@ function formatPercent(value: number | null): string | null {
     return null;
   }
   return Number.isInteger(value) ? String(value) : String(Number(value.toFixed(2)));
-}
-
-function compactToken(value: string, head: number): string {
-  if (value.length <= head + 4) {
-    return value;
-  }
-  return `${value.slice(0, head)}…${value.slice(-4)}`;
 }
 
 function humanizeCode(value: string): string {
