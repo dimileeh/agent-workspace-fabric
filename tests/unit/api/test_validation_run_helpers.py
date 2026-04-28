@@ -97,6 +97,7 @@ def test_validation_coverage_fields_ignore_non_contract_value_types() -> None:
         "coverage_minimum_percent": None,
         "coverage_status": None,
         "coverage_reason_code": None,
+        "coverage_gaps": [],
     }
 
 

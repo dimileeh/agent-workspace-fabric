@@ -11,7 +11,7 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
-from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
@@ -20,6 +20,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
+from tests.unit.helpers import create_operation, create_workspace, zero_status_counts
 
 
 @pytest.fixture
@@ -27,46 +28,6 @@ async def session_factory(
     engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     yield make_session_factory(engine)
-
-
-async def _workspace(
-    session_factory: async_sessionmaker[AsyncSession],
-    *,
-    status: WorkspaceStatus,
-    updated_at: datetime,
-    failure_reason: FailureReason | str | None = None,
-    created_at: datetime | None = None,
-    repo_url: str = "git@github.com:example/metrics.git",
-    branch_base: str = "main",
-    task_title: str | None = None,
-    agent: str = "codex",
-    failure_message: str | None = None,
-    pr_url: str | None = None,
-    task_policy: dict | None = None,
-) -> str:
-    async with session_factory() as session:
-        workspace = await WorkspaceRepository(session).create(
-            repo_url=repo_url,
-            branch_base=branch_base,
-            task_title=task_title or f"{status.value} workspace",
-            task_prompt="Collect workspace reliability metrics.",
-            agent=agent,
-            test_commands=[],
-        )
-        workspace.status = status.value
-        if created_at is not None:
-            workspace.created_at = created_at
-        workspace.updated_at = updated_at
-        workspace.failure_reason = (
-            failure_reason.value if isinstance(failure_reason, FailureReason) else failure_reason
-        )
-        workspace.failure_message = failure_message
-        workspace.pr_url = pr_url
-        if task_policy is not None:
-            workspace.task_policy = task_policy
-        await session.commit()
-        return workspace.id
-
 
 async def _reservation_for_workspace(
     session_factory: async_sessionmaker[AsyncSession],
@@ -115,9 +76,6 @@ async def _reservation_for_workspace(
         reservation.released_at = released_at
         await session.commit()
 
-
-def _zero_status_counts() -> dict[str, int]:
-    return {status.value: 0 for status in WorkspaceStatus}
 
 
 def _disk_check(
@@ -173,7 +131,7 @@ async def test_empty_db_returns_zero_workspace_reliability_summary(
 
     assert summary.generated_at == now
     assert summary.window_start == now - timedelta(hours=24)
-    assert summary.status_counts == _zero_status_counts()
+    assert summary.status_counts == zero_status_counts()
     assert summary.failure_reason_counts == {}
     assert summary.active_count == 0
     assert summary.destroying_count == 0
@@ -200,14 +158,14 @@ async def test_mixed_statuses_and_failure_reasons_roll_up_counts(
         WorkspaceStatus.cancelled,
         WorkspaceStatus.destroyed,
     ):
-        await _workspace(session_factory, status=status, updated_at=now - timedelta(minutes=10))
-    await _workspace(
+        await create_workspace(session_factory, status=status, updated_at=now - timedelta(minutes=10))
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=10),
         failure_reason=FailureReason.agent_failure,
     )
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=10),
@@ -216,7 +174,7 @@ async def test_mixed_statuses_and_failure_reasons_roll_up_counts(
 
     summary = await summarize_workspace_reliability(session_factory, settings=Settings(), now=now)
 
-    expected_status_counts = _zero_status_counts()
+    expected_status_counts = zero_status_counts()
     expected_status_counts.update(
         {
             WorkspaceStatus.requested.value: 1,
@@ -250,12 +208,12 @@ async def test_since_hours_filters_by_workspace_updated_at(
     from awf.service.metrics import summarize_workspace_reliability
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=7),
     )
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=5),
@@ -264,7 +222,7 @@ async def test_since_hours_filters_by_workspace_updated_at(
 
     summary = await summarize_workspace_reliability(session_factory, settings=Settings(), since_hours=6, now=now)
 
-    expected_status_counts = _zero_status_counts()
+    expected_status_counts = zero_status_counts()
     expected_status_counts[WorkspaceStatus.failed.value] = 1
     assert summary.window_start == now - timedelta(hours=6)
     assert summary.status_counts == expected_status_counts
@@ -282,17 +240,17 @@ async def test_current_counts_include_workspaces_outside_updated_at_window(
     from awf.service.metrics import summarize_workspace_reliability
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.running,
         updated_at=now - timedelta(hours=30),
     )
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.destroying,
         updated_at=now - timedelta(hours=30),
     )
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=30),
@@ -300,7 +258,7 @@ async def test_current_counts_include_workspaces_outside_updated_at_window(
 
     summary = await summarize_workspace_reliability(session_factory, settings=Settings(), now=now)
 
-    assert summary.status_counts == _zero_status_counts()
+    assert summary.status_counts == zero_status_counts()
     assert summary.active_count == 2
     assert summary.destroying_count == 1
 
@@ -312,19 +270,19 @@ async def test_failure_analysis_groups_failed_workspaces_and_latest_examples(
     from awf.service.metrics import summarize_failure_analysis
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=25),
         failure_reason=FailureReason.agent_failure,
     )
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.running,
         updated_at=now - timedelta(minutes=4),
         failure_reason=FailureReason.validation_failure,
     )
-    missing_reason_id = await _workspace(
+    missing_reason_id = await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=1),
@@ -332,7 +290,7 @@ async def test_failure_analysis_groups_failed_workspaces_and_latest_examples(
         task_title="Missing reason failure",
         failure_message="The executor failed before a reason was recorded.",
     )
-    raw_unknown_id = await _workspace(
+    raw_unknown_id = await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=2),
@@ -340,7 +298,7 @@ async def test_failure_analysis_groups_failed_workspaces_and_latest_examples(
         failure_reason="new_failure_reason",
         task_title="Unknown reason failure",
     )
-    latest_validation_id = await _workspace(
+    latest_validation_id = await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=5),
@@ -353,20 +311,20 @@ async def test_failure_analysis_groups_failed_workspaces_and_latest_examples(
         failure_message="pytest failed",
         pr_url="https://github.com/example/api/pull/42",
     )
-    infrastructure_id = await _workspace(
+    infrastructure_id = await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=10),
         created_at=now - timedelta(minutes=20),
         failure_reason=FailureReason.infrastructure_failure,
     )
-    middle_validation_id = await _workspace(
+    middle_validation_id = await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=30),
         failure_reason=FailureReason.validation_failure,
     )
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=45),
@@ -435,7 +393,7 @@ async def test_failure_analysis_latest_examples_do_not_load_workspace_relationsh
     from awf.service.metrics import summarize_failure_analysis
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=1),
@@ -481,13 +439,13 @@ async def test_failure_analysis_filters_by_since_hours(
     from awf.service.metrics import summarize_failure_analysis
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=3),
         failure_reason=FailureReason.validation_failure,
     )
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=30),
@@ -514,7 +472,7 @@ async def test_failure_analysis_accepts_example_limit(
     workspace_ids: list[str] = []
     for index in range(6):
         workspace_ids.append(
-            await _workspace(
+            await create_workspace(
                 session_factory,
                 status=WorkspaceStatus.failed,
                 updated_at=now - timedelta(minutes=index),
@@ -574,7 +532,7 @@ async def test_resource_saturation_reports_active_counts_and_configured_defaults
         WorkspaceStatus.destroying,
         WorkspaceStatus.completed,
     ):
-        await _workspace(session_factory, status=status, updated_at=now)
+        await create_workspace(session_factory, status=status, updated_at=now)
 
     summary = await summarize_resource_saturation(
         session_factory,
@@ -632,17 +590,17 @@ async def test_resource_saturation_prefers_active_reservations_and_falls_back_fo
         workspace_peak_memory_gb=16.0,
     )
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    reserved_workspace_id = await _workspace(
+    reserved_workspace_id = await create_workspace(
         session_factory,
         status=WorkspaceStatus.running,
         updated_at=now,
     )
-    legacy_workspace_id = await _workspace(
+    legacy_workspace_id = await create_workspace(
         session_factory,
         status=WorkspaceStatus.ready,
         updated_at=now,
     )
-    released_workspace_id = await _workspace(
+    released_workspace_id = await create_workspace(
         session_factory,
         status=WorkspaceStatus.completed,
         updated_at=now,
@@ -698,7 +656,7 @@ async def test_resource_saturation_uses_latest_active_reservation_per_workspace(
         workspace_peak_memory_gb=16.0,
     )
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    workspace_id = await _workspace(
+    workspace_id = await create_workspace(
         session_factory,
         status=WorkspaceStatus.running,
         updated_at=now,
@@ -751,8 +709,8 @@ async def test_resource_saturation_admission_reports_both_saturated_concurrency_
         worker_max_concurrent_executions=1,
     )
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    await _workspace(session_factory, status=WorkspaceStatus.provisioning, updated_at=now)
-    await _workspace(session_factory, status=WorkspaceStatus.running, updated_at=now)
+    await create_workspace(session_factory, status=WorkspaceStatus.provisioning, updated_at=now)
+    await create_workspace(session_factory, status=WorkspaceStatus.running, updated_at=now)
 
     summary = await summarize_resource_saturation(
         session_factory,
@@ -783,7 +741,7 @@ async def test_resource_saturation_admission_reports_provision_only_saturation(
         worker_max_concurrent_executions=3,
     )
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
-    await _workspace(session_factory, status=WorkspaceStatus.provisioning, updated_at=now)
+    await create_workspace(session_factory, status=WorkspaceStatus.provisioning, updated_at=now)
 
     summary = await summarize_resource_saturation(
         session_factory,
@@ -893,21 +851,21 @@ async def test_workspace_reliability_reports_stuck_count(
     settings = Settings(_env_file=None, agent_wall_timeout_seconds=7200)
 
     # 1. Active, fresh -> Not stuck
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.running,
         updated_at=now,
         created_at=now - timedelta(hours=1),
     )
     # 2. Active, older than 2x SLA (4 hours), no reason -> Stuck
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.monitoring_pr,
         updated_at=now - timedelta(hours=5),
         created_at=now - timedelta(hours=5),
     )
     # 3. Active, older than 2x SLA, has reason -> Not stuck (already classified)
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.pushing,
         updated_at=now - timedelta(hours=5),
@@ -915,7 +873,7 @@ async def test_workspace_reliability_reports_stuck_count(
         failure_reason="network_hiccup",
     )
     # 4. Terminal, older than 2x SLA -> Not active, so not stuck
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=5),
@@ -938,34 +896,34 @@ async def test_workspace_reliability_reports_cleanup_failure_reason_code_coverag
     settings = Settings(_env_file=None)
 
     # 1. Failed with actionable reason in window
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now,
         failure_reason=FailureReason.agent_failure,
     )
     # 2. Destroying with actionable reason in window
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.destroying,
         updated_at=now,
         failure_reason=FailureReason.cleanup_failure,
     )
     # 3. Failed with unknown reason in window
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now,
         failure_reason="unknown_error_code",
     )
     # 4. Cancelled with NO reason in window
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.cancelled,
         updated_at=now,
     )
     # 5. Failed outside window -> should not be counted
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=48),
@@ -1003,7 +961,7 @@ async def test_root_cause_clusters_mixed_rows(
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
 
     # 1. AGENT_AUTH_FAILED
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1012,7 +970,7 @@ async def test_root_cause_clusters_mixed_rows(
         agent="gemini",
     )
     # 2. model not found or 404
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1021,7 +979,7 @@ async def test_root_cause_clusters_mixed_rows(
         agent="claude",
     )
     # 3. missing worktree
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1030,7 +988,7 @@ async def test_root_cause_clusters_mixed_rows(
         agent="gemini",
     )
     # 4. coverage threshold failure
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1039,7 +997,7 @@ async def test_root_cause_clusters_mixed_rows(
         agent="gemini",
     )
     # 5. syntax/import errors during validation
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1048,7 +1006,7 @@ async def test_root_cause_clusters_mixed_rows(
         agent="opencode",
     )
     # 6. GitHub transient/auth errors
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1057,7 +1015,7 @@ async def test_root_cause_clusters_mixed_rows(
         agent="gemini",
     )
     # 7. unknown validation failure
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1066,7 +1024,7 @@ async def test_root_cause_clusters_mixed_rows(
         agent="gemini",
     )
     # 8. Another syntax error to test grouping
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1075,7 +1033,7 @@ async def test_root_cause_clusters_mixed_rows(
         agent="opencode",
     )
     # 9. unknown agent failure
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1112,7 +1070,7 @@ async def test_root_cause_clusters_agent_model_extraction(
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
 
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1122,7 +1080,7 @@ async def test_root_cause_clusters_agent_model_extraction(
         task_policy={"agent_model": "gemini-1.5-pro"},
     )
 
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1162,7 +1120,7 @@ async def test_existing_failure_groups_unaffected(
 
     now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
 
-    await _workspace(
+    await create_workspace(
         session_factory,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(hours=1),
@@ -1176,3 +1134,471 @@ async def test_existing_failure_groups_unaffected(
     assert len(summary.failure_groups) == 1
     assert summary.failure_groups[0].failure_reason == FailureReason.agent_failure.value
     assert len(summary.latest_examples) == 1
+
+
+
+
+@pytest.mark.unit
+async def test_slo_summary_returns_zero_counts_for_empty_db(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            now=now,
+        )
+
+    assert summary.generated_at == now
+    assert summary.window_start == now - timedelta(hours=24)
+    assert summary.since_hours == 24
+    assert summary.creation_total == 0
+    assert summary.creation_succeeded == 0
+    assert summary.creation_failed == 0
+    assert summary.creation_cancelled == 0
+    assert summary.cleanup_total == 0
+    assert summary.cleanup_succeeded == 0
+    assert summary.cleanup_failure_count == 0
+    assert summary.stuck_running_count == 0
+    assert summary.stuck_with_reason_count == 0
+    assert summary.recovery_total == 0
+    assert summary.recovery_succeeded == 0
+    assert summary.recovery_failed_count == 0
+    assert summary.monitor_completed_total == 0
+    assert summary.completed_after_monitor_count == 0
+    assert summary.monitor_stuck_count == 0
+    assert summary.actionable_failure_count == 0
+    assert summary.unactionable_failure_count == 0
+
+
+@pytest.mark.unit
+async def test_creation_metrics_windowed_by_created_at(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        created_at=now - timedelta(hours=2),
+        updated_at=now - timedelta(hours=1),
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        failure_reason=FailureReason.agent_failure,
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.cancelled,
+        created_at=now - timedelta(hours=4),
+        updated_at=now - timedelta(hours=3),
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        created_at=now - timedelta(hours=30),
+        updated_at=now - timedelta(hours=29),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.creation_total == 3
+    assert summary.creation_succeeded == 1
+    assert summary.creation_failed == 1
+    assert summary.creation_cancelled == 1
+
+
+@pytest.mark.unit
+async def test_cleanup_metrics_from_destroy_operations(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    ws_id_1 = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.destroyed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+    )
+    ws_id_2 = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.destroyed,
+        created_at=now - timedelta(hours=6),
+        updated_at=now - timedelta(hours=1),
+    )
+    ws_id_3 = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.destroyed,
+        created_at=now - timedelta(hours=30),
+        updated_at=now - timedelta(hours=29),
+    )
+    await create_operation(
+        session_factory,
+        ws_id_1,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.succeeded,
+        finished_at=now - timedelta(hours=1),
+    )
+    await create_operation(
+        session_factory,
+        ws_id_2,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.failed,
+        finished_at=now - timedelta(hours=1),
+    )
+    await create_operation(
+        session_factory,
+        ws_id_3,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.succeeded,
+        finished_at=now - timedelta(hours=29),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.cleanup_total == 2
+    assert summary.cleanup_succeeded == 1
+    assert summary.cleanup_failure_count == 1
+
+
+@pytest.mark.unit
+async def test_stuck_state_splits_by_reason_code_presence(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    settings = Settings(_env_file=None, agent_wall_timeout_seconds=3600)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        failure_reason="network_hiccup",
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        created_at=now - timedelta(minutes=30),
+        updated_at=now - timedelta(minutes=20),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=settings,
+            now=now,
+        )
+
+    assert summary.stuck_running_count == 1
+    assert summary.stuck_with_reason_count == 1
+
+
+@pytest.mark.unit
+async def test_recovery_metrics_from_operations(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    ws_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.agent_failure,
+    )
+    await create_operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.remonitor,
+        status=OperationStatus.succeeded,
+        created_at=now - timedelta(hours=1),
+        finished_at=now - timedelta(minutes=50),
+    )
+    await create_operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.rebase,
+        status=OperationStatus.failed,
+        created_at=now - timedelta(hours=1),
+        finished_at=now - timedelta(minutes=40),
+    )
+    await create_operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.retry,
+        status=OperationStatus.succeeded,
+        created_at=now - timedelta(hours=1),
+        finished_at=now - timedelta(minutes=30),
+    )
+    await create_operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.remonitor,
+        status=OperationStatus.succeeded,
+        created_at=now - timedelta(hours=30),
+        finished_at=now - timedelta(hours=29),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.recovery_total == 3
+    assert summary.recovery_succeeded == 2
+    assert summary.recovery_failed_count == 1
+
+
+@pytest.mark.unit
+async def test_monitor_metrics_counts_completed_and_stuck(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    settings = Settings(_env_file=None, agent_wall_timeout_seconds=3600)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        pr_url="https://github.com/example/repo/pull/1",
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        created_at=now - timedelta(hours=10),
+        updated_at=now - timedelta(hours=1),
+        pr_url="https://github.com/example/repo/pull/2",
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=settings,
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.monitor_stuck_count == 1
+    assert summary.completed_after_monitor_count == 1
+    assert summary.monitor_completed_total == 2
+    assert summary.monitor_completed_total != summary.completed_after_monitor_count
+
+
+@pytest.mark.unit
+async def test_monitoring_pr_not_counted_in_stuck_detailed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    settings = Settings(_env_file=None, agent_wall_timeout_seconds=3600)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        pr_url="https://github.com/example/repo/pull/1",
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        pr_url="https://github.com/example/repo/pull/2",
+        failure_reason="network_hiccup",
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=settings,
+            now=now,
+        )
+
+    assert summary.stuck_running_count == 0
+    assert summary.stuck_with_reason_count == 0
+    assert summary.monitor_stuck_count == 2
+
+
+@pytest.mark.unit
+async def test_actionable_vs_unactionable_failure_counts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.agent_failure,
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+        failure_reason="unknown_error_code",
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.actionable_failure_count == 2
+    assert summary.unactionable_failure_count == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("since_hours", [0, 169])
+async def test_since_hours_validation_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+    since_hours: int,
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    async with session_factory() as session:
+        with pytest.raises(ValueError, match="since_hours must be between"):
+            await summarize_slo_metrics_for_session(
+                session,
+                settings=Settings(_env_file=None),
+                since_hours=since_hours,
+            )
+
+
+@pytest.mark.unit
+async def test_slo_summary_defaults_to_24_hour_window(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            now=now,
+        )
+
+    assert summary.since_hours == 24
+    assert summary.window_start == now - timedelta(hours=24)
+
+
+@pytest.mark.unit
+async def test_slo_summary_session_factory_wrapper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    summary = await summarize_slo_metrics(
+        session_factory, settings=Settings(_env_file=None), now=now
+    )
+
+    assert summary.generated_at == now
+    assert summary.since_hours == 24
+    assert summary.creation_total == 0
+
+
+@pytest.mark.unit
+async def test_cleanup_and_recovery_include_cancelled_operations(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    ws_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.destroyed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+    )
+    await create_operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.succeeded,
+        finished_at=now - timedelta(hours=1),
+    )
+    await create_operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.cancelled,
+        finished_at=now - timedelta(hours=1),
+    )
+    await create_operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.remonitor,
+        status=OperationStatus.succeeded,
+        created_at=now - timedelta(hours=1),
+        finished_at=now - timedelta(minutes=50),
+    )
+    await create_operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.retry,
+        status=OperationStatus.cancelled,
+        created_at=now - timedelta(hours=1),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.cleanup_total == 2
+    assert summary.cleanup_succeeded == 1
+    assert summary.cleanup_failure_count == 0
+    assert summary.recovery_total == 2
+    assert summary.recovery_succeeded == 1
+    assert summary.recovery_failed_count == 0

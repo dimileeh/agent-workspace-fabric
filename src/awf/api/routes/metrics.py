@@ -23,6 +23,7 @@ from awf.service.metrics import (
     MIN_SUMMARY_WINDOW_HOURS,
     summarize_failure_analysis_for_session,
     summarize_resource_saturation_for_session,
+    summarize_slo_metrics_for_session,
     summarize_workspace_reliability_for_session,
 )
 
@@ -119,6 +120,51 @@ class FailureAnalysisSummaryResponse(BaseModel):
     root_cause_clusters: list[RootCauseClusterResponse] = Field(
         default_factory=list,
         description="Identified root cause clusters from failure signals.",
+    )
+
+
+class SloMetricsSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    generated_at: datetime
+    window_start: datetime
+    since_hours: int
+
+    creation_total: int = Field(description="Workspaces created in the window.")
+    creation_succeeded: int = Field(description="Workspaces created in the window that reached completed.")
+    creation_failed: int = Field(description="Workspaces created in the window that reached failed.")
+    creation_cancelled: int = Field(description="Workspaces created in the window that reached cancelled.")
+
+    cleanup_total: int = Field(description="Destroy operations finished in the window.")
+    cleanup_succeeded: int = Field(description="Destroy operations finished in the window with succeeded status.")
+    cleanup_failure_count: int = Field(description="Destroy operations finished in the window with failed status.")
+
+    stuck_running_count: int = Field(
+        description="Non-terminal workspaces beyond 2x SLA without a failure reason code.",
+    )
+    stuck_with_reason_count: int = Field(
+        description="Non-terminal workspaces beyond 2x SLA with a failure reason code.",
+    )
+
+    recovery_total: int = Field(description="Recovery operations (remonitor/rebase/retry) created in the window.")
+    recovery_succeeded: int = Field(description="Recovery operations that succeeded.")
+    recovery_failed_count: int = Field(description="Recovery operations that failed.")
+
+    monitor_completed_total: int = Field(
+        description="Workspaces with a PR URL updated in the window (includes all statuses, not only completed).",
+    )
+    completed_after_monitor_count: int = Field(
+        description="Workspaces in completed status updated in the window that previously entered monitoring (pr_url set).",
+    )
+    monitor_stuck_count: int = Field(
+        description="Workspaces currently in monitoring_pr status beyond 2x SLA.",
+    )
+
+    actionable_failure_count: int = Field(
+        description="Failed/cancelled workspaces updated in the window with a known FailureReason code.",
+    )
+    unactionable_failure_count: int = Field(
+        description="Failed/cancelled workspaces updated in the window without a known FailureReason code.",
     )
 
 
@@ -304,6 +350,29 @@ async def get_resource_saturation_summary(
         disk_check=disk_check,
     )
     return ResourceSaturationSummaryResponse.model_validate(summary)
+
+
+@router.get(
+    "/slo",
+    response_model=SloMetricsSummaryResponse,
+)
+async def get_slo_metrics_summary(
+    since_hours: Annotated[
+        int,
+        Query(
+            ge=MIN_SUMMARY_WINDOW_HOURS,
+            le=MAX_SUMMARY_WINDOW_HOURS,
+        ),
+    ] = DEFAULT_SUMMARY_WINDOW_HOURS,
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_db_session),
+) -> SloMetricsSummaryResponse:
+    summary = await summarize_slo_metrics_for_session(
+        session,
+        settings=settings,
+        since_hours=since_hours,
+    )
+    return SloMetricsSummaryResponse.model_validate(summary)
 
 
 async def _resource_saturation_disk_check(request: Request, settings: Settings) -> DiskCheck:

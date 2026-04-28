@@ -470,6 +470,7 @@ class ValidationRunSummaryResponse(BaseModel):
     coverage_minimum_percent: float | None = None
     coverage_status: str | None = None
     coverage_reason_code: str | None = None
+    coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
 
 
 StaleReasonStatus = Literal["active", "resolved"]
@@ -665,6 +666,7 @@ class ValidationProvenanceItemResponse(BaseModel):
     coverage_minimum_percent: float | None = None
     coverage_status: str | None = None
     coverage_reason_code: str | None = None
+    coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ValidationProvenanceListResponse(BaseModel):
