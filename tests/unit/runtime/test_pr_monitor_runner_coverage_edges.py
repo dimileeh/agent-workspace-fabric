@@ -14,7 +14,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.base import Base
-from awf.db.enums import OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import OperationRepository, WorkspaceEventCreate, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
@@ -54,6 +54,7 @@ from awf.runtime.pr_monitor_runner import (
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
     _notify_human_reason,
+    _redact_and_truncate_github_error,
     _stale_pending_check_warnings,
     _target_reconcile_payload,
     _with_ci_failures,
@@ -136,6 +137,24 @@ class _QueueAfterLockRunner(PullRequestMonitorRunner):
         return [] if self.blocker_calls == 1 else [self._blocker]
 
 
+class _StopAfterRetryError(RuntimeError):
+    pass
+
+
+class _StopAfterRetrySleep(RecordedSleep):
+    async def __call__(self, seconds: float) -> None:
+        await super().__call__(seconds)
+        raise _StopAfterRetryError
+
+
+def _retry_events(ws: Workspace) -> list:
+    return [
+        event
+        for event in ws.events
+        if event.event_type == "monitor.github_transient_error_retrying"
+    ]
+
+
 async def _mark_refactor_task(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
@@ -148,6 +167,22 @@ async def _mark_refactor_task(
         ws.task_class = TaskClass.refactor_task.value
         ws.auto_merge = auto_merge
         await s.commit()
+
+
+async def _seed_running_operation(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> str:
+    async with factory() as s:
+        operation = await OperationRepository(s).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.refresh,
+            status=OperationStatus.running,
+            payload={"source": "test", "keep": True},
+            idempotency_key=f"op:{workspace_id}",
+        )
+        await s.commit()
+        return operation.id
 
 
 async def _update_workspace(
@@ -267,6 +302,84 @@ async def test_monitor_run_terminates_on_github_status_error(
         assert ws.status == WorkspaceStatus.failed.value
         assert "github error" in (ws.failure_message or "")
         assert "gh auth failed" in (ws.failure_message or "")
+        assert _retry_events(ws) == []
+
+
+@pytest.mark.unit
+async def test_monitor_run_transient_status_fetch_preserves_state_operations_and_lifecycle(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = _StopAfterRetrySleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    operation_id = await _seed_running_operation(factory, workspace_id)
+    started_at = datetime(2026, 1, 2, tzinfo=UTC)
+    await _update_workspace(
+        factory,
+        workspace_id,
+        monitor_iter_count=7,
+        monitor_threads_addressed={"T_old": "defer"},
+        monitor_last_commit_sha="oldsha",
+        monitor_started_at=started_at,
+    )
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(
+        returncode=1,
+        stderr="HTTP 502 Bad Gateway for token ghp_statusretrysecret",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(_StopAfterRetryError):
+        await runner.run(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    assert sleep_fn.calls == [60]
+    assert [call.args[:3] for call in cmd.calls] == [
+        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
+        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
+        ["gh", "api", "graphql"],
+    ]
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.failure_message is None
+        assert ws.monitor_iter_count == 7
+        assert ws.monitor_threads_addressed == {"T_old": "defer"}
+        assert ws.monitor_last_commit_sha == "oldsha"
+        assert _as_utc(ws.monitor_started_at) == started_at
+        operation = await OperationRepository(s).get(operation_id)
+        assert operation is not None
+        assert operation.status == OperationStatus.running.value
+        assert operation.payload == {"source": "test", "keep": True}
+        events = _retry_events(ws)
+        assert len(events) == 1
+        assert events[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+        assert events[0].old_state == WorkspaceStatus.monitoring_pr.value
+        assert events[0].new_state == WorkspaceStatus.monitoring_pr.value
+        assert events[0].payload == {
+            "context": "fetch_pr_status",
+            "operation": "gh api graphql",
+            "returncode": 1,
+            "pr_number": 42,
+            "wait_seconds": 60,
+            "message": (
+                "gh api graphql failed (exit=1): HTTP 502 Bad Gateway for token <redacted>"
+            ),
+            "stderr": "HTTP 502 Bad Gateway for token <redacted>",
+        }
 
 
 @pytest.mark.unit
@@ -335,6 +448,75 @@ def test_transient_github_error_classifier_keeps_auth_errors_terminal() -> None:
             stderr="review is required before merging",
         )
     )
+
+
+@pytest.mark.unit
+def test_github_error_redaction_covers_app_jwt_and_bearer_tokens() -> None:
+    app_token = "gha_11AA22BB33CC44DD"
+    jwt_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
+    bearer_token = "opaqueBearerToken123"
+    redacted = _redact_and_truncate_github_error(
+        "HTTP 503 "
+        f"{app_token} "
+        f"jwt={jwt_token} "
+        f"Authorization: Bearer {bearer_token}"
+    )
+
+    assert app_token not in redacted
+    assert jwt_token not in redacted
+    assert bearer_token not in redacted
+    assert redacted.count("<redacted>") == 3
+    assert "Authorization: Bearer <redacted>" in redacted
+
+
+@pytest.mark.unit
+async def test_transient_retry_event_payload_is_structured_and_redacted(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    secret = "github_pat_11AA22BB33CC44DD"
+    noisy_stderr = (
+        f"HTTP 503 Service Unavailable for {secret} at "
+        f"https://user:{secret}@github.com/example/repo " + ("x" * 600)
+    )
+
+    retried = await runner._wait_after_transient_github_error(
+        GitHubClientError(operation="gh api graphql", returncode=1, stderr=noisy_stderr),
+        workspace_id=workspace_id,
+        pr_number=42,
+        context="fetch_pr_status",
+        monitor_log=None,
+    )
+
+    assert retried is True
+    assert sleep_fn.calls == [60]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        events = _retry_events(ws)
+        assert len(events) == 1
+        event = events[0]
+        assert event.reason_code == "GITHUB_TRANSIENT_RETRY"
+        payload = event.payload
+        assert payload is not None
+        assert payload["context"] == "fetch_pr_status"
+        assert payload["operation"] == "gh api graphql"
+        assert payload["returncode"] == 1
+        assert payload["pr_number"] == 42
+        assert payload["wait_seconds"] == 60
+        assert secret not in str(payload)
+        assert "https://<redacted>@github.com/example/repo" in payload["stderr"]
+        assert len(payload["stderr"]) <= 400
+        assert len(payload["message"]) <= 400
 
 
 @pytest.mark.unit
@@ -471,6 +653,7 @@ async def test_pre_merge_recheck_transient_github_error_retries_later(
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     workspace_id = await seed_monitoring_workspace(factory)
+    operation_id = await _seed_running_operation(factory, workspace_id)
     cmd.queue_result(returncode=0)
     cmd.queue_result(returncode=0, stdout="0\n")
     cmd.queue_result(returncode=1, stderr="HTTP 503 Service Unavailable")
@@ -500,11 +683,92 @@ async def test_pre_merge_recheck_transient_github_error_retries_later(
 
     assert terminal is False
     assert sleep_fn.calls == [2, 60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.monitoring_pr.value
         assert ws.failure_message is None
+        operation = await OperationRepository(s).get(operation_id)
+        assert operation is not None
+        assert operation.status == OperationStatus.running.value
+        assert operation.payload == {"source": "test", "keep": True}
+        events = _retry_events(ws)
+        assert len(events) == 1
+        assert events[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+        assert events[0].payload["context"] == "pre_merge_recheck"
+        assert events[0].payload["operation"] == "gh api graphql"
+        assert events[0].payload["wait_seconds"] == 60
+
+
+@pytest.mark.unit
+async def test_pre_merge_recheck_unknown_status_after_retry_never_uses_old_green_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=1, stderr="HTTP 503 Service Unavailable")
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=0, stdout=pr_payload(check_state="PENDING"))
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        pre_merge_settle_seconds=2,
+    )
+    state = MonitorState()
+    repo = RepoRef(owner="dimileeh", name="aira-web")
+    status = _status_for_helpers()
+
+    first_terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=repo,
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+    second_terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=repo,
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert first_terminal is False
+    assert second_terminal is False
+    assert sleep_fn.calls == [2, 60, 2, 60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        events = _retry_events(ws)
+        assert len(events) == 1
+        assert events[0].payload["context"] == "pre_merge_recheck"
 
 
 @pytest.mark.unit
@@ -590,6 +854,10 @@ async def test_merge_rejection_posts_human_notification_and_keeps_monitoring(
     assert any(key.startswith("__awf_notify__:abc123:") for key in state.threads_addressed_ids)
     assert cmd.calls[0].args[:4] == ["gh", "pr", "merge", "42"]
     assert cmd.calls[1].args[:4] == ["gh", "pr", "comment", "42"]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert _retry_events(ws) == []
 
 
 @pytest.mark.unit
@@ -752,6 +1020,13 @@ async def test_transient_github_merge_error_retries_without_human_escalation(
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.failure_message is None
+        events = _retry_events(ws)
+        assert len(events) == 1
+        assert events[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+        assert events[0].payload["context"] == "merge_pr"
+        assert events[0].payload["operation"] == "gh pr merge"
+        assert events[0].payload["wait_seconds"] == 60
 
 
 @pytest.mark.unit
@@ -792,6 +1067,17 @@ async def test_transient_human_notification_comment_error_retries_without_crashi
     assert len(cmd.calls) == 1
     assert cmd.calls[0].args[:3] == ["gh", "pr", "comment"]
     assert state.threads_addressed_ids == {}
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert ws.failure_message is None
+        events = _retry_events(ws)
+        assert len(events) == 1
+        assert events[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+        assert events[0].payload["context"] == "post_human_notification"
+        assert events[0].payload["operation"] == "gh pr comment"
+        assert events[0].payload["wait_seconds"] == 60
 
 
 @pytest.mark.unit
@@ -835,6 +1121,7 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
     adapter.queue(stdout="Committed fix locally.")
     cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
     cmd.queue_result(returncode=0, stderr="Everything up-to-date")
@@ -856,24 +1143,95 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     state = MonitorState()
 
     await runner._run_fix_cycle(
-        workspace_id="ws_retry",
+        workspace_id=workspace_id,
         repo=RepoRef(owner="dimileeh", name="aira-web"),
         pr_number=42,
         initial_threads=(thread,),
         initial_reviews=(),
         state=state,
-        remote_branch="awf/ws_retry",
+        remote_branch=f"awf/{workspace_id}",
         compose_project="proj",
         compose_file=tmp_path / "compose.yml",
     )
 
-    assert sleep_fn.calls == [30]
+    assert sleep_fn.calls == [30, 60]
     assert state.threads_addressed_ids == {"T_retry": "fix_committed"}
     assert [call.args[:3] for call in cmd.calls] == [
         ["gh", "api", "graphql"],
-        ["git", "-C", str(tmp_path / "worktrees" / "ws_retry")],
+        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
         ["gh", "api", "graphql"],
     ]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        events = _retry_events(ws)
+        assert len(events) == 1
+        assert events[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+        assert events[0].payload["context"] == "fix_cycle_settle_fetch_pr_status"
+        assert events[0].payload["operation"] == "gh api graphql"
+
+
+@pytest.mark.unit
+async def test_resolve_thread_transient_failure_requeues_thread_safely(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="newsha\n")
+    cmd.queue_result(returncode=1, stderr="HTTP 502 Bad Gateway")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_resolve",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="review-bot",
+    )
+    state = MonitorState()
+
+    await runner._run_fix_cycle(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=state,
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert sleep_fn.calls == [30, 60]
+    assert "T_resolve" not in state.threads_addressed_ids
+    assert state.last_push_sha == "newsha"
+    assert [call.args[:3] for call in cmd.calls] == [
+        ["gh", "api", "graphql"],
+        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
+        ["git", "-C", str(tmp_path / "worktrees" / workspace_id)],
+        ["gh", "api", "graphql"],
+    ]
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+        events = _retry_events(ws)
+        assert len(events) == 1
+        assert events[0].reason_code == "GITHUB_TRANSIENT_RETRY"
+        assert events[0].payload["context"] == "resolve_thread"
+        assert events[0].payload["operation"] == "gh api graphql"
 
 
 @pytest.mark.unit
@@ -1975,33 +2333,49 @@ def test_initial_review_grace_state_converts_wall_and_legacy_values() -> None:
 @pytest.mark.unit
 def test_non_check_reviewer_settle_state_converts_wall_legacy_and_invalid_values() -> None:
     started_key = _non_check_reviewer_settle_started_key(pr_number=42, head_sha="head-1")
+    legacy_key = f"{started_key}:legacy"
+    invalid_key = f"{started_key}:invalid"
     other_key = _non_check_reviewer_settle_started_key(pr_number=99, head_sha="head-2")
     wall_started = datetime(2026, 4, 27, 12, 0, tzinfo=UTC).timestamp()
 
-    runtime_wall = _non_check_reviewer_settle_state_for_runtime(
-        {started_key: f"{wall_started:.6f}", other_key: "untouched"},
+    runtime_state = _non_check_reviewer_settle_state_for_runtime(
+        {
+            started_key: f"{wall_started:.6f}",
+            legacy_key: "500.0",
+            invalid_key: "not-a-number",
+            other_key: "untouched",
+            "review:1": "addressed",
+        },
         pr_number=42,
         now_monotonic=1_100,
         now_wall_seconds=wall_started + 75,
     )
-    assert runtime_wall[started_key] == "1025.000000"
-    assert runtime_wall[other_key] == "untouched"
+    assert runtime_state[started_key] == "1025.000000"
+    assert runtime_state[legacy_key] == "1100.000000"
+    assert runtime_state[invalid_key] == "not-a-number"
+    assert runtime_state[other_key] == "untouched"
+    assert runtime_state["review:1"] == "addressed"
 
-    runtime_legacy = _non_check_reviewer_settle_state_for_runtime(
-        {started_key: "500.0"},
+    persisted_state = _non_check_reviewer_settle_state_for_persistence(
+        runtime_state,
         pr_number=42,
         now_monotonic=1_100,
         now_wall_seconds=wall_started + 75,
     )
-    assert runtime_legacy[started_key] == "1100.000000"
+    assert persisted_state[started_key] == f"{wall_started:.6f}"
+    assert persisted_state[legacy_key] == f"{wall_started + 75:.6f}"
+    assert persisted_state[invalid_key] == "not-a-number"
+    assert persisted_state[other_key] == "untouched"
+    assert persisted_state["review:1"] == "addressed"
 
-    runtime_invalid = _non_check_reviewer_settle_state_for_runtime(
-        {started_key: "not-a-number"},
+    invalid_marker = object()
+    runtime_invalid_object = _non_check_reviewer_settle_state_for_runtime(
+        {started_key: invalid_marker},  # type: ignore[dict-item]
         pr_number=42,
         now_monotonic=1_100,
         now_wall_seconds=wall_started,
     )
-    assert runtime_invalid[started_key] == "not-a-number"
+    assert runtime_invalid_object[started_key] is invalid_marker
 
     persisted_wall = _non_check_reviewer_settle_state_for_persistence(
         {started_key: f"{wall_started:.6f}"},
@@ -2011,6 +2385,14 @@ def test_non_check_reviewer_settle_state_converts_wall_legacy_and_invalid_values
     )
     assert persisted_wall[started_key] == f"{wall_started:.6f}"
 
+    persisted_legacy = _non_check_reviewer_settle_state_for_persistence(
+        {started_key: "1040.000000"},
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started + 60,
+    )
+    assert persisted_legacy[started_key] == f"{wall_started:.6f}"
+
     persisted_invalid = _non_check_reviewer_settle_state_for_persistence(
         {started_key: "not-a-number"},
         pr_number=42,
@@ -2018,6 +2400,15 @@ def test_non_check_reviewer_settle_state_converts_wall_legacy_and_invalid_values
         now_wall_seconds=wall_started,
     )
     assert persisted_invalid[started_key] == "not-a-number"
+
+    persisted_invalid_marker = object()
+    persisted_invalid_object = _non_check_reviewer_settle_state_for_persistence(
+        {started_key: persisted_invalid_marker},  # type: ignore[dict-item]
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started,
+    )
+    assert persisted_invalid_object[started_key] is persisted_invalid_marker
 
 
 @pytest.mark.unit

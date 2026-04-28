@@ -21,7 +21,7 @@ import awf.service.workspaces as workspace_service
 from awf.api.app import configure_database, create_app
 from awf.common.config import get_settings
 from awf.db.base import Base
-from awf.db.enums import OperationStatus, OperationType
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
     WorkspaceLogStreamRepository,
@@ -105,6 +105,53 @@ async def _mutate_workspace(engine: AsyncEngine, workspace_id: str) -> None:
         await session.commit()
 
 
+async def _dispatch_monitor_recovery(engine: AsyncEngine, workspace_id: str) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.monitoring_pr,
+        ):
+            await repo.transition(workspace, to=target, reason_code="TEST")
+        operation_payload = {
+            "owner": "pr_monitor",
+            "source": "pr_monitor",
+            "reason": "Owned paths overlap a fresher workspace.",
+            "reason_code": "STALE_OVERLAP",
+            "stale_reason": "STALE_OVERLAP",
+            "requested_action": "rebase",
+            "recovery_mode": "rebase_only",
+        }
+        await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.pending,
+            payload=operation_payload,
+        )
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.ready,
+            reason_code="RECOVERY_DISPATCH",
+        )
+        await repo.add_event(
+            workspace,
+            event_type="monitor.recovery_dispatched",
+            reason_code="RECOVERY_DISPATCH",
+            payload={
+                "reason": "STALE_OVERLAP",
+                "req_action": "rebase",
+                "recovery_mode": "rebase_only",
+            },
+        )
+        await session.commit()
+
+
 def _auth(monkeypatch: pytest.MonkeyPatch) -> dict[str, str]:
     monkeypatch.setenv("AWF_API_TOKEN", "secret")
     get_settings.cache_clear()
@@ -170,6 +217,50 @@ class TestConsoleViews:
         assert item["current_phase"] == "requested"
         assert item["active_operation"] == "validate"
         assert item["last_event"]["event_type"] == "workspace.phase_started"
+        assert item["recovery"] is None
+
+    @pytest.mark.unit
+    async def test_workspace_detail_and_overview_expose_monitor_recovery_summary(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        await _dispatch_monitor_recovery(engine, workspace_id)
+
+        detail = await client.get(f"/v1/workspaces/{workspace_id}")
+        overview = await client.get("/v1/workspaces/overview")
+
+        assert detail.status_code == 200
+        assert overview.status_code == 200
+        for recovery in (
+            detail.json()["recovery"],
+            overview.json()["items"][0]["recovery"],
+        ):
+            assert recovery["from_state"] == "monitoring_pr"
+            assert recovery["to_state"] == "ready"
+            assert recovery["reason_code"] == "STALE_OVERLAP"
+            assert recovery["action"] == "rebase"
+            assert recovery["recovery_mode"] == "rebase_only"
+            assert recovery["current_operation"]["type"] == "validate"
+            assert recovery["current_operation"]["status"] == "pending"
+            assert "monitoring_pr -> ready" in recovery["summary"]
+
+        overview_item = overview.json()["items"][0]
+        assert overview_item["active_operation"] == "validate"
+        assert overview_item["last_event"]["event_type"] == "monitor.recovery_dispatched"
+
+    @pytest.mark.unit
+    async def test_ordinary_workspace_detail_returns_null_recovery(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+
+        response = await client.get(f"/v1/workspaces/{workspace_id}")
+
+        assert response.status_code == 200
+        assert response.json()["recovery"] is None
 
     @pytest.mark.unit
     async def test_runtime_endpoint_returns_mocked_container_snapshot(

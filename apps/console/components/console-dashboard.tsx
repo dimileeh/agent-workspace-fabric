@@ -51,6 +51,11 @@ import {
   summarizeStaleReasons,
   summarizeValidation,
 } from "@/lib/merge-queue-format";
+import {
+  formatRecoveryBadge,
+  formatRecoveryCallout,
+  isReverseWorkspaceTransition,
+} from "@/lib/recovery-format";
 import type {
   ApiEnvelope,
   AwfStreamFrame,
@@ -198,6 +203,7 @@ export function ConsoleDashboard() {
         ...item,
         lifecycle: item.lifecycle ?? [],
         llm_usage: fallbackLlmUsage(item.llm_usage),
+        recovery: item.recovery ?? null,
       })),
     );
     setLastRefresh(new Date());
@@ -279,6 +285,7 @@ export function ConsoleDashboard() {
             ...workspace.data,
             lifecycle: workspace.data.lifecycle ?? [],
             llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
+            recovery: workspace.data.recovery ?? null,
           }
         : null,
       runtime: runtime.ok ? runtime.data : null,
@@ -464,7 +471,15 @@ export function ConsoleDashboard() {
       }
       if (frame.type === "snapshot") {
         setStreamState("live");
-        setDetail((current) => ({ ...current, workspace: frame.workspace }));
+        setDetail((current) => ({
+          ...current,
+          workspace: {
+            ...frame.workspace,
+            lifecycle: frame.workspace.lifecycle ?? [],
+            llm_usage: fallbackLlmUsage(frame.workspace.llm_usage),
+            recovery: frame.workspace.recovery ?? null,
+          },
+        }));
         return;
       }
       if (frame.type === "event") {
@@ -538,6 +553,8 @@ export function ConsoleDashboard() {
             item.agent_model ?? "",
             item.agent_effort ?? "",
             item.status,
+            item.recovery?.reason_code ?? "",
+            item.recovery?.recovery_mode ?? "",
           ]
             .join(" ")
             .toLowerCase()
@@ -1044,61 +1061,69 @@ function WorkspaceList({
   const selectedSet = new Set(selectedWorkspaceIds);
   return (
     <div className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden">
-      {items.map((item) => (
-        <div
-          key={item.workspace_id}
-          className={`grid min-w-0 gap-2 border-b border-slate-100 px-3 py-3 transition hover:bg-slate-50 ${
-            selectedId === item.workspace_id ? "bg-blue-50" : "bg-white"
-          }`}
-        >
-          <div className="flex min-w-0 items-start justify-between gap-3">
-            <div className="flex min-w-0 flex-1 items-start gap-2">
-              <input
-                type="checkbox"
-                checked={selectedSet.has(item.workspace_id)}
-                onChange={(event) => onToggleWorkspaceSelection(item.workspace_id, event.target.checked)}
-                aria-label={`Select ${item.title} for fullscreen logs`}
-                className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
-              />
+      {items.map((item) => {
+        const recoveryBadge = formatRecoveryBadge(item.recovery);
+        return (
+          <div
+            key={item.workspace_id}
+            className={`grid min-w-0 gap-2 border-b border-slate-100 px-3 py-3 transition hover:bg-slate-50 ${
+              selectedId === item.workspace_id ? "bg-blue-50" : "bg-white"
+            }`}
+          >
+            <div className="flex min-w-0 items-start justify-between gap-3">
+              <div className="flex min-w-0 flex-1 items-start gap-2">
+                <input
+                  type="checkbox"
+                  checked={selectedSet.has(item.workspace_id)}
+                  onChange={(event) => onToggleWorkspaceSelection(item.workspace_id, event.target.checked)}
+                  aria-label={`Select ${item.title} for fullscreen logs`}
+                  className="mt-0.5 h-4 w-4 shrink-0 rounded border-slate-300"
+                />
+                <button
+                  type="button"
+                  onClick={() => onSelect(item.workspace_id)}
+                  className="grid min-w-0 flex-1 gap-2 text-left"
+                >
+                  <span className="line-clamp-2 text-sm font-semibold text-slate-950">{item.title}</span>
+                  <div className="mono truncate text-[11px] text-[var(--muted)]">{item.workspace_id}</div>
+                  <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
+                    <span className="truncate">created {formatDateTime(item.created_at)}</span>
+                    <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs text-slate-600">
+                    <Bot size={13} aria-hidden />
+                    <span className="truncate" title={formatAgentTitle(item)}>
+                      {formatAgentLabel(item)}
+                    </span>
+                    <span className="text-slate-300">/</span>
+                    <span className="truncate">{item.base_branch}</span>
+                  </div>
+                  <div className="truncate text-xs text-[var(--muted)]">{item.repo_url}</div>
+                </button>
+              </div>
+              <div className="flex shrink-0 flex-col items-end gap-1">
+                <Badge value={item.status} />
+                {recoveryBadge ? (
+                  <span className="inline-flex h-6 max-w-44 items-center rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900">
+                    <span className="truncate">{recoveryBadge}</span>
+                  </span>
+                ) : null}
+                {item.pr_url ? <SmallExternalAnchor href={item.pr_url} label="PR" /> : null}
+              </div>
+            </div>
+            <div className="flex justify-end">
               <button
                 type="button"
-                onClick={() => onSelect(item.workspace_id)}
-                className="grid min-w-0 flex-1 gap-2 text-left"
+                onClick={() => onOpenLogs(item.workspace_id)}
+                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] text-slate-800 transition hover:bg-slate-50"
               >
-                <span className="line-clamp-2 text-sm font-semibold text-slate-950">{item.title}</span>
-                <div className="mono truncate text-[11px] text-[var(--muted)]">{item.workspace_id}</div>
-                <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
-                  <span className="truncate">created {formatDateTime(item.created_at)}</span>
-                  <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs text-slate-600">
-                  <Bot size={13} aria-hidden />
-                  <span className="truncate" title={formatAgentTitle(item)}>
-                    {formatAgentLabel(item)}
-                  </span>
-                  <span className="text-slate-300">/</span>
-                  <span className="truncate">{item.base_branch}</span>
-                </div>
-                <div className="truncate text-xs text-[var(--muted)]">{item.repo_url}</div>
+                <Terminal size={12} aria-hidden />
+                Logs
               </button>
             </div>
-            <div className="flex shrink-0 flex-col items-end gap-1">
-              <Badge value={item.status} />
-              {item.pr_url ? <SmallExternalAnchor href={item.pr_url} label="PR" /> : null}
-            </div>
           </div>
-          <div className="flex justify-end">
-            <button
-              type="button"
-              onClick={() => onOpenLogs(item.workspace_id)}
-              className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] text-slate-800 transition hover:bg-slate-50"
-            >
-              <Terminal size={12} aria-hidden />
-              Logs
-            </button>
-          </div>
-        </div>
-      ))}
+        );
+      })}
     </div>
   );
 }
@@ -1117,6 +1142,7 @@ function WorkspaceSummary({
   onRetry: () => void;
 }) {
   const canRetry = overview.status === "failed" || overview.status === "cancelled";
+  const recovery = workspace?.recovery ?? overview.recovery ?? null;
 
   return (
     <Panel
@@ -1163,6 +1189,7 @@ function WorkspaceSummary({
         </div>
         <WorkspaceRecoveryBlock item={mergeQueueItem} />
         <UsageSummaryBlock usage={workspace?.llm_usage ?? overview.llm_usage} />
+        {recovery ? <RecoveryCallout recovery={recovery} status={overview.status} /> : null}
         {overview.failure_reason || overview.failure_message ? (
           <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
             <div className="font-semibold">{overview.failure_reason ?? "failure"}</div>
@@ -1289,6 +1316,35 @@ function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] | null | u
           ? (safeUsage.reason ?? "usage unavailable")
           : `${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
       </div>
+    </div>
+  );
+}
+
+function RecoveryCallout({
+  recovery,
+  status,
+}: {
+  recovery: NonNullable<Workspace["recovery"]>;
+  status: WorkspaceStatus;
+}) {
+  const callout = formatRecoveryCallout(recovery, status);
+  return (
+    <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2 font-semibold">
+          <RefreshCw size={14} aria-hidden />
+          <span className="truncate">{callout.title}</span>
+        </div>
+        <span className="mono rounded-md border border-amber-300 bg-white/70 px-2 py-0.5 text-[11px] text-amber-900">
+          {callout.reason}
+        </span>
+      </div>
+      <div className="mt-2 grid gap-2 text-xs sm:grid-cols-3">
+        <Fact label="Action" value={callout.action} />
+        <Fact label="Current" value={callout.current} />
+        <Fact label="Started" value={formatDateTime(recovery.started_at)} />
+      </div>
+      <div className="mt-2 text-xs text-amber-900">{callout.body}</div>
     </div>
   );
 }
@@ -2121,18 +2177,33 @@ function EventsPanel({ events }: { events: WorkspaceEvent[] }) {
         <MutedLine>No events recorded.</MutedLine>
       ) : (
         <div className="max-h-[360px] overflow-auto">
-          {sortedEvents.map((event) => (
-            <div key={event.id} className="grid gap-1 border-b border-slate-100 py-2 text-xs">
-              <div className="flex items-center justify-between gap-2">
-                <span className="font-medium">{event.event_type}</span>
-                <span className="text-slate-500">{formatDateTime(event.occurred_at)}</span>
+          {sortedEvents.map((event) => {
+            const reverse = isReverseWorkspaceTransition(event);
+            return (
+              <div
+                key={event.id}
+                className={`grid gap-1 border-b py-2 text-xs ${
+                  reverse
+                    ? "border-amber-100 bg-amber-50/70 px-2"
+                    : "border-slate-100"
+                }`}
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <span className="font-medium">{event.event_type}</span>
+                  <span className="text-slate-500">{formatDateTime(event.occurred_at)}</span>
+                </div>
+                <div className="flex flex-wrap gap-2 text-slate-600">
+                  <span>{event.old_state ?? "—"} → {event.new_state ?? "—"}</span>
+                  {event.reason_code ? <span className="mono">{event.reason_code}</span> : null}
+                  {reverse ? (
+                    <span className="rounded-md border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-amber-900">
+                      step-back
+                    </span>
+                  ) : null}
+                </div>
               </div>
-              <div className="flex flex-wrap gap-2 text-slate-600">
-                <span>{event.old_state ?? "—"} → {event.new_state ?? "—"}</span>
-                {event.reason_code ? <span className="mono">{event.reason_code}</span> : null}
-              </div>
-            </div>
-          ))}
+            );
+          })}
         </div>
       )}
     </Panel>

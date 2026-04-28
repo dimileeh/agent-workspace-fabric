@@ -19,6 +19,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 RuntimeEnv = Literal["local", "ci", "staging", "prod"]
 DEFAULT_MIN_FREE_DISK_BYTES = 10 * 1024 * 1024 * 1024
+DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS = 168
+DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS = 3600
+DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT = 50
 
 
 class Settings(BaseSettings):
@@ -82,6 +85,30 @@ class Settings(BaseSettings):
             "Minimum free bytes required on the AWF work directory filesystem before "
             "admitting new local workspaces."
         ),
+    )
+
+    # Retention cleanup
+    completed_workspace_retention_hours: float = Field(
+        default=DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS,
+        ge=0,
+        description=(
+            "Hours to retain completed PR workspace pressure directories before "
+            "they become eligible for service GC."
+        ),
+    )
+    workspace_cleanup_enabled: bool = Field(
+        default=True,
+        description="Whether retention-based workspace cleanup planning is enabled.",
+    )
+    workspace_cleanup_scan_interval_seconds: float = Field(
+        default=DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS,
+        gt=0,
+        description="Interval for future automatic workspace cleanup sweeps.",
+    )
+    workspace_cleanup_batch_limit: int = Field(
+        default=DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT,
+        gt=0,
+        description="Maximum cleanup candidates to select in one retention cleanup batch.",
     )
     host_home: str = Field(
         default="~",

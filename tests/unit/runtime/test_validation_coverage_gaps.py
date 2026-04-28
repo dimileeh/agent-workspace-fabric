@@ -85,6 +85,7 @@ def test_parse_term_missing_handles_truncated_output(tmp_path: Path) -> None:
 def test_parse_term_missing_handles_malformed_lines(tmp_path: Path) -> None:
     coverage_output = tmp_path / "coverage.txt"
     coverage_output.write_text(
+        "coverage preamble before the table\n"
         "Name                                      Stmts   Miss  Cover   Missing\n"
         "---------------------------------------------------------------------\n"
         "not enough columns here\n"
@@ -99,6 +100,28 @@ def test_parse_term_missing_handles_malformed_lines(tmp_path: Path) -> None:
     assert len(gaps) == 1
     assert gaps[0]["file"] == "src/awf/control/executor.py"
     assert gaps[0]["missing_lines"] == ["10-20"]
+
+
+@pytest.mark.unit
+def test_parse_term_missing_ignores_lines_before_header(tmp_path: Path) -> None:
+    coverage_output = tmp_path / "coverage.txt"
+    coverage_output.write_text(
+        "pytest started\n"
+        "src/awf/before_header.py                 10      5    50%   1-5\n"
+        "Name                                      Stmts   Miss  Cover   Missing\n"
+        "---------------------------------------------------------------------\n"
+        "src/awf/after_header.py                  100     10    90%   5-10\n",
+        encoding="utf-8",
+    )
+
+    gaps = _parse_term_missing_gaps([coverage_output])
+
+    assert gaps == [{"file": "src/awf/after_header.py", "missing_lines": ["5-10"]}]
+
+
+@pytest.mark.unit
+def test_missing_line_count_handles_ranges_non_strings_and_malformed_tokens() -> None:
+    assert _missing_line_count([10, None, "7-9", "12-nope", "abc", "14"]) == 6
 
 
 @pytest.mark.unit
@@ -149,6 +172,11 @@ def test_parse_term_missing_sorts_by_line_count_not_tokens(
     assert len(gaps) == 2
     assert gaps[0]["file"] == "src/awf/big_range.py"
     assert gaps[1]["file"] == "src/awf/small_tokens.py"
+
+
+@pytest.mark.unit
+def test_missing_line_count_treats_malformed_tokens_as_single_lines() -> None:
+    assert _missing_line_count([None, "  7  ", "10-12", "bad-range", "x"]) == 6
 
 
 @pytest.mark.unit

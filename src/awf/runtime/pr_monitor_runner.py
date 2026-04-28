@@ -152,6 +152,23 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
     "abuse detection",
     "something went wrong",
 )
+_GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
+_REDACTION = "<redacted>"
+_URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s:@]+(?::[^/\s@]+)?@)")
+_AUTHORIZATION_BEARER_RE = re.compile(
+    r"(\bAuthorization:\s*Bearer\s+)([A-Za-z0-9._~+/=-]{8,})",
+    re.IGNORECASE,
+)
+_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9])("
+    r"gh[apousr]_[A-Za-z0-9_]{8,}|"
+    r"github_pat_[A-Za-z0-9_]{8,}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
+    r"sk-ant-[A-Za-z0-9_-]{8,}|"
+    r"AIza[A-Za-z0-9_-]{12,}|"
+    r"xox[baprs]-[A-Za-z0-9-]{8,}"
+    r")(?![A-Za-z0-9])"
+)
 
 
 @dataclass
@@ -638,6 +655,7 @@ class PullRequestMonitorRunner:
                     remote_branch=remote_branch,
                     compose_project=compose_project,
                     compose_file=compose_file,
+                    monitor_log=monitor_log,
                 )
             except ComposeExecCleanupError as exc:
                 await self._terminate_failed(
@@ -1523,6 +1541,7 @@ class PullRequestMonitorRunner:
         remote_branch: str,
         compose_project: str,
         compose_file: Path,
+        monitor_log: WorkspaceLogSink | None = None,
     ) -> None:
         """Implements the commit-then-push-on-settle behaviour from the plan.
 
@@ -1568,14 +1587,13 @@ class PullRequestMonitorRunner:
                     repo=repo, pr_number=pr_number, base_behind_count=0
                 )
             except GitHubClientError as exc:
-                if _is_transient_github_client_error(exc):
-                    _log.warning(
-                        "monitor.github_transient_error_during_fix_cycle",
-                        workspace_id=workspace_id,
-                        pr_number=pr_number,
-                        operation=exc.operation,
-                        stderr=exc.stderr[:400],
-                    )
+                if await self._wait_after_transient_github_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="fix_cycle_settle_fetch_pr_status",
+                    monitor_log=monitor_log,
+                ):
                     break
                 raise
             new_threads = [
@@ -1620,6 +1638,15 @@ class PullRequestMonitorRunner:
             try:
                 await self._deps.gh.resolve_thread(thread_id=tid)
             except GitHubClientError as exc:
+                if await self._wait_after_transient_github_error(
+                    exc,
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    context="resolve_thread",
+                    monitor_log=monitor_log,
+                ):
+                    state.threads_addressed_ids.pop(tid, None)
+                    continue
                 _log.warning(
                     "monitor.resolve_thread_failed",
                     thread_id=tid,
@@ -2035,28 +2062,35 @@ class PullRequestMonitorRunner:
         if not _is_transient_github_client_error(exc):
             return False
         wait_seconds = self._config.poll_interval_seconds
+        payload = _transient_github_retry_payload(
+            exc,
+            context=context,
+            pr_number=pr_number,
+            wait_seconds=wait_seconds,
+        )
         _log.warning(
             "monitor.github_transient_error_retrying",
             workspace_id=workspace_id,
-            pr_number=pr_number,
-            context=context,
-            operation=exc.operation,
-            returncode=exc.returncode,
-            stderr=exc.stderr[:400],
-            wait_seconds=wait_seconds,
+            **payload,
         )
         await self._write_monitor_log(
             monitor_log,
             {
                 "event": "monitor.github_transient_error_retrying",
                 "workspace_id": workspace_id,
-                "pr_number": pr_number,
-                "context": context,
-                "operation": exc.operation,
-                "returncode": exc.returncode,
-                "message": str(exc)[:400],
-                "wait_seconds": wait_seconds,
+                "reason_code": _GITHUB_TRANSIENT_RETRY_REASON,
+                **payload,
             },
+        )
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type="monitor.github_transient_error_retrying",
+                    reason_code=_GITHUB_TRANSIENT_RETRY_REASON,
+                    payload=payload,
+                )
+            ],
         )
         await self._deps.sleep(wait_seconds)
         return True
@@ -2396,6 +2430,16 @@ class PullRequestMonitorRunner:
                 error=repr(exc)[:400],
             )
             return
+        if not result.plan.candidates and result.plan.preserved:
+            preserved = result.plan.preserved[0]
+            _log.info(
+                "monitor.filesystem_gc_deferred",
+                workspace_id=workspace_id,
+                reason_code=preserved.reason_code,
+                age_hours=preserved.age_hours,
+                retention_hours=result.plan.min_age_hours,
+            )
+            return
         if result.delete_errors:
             _log.warning(
                 "monitor.filesystem_gc_failed",
@@ -2648,6 +2692,33 @@ def _merge_rejection_reason(stderr: str) -> str:
     if detail:
         return f"GitHub rejected the merge attempt: {detail}"
     return "GitHub rejected the merge attempt"
+
+
+def _transient_github_retry_payload(
+    exc: GitHubClientError,
+    *,
+    context: str,
+    pr_number: int,
+    wait_seconds: float,
+) -> dict[str, object]:
+    return {
+        "context": context,
+        "operation": exc.operation,
+        "returncode": exc.returncode,
+        "pr_number": pr_number,
+        "wait_seconds": wait_seconds,
+        "message": _redact_and_truncate_github_error(str(exc)),
+        "stderr": _redact_and_truncate_github_error(exc.stderr),
+    }
+
+
+def _redact_and_truncate_github_error(value: str, *, limit: int = 400) -> str:
+    redacted = _URL_CREDENTIAL_RE.sub(r"\1<redacted>@", value)
+    redacted = _AUTHORIZATION_BEARER_RE.sub(r"\1<redacted>", redacted)
+    redacted = _TOKEN_RE.sub(_REDACTION, redacted).strip()
+    if len(redacted) <= limit:
+        return redacted
+    return redacted[: limit - 3] + "..."
 
 
 def _is_transient_github_client_error(exc: GitHubClientError) -> bool:
