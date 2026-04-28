@@ -2201,9 +2201,9 @@ class PullRequestMonitorRunner:
                 )
                 await s.commit()
                 return
-            await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
             if pr_merge_sha:
                 ws.pr_merge_sha = pr_merge_sha
+            await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
             await s.commit()
         if repo_url and base_branch:
             await self._reconcile_target_branch_after_merge(
