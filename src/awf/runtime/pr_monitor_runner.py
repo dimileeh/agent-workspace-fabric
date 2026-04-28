@@ -96,7 +96,7 @@ Verdict = str  # "fix_committed" | "false_positive" | "defer" | "agent_failed"
 class PostMergeTargetReconciler(Protocol):
     """Best-effort target-branch repair hook invoked after a PR is merged."""
 
-    async def __call__(
+    async def __call__(  # pragma: no cover - Protocol declaration only.
         self, *, repo_url: str, branch: str, workspace_id: str
     ) -> object: ...
 
@@ -165,6 +165,14 @@ class _RunnerDeps:
     sleep: Callable[[float], Awaitable[None]]
     log_store: LogStore | None = None
     post_merge_target_reconciler: PostMergeTargetReconciler | None = None
+
+
+@dataclass(frozen=True)
+class _MergeGateResult:
+    workspace: Workspace
+    stale_reason: str | None = None
+    req_action: str | None = None
+    notify_message: str | None = None
 
 
 class PullRequestMonitorRunner:
@@ -630,199 +638,23 @@ class PullRequestMonitorRunner:
             return False
 
         if isinstance(action, Merge):
-            from awf.runtime.merge_eligibility import compute_stale_reason
-
-            ws = await self._load_workspace(workspace_id)
-            stale_reason, req_action = compute_stale_reason(ws)
-
-            # Manual-merge mode short-circuits to Abort regardless of
-            # grace state — operator-driven workspaces never dispatch
-            # automated recovery.
-            if stale_reason is not None and not ws.auto_merge:
-                return await self._execute(
-                    action=Abort(AbortReason.stale),
-                    workspace_id=workspace_id,
-                    repo_url=repo_url,
-                    repo=repo,
-                    pr_number=pr_number,
-                    status=status,
-                    state=state,
-                    base_branch=base_branch,
-                    remote_branch=remote_branch,
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    monitor_log=monitor_log,
-                )
-
-            # An unrecoverable failed rebase still needs human eyes —
-            # grace cannot fix it.
-            if stale_reason is not None and req_action == "rebase":
-                has_failed_rebase = any(
-                    op.type == "rebase" and op.status == "failed" for op in ws.operations
-                )
-                if has_failed_rebase:
-                    return await self._execute(
-                        action=NotifyHuman(
-                            message=(
-                                f"Agent could not resolve {stale_reason}. "
-                                "Rebase conflicted. Manual intervention required."
-                            )
-                        ),
-                        workspace_id=workspace_id,
-                        repo_url=repo_url,
-                        repo=repo,
-                        pr_number=pr_number,
-                        status=status,
-                        state=state,
-                        base_branch=base_branch,
-                        remote_branch=remote_branch,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        monitor_log=monitor_log,
-                    )
-
-            # Initial-review grace wins over recovery dispatch. Otherwise
-            # the workspace would leave ``monitoring_pr`` and re-enter
-            # the executor pipeline before slow first-pass reviewers had
-            # any chance to comment — defeating the contract added with
-            # the grace window.
-            grace_wait_seconds = _initial_review_grace_wait_seconds(
-                state,
+            merge_gate = await self._merge_gate_for_workspace(workspace_id)
+            handled = await self._handle_merge_gate_blocker(
+                gate=merge_gate,
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                repo=repo,
                 pr_number=pr_number,
-                now=time.monotonic(),
-                grace_seconds=self._config.initial_review_grace_period_seconds,
-                poll_interval_seconds=self._config.poll_interval_seconds,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                monitor_log=monitor_log,
             )
-            if grace_wait_seconds > 0:
-                if stale_reason is not None:
-                    grace_defer_payload: dict[str, object] = {
-                        "stale_reason": stale_reason,
-                        "req_action": req_action,
-                        "wait_seconds": grace_wait_seconds,
-                        "grace_seconds": (
-                            self._config.initial_review_grace_period_seconds
-                        ),
-                        "pr_number": pr_number,
-                        "head_sha": status.head_sha,
-                    }
-                    _log.info(
-                        "monitor.grace_defers_recovery",
-                        workspace_id=workspace_id,
-                        **grace_defer_payload,
-                    )
-                    await self._write_monitor_log(
-                        monitor_log,
-                        {
-                            "event": "monitor.grace_defers_recovery",
-                            "workspace_id": workspace_id,
-                            **grace_defer_payload,
-                        },
-                    )
-                    await self._append_workspace_events(
-                        workspace_id=workspace_id,
-                        events=[
-                            WorkspaceEventCreate(
-                                event_type="monitor.grace_defers_recovery",
-                                reason_code="GRACE_DEFERS_RECOVERY",
-                                payload=grace_defer_payload,
-                            )
-                        ],
-                    )
-                else:
-                    _log.info(
-                        "monitor.initial_review_grace_waiting",
-                        workspace_id=workspace_id,
-                        pr_number=pr_number,
-                        wait_seconds=grace_wait_seconds,
-                        grace_seconds=self._config.initial_review_grace_period_seconds,
-                        head_sha=status.head_sha[:10],
-                    )
-                await self._deps.sleep(grace_wait_seconds)
-                return False
-
-            if stale_reason is not None:
-                # Grace has elapsed (or is disabled) — dispatch recovery.
-                # ``recovery_mode`` discriminates how the executor's
-                # recovery branch handles this row: ``validate_only``
-                # runs validation against the already-committed work,
-                # ``rebase_only`` is reserved for a future slice that
-                # routes the rebase path through here as well. Until
-                # that slice lands the executor only runs validation in
-                # the recovery branch, so the operation type is always
-                # ``validate`` — otherwise a ``rebase``-typed row would
-                # leak forever (the validate finisher queries by type).
-                recovery_mode = (
-                    "rebase_only" if req_action == "rebase" else "validate_only"
-                )
-                operation_payload: dict[str, object] = {
-                    "source": "pr_monitor",
-                    "reason": stale_reason,
-                    "recovery_mode": recovery_mode,
-                }
-                async with self._deps.session_factory() as s:
-                    from awf.db.repositories import OperationRepository, WorkspaceRepository
-
-                    _ws = await WorkspaceRepository(s).get(workspace_id)
-                    if _ws is not None:
-                        # Idempotency: if a pr_monitor recovery op is
-                        # already active for this workspace, skip the
-                        # dispatch so a runner restart cannot create a
-                        # duplicate row before the executor finishes
-                        # the prior one.
-                        active_recovery = any(
-                            op.status
-                            in (
-                                OperationStatus.pending.value,
-                                OperationStatus.running.value,
-                            )
-                            and isinstance(op.payload, dict)
-                            and op.payload.get("source") == "pr_monitor"
-                            for op in _ws.operations
-                        )
-                        if active_recovery:
-                            return True
-                        await OperationRepository(s).create(
-                            workspace_id=workspace_id,
-                            operation_type="validate",
-                            payload=operation_payload,
-                        )
-                        await WorkspaceRepository(s).transition(
-                            _ws,
-                            to=WorkspaceStatus.ready,
-                            reason_code="RECOVERY_DISPATCH",
-                        )
-                        await s.commit()
-                dispatch_payload: dict[str, object] = {
-                    "pr_number": pr_number,
-                    "head_sha": status.head_sha,
-                    "reason": stale_reason,
-                    "req_action": req_action,
-                    "recovery_mode": recovery_mode,
-                }
-                _log.info(
-                    "monitor.recovery_dispatched",
-                    workspace_id=workspace_id,
-                    **dispatch_payload,
-                )
-                await self._write_monitor_log(
-                    monitor_log,
-                    {
-                        "event": "monitor.recovery_dispatched",
-                        "workspace_id": workspace_id,
-                        **dispatch_payload,
-                    },
-                )
-                await self._append_workspace_events(
-                    workspace_id=workspace_id,
-                    events=[
-                        WorkspaceEventCreate(
-                            event_type="monitor.recovery_dispatched",
-                            reason_code="RECOVERY_DISPATCH",
-                            payload=dispatch_payload,
-                        )
-                    ],
-                )
-                return True
+            if handled is not None:
+                return handled
 
             policy_blocked = await self._refresh_scope_policy_for_merge(
                 workspace_id=workspace_id,
@@ -848,6 +680,27 @@ class PullRequestMonitorRunner:
                     compose_file=compose_file,
                     monitor_log=monitor_log,
                 )
+
+            merge_gate = await self._merge_gate_for_workspace(
+                workspace_id,
+                check_policy=True,
+            )
+            handled = await self._handle_merge_gate_blocker(
+                gate=merge_gate,
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                monitor_log=monitor_log,
+            )
+            if handled is not None:
+                return handled
 
             queue_blockers = await self._merge_queue_blockers_for_workspace(workspace_id)
             if queue_blockers:
@@ -879,6 +732,7 @@ class PullRequestMonitorRunner:
             recheck_error: GitHubClientError | None = None
             merge_status = status
             queue_blockers_after_lock: list[MergeQueueBlocker] = []
+            merge_gate_after_lock: _MergeGateResult | None = None
             async with self._merge_coordinator.serialized_merge(
                 repo_url=repo_url,
                 base_branch=base_branch,
@@ -932,6 +786,15 @@ class PullRequestMonitorRunner:
                         workspace_id
                     )
                     if not queue_blockers_after_lock:
+                        merge_gate_after_lock = await self._merge_gate_for_workspace(
+                            workspace_id,
+                            check_policy=True,
+                        )
+                    if (
+                        not queue_blockers_after_lock
+                        and merge_gate_after_lock is not None
+                        and not _merge_gate_blocks(merge_gate_after_lock)
+                    ):
                         try:
                             merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
                         except GitHubClientError as exc:
@@ -949,6 +812,27 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                 )
                 return False
+
+            if merge_gate_after_lock is not None and _merge_gate_blocks(
+                merge_gate_after_lock
+            ):
+                handled = await self._handle_merge_gate_blocker(
+                    gate=merge_gate_after_lock,
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=merge_status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                )
+                if handled is None:  # pragma: no cover - defensive invariant
+                    raise RuntimeError("merge gate blocker was not handled")
+                return handled
 
             if recheck_error is not None:
                 if await self._wait_after_transient_github_error(
@@ -1078,6 +962,318 @@ class PullRequestMonitorRunner:
             )
             await s.commit()
         return bool(result and result.policy_blocked)
+
+    async def _merge_gate_for_workspace(
+        self,
+        workspace_id: str,
+        *,
+        check_policy: bool = False,
+    ) -> _MergeGateResult:
+        from awf.db.repositories import (
+            MergeCandidateRepository,
+            PolicyFindingRepository,
+            StaleReasonRepository,
+            WorkspaceRepository,
+            sync_candidate_readiness,
+        )
+        from awf.runtime.merge_eligibility import (
+            VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+            compute_stale_reason_for_attempt,
+        )
+
+        async with self._deps.session_factory() as s:
+            candidate = await MergeCandidateRepository(
+                s
+            ).get_open_for_workspace_with_merge_inputs(workspace_id)
+            if candidate is None:
+                ws = await WorkspaceRepository(s).get_with_validation_runs(workspace_id)
+                if ws is None:  # pragma: no cover - defensive invariant
+                    raise RuntimeError(f"workspace {workspace_id} disappeared mid-monitor")
+                return _MergeGateResult(
+                    workspace=ws,
+                    notify_message=(
+                        "AWF could not find an open merge candidate for this "
+                        "workspace. Auto-merge is blocked until candidate "
+                        "provenance is repaired."
+                    ),
+                )
+
+            ws = candidate.workspace
+            active_stale_reasons = await StaleReasonRepository(s).list_active_for_candidate(
+                candidate.id
+            )
+            active_policy_findings = await PolicyFindingRepository(
+                s
+            ).list_active_for_candidate(candidate.id)
+            validation_reason, validation_action = compute_stale_reason_for_attempt(
+                ws,
+                attempt_id=candidate.attempt_id,
+            )
+
+            persisted_stale_reason = candidate.stale_reason if candidate.stale else None
+            if (
+                validation_reason is None
+                and persisted_stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+            ):
+                persisted_stale_reason = None
+            active_stale_reason = (
+                active_stale_reasons[0].reason_code if active_stale_reasons else None
+            )
+            stale_reason = validation_reason or active_stale_reason or persisted_stale_reason
+            req_action = (
+                validation_action
+                if validation_reason is not None
+                else _candidate_stale_required_action(stale_reason)
+            )
+            notify_message: str | None = None
+
+            if not candidate.attempt.is_canonical_for_merge:
+                notify_message = (
+                    "AWF blocked auto-merge because this PR is no longer the "
+                    "canonical attempt for its task."
+                )
+            elif not ws.auto_merge:
+                notify_message = "AWF blocked auto-merge because auto_merge is disabled."
+            elif check_policy and (candidate.policy_blocked or any(
+                finding.severity == "blocking" for finding in active_policy_findings
+            )):
+                notify_message = (
+                    "OUT_OF_SCOPE_CHANGE: changed files outside declared "
+                    "owned_paths require an operator scope decision."
+                )
+
+            if validation_reason is not None:
+                candidate.stale = True
+                candidate.stale_reason = validation_reason
+            elif active_stale_reason is not None:
+                candidate.stale = True
+                candidate.stale_reason = active_stale_reason
+            elif candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON:
+                candidate.stale = False
+                candidate.stale_reason = None
+
+            sync_candidate_readiness(
+                candidate,
+                workspace=ws,
+                attempt=candidate.attempt,
+                sync_validation_staleness=False,
+            )
+            await s.commit()
+
+            return _MergeGateResult(
+                workspace=ws,
+                stale_reason=stale_reason,
+                req_action=req_action,
+                notify_message=notify_message,
+            )
+
+    async def _handle_merge_gate_blocker(
+        self,
+        *,
+        gate: _MergeGateResult,
+        workspace_id: str,
+        repo_url: str,
+        repo: RepoRef,
+        pr_number: int,
+        status: PRStatus,
+        state: MonitorState,
+        base_branch: str,
+        remote_branch: str,
+        compose_project: str,
+        compose_file: Path,
+        monitor_log: WorkspaceLogSink | None,
+    ) -> bool | None:
+        stale_reason = gate.stale_reason
+        req_action = gate.req_action
+        ws = gate.workspace
+
+        # Manual-merge mode short-circuits to Abort regardless of grace
+        # state — operator-driven workspaces never dispatch automated
+        # recovery.
+        if stale_reason is not None and not ws.auto_merge:
+            return await self._execute(
+                action=Abort(AbortReason.stale),
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                monitor_log=monitor_log,
+            )
+
+        # An unrecoverable failed rebase still needs human eyes — grace
+        # cannot fix it.
+        if stale_reason is not None and req_action == "rebase":
+            has_failed_rebase = any(
+                op.type == "rebase" and op.status == "failed" for op in ws.operations
+            )
+            if has_failed_rebase:
+                return await self._execute(
+                    action=NotifyHuman(
+                        message=(
+                            f"Agent could not resolve {stale_reason}. "
+                            "Rebase conflicted. Manual intervention required."
+                        )
+                    ),
+                    workspace_id=workspace_id,
+                    repo_url=repo_url,
+                    repo=repo,
+                    pr_number=pr_number,
+                    status=status,
+                    state=state,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    monitor_log=monitor_log,
+                )
+
+        # Initial-review grace wins over recovery dispatch. Otherwise the
+        # workspace would leave ``monitoring_pr`` and re-enter the executor
+        # pipeline before slow first-pass reviewers had any chance to
+        # comment.
+        grace_wait_seconds = _initial_review_grace_wait_seconds(
+            state,
+            pr_number=pr_number,
+            now=time.monotonic(),
+            grace_seconds=self._config.initial_review_grace_period_seconds,
+            poll_interval_seconds=self._config.poll_interval_seconds,
+        )
+        if grace_wait_seconds > 0:
+            if stale_reason is not None:
+                grace_defer_payload: dict[str, object] = {
+                    "stale_reason": stale_reason,
+                    "req_action": req_action,
+                    "wait_seconds": grace_wait_seconds,
+                    "grace_seconds": self._config.initial_review_grace_period_seconds,
+                    "pr_number": pr_number,
+                    "head_sha": status.head_sha,
+                }
+                _log.info(
+                    "monitor.grace_defers_recovery",
+                    workspace_id=workspace_id,
+                    **grace_defer_payload,
+                )
+                await self._write_monitor_log(
+                    monitor_log,
+                    {
+                        "event": "monitor.grace_defers_recovery",
+                        "workspace_id": workspace_id,
+                        **grace_defer_payload,
+                    },
+                )
+                await self._append_workspace_events(
+                    workspace_id=workspace_id,
+                    events=[
+                        WorkspaceEventCreate(
+                            event_type="monitor.grace_defers_recovery",
+                            reason_code="GRACE_DEFERS_RECOVERY",
+                            payload=grace_defer_payload,
+                        )
+                    ],
+                )
+            else:
+                _log.info(
+                    "monitor.initial_review_grace_waiting",
+                    workspace_id=workspace_id,
+                    pr_number=pr_number,
+                    wait_seconds=grace_wait_seconds,
+                    grace_seconds=self._config.initial_review_grace_period_seconds,
+                    head_sha=status.head_sha[:10],
+                )
+            await self._deps.sleep(grace_wait_seconds)
+            return False
+
+        if stale_reason is not None:
+            recovery_mode = "rebase_only" if req_action == "rebase" else "validate_only"
+            operation_payload: dict[str, object] = {
+                "source": "pr_monitor",
+                "reason": stale_reason,
+                "recovery_mode": recovery_mode,
+            }
+            async with self._deps.session_factory() as s:
+                from awf.db.repositories import OperationRepository, WorkspaceRepository
+
+                _ws = await WorkspaceRepository(s).get(workspace_id)
+                if _ws is None:  # pragma: no cover - defensive invariant
+                    return True
+                active_recovery = any(
+                    op.status
+                    in (
+                        OperationStatus.pending.value,
+                        OperationStatus.running.value,
+                    )
+                    and isinstance(op.payload, dict)
+                    and op.payload.get("source") == "pr_monitor"
+                    for op in _ws.operations
+                )
+                if active_recovery:
+                    return True
+                await OperationRepository(s).create(
+                    workspace_id=workspace_id,
+                    operation_type="validate",
+                    payload=operation_payload,
+                )
+                await WorkspaceRepository(s).transition(
+                    _ws,
+                    to=WorkspaceStatus.ready,
+                    reason_code="RECOVERY_DISPATCH",
+                )
+                await s.commit()
+            dispatch_payload: dict[str, object] = {
+                "pr_number": pr_number,
+                "head_sha": status.head_sha,
+                "reason": stale_reason,
+                "req_action": req_action,
+                "recovery_mode": recovery_mode,
+            }
+            _log.info(
+                "monitor.recovery_dispatched",
+                workspace_id=workspace_id,
+                **dispatch_payload,
+            )
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.recovery_dispatched",
+                    "workspace_id": workspace_id,
+                    **dispatch_payload,
+                },
+            )
+            await self._append_workspace_events(
+                workspace_id=workspace_id,
+                events=[
+                    WorkspaceEventCreate(
+                        event_type="monitor.recovery_dispatched",
+                        reason_code="RECOVERY_DISPATCH",
+                        payload=dispatch_payload,
+                    )
+                ],
+            )
+            return True
+
+        if gate.notify_message is not None:
+            return await self._execute(
+                action=NotifyHuman(message=gate.notify_message),
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                repo=repo,
+                pr_number=pr_number,
+                status=status,
+                state=state,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                monitor_log=monitor_log,
+            )
+
+        return None
 
     async def _record_merge_coordination_event(
         self,
@@ -2302,6 +2498,18 @@ def _notification_key(*, head_sha: str, blocker_reason: str | None) -> str:
 
 def _merge_queue_wait_key(*, head_sha: str, blocker_candidate_id: str) -> str:
     return f"__awf_merge_queue_wait__:{head_sha}:{blocker_candidate_id}"
+
+
+def _merge_gate_blocks(gate: _MergeGateResult) -> bool:
+    return gate.stale_reason is not None or gate.notify_message is not None
+
+
+def _candidate_stale_required_action(reason: str | None) -> str | None:
+    if reason is None:
+        return None
+    if reason == "validation_insufficient_tier":
+        return "validate"
+    return "rebase"
 
 
 def _initial_review_grace_started_key(pr_number: int) -> str:

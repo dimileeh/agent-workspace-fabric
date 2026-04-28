@@ -22,7 +22,12 @@ from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import (
+    TaskAttemptRepository,
+    TaskRepository,
+    ValidationRunRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import MonitorConfig, MonitorState
 from awf.runtime.pr_monitor_runner import (
@@ -190,6 +195,25 @@ async def _seed_monitoring_workspace(
             test_commands=["pytest -q"],
             requires_database=False,
         )
+        attempt = await TaskAttemptRepository(s).create_for_workspace(
+            task=await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=ws.task_external_id,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            ),
+            workspace=ws,
+        )
+        ws.branch_name = branch_name or f"awf/{ws.id}"
+        ws.remote_push_branch = remote_push_branch or ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
+        ws.pr_number = pr_number
         # Walk requested → provisioning → ready → running → validating → pushing → monitoring_pr
         for target in (
             WorkspaceStatus.provisioning,
@@ -200,12 +224,22 @@ async def _seed_monitoring_workspace(
             WorkspaceStatus.monitoring_pr,
         ):
             await repo.transition(ws, to=target, reason_code="X")
-        ws.branch_name = branch_name or f"awf/{ws.id}"
-        ws.remote_push_branch = remote_push_branch or ws.branch_name
-        ws.base_commit = "a" * 40
-        ws.compose_project_name = f"awf_{ws.id}"
-        ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
-        ws.pr_number = pr_number
+        validation_repo = ValidationRunRepository(s)
+        validation_run = await validation_repo.start(
+            workspace_id=ws.id,
+            attempt_id=attempt.id,
+            tier=1,
+            commands=[],
+            base_commit=ws.base_commit,
+            target_branch=ws.remote_push_branch,
+            target_head_sha="abc123",
+            log_stream_refs={},
+        )
+        await validation_repo.finish(
+            validation_run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+        )
         await s.commit()
         return ws.id
 

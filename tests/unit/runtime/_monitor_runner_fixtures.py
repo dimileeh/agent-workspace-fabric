@@ -23,7 +23,14 @@ from awf.adapters.base import AgentAdapter, AgentRunError, AgentRunResult
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import GitHubClient
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    ValidationRunRepository,
+    WorkspaceRepository,
+    sync_candidate_readiness,
+)
 from awf.runtime.logs import LogStore
 from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
@@ -192,6 +199,7 @@ async def seed_monitoring_workspace(
     factory: async_sessionmaker[AsyncSession],
     *,
     pr_number: int = 42,
+    head_sha: str = "abc1234567890def",
 ) -> str:
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -219,6 +227,45 @@ async def seed_monitoring_workspace(
         ws.compose_project_name = f"awf_{ws.id}"
         ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
         ws.pr_number = pr_number
+        task = await TaskRepository(s).create_or_get(
+            repo_url=ws.repo_url,
+            base_branch=ws.branch_base,
+            title=ws.task_title,
+            prompt=ws.task_prompt,
+            external_id=ws.task_external_id,
+            idempotency_key=None,
+            task_class=ws.task_class,
+            owned_paths=list(ws.owned_paths),
+        )
+        attempt = await TaskAttemptRepository(s).create_for_workspace(
+            task=task,
+            workspace=ws,
+        )
+        attempt.is_canonical_for_merge = True
+        candidate = await MergeCandidateRepository(s).create_or_update_open_for_attempt(
+            task=task,
+            attempt=attempt,
+            workspace=ws,
+            head_sha=head_sha,
+            base_sha=ws.base_commit,
+        )
+        validation_repo = ValidationRunRepository(s)
+        validation_run = await validation_repo.start(
+            workspace_id=ws.id,
+            attempt_id=attempt.id,
+            tier=1,
+            commands=[],
+            base_commit=ws.base_commit,
+            target_branch=ws.remote_push_branch,
+            target_head_sha=head_sha,
+            log_stream_refs={},
+        )
+        await validation_repo.finish(
+            validation_run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+        )
+        sync_candidate_readiness(candidate, workspace=ws, attempt=attempt)
         await s.commit()
         return ws.id
 

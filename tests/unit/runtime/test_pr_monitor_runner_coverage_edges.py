@@ -15,6 +15,7 @@ from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.base import Base
 from awf.db.enums import OperationType, TaskClass, WorkspaceStatus
+from awf.db.models import Workspace
 from awf.db.repositories import OperationRepository, WorkspaceEventCreate, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import (
@@ -38,6 +39,7 @@ from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     PullRequestMonitorRunner,
     _as_utc,
+    _candidate_stale_required_action,
     _collect_defer_items,
     _initial_review_grace_done_key,
     _initial_review_grace_started_key,
@@ -785,6 +787,39 @@ async def test_transient_human_notification_comment_error_retries_without_crashi
 
 
 @pytest.mark.unit
+async def test_non_transient_human_notification_comment_error_raises(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=1, stderr="bad credentials")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(GitHubClientError, match="bad credentials"):
+        await runner._execute(
+            action=NotifyHuman(message="manual review needed"),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_status_for_helpers(),
+            state=MonitorState(),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+
+@pytest.mark.unit
 async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -831,6 +866,76 @@ async def test_fix_cycle_treats_transient_settle_poll_as_retryable(
         ["git", "-C", str(tmp_path / "worktrees" / "ws_retry")],
         ["gh", "api", "graphql"],
     ]
+
+
+@pytest.mark.unit
+async def test_fix_cycle_reraises_non_transient_settle_poll_error(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="Committed fix locally.")
+    cmd.queue_result(returncode=1, stderr="bad credentials")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_auth",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="reviewer",
+    )
+
+    with pytest.raises(GitHubClientError, match="bad credentials"):
+        await runner._run_fix_cycle(
+            workspace_id="ws_auth",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            initial_threads=(thread,),
+            initial_reviews=(),
+            state=MonitorState(),
+            remote_branch="awf/ws_auth",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+
+@pytest.mark.unit
+async def test_fix_cycle_zero_passes_still_runs_push(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stderr="Everything up-to-date")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    object.__setattr__(runner._runner_config, "max_fix_cycle_passes", 0)
+
+    await runner._run_fix_cycle(
+        workspace_id="ws_zero_pass",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        initial_threads=(),
+        initial_reviews=(),
+        state=MonitorState(),
+        remote_branch="awf/ws_zero_pass",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert len(cmd.calls) == 1
+    assert cmd.calls[0].args[:2] == ["git", "-C"]
 
 
 @pytest.mark.unit
@@ -1505,6 +1610,104 @@ async def test_load_and_persist_state_convert_monitor_timestamps(
 
 
 @pytest.mark.unit
+async def test_load_and_persist_state_handles_workspace_without_pr_number(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _update_workspace(
+        factory,
+        workspace_id,
+        pr_number=None,
+        monitor_started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        monitor_threads_addressed={"review-1": "false_positive"},
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    ws = await runner._load_workspace(workspace_id)
+    state = runner._load_state(ws)
+    state.iter_count = 3
+    await runner._persist_state(workspace_id, state)
+
+    async with factory() as s:
+        persisted = await WorkspaceRepository(s).get(workspace_id)
+        assert persisted is not None
+        assert persisted.monitor_iter_count == 3
+        assert persisted.monitor_threads_addressed == {"review-1": "false_positive"}
+
+
+@pytest.mark.unit
+def test_load_state_normalizes_naive_started_at_without_database(
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=None,  # type: ignore[arg-type]
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    workspace = Workspace(
+        id="ws_naive_started",
+        status=WorkspaceStatus.monitoring_pr.value,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        branch_base="development",
+        task_title="naive",
+        task_prompt="x",
+        agent="claude_code",
+        test_commands=[],
+        monitor_started_at=datetime(2026, 4, 27, 12, 0),
+        pr_number=None,
+    )
+
+    state = runner._load_state(workspace)
+    aware_workspace = Workspace(
+        id="ws_aware_started",
+        status=WorkspaceStatus.monitoring_pr.value,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        branch_base="development",
+        task_title="aware",
+        task_prompt="x",
+        agent="claude_code",
+        test_commands=[],
+        monitor_started_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        pr_number=None,
+    )
+    aware_state = runner._load_state(aware_workspace)
+
+    assert state.started_at > 0
+    assert aware_state.started_at > 0
+
+
+@pytest.mark.unit
+async def test_terminate_completed_without_optional_merge_cleanup_inputs(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._terminate_completed(workspace_id, pr_merge_sha=None)
+
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.completed.value
+
+
+@pytest.mark.unit
 async def test_compose_teardown_runner_exception_is_swallowed(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -1736,3 +1939,10 @@ def test_target_reconcile_payload_supports_dict_to_dict_and_fallback() -> None:
     assert _target_reconcile_payload(bad) == {"result": str(bad)}
     non_callable = _NonCallableToDict()
     assert _target_reconcile_payload(non_callable) == {"result": str(non_callable)}
+
+
+@pytest.mark.unit
+def test_candidate_stale_required_action_maps_validation_reason() -> None:
+    assert _candidate_stale_required_action(None) is None
+    assert _candidate_stale_required_action("validation_insufficient_tier") == "validate"
+    assert _candidate_stale_required_action("STALE_TARGET_ADVANCED") == "rebase"

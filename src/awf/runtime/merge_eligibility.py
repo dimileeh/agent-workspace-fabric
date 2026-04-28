@@ -81,6 +81,49 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
     return None, None
 
 
+def compute_stale_reason_for_attempt(
+    workspace: Workspace,
+    *,
+    attempt_id: str,
+) -> tuple[str | None, str | None]:
+    """Return stale state using validation provenance for one attempt only."""
+    state = inspect(workspace)
+    operations = workspace.operations if "operations" not in state.unloaded else []
+    validation_runs = workspace.validation_runs if "validation_runs" not in state.unloaded else []
+
+    rebase_time = None
+    for op in operations:
+        if (
+            op.type == "rebase"
+            and op.status == "succeeded"
+            and (rebase_time is None or op.created_at > rebase_time)
+        ):
+            rebase_time = op.created_at
+
+    required_tier = _task_class_tier(workspace.task_class)
+    if rebase_time is not None:
+        required_tier = max(required_tier, 2)
+
+    actual_tier = 0
+    for run in validation_runs:
+        if run.attempt_id != attempt_id:
+            continue
+        run_tier = _successful_validation_run_tier(run)
+        if run_tier is None:
+            continue
+
+        completed_at = run.finished_at or run.started_at
+        if rebase_time and completed_at <= rebase_time:
+            continue
+
+        actual_tier = max(actual_tier, run_tier)
+
+    if actual_tier < required_tier:
+        return VALIDATION_INSUFFICIENT_TIER_STALE_REASON, "validate"
+
+    return None, None
+
+
 def _successful_validation_run_tier(run: ValidationRun) -> int | None:
     if run.status != "succeeded":
         return None

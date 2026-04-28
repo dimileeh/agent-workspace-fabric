@@ -12,7 +12,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import MonitorState, NotifyHuman
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -97,6 +97,22 @@ async def _seed_monitoring_candidate_workspace(
         workspace.pr_url = "https://github.com/dimileeh/aira-web/pull/42"
         workspace.pr_number = 42
         await repo.transition(workspace, to=WorkspaceStatus.monitoring_pr, reason_code="PR_OPENED")
+        validation_repo = ValidationRunRepository(session)
+        validation_run = await validation_repo.start(
+            workspace_id=workspace.id,
+            attempt_id=attempt.id,
+            tier=1,
+            commands=[],
+            base_commit=workspace.base_commit,
+            target_branch=workspace.remote_push_branch,
+            target_head_sha="abc1234567890def",
+            log_stream_refs={},
+        )
+        await validation_repo.finish(
+            validation_run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+        )
         await session.commit()
         return workspace.id, attempt.id
 

@@ -271,6 +271,7 @@ async def _load_candidate(session: AsyncSession, candidate_id: str) -> MergeCand
         .options(
             selectinload(MergeCandidate.attempt),
             selectinload(MergeCandidate.workspace).selectinload(Workspace.operations),
+            selectinload(MergeCandidate.workspace).selectinload(Workspace.validation_runs),
             selectinload(MergeCandidate.workspace).selectinload(Workspace.policy_findings),
             selectinload(MergeCandidate.task),
         )

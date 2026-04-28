@@ -28,7 +28,12 @@ from awf.db.enums import (
     TaskClass,
     WorkspaceStatus,
 )
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import MonitorConfig
 from awf.runtime.pr_monitor_runner import (
@@ -150,10 +155,36 @@ async def _seed_monitoring_workspace(
             branch_base="development",
             task_title="recovery cycle",
             task_prompt="implement-thing",
+            task_class=TaskClass.refactor_task.value,
             agent="claude_code",
             test_commands=["pytest -q"],
             requires_database=False,
         )
+        await TaskAttemptRepository(s).create_for_workspace(
+            task=await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=ws.task_external_id,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            ),
+            workspace=ws,
+        )
+        ws.branch_name = f"awf/{ws.id}"
+        ws.remote_push_branch = ws.branch_name
+        ws.base_commit = "a" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
+        ws.pr_number = pr_number
+        ws.auto_merge = True
+        # Mark the initial-review grace window as already elapsed so the
+        # monitor proceeds straight to recovery dispatch.
+        ws.monitor_threads_addressed = {
+            "__awf_initial_review_grace_done__:42": "elapsed",
+        }
         for target in (
             WorkspaceStatus.provisioning,
             WorkspaceStatus.ready,
@@ -163,19 +194,6 @@ async def _seed_monitoring_workspace(
             WorkspaceStatus.monitoring_pr,
         ):
             await repo.transition(ws, to=target, reason_code="X")
-        ws.branch_name = f"awf/{ws.id}"
-        ws.remote_push_branch = ws.branch_name
-        ws.base_commit = "a" * 40
-        ws.compose_project_name = f"awf_{ws.id}"
-        ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
-        ws.pr_number = pr_number
-        ws.task_class = TaskClass.refactor_task.value
-        ws.auto_merge = True
-        # Mark the initial-review grace window as already elapsed so the
-        # monitor proceeds straight to recovery dispatch.
-        ws.monitor_threads_addressed = {
-            "__awf_initial_review_grace_done__:42": "elapsed",
-        }
         await s.commit()
         return ws.id
 
