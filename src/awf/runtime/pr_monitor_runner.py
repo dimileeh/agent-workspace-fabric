@@ -28,7 +28,7 @@ import json
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -45,8 +45,8 @@ from awf.common.compose_exec import (
 )
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
-from awf.db.enums import FailureReason, OperationStatus, WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Operation, Workspace
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
 from awf.runtime.logs import LogStore, WorkspaceLogSink
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
@@ -1139,8 +1139,22 @@ class PullRequestMonitorRunner:
         # An unrecoverable failed rebase still needs human eyes — grace
         # cannot fix it.
         if stale_reason is not None and req_action == "rebase":
+            latest_remonitor_at = _latest_successful_remonitor_at(ws.operations)
             has_failed_rebase = any(
-                op.type == "rebase" and op.status == "failed" for op in ws.operations
+                (
+                    op.type == "rebase"
+                    or (
+                        isinstance(op.payload, dict)
+                        and op.payload.get("source") == "pr_monitor"
+                        and op.payload.get("recovery_mode") == "rebase_only"
+                    )
+                )
+                and op.status == "failed"
+                and (
+                    latest_remonitor_at is None
+                    or _operation_observed_at(op) > latest_remonitor_at
+                )
+                for op in ws.operations
             )
             if has_failed_rebase:
                 return await self._execute(
@@ -2844,6 +2858,25 @@ def _pr_monitor_recovery_reason_code(stale_reason: str) -> str:
         return mapped
     reason_code = re.sub(r"[^A-Za-z0-9]+", "_", stale_reason).strip("_").upper()
     return reason_code or "STALE"
+
+
+def _latest_successful_remonitor_at(operations: Iterable[Operation]) -> datetime | None:
+    remonitor_times = [
+        _operation_observed_at(op)
+        for op in operations
+        if op.type == OperationType.remonitor.value
+        and op.status == OperationStatus.succeeded.value
+    ]
+    return max(remonitor_times, default=None)
+
+
+def _operation_observed_at(operation: Operation) -> datetime:
+    return (
+        operation.finished_at
+        or operation.started_at
+        or operation.created_at
+        or datetime.min.replace(tzinfo=UTC)
+    )
 
 
 def _initial_review_grace_started_key(pr_number: int) -> str:

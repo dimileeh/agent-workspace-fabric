@@ -183,6 +183,24 @@ def _queue_push_and_pr(
     fake.queue_result(returncode=0, stdout=pr_url)  # gh pr create
 
 
+def _queue_rebase_recovery(fake: FakeCommandRunner) -> None:
+    fake.queue_result(returncode=0)  # git fetch origin <base>
+    fake.queue_result(returncode=0)  # git switch <branch>
+    fake.queue_result(returncode=1)  # git merge-base --is-ancestor origin/<base> HEAD
+    fake.queue_result(returncode=0)  # git rebase origin/<base>
+    fake.queue_result(returncode=0, stdout="b" * 40 + "\n")  # rev-parse origin/<base>
+    fake.queue_result(returncode=0, stdout="c" * 40 + "\n")  # rev-parse HEAD
+    fake.queue_result(returncode=0)  # git push --force-with-lease
+
+
+def _queue_already_synced_rebase_recovery(fake: FakeCommandRunner) -> None:
+    fake.queue_result(returncode=0)  # git fetch origin <base>
+    fake.queue_result(returncode=0)  # git switch <branch>
+    fake.queue_result(returncode=0)  # git merge-base --is-ancestor origin/<base> HEAD
+    fake.queue_result(returncode=0, stdout="b" * 40 + "\n")  # rev-parse origin/<base>
+    fake.queue_result(returncode=0, stdout="c" * 40 + "\n")  # rev-parse HEAD
+
+
 def _all_adapter_args(fake: FakeCommandRunner) -> list[list[str]]:
     """Every `docker compose exec ... codex ...` invocation."""
     return [c.args for c in fake.calls if "exec" in c.args and "codex" in c.args]
@@ -344,7 +362,9 @@ async def test_executor_recovery_marks_validate_operation_succeeded_on_clean_pas
     pr_monitor_ops = [
         op
         for op in ops
-        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+        if op.type == OperationType.validate.value
+        and isinstance(op.payload, dict)
+        and op.payload.get("source") == "pr_monitor"
     ]
     assert len(pr_monitor_ops) == 1
     op = pr_monitor_ops[0]
@@ -401,25 +421,15 @@ async def test_executor_recovery_closes_operation_row_for_rebase_only_mode(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """When the monitor dispatches recovery with ``recovery_mode='rebase_only'``,
-    the recovery Operation row must still be closed cleanly by the
-    executor's recovery branch.
-
-    Until the future rebase slice lands the runner always creates the
-    recovery op as ``OperationType.validate`` (the executor's recovery
-    branch only runs validation today, and its finisher queries by
-    type). A ``rebase``-typed row would leak forever as ``running`` —
-    the very bug fixed in commit 666cba6. This test guards the contract
-    from the executor side: the ``rebase_only`` payload discriminator
-    must not change which operation rows the executor closes.
-    """
+    """``recovery_mode='rebase_only'`` performs a real rebase/push, then
+    still closes the monitor-created validate operation cleanly."""
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
     ws_id = await _seed_ready_workspace_with_recovery(
         factory, recovery_mode="rebase_only"
     )
 
+    _queue_rebase_recovery(fake)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation
-    _queue_push_and_pr(fake)
 
     await executor.execute(ws_id)
 
@@ -428,19 +438,25 @@ async def test_executor_recovery_closes_operation_row_for_rebase_only_mode(
     pr_monitor_ops = [
         op
         for op in ops
-        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+        if op.type == OperationType.validate.value
+        and isinstance(op.payload, dict)
+        and op.payload.get("source") == "pr_monitor"
     ]
     assert len(pr_monitor_ops) == 1
     op = pr_monitor_ops[0]
     assert op.type == OperationType.validate.value
     assert op.payload is not None
     assert op.payload.get("recovery_mode") == "rebase_only"
+    assert op.payload.get("requested_tier") == 2
     assert op.status == OperationStatus.succeeded.value
     assert isinstance(op.result, dict)
     assert "validation_run_id" in op.result
     assert op.started_at is not None
     assert op.finished_at is not None
     assert op.started_at < op.finished_at
+    rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
+    assert len(rebase_ops) == 1
+    assert rebase_ops[0].status == OperationStatus.succeeded.value
 
 
 @pytest.mark.unit
@@ -666,23 +682,28 @@ async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
 
 
 @pytest.mark.unit
-async def test_rebase_only_recovery_skips_push(
+async def test_rebase_only_recovery_rebases_pushes_and_skips_pr_recreate(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Rebase-only recovery semantics must mirror validate-only: skip push
-    and transition back to monitoring_pr."""
+    """Rebase-only recovery updates the existing PR branch but does not
+    recreate the PR."""
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
     ws_id = await _seed_ready_workspace_with_recovery(
         factory, recovery_mode="rebase_only"
     )
 
+    _queue_rebase_recovery(fake)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
 
-    assert _all_push_and_pr_create_calls(fake) == []
+    assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls)
+    assert any(
+        call.args[0] == "git" and "push" in call.args and "--force-with-lease" in call.args
+        for call in fake.calls
+    )
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
@@ -691,6 +712,46 @@ async def test_rebase_only_recovery_skips_push(
             WorkspaceStatus.completed.value,
             WorkspaceStatus.monitoring_pr.value,
         }
+
+
+@pytest.mark.unit
+async def test_rebase_only_recovery_skips_rebase_when_target_already_merged(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """If an earlier SyncBase already merged the target branch into the
+    PR branch, rebase recovery should record that refreshed head and move
+    straight to Tier 2 validation instead of replaying commits again."""
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, recovery_mode="rebase_only"
+    )
+
+    _queue_already_synced_rebase_recovery(fake)
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    git_calls = [call.args for call in fake.calls if call.args and call.args[0] == "git"]
+    assert not any("rebase" in call for call in git_calls)
+    assert not any("push" in call for call in git_calls)
+    assert any("merge-base" in call for call in git_calls)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.base_commit == "b" * 40
+        assert ws.monitor_last_commit_sha == "c" * 40
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
+    assert len(rebase_ops) == 1
+    assert rebase_ops[0].status == OperationStatus.succeeded.value
+    assert rebase_ops[0].result == {
+        "reason_code": "REBASE_OK",
+        "base_sha": "b" * 40,
+        "head_sha": "c" * 40,
+    }
 
 
 

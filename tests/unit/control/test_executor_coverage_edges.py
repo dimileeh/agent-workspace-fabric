@@ -7,10 +7,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from awf.adapters.base import AgentDefaults
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
+    _agent_defaults_for_workspace,
     _agent_model_for_workspace,
     _apply_baseline_coverage_ratchet,
     _call_pr_monitor_factory,
@@ -1005,7 +1007,7 @@ async def test_planning_required_dirty_extra_file_still_rejected(tmp_path: Path)
 
 @pytest.mark.unit
 def test_agent_model_for_workspace_prefers_nonblank_policy_override() -> None:
-    defaults = SimpleNamespace(model="default-model")
+    defaults = AgentDefaults(model="default-model")
 
     assert (
         _agent_model_for_workspace(  # type: ignore[arg-type]
@@ -1028,3 +1030,17 @@ def test_agent_model_for_workspace_prefers_nonblank_policy_override() -> None:
         )
         is None
     )
+
+
+@pytest.mark.unit
+def test_agent_defaults_for_workspace_binds_policy_model_for_monitor_recovery() -> None:
+    defaults = AgentDefaults(model="ollama/kimi-k2.6:cloud", effort="xhigh")
+
+    bound = _agent_defaults_for_workspace(  # type: ignore[arg-type]
+        SimpleNamespace(task_policy={"agent_model": "  ollama/glm-5.1:cloud  "}),
+        defaults,
+    )
+
+    assert bound is not None
+    assert bound.model == "ollama/glm-5.1:cloud"
+    assert bound.effort == "xhigh"

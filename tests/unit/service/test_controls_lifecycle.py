@@ -435,7 +435,7 @@ async def test_control_require_workspace_reports_missing_workspace(
 async def test_remonitor_rejects_wrong_state_and_missing_pr_before_creating_operation(
     session: AsyncSession,
 ) -> None:
-    completed = await _workspace(session, status=WorkspaceStatus.completed)
+    requested = await _workspace(session, status=WorkspaceStatus.requested)
     missing_pr = await _workspace(
         session,
         status=WorkspaceStatus.monitoring_pr,
@@ -444,16 +444,19 @@ async def test_remonitor_rejects_wrong_state_and_missing_pr_before_creating_oper
     service, _stopper, _cleaner = _service(session)
 
     with pytest.raises(WorkspaceRemonitorStateError) as wrong_state:
-        await service.remonitor_workspace(completed.id, reason="retry monitor")
+        await service.remonitor_workspace(requested.id, reason="retry monitor")
     with pytest.raises(WorkspaceRemonitorMissingPrUrlError) as missing_pr_error:
         await service.remonitor_workspace(missing_pr.id, reason="retry monitor")
 
     assert wrong_state.value.detail == {
-        "status": WorkspaceStatus.completed.value,
-        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+        "status": WorkspaceStatus.requested.value,
+        "eligible_statuses": [
+            WorkspaceStatus.monitoring_pr.value,
+            WorkspaceStatus.failed.value,
+        ],
     }
     assert missing_pr_error.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}
-    assert await _operations(session, completed.id) == []
+    assert await _operations(session, requested.id) == []
     assert await _operations(session, missing_pr.id) == []
 
 
@@ -619,6 +622,43 @@ async def test_refresh_active_workspace_creates_pending_operation_and_coalesces_
         "source": "operator_api",
         "reason": "stale merge queue",
         "operation_id": operation.id,
+    }
+
+
+@pytest.mark.unit
+async def test_remonitor_failed_workspace_with_pr_reenters_monitoring(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/43"
+    workspace.pr_number = 43
+    workspace.failure_reason = "infrastructure_failure"
+    workspace.failure_message = "old worker died during rebase recovery"
+    workspace.monitor_iter_count = 8
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    response = await service.remonitor_workspace(
+        workspace.id,
+        reason="reattach failed PR",
+        idempotency_key="remonitor-failed-pr",
+        expected_version=workspace.version,
+    )
+    events = await _events(session, workspace.id)
+
+    assert response.status == WorkspaceStatus.monitoring_pr
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+    assert workspace.monitor_iter_count == 0
+    assert events[0].event_type == "workspace.remonitor_requested"
+    assert events[0].old_state == WorkspaceStatus.failed.value
+    assert events[0].new_state == WorkspaceStatus.monitoring_pr.value
+    assert events[0].payload["state_reset"] == {
+        "from": WorkspaceStatus.failed.value,
+        "to": WorkspaceStatus.monitoring_pr.value,
+        "monitor_iter_count_reset_from": 8,
+        "candidate_reopened": False,
     }
 
 

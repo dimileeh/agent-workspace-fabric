@@ -12,17 +12,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.schemas import WorkspaceControlResponse
 from awf.common.config import get_settings
+from awf.common.ids import new_event_id
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.models import Operation, Workspace, WorkspaceEvent
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    OperationRepository,
+    TaskAttemptRepository,
+    WorkspaceRepository,
+)
 from awf.node.cleanup import WorkspaceCleaner
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
 
 ProjectStopper = Callable[[str | None], Awaitable[None]]
 CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
-_REMONITOR_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
+_REMONITOR_ELIGIBLE_STATUSES = (
+    WorkspaceStatus.monitoring_pr,
+    WorkspaceStatus.failed,
+)
 _VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _VALIDATE_REPLAY_STATUSES = frozenset(
     {
@@ -407,28 +416,51 @@ class WorkspaceControlService:
             idempotency_key=idempotency_key,
         )
         claims_reset = _claim_reset_snapshot(workspace)
+        state_reset = await _reset_failed_workspace_for_remonitor(
+            self._session,
+            workspace,
+        )
         workspace.monitor_claimed_by = None
         workspace.monitor_claim_expires_at = None
         workspace.execution_claimed_by = None
         workspace.execution_claim_expires_at = None
         workspace.version += 1
-        await repo.add_event(
-            workspace,
-            event_type="workspace.remonitor_requested",
-            reason_code=_OPERATOR_REMONITOR_REASON_CODE,
-            payload={
-                "reason": reason,
-                "operation_id": operation.id,
-                "claims_reset": claims_reset,
-            },
-        )
+        event_payload: dict[str, object | None] = {
+            "reason": reason,
+            "operation_id": operation.id,
+            "claims_reset": claims_reset,
+        }
+        if state_reset is not None:
+            event_payload["state_reset"] = state_reset
+            workspace.events.append(
+                WorkspaceEvent(
+                    id=new_event_id(),
+                    workspace_id=workspace.id,
+                    event_type="workspace.remonitor_requested",
+                    old_state=str(state_reset["from"]),
+                    new_state=str(state_reset["to"]),
+                    reason_code=_OPERATOR_REMONITOR_REASON_CODE,
+                    payload=event_payload,
+                )
+            )
+            await self._session.flush()
+        else:
+            await repo.add_event(
+                workspace,
+                event_type="workspace.remonitor_requested",
+                reason_code=_OPERATOR_REMONITOR_REASON_CODE,
+                payload=event_payload,
+            )
+        result: dict[str, object | None] = {
+            "status": workspace.status,
+            "claims_reset": claims_reset,
+        }
+        if state_reset is not None:
+            result["state_reset"] = state_reset
         await operations.finish(
             operation,
             status=OperationStatus.succeeded,
-            result={
-                "status": workspace.status,
-                "claims_reset": claims_reset,
-            },
+            result=result,
         )
         return WorkspaceControlResponse(
             workspace_id=workspace_id,
@@ -816,7 +848,45 @@ def default_cleaner() -> WorkspaceCleaner:
     return WorkspaceCleaner(
         git=GitManager(work_dir / "git"),
         compose=ComposeManager(work_dir=work_dir, template_path=template),
-    )
+        )
+
+
+async def _reset_failed_workspace_for_remonitor(
+    session: AsyncSession,
+    workspace: Workspace,
+) -> dict[str, object] | None:
+    if workspace.status != WorkspaceStatus.failed.value:
+        return None
+
+    old_status = workspace.status
+    old_iter_count = workspace.monitor_iter_count
+    workspace.status = WorkspaceStatus.monitoring_pr.value
+    workspace.failure_reason = None
+    workspace.failure_message = None
+    workspace.monitor_iter_count = 0
+
+    attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
+    candidate_reopened = False
+    if attempt is not None:
+        attempt.status = workspace.status
+        candidate_repo = MergeCandidateRepository(session)
+        candidate = await candidate_repo.get_by_attempt_id(attempt.id)
+        if candidate is not None:
+            await candidate_repo.create_or_update_open_for_attempt(
+                task=candidate.task,
+                attempt=candidate.attempt,
+                workspace=workspace,
+                head_sha=workspace.monitor_last_commit_sha,
+                base_sha=workspace.base_commit,
+            )
+            candidate_reopened = True
+
+    return {
+        "from": old_status,
+        "to": WorkspaceStatus.monitoring_pr.value,
+        "monitor_iter_count_reset_from": old_iter_count,
+        "candidate_reopened": candidate_reopened,
+    }
 
 
 def _control_response(

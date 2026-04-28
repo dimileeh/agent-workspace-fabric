@@ -406,6 +406,90 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
 
 
 @pytest.mark.unit
+async def test_remonitor_after_failed_rebase_allows_fresh_recovery_dispatch(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+    await _mark_candidate_target_advanced_stale(factory, workspace_id)
+
+    async with factory() as s:
+        operations = OperationRepository(s)
+        failed = await operations.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.validate,
+            payload={
+                "source": "pr_monitor",
+                "reason": "STALE_TARGET_ADVANCED",
+                "recovery_mode": "rebase_only",
+            },
+        )
+        await operations.finish(
+            failed,
+            status=OperationStatus.failed,
+            result={"reason_code": "MONITOR_RECOVERY_REBASE_FAILED"},
+        )
+        await operations.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.succeeded,
+            payload={"reason": "reattach after fixing recovery"},
+        )
+        await s.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=900,
+    )
+
+    state = MonitorState(started_at=0.0)
+    state.mark_addressed(
+        _initial_review_grace_started_key(42),
+        f"{0.0:.6f}",
+    )
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_pr_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is True
+    assert cmd.calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.ready.value
+        ops = await OperationRepository(s).list_all(workspace_id=workspace_id)
+
+    pr_monitor_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert [op.status for op in pr_monitor_ops] == [
+        OperationStatus.pending.value,
+        OperationStatus.failed.value,
+    ]
+
+
+@pytest.mark.unit
 async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

@@ -16,8 +16,8 @@ import awf.api.routes.controls as controls_route
 from awf.api.schemas import WorkspaceOperationRequest
 from awf.common.config import get_settings
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import Operation, Workspace, WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.models import MergeCandidate, Operation, Workspace, WorkspaceEvent
+from awf.db.repositories import TaskAttemptRepository, TaskRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 
 _BODY = {
@@ -65,6 +65,20 @@ async def _seed_monitoring_workspace(
             agent="codex",
             test_commands=["pytest -q"],
         )
+        task = await TaskRepository(session).create_or_get(
+            repo_url=workspace.repo_url,
+            base_branch=workspace.branch_base,
+            title=workspace.task_title,
+            prompt=workspace.task_prompt,
+            external_id=workspace.task_external_id,
+            idempotency_key=None,
+            task_class=workspace.task_class,
+            owned_paths=list(workspace.owned_paths),
+        )
+        await TaskAttemptRepository(session).create_for_workspace(
+            task=task,
+            workspace=workspace,
+        )
         await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
         workspace.branch_name = f"awf/{workspace.id}"
         workspace.remote_push_branch = workspace.branch_name
@@ -103,13 +117,12 @@ async def _seed_monitoring_workspace(
             workspace.pr_url = "https://github.com/example/remonitor/pull/42"
             workspace.pr_number = 42
             workspace.monitor_last_commit_sha = "b" * 40
-        if final_status == WorkspaceStatus.monitoring_pr:
-            await repo.transition(
-                workspace,
-                to=WorkspaceStatus.monitoring_pr,
-                reason_code="SEED",
-            )
-        elif final_status in {
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.monitoring_pr,
+            reason_code="SEED",
+        )
+        if final_status in {
             WorkspaceStatus.completed,
             WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
@@ -119,7 +132,7 @@ async def _seed_monitoring_workspace(
                 to=final_status,
                 reason_code="SEED",
             )
-        else:
+        elif final_status != WorkspaceStatus.monitoring_pr:
             raise AssertionError(f"unsupported seed status {final_status}")
 
         if with_active_claims:
@@ -597,9 +610,74 @@ async def test_remonitor_rejects_incompatible_state_with_structured_conflict(
         "message": "Workspace is not in a state eligible for remonitor recovery.",
         "detail": {
             "status": WorkspaceStatus.completed.value,
-            "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+            "eligible_statuses": [
+                WorkspaceStatus.monitoring_pr.value,
+                WorkspaceStatus.failed.value,
+            ],
         },
     }
+
+
+@pytest.mark.unit
+async def test_remonitor_failed_workspace_with_pr_reopens_candidate_for_worker(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.failed,
+        with_active_claims=True,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.failure_reason = "infrastructure_failure"
+        workspace.failure_message = "old monitor worker failed during rebase recovery"
+        workspace.monitor_iter_count = 7
+        await session.commit()
+    headers = {**_auth(monkeypatch), "Idempotency-Key": "remonitor-failed-open-pr"}
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "reattach open PR"},
+        headers=headers,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == WorkspaceStatus.monitoring_pr.value
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        candidate = (
+            await session.execute(
+                select(MergeCandidate).where(MergeCandidate.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        remonitor_event = next(
+            event
+            for event in (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == workspace_id,
+                        WorkspaceEvent.event_type == "workspace.remonitor_requested",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+    assert workspace.failure_reason is None
+    assert workspace.failure_message is None
+    assert workspace.monitor_iter_count == 0
+    assert workspace.monitor_claimed_by is None
+    assert workspace.execution_claimed_by is None
+    assert candidate.status == "open"
+    assert candidate.close_reason is None
+    assert candidate.failed_or_cancelled is False
+    assert remonitor_event.old_state == WorkspaceStatus.failed.value
+    assert remonitor_event.new_state == WorkspaceStatus.monitoring_pr.value
 
 
 @pytest.mark.unit
@@ -607,7 +685,6 @@ async def test_remonitor_rejects_incompatible_state_with_structured_conflict(
     "final_status",
     [
         WorkspaceStatus.completed,
-        WorkspaceStatus.failed,
         WorkspaceStatus.cancelled,
     ],
 )
@@ -636,7 +713,10 @@ async def test_remonitor_rejects_incompatible_state_before_missing_pr_url(
         "message": "Workspace is not in a state eligible for remonitor recovery.",
         "detail": {
             "status": final_status.value,
-            "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+            "eligible_statuses": [
+                WorkspaceStatus.monitoring_pr.value,
+                WorkspaceStatus.failed.value,
+            ],
         },
     }
 

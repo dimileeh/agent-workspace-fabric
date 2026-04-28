@@ -17,6 +17,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 - populates adapter registry
+from awf.adapters.base import AgentAdapter
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
@@ -338,6 +339,65 @@ class TestHappyPath:
         assert "ollama/gemma4:31b-cloud" in adapter_args
         pr_body = _created_pr_body(fake)
         assert "(agent: `opencode`, model: `ollama/gemma4:31b-cloud`, effort: `xhigh`)." in pr_body
+
+    @pytest.mark.unit
+    async def test_pr_monitor_receives_adapter_bound_to_workspace_model(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        captured: list[tuple[str | None, str | None]] = []
+
+        class Monitor:
+            async def run(self, **_: object) -> None:
+                return None
+
+        def monitor_factory(adapter: AgentAdapter, *_: object) -> Monitor:
+            captured.append(
+                (
+                    adapter._default_model,
+                    adapter._default_effort,
+                )
+            )
+            return Monitor()
+
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE),
+            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts"),
+            pr_creator=PullRequestCreator(fake),
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+            ),
+            pr_monitor_factory=monitor_factory,
+        )
+        ws_id = await _seed_ready_workspace(
+            factory,
+            agent="opencode",
+            task_policy={"agent_model": "ollama/glm-5.1:cloud"},
+        )
+
+        fake.queue_result(returncode=0, stdout="opencode finished")  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(
+            returncode=0,
+            stdout="https://github.com/dimileeh/aira-agent/pull/125\n",
+        )  # gh pr create
+
+        await executor.execute(ws_id)
+
+        assert captured == [("ollama/glm-5.1:cloud", "xhigh")]
 
     @pytest.mark.unit
     async def test_planning_profile_runs_plan_execute_compare_before_validation(

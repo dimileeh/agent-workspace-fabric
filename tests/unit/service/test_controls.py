@@ -296,7 +296,10 @@ async def test_remonitor_workspace_rejects_wrong_state_and_missing_pr_url(
 
     assert state_error.value.detail == {
         "status": WorkspaceStatus.requested.value,
-        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+        "eligible_statuses": [
+            WorkspaceStatus.monitoring_pr.value,
+            WorkspaceStatus.failed.value,
+        ],
     }
     assert pr_error.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}
 

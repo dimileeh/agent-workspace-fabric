@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -34,7 +34,7 @@ from awf.adapters.base import (
     get_adapter,
 )
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
-from awf.common.commands import AsyncCommandRunner
+from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
     ComposeExecCleanupError,
@@ -61,10 +61,13 @@ from awf.db.enums import (
 )
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    MergeCandidateRepository,
     OperationRepository,
+    StaleReasonRepository,
     TaskAttemptRepository,
     ValidationRunRepository,
     WorkspaceRepository,
+    sync_candidate_readiness,
 )
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import WorkspaceProfile
@@ -104,6 +107,16 @@ _RECOVERY_ACTIVE_OPERATION_STATUSES = {
 }
 _VALIDATE_ONLY_RECOVERY_SOURCES = {"pr_monitor", "operator_api"}
 _VALIDATE_ONLY_RECOVERY_MODES = {"validate_only", "rebase_only"}
+
+
+@dataclass(frozen=True)
+class _RebaseRecoveryResult:
+    base_sha: str
+    head_sha: str
+
+
+class _MonitorRebaseRecoveryError(RuntimeError):
+    """Raised when monitor-driven rebase recovery cannot update the PR branch."""
 
 
 def _get_active_recovery_payload(workspace: Any) -> dict[str, Any] | None:
@@ -251,15 +264,17 @@ class WorkspaceExecutor:
         # plan artifact and re-implement the feature mid-merge. Recovery
         # only re-runs validation against the already-pushed work.
         recovery = _get_active_recovery_payload(ws)
+        rebase_recovery_result: _RebaseRecoveryResult | None = None
         baseline_coverage: ValidationCoverageResult | None = None
         try:
             agent = AgentRuntime(ws.agent)
             defaults = self._defaults_for(agent)
-            default_model = _agent_model_for_workspace(ws, defaults)
+            adapter_defaults = _agent_defaults_for_workspace(ws, defaults)
+            default_model = adapter_defaults.model if adapter_defaults is not None else None
             adapter = get_adapter(
                 agent,
                 runner=self._runner,
-                defaults=defaults,
+                defaults=adapter_defaults,
                 log_store=self._log_store,
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
@@ -715,6 +730,33 @@ class WorkspaceExecutor:
                         workspace_id=workspace_id,
                         base_commit=base_commit,
                     )
+            elif recovery.get("recovery_mode") == "rebase_only":
+                try:
+                    rebase_recovery_result = await self._run_monitor_rebase_recovery(
+                        workspace_id=workspace_id,
+                        worktree_path=worktree_path,
+                        base_branch=ws.branch_base,
+                        branch_name=expected_branch,
+                        remote_branch=ws.remote_push_branch or expected_branch,
+                        reason=str(recovery.get("reason") or "stale"),
+                    )
+                    base_commit = rebase_recovery_result.base_sha
+                except _MonitorRebaseRecoveryError as exc:
+                    message = str(exc)[:2000]
+                    await self._finish_active_recovery_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        reason_code="MONITOR_RECOVERY_REBASE_FAILED",
+                        error_message=message,
+                    )
+                    await self._mark_failed(
+                        workspace_id=workspace_id,
+                        from_status=WorkspaceStatus.running,
+                        failure_reason=FailureReason.infrastructure_failure,
+                        message=message,
+                        reason_code="MONITOR_RECOVERY_REBASE_FAILED",
+                    )
+                    return
         except Exception as exc:  # unexpected — mark infrastructure
             _log.exception("executor.commit_step_failed", workspace_id=workspace_id)
             await self._mark_failed(
@@ -743,6 +785,8 @@ class WorkspaceExecutor:
         ]
         test_commands_tuple = tuple(validation_commands)
         validation_tier = _validation_tier_for_workspace(ws, profile)
+        if rebase_recovery_result is not None:
+            validation_tier = max(validation_tier, 2)
         last_failure_message: str | None = None
         successful_validation_run_id: str | None = None
         for pass_number in range(max_fix_passes + 1):
@@ -1092,12 +1136,26 @@ class WorkspaceExecutor:
             # Loop back to re-validate.
 
         # ── Recovery skip-push guard ───────────────────────────────────────
-        # Validate-only or rebase-only recovery for a workspace that already
-        # has an open PR must NOT re-push or re-create it. The executor
-        # transitions directly back to monitoring_pr (if a monitor is wired)
-        # or completed (legacy/no-monitor path) without entering the full
-        # agent execution or PR-creation flow again.
+        # Recovery for a workspace that already has an open PR must NOT
+        # re-create the PR. Validate-only recovery does not push; rebase-only
+        # recovery already pushed the rebased branch above and now just hands
+        # back to the monitor after validation.
         if recovery is not None and ws.pr_url:
+            if rebase_recovery_result is not None and successful_validation_run_id is not None:
+                try:
+                    await self._set_validation_run_target_head_sha(
+                        validation_run_id=successful_validation_run_id,
+                        target_head_sha=rebase_recovery_result.head_sha,
+                    )
+                    await self._clear_rebase_recovery_staleness(
+                        workspace_id=workspace_id,
+                    )
+                except Exception:
+                    _log.exception(
+                        "executor.rebase_recovery_staleness_clear_failed",
+                        workspace_id=workspace_id,
+                        validation_run_id=successful_validation_run_id,
+                    )
             if not await self._recheck_status(
                 workspace_id,
                 expected=WorkspaceStatus.validating,
@@ -1398,10 +1456,11 @@ class WorkspaceExecutor:
             if monitor is None and self._pr_monitor_factory is not None:
                 agent = AgentRuntime(ws.agent)
                 defaults = self._defaults_for(agent)
+                adapter_defaults = _agent_defaults_for_workspace(ws, defaults)
                 adapter = get_adapter(
                     agent,
                     runner=self._runner,
-                    defaults=defaults,
+                    defaults=adapter_defaults,
                     log_store=self._log_store,
                 )
                 profile = _profile_for_workspace(
@@ -1958,6 +2017,211 @@ class WorkspaceExecutor:
             await session.commit()
             return run.id
 
+    async def _run_monitor_rebase_recovery(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        base_branch: str,
+        branch_name: str,
+        remote_branch: str,
+        reason: str,
+    ) -> _RebaseRecoveryResult:
+        """Rebase an already-open PR branch onto the latest target branch.
+
+        The PR monitor dispatches ``recovery_mode='rebase_only'`` when a
+        merge candidate is stale because the target branch moved. Older
+        executor code treated that as validation-only, which left the same
+        stale reason active and caused an infinite
+        ``monitoring_pr -> ready -> running -> validating`` loop. This
+        recovery performs the real branch update once, pushes it, records a
+        rebase operation, and lets the normal Tier 2 validation pass prove the
+        rebased branch.
+        """
+
+        async def git(args: list[str]) -> CommandResult:
+            return await self._runner.run(
+                [
+                    "git",
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                    *args,
+                ]
+            )
+
+        fetch = await git(["fetch", "origin", base_branch])
+        if not fetch.ok:
+            raise _MonitorRebaseRecoveryError(
+                f"rebase recovery: git fetch origin {base_branch} failed: {fetch.stderr}"
+            )
+
+        switch = await git(["switch", branch_name])
+        if not switch.ok:
+            raise _MonitorRebaseRecoveryError(
+                f"rebase recovery: git switch {branch_name} failed: {switch.stderr}"
+            )
+
+        target_ref = f"origin/{base_branch}"
+        already_contains_target = await git(["merge-base", "--is-ancestor", target_ref, "HEAD"])
+        if already_contains_target.ok:
+            return await self._record_current_rebase_recovery_head(
+                git=git,
+                workspace_id=workspace_id,
+                target_ref=target_ref,
+                reason=reason,
+            )
+        if already_contains_target.returncode not in {1}:
+            raise _MonitorRebaseRecoveryError(
+                "rebase recovery: git merge-base --is-ancestor "
+                f"{target_ref} HEAD failed: {already_contains_target.stderr}"
+            )
+
+        rebase = await git(["rebase", target_ref])
+        if not rebase.ok:
+            await git(["rebase", "--abort"])
+            raise _MonitorRebaseRecoveryError(
+                f"rebase recovery: git rebase {target_ref} failed: {rebase.stderr}"
+            )
+
+        return await self._record_current_rebase_recovery_head(
+            git=git,
+            workspace_id=workspace_id,
+            target_ref=target_ref,
+            reason=reason,
+            remote_branch=remote_branch,
+        )
+
+    async def _record_current_rebase_recovery_head(
+        self,
+        *,
+        git: Callable[[list[str]], Awaitable[CommandResult]],
+        workspace_id: str,
+        target_ref: str,
+        reason: str,
+        remote_branch: str | None = None,
+    ) -> _RebaseRecoveryResult:
+        """Record the current branch head after rebase-style recovery.
+
+        A monitor may dispatch rebase recovery after GitHub has already
+        synced the PR branch with the target branch. In that case the
+        branch already contains ``origin/<base>`` and running ``git rebase``
+        again can fail while replaying commits from a merge-synced branch.
+        Treating the already-synced state as a successful refresh keeps the
+        recovery path idempotent; Tier 2 validation still proves the branch
+        before merge eligibility is restored.
+        """
+
+        base_sha_result = await git(["rev-parse", target_ref])
+        if not base_sha_result.ok or not base_sha_result.stdout.strip():
+            raise _MonitorRebaseRecoveryError(
+                f"rebase recovery: could not resolve {target_ref}: {base_sha_result.stderr}"
+            )
+        base_sha = base_sha_result.stdout.strip()
+
+        head_sha_result = await git(["rev-parse", "HEAD"])
+        if not head_sha_result.ok or not head_sha_result.stdout.strip():
+            raise _MonitorRebaseRecoveryError(
+                f"rebase recovery: could not resolve HEAD: {head_sha_result.stderr}"
+            )
+        head_sha = head_sha_result.stdout.strip()
+
+        if remote_branch is not None:
+            push = await git(["push", "--force-with-lease", "origin", f"HEAD:{remote_branch}"])
+            if not push.ok:
+                raise _MonitorRebaseRecoveryError(
+                    f"rebase recovery: git push --force-with-lease failed: {push.stderr}"
+                )
+
+        await self._record_rebase_recovery_success(
+            workspace_id=workspace_id,
+            reason=reason,
+            base_sha=base_sha,
+            head_sha=head_sha,
+        )
+        return _RebaseRecoveryResult(base_sha=base_sha, head_sha=head_sha)
+
+    async def _record_rebase_recovery_success(
+        self,
+        *,
+        workspace_id: str,
+        reason: str,
+        base_sha: str,
+        head_sha: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None:  # pragma: no cover - destroyed mid-recovery
+                return
+            workspace.base_commit = base_sha
+            workspace.monitor_last_commit_sha = head_sha
+
+            candidate = await MergeCandidateRepository(
+                session
+            ).get_open_for_workspace_with_merge_inputs(workspace_id)
+            if candidate is not None:
+                candidate.base_sha = base_sha
+                candidate.head_sha = head_sha
+                candidate.workspace.base_commit = base_sha
+                candidate.workspace.monitor_last_commit_sha = head_sha
+                sync_candidate_readiness(
+                    candidate,
+                    workspace=candidate.workspace,
+                    attempt=candidate.attempt,
+                    sync_validation_staleness=False,
+                )
+
+            operation = await OperationRepository(session).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.rebase,
+                payload={
+                    "source": "pr_monitor",
+                    "reason": reason,
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
+                },
+            )
+            operation.status = OperationStatus.running.value
+            operation.started_at = datetime.now(UTC)
+            await OperationRepository(session).finish(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "reason_code": "REBASE_OK",
+                    "base_sha": base_sha,
+                    "head_sha": head_sha,
+                },
+            )
+            await session.commit()
+
+    async def _clear_rebase_recovery_staleness(
+        self,
+        *,
+        workspace_id: str,
+    ) -> None:
+        async with self._session_factory() as session:
+            candidate = await MergeCandidateRepository(
+                session
+            ).get_open_for_workspace_with_merge_inputs(workspace_id)
+            if candidate is None:
+                return
+            await StaleReasonRepository(session).replace_active_findings(
+                workspace_id=candidate.workspace_id,
+                candidate_id=candidate.id,
+                attempt_id=candidate.attempt_id,
+                task_id=candidate.task_id,
+                findings=[],
+            )
+            candidate.stale = False
+            candidate.stale_reason = None
+            sync_candidate_readiness(
+                candidate,
+                workspace=candidate.workspace,
+                attempt=candidate.attempt,
+                sync_validation_staleness=False,
+            )
+            await session.commit()
+
     async def _start_pending_recovery_operations(
         self,
         *,
@@ -2247,11 +2511,37 @@ def _agent_model_for_workspace(
     ws: Workspace,
     defaults: AgentDefaults | None,
 ) -> str | None:
+    workspace_defaults = _agent_defaults_for_workspace(ws, defaults)
+    return workspace_defaults.model if workspace_defaults is not None else None
+
+
+def _agent_defaults_for_workspace(
+    ws: Workspace,
+    defaults: AgentDefaults | None,
+) -> AgentDefaults | None:
+    """Return adapter defaults after applying workspace-persisted policy.
+
+    Agent adapters are handed to the PR monitor, which invokes recovery
+    prompts without passing an explicit ``model`` each time. Binding the
+    workspace's effective model into the adapter is therefore important:
+    an opencode workspace launched with ``ollama/glm-5.1:cloud`` must not
+    drift back to AWF's opencode default (currently Kimi) while resolving
+    PR comments.
+    """
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
     model = _nonblank_policy_string(policy, "agent_model")
-    if model is not None:
-        return model
-    return defaults.model if defaults else None
+    effort = _nonblank_policy_string(policy, "agent_effort")
+    if model is None and effort is None:
+        return defaults
+    if defaults is not None:
+        return replace(
+            defaults,
+            model=model or defaults.model,
+            effort=effort or defaults.effort,
+        )
+    if model is None:
+        return None
+    return AgentDefaults(model=model, effort=effort)
 
 
 def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
