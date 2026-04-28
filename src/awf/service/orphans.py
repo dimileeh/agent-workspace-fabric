@@ -315,11 +315,19 @@ def _collect_docker_resources(
 ) -> tuple[list[ManagedResource], list[ResourceFinding]]:
     resources: list[ManagedResource] = []
     warnings: list[ResourceFinding] = []
-    for kind, args in _docker_list_commands():
+    commands = _docker_list_commands()
+    for index, (kind, args) in enumerate(commands):
         result = _run_docker_command(args, docker_host=docker_host, run_subprocess=run_subprocess)
         failure = _docker_failure_finding(result, resource_kind=kind)
         if failure is not None:
             warnings.append(failure)
+            warnings.extend(
+                _docker_skipped_findings(
+                    commands[index + 1 :],
+                    failed_kind=kind,
+                    failure=failure,
+                )
+            )
             break
         assert not isinstance(result, Exception)
         parsed, parse_warnings = _parse_docker_lines(
@@ -330,6 +338,23 @@ def _collect_docker_resources(
         resources.extend(parsed)
         warnings.extend(parse_warnings)
     return resources, warnings
+
+
+def _docker_skipped_findings(
+    commands: tuple[tuple[str, list[str]], ...],
+    *,
+    failed_kind: str,
+    failure: ResourceFinding,
+) -> list[ResourceFinding]:
+    failed_detail = f": {failure.detail}" if failure.detail else ""
+    return [
+        _warning(
+            resource_kind=kind,
+            reason="DOCKER_SCAN_SKIPPED",
+            detail=f"not scanned because {failed_kind} list failed{failed_detail}",
+        )
+        for kind, _args in commands
+    ]
 
 
 def _docker_list_commands() -> tuple[tuple[str, list[str]], ...]:
@@ -662,7 +687,7 @@ def _suggested_action(resource: ManagedResource, *, reason: str) -> str:
 
 
 def _warning_action(reason: str) -> str:
-    if reason in {"DOCKER_CLI_NOT_FOUND", "DOCKER_UNAVAILABLE"}:
+    if reason in {"DOCKER_CLI_NOT_FOUND", "DOCKER_UNAVAILABLE", "DOCKER_SCAN_SKIPPED"}:
         return "Start Docker or fix Docker CLI access, then re-run `awf service status`."
     if reason == "WORKTREE_SCAN_FAILED":
         return "Fix permissions on the AWF worktree root, then re-run `awf service status`."

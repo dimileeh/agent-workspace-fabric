@@ -304,11 +304,37 @@ def test_docker_unavailable_is_actionable_warning_not_crash(tmp_path: Path) -> N
     assert summary["ok"] is False
     assert summary["reason"] == "ORPHANS_PRESENT"
     assert summary["orphan_counts_by_kind"] == {"worktree": 1}
-    assert summary["warning_count"] == 1
+    assert summary["warning_count"] == 3
+    assert [warning["resource_kind"] for warning in summary["warnings"]] == [
+        "container",
+        "network",
+        "volume",
+    ]
     warning = summary["warnings"][0]
     assert warning["reason"] == "DOCKER_CLI_NOT_FOUND"
     assert warning["classification"] == "warning"
     assert warning["suggested_action"]
+
+
+def test_docker_failure_warns_for_unscanned_resource_kinds(tmp_path: Path) -> None:
+    summary = detect_orphan_resources(
+        work_dir=tmp_path,
+        docker_host="unix:///var/run/docker.sock",
+        workspace_view=_view(),
+        run_subprocess=_run_with(containers=RuntimeError("daemon exploded")),
+    ).to_check_payload()
+
+    warnings = summary["warnings"]
+    assert [warning["resource_kind"] for warning in warnings] == [
+        "container",
+        "network",
+        "volume",
+    ]
+    assert warnings[0]["reason"] == "DOCKER_UNAVAILABLE"
+    assert warnings[1]["reason"] == "DOCKER_SCAN_SKIPPED"
+    assert warnings[2]["reason"] == "DOCKER_SCAN_SKIPPED"
+    assert "container list failed" in str(warnings[1]["detail"])
+    assert "container list failed" in str(warnings[2]["detail"])
 
 
 def test_malformed_docker_output_records_warning_and_keeps_valid_rows(
