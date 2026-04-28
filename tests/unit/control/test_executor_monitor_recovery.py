@@ -29,7 +29,7 @@ from awf.control.executor import (
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace as WorkspaceModel
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import OperationRepository, ValidationRunRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
@@ -38,6 +38,10 @@ from awf.runtime.validation import ValidationRunner
 from .executor_paths import _test_worktree_path, _test_worktrees_root
 
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
+
+
+def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
+    fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
 @pytest.fixture
@@ -308,6 +312,7 @@ async def test_executor_skips_planning_and_agent_run_when_recovery_dispatched(
 
     # Recovery skips Step 1/1b. Validation runs once and passes; push +
     # PR update is a no-op against the existing PR URL.
+    _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation
     _queue_push_and_pr(fake, pr_url="https://github.com/x/y/pull/1")
 
@@ -420,6 +425,7 @@ async def test_executor_recovery_marks_validate_operation_succeeded_on_clean_pas
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
     ws_id = await _seed_ready_workspace_with_recovery(factory)
 
+    _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation
     _queue_push_and_pr(fake)
 
@@ -464,6 +470,7 @@ async def test_operator_api_validate_only_recovery_skips_full_agent_path(
         source="operator_api",
     )
 
+    _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -497,12 +504,14 @@ async def test_executor_recovery_closes_operation_row_for_rebase_only_mode(
     )
 
     _queue_rebase_recovery(fake)
+    fake.queue_result(returncode=0, stdout="c" * 40 + "\n")  # pre-validation rev-parse HEAD
     fake.queue_result(returncode=0, stdout="tests ok")  # validation
 
     await executor.execute(ws_id)
 
     async with factory() as s:
         ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+        runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
     pr_monitor_ops = [
         op
         for op in ops
@@ -522,6 +531,9 @@ async def test_executor_recovery_closes_operation_row_for_rebase_only_mode(
     assert op.started_at is not None
     assert op.finished_at is not None
     assert op.started_at < op.finished_at
+    assert len(runs) == 1
+    assert runs[0].target_head_sha == "c" * 40
+    assert runs[0].workspace_head_sha == "c" * 40
     rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
     assert len(rebase_ops) == 1
     rebase_op = rebase_ops[0]
@@ -572,6 +584,7 @@ async def test_executor_recovery_marks_validate_operation_failed_when_validation
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=0)
     ws_id = await _seed_ready_workspace_with_recovery(factory)
 
+    _queue_validation_head(fake)
     fake.queue_result(
         returncode=1,
         stdout="FAILED tests/foo.py::test_bar",
@@ -606,6 +619,7 @@ async def test_failed_recovery_operation_includes_reason_code(
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=0)
     ws_id = await _seed_ready_workspace_with_recovery(factory)
 
+    _queue_validation_head(fake)
     fake.queue_result(
         returncode=1,
         stdout="FAILED tests/foo.py::test_bar",
@@ -656,6 +670,7 @@ async def test_executor_normal_path_unchanged_when_no_recovery_op(
     fake.queue_result(returncode=0)  # git commit
     fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
     fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+    _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation
     _queue_push_and_pr(fake)
 
@@ -698,6 +713,7 @@ async def test_recovery_skips_push_when_pr_already_exists(
     ws_id = await _seed_ready_workspace_with_recovery(factory, pr_url="https://github.com/x/y/pull/1")
 
     # Only validation should run; no push or PR creation commands.
+    _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -740,6 +756,7 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
         factory, pr_url="https://github.com/x/y/pull/1"
     )
 
+    _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -766,6 +783,7 @@ async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
     ws_id = await _seed_ready_workspace_with_recovery(factory)
 
+    _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -793,6 +811,7 @@ async def test_rebase_only_recovery_rebases_pushes_and_skips_pr_recreate(
     )
 
     _queue_rebase_recovery(fake)
+    _queue_validation_head(fake, head="c" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -876,6 +895,7 @@ async def test_rebase_only_recovery_skips_rebase_when_target_already_merged(
     )
 
     _queue_already_synced_rebase_recovery(fake)
+    _queue_validation_head(fake, head="c" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -1076,6 +1096,7 @@ async def test_executor_recovery_does_not_run_planning_when_planning_profile_req
     plan_path.write_text("# pre-existing plan\n", encoding="utf-8")
     plan_mtime_before = plan_path.stat().st_mtime
 
+    _queue_validation_head(fake)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation
     _queue_push_and_pr(fake)
 

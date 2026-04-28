@@ -635,6 +635,69 @@ async def test_validation_run_finish_updates_metadata_and_handles_missing(
 
 
 @pytest.mark.unit
+async def test_validation_run_start_persists_identity_provenance_and_allows_legacy_rows(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, title="validation identity")
+    repo = ValidationRunRepository(session)
+
+    run = await repo.start(
+        workspace_id=workspace.id,
+        attempt_id=None,
+        tier=2,
+        commands=[{"phase": "validate", "command": "pytest -q"}],
+        base_commit="legacy-base",
+        base_sha="base-sha",
+        workspace_head_sha="workspace-head",
+        target_branch="development",
+        target_head_sha="target-head",
+        profile_name="python",
+        profile_version=7,
+        profile_source="repo:.awf/workspace.yml",
+        resolved_profile_digest="1" * 64,
+        environment_identity_digest="2" * 64,
+        environment_identity_inputs={
+            "schema_version": 1,
+            "runtime": {"toolchain_image": "python:3.12"},
+        },
+        log_stream_refs={"commands": []},
+    )
+    legacy = await repo.start(
+        workspace_id=workspace.id,
+        attempt_id=None,
+        tier=1,
+        commands=[{"phase": "validate", "command": "ruff check"}],
+        base_commit="legacy-only-base",
+        target_branch=None,
+        target_head_sha=None,
+        log_stream_refs={},
+    )
+
+    await session.refresh(run)
+    await session.refresh(legacy)
+
+    assert run.base_sha == "base-sha"
+    assert run.workspace_head_sha == "workspace-head"
+    assert run.profile_name == "python"
+    assert run.profile_version == 7
+    assert run.profile_source == "repo:.awf/workspace.yml"
+    assert run.resolved_profile_digest == "1" * 64
+    assert run.environment_identity_digest == "2" * 64
+    assert run.environment_identity_inputs == {
+        "schema_version": 1,
+        "runtime": {"toolchain_image": "python:3.12"},
+    }
+    assert legacy.base_sha is None
+    assert legacy.workspace_head_sha is None
+    assert legacy.profile_name is None
+    assert legacy.profile_version is None
+    assert legacy.profile_source is None
+    assert legacy.resolved_profile_digest is None
+    assert legacy.environment_identity_digest is None
+    assert legacy.environment_identity_inputs is None
+
+
+@pytest.mark.unit
 async def test_stale_reason_replace_active_findings_is_idempotent_and_grouped(
     session: AsyncSession,
 ) -> None:

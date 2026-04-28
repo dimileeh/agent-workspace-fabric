@@ -22,6 +22,7 @@ from awf.api.validation_runs import (
     _validation_tier,
     fresh_for_target,
     validation_coverage_fields,
+    validation_identity_fields,
 )
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceLogStream
@@ -196,6 +197,7 @@ def _build_persisted_validation_items(
                     status=_validation_status(run.status),
                     reason_code=run.reason_code,
                     base_commit=run.base_commit,
+                    **validation_identity_fields(run),
                     branch_name=run.target_branch or workspace.branch_name,
                     target_branch=run.target_branch,
                     target_head_sha=run.target_head_sha,

@@ -78,6 +78,41 @@ def test_validation_run_summary_preserves_running_failed_and_tier_three_states()
 
 
 @pytest.mark.unit
+def test_validation_run_summary_includes_identity_fields_and_legacy_fallbacks() -> None:
+    persisted = validation_run_summary(
+        _run(
+            base_sha="base-new",
+            workspace_head_sha="workspace-head",
+            profile_name="python",
+            profile_version=5,
+            profile_source="repo:.awf/workspace.yml",
+            resolved_profile_digest="1" * 64,
+            environment_identity_digest="2" * 64,
+            environment_identity_inputs={"schema_version": 1},
+        ),
+        current_target_head_sha="target-sha",
+    )
+    legacy = validation_run_summary(
+        _run(environment_identity_inputs=["not", "a", "mapping"]),
+        current_target_head_sha="target-sha",
+    )
+
+    assert persisted.base_sha == "base-new"
+    assert persisted.workspace_head_sha == "workspace-head"
+    assert persisted.profile_name == "python"
+    assert persisted.profile_version == 5
+    assert persisted.profile_source == "repo:.awf/workspace.yml"
+    assert persisted.resolved_profile_digest == "1" * 64
+    assert persisted.environment_identity_digest == "2" * 64
+    assert persisted.environment_identity_inputs == {"schema_version": 1}
+    assert persisted.identity_source == "persisted"
+    assert legacy.base_sha == "base-sha"
+    assert legacy.workspace_head_sha == "target-sha"
+    assert legacy.environment_identity_inputs == {}
+    assert legacy.identity_source == "legacy_fallback"
+
+
+@pytest.mark.unit
 def test_validation_coverage_fields_ignore_non_contract_value_types() -> None:
     fields = validation_coverage_fields(
         _run(

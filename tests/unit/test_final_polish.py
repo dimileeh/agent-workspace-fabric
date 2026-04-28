@@ -128,12 +128,14 @@ class TestExecutorFixPassWarnings:
         fake.queue_result(returncode=0)  # commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
         # Fix pass 1: adapter → fix_add FAILS (warning) → cached diff →
         # commit FAILS (warning) → validation GREEN.
         fake.queue_result(returncode=0)  # adapter (fix pass)
         fake.queue_result(returncode=1, stderr="index.lock held")  # fix_add FAILS
         fake.queue_result(returncode=0, stdout="a.py\n")  # cached diff (hack: still has change)
         fake.queue_result(returncode=1, stderr="commit would be empty")  # fix_commit FAILS
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
         class _FixPassValidation:
             def __init__(self, artifacts_dir: Path) -> None:
                 self.artifacts_dir = artifacts_dir

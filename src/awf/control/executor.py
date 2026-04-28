@@ -91,6 +91,11 @@ from awf.runtime.pr_monitor_operations import (
     monitor_operation_idempotency_key,
 )
 from awf.runtime.validation import ValidationCoverageResult, ValidationResult, ValidationRunner
+from awf.runtime.validation_identity import (
+    environment_identity_digest,
+    environment_identity_inputs,
+    resolved_profile_digest,
+)
 
 
 class _MonitorRunnerProto(Protocol):
@@ -818,6 +823,10 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 profile=profile,
                 base_commit=base_commit,
+                workspace_head_sha=await self._capture_workspace_head_sha(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                ),
                 target_branch=expected_branch,
                 target_head_sha=None,
                 tier=validation_tier,
@@ -2008,6 +2017,7 @@ class WorkspaceExecutor:
         workspace_id: str,
         profile: WorkspaceProfile,
         base_commit: str | None,
+        workspace_head_sha: str | None,
         target_branch: str | None,
         target_head_sha: str | None,
         tier: int,
@@ -2025,13 +2035,41 @@ class WorkspaceExecutor:
                 tier=tier,
                 commands=command_records,
                 base_commit=base_commit,
+                base_sha=base_commit,
+                workspace_head_sha=workspace_head_sha,
                 target_branch=target_branch,
                 target_head_sha=target_head_sha,
+                profile_name=profile.name,
+                profile_version=profile.version,
+                profile_source=profile.source,
+                resolved_profile_digest=resolved_profile_digest(profile),
+                environment_identity_digest=environment_identity_digest(profile),
+                environment_identity_inputs=environment_identity_inputs(profile),
                 log_stream_refs=_validation_run_log_stream_refs(command_records),
                 started_at=datetime.now(UTC),
             )
             await session.commit()
             return run.id
+
+    async def _capture_workspace_head_sha(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+    ) -> str | None:
+        result = await self._runner.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+        )
+        head_sha = result.stdout.strip()
+        if result.ok and head_sha:
+            return head_sha
+        _log.warning(
+            "executor.validation_workspace_head_sha_capture_failed",
+            workspace_id=workspace_id,
+            returncode=result.returncode,
+            stderr=result.stderr[:400],
+        )
+        return None
 
     async def _begin_rebase_recovery_operation(
         self,
@@ -2511,11 +2549,13 @@ class WorkspaceExecutor:
         *,
         validation_run_id: str,
         target_head_sha: str,
+        workspace_head_sha: str | None = None,
     ) -> None:
         async with self._session_factory() as session:
             await ValidationRunRepository(session).update_target_head_sha(
                 validation_run_id,
                 target_head_sha=target_head_sha,
+                workspace_head_sha=workspace_head_sha,
             )
             await session.commit()
 

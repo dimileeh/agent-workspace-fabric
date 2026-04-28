@@ -43,6 +43,10 @@ from .executor_paths import _test_worktree_path, _test_worktrees_root
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
+def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
+    fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
+
+
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'ex.db'}")
@@ -775,6 +779,7 @@ class TestBranchDriftRecovery:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
         fake.queue_result(returncode=0, stdout="sha\n")  # pre-push rev-parse HEAD
         fake.queue_result(returncode=0, stdout="awf/x\n")  # pre-push abbrev-ref
@@ -835,6 +840,7 @@ class TestBranchDriftRecovery:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")
         fake.queue_result(returncode=0)
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
         fake.queue_result(returncode=0, stdout="sha\n")
         fake.queue_result(returncode=0, stdout="awf/x\n")
@@ -1134,6 +1140,7 @@ class TestValidationInfrastructureError:
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="1\n")
         fake.queue_result(returncode=0)
+        fake.queue_result(returncode=128, stderr="fatal: not a git repository")
 
         executor = _make_executor(fake, factory, tmp_path, validation=validation)
         await executor.execute(ws_id)
@@ -1150,9 +1157,15 @@ class TestValidationInfrastructureError:
             run = runs[0]
             assert run.status == "failed"
             assert run.reason_code == "VALIDATION_INFRASTRUCTURE_ERROR"
+            assert run.workspace_head_sha is None
             assert run.finished_at is not None
 
         assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
+        assert any(
+            call.args[:4] == ["git", "-C", str(_test_worktree_path(factory, ws_id)), "rev-parse"]
+            and call.args[-1] == "HEAD"
+            for call in fake.calls
+        )
 
 
 class TestPullRequestUnexpectedError:
@@ -1174,6 +1187,7 @@ class TestPullRequestUnexpectedError:
         fake.queue_result(returncode=0, stdout="")  # cached diff empty; agent committed
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        fake.queue_result(returncode=0, stdout="pre-pr-validation-head\n")  # rev-parse HEAD
         fake.queue_result(returncode=0, stdout="tests ok")  # validation
 
         compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
@@ -1200,6 +1214,11 @@ class TestPullRequestUnexpectedError:
             assert ws.failure_reason == "infrastructure_failure"
             assert "unexpected error during PR creation" in (ws.failure_message or "")
             assert "FileNotFoundError" in (ws.failure_message or "")
+            runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+            assert len(runs) == 1
+            assert runs[0].status == "succeeded"
+            assert runs[0].target_head_sha is None
+            assert runs[0].workspace_head_sha == "pre-pr-validation-head"
 
     @pytest.mark.unit
     async def test_validation_target_sha_update_failure_keeps_open_pr(
@@ -1222,6 +1241,7 @@ class TestPullRequestUnexpectedError:
         fake.queue_result(returncode=0, stdout="")
         fake.queue_result(returncode=0, stdout="1\n")
         fake.queue_result(returncode=0)
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
         fake.queue_result(returncode=0, stdout="deadbeef01\n")
         fake.queue_result(returncode=0, stdout="awf/x\n")
@@ -1401,6 +1421,7 @@ class TestPrMonitorFactoryPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation cmd
         # pr_creator pre-push diagnostics:
         fake.queue_result(returncode=0, stdout="deadbeef\n")
@@ -1449,6 +1470,7 @@ class TestPrMonitorFactoryPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation cmd
         fake.queue_result(returncode=0, stdout="deadbeef\n")  # rev-parse HEAD
         fake.queue_result(returncode=0, stdout="awf/x\n")  # current branch
@@ -1493,6 +1515,7 @@ class TestPrMonitorFactoryPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation cmd
         fake.queue_result(returncode=0, stdout="deadbeef\n")
         fake.queue_result(returncode=0, stdout="awf/x\n")
@@ -1929,6 +1952,7 @@ class TestExecutorCoverageEdges:
         fake.queue_result(returncode=0)  # commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation
         executor = _make_executor(
             fake,

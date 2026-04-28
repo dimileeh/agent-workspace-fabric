@@ -20,6 +20,11 @@ from awf.runtime.validation import (
     _coverage_status,
     _parse_python_coverage_percent_from_files,
 )
+from awf.runtime.validation_identity import (
+    environment_identity_digest,
+    environment_identity_inputs,
+    resolved_profile_digest,
+)
 
 _COMPOSE_PROJECT = "awf_ws_val"
 _COMPOSE_FILE = Path("/fake/compose.yml")
@@ -29,6 +34,258 @@ _COMPOSE_FILE = Path("/fake/compose.yml")
 def runner(tmp_path: Path) -> tuple[FakeCommandRunner, ValidationRunner]:
     fake = FakeCommandRunner()
     return fake, ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+
+
+def _identity_profile(**overrides: object) -> WorkspaceProfile:
+    body: dict[str, object] = {
+        "name": "identity-test",
+        "version": 3,
+        "source": "repo:.awf/workspace.yml",
+        "description": "Human-facing profile details are not validation identity.",
+        "runtime": {
+            "agent_image": "ghcr.io/acme/agent:1",
+            "toolchain_image": "ghcr.io/acme/toolchain:1",
+            "environment": {
+                "PYTHON_VERSION": "3.12",
+                "API_TOKEN": "sk-secret-value",
+            },
+        },
+        "docker": {
+            "mode": "dind",
+            "compose_files": ["compose.yml", "compose.override.yml"],
+            "project_directory": ".",
+            "startup_timeout_seconds": 120,
+        },
+        "services": [
+            {
+                "name": "api",
+                "image": "ghcr.io/acme/api:1",
+                "environment": {"DATABASE_URL": "postgres://secret", "LOG_LEVEL": "debug"},
+                "depends_on": ["postgres"],
+                "healthcheck_cmd": "curl -fsS http://api:8000/health",
+                "ports": [(8000, 8000)],
+            },
+            {
+                "name": "postgres",
+                "image": "postgres:16",
+                "environment": {"POSTGRES_PASSWORD": "postgres-secret"},
+            },
+        ],
+        "phases": {
+            "validate": ["pytest -q"],
+        },
+        "validation": {
+            "healthchecks": [
+                {
+                    "name": "api",
+                    "command": "curl -fsS http://api:8000/health",
+                    "timeout_seconds": 20,
+                }
+            ],
+            "coverage": {
+                "minimum_percent": 99,
+                "provider": "python",
+                "command": "pytest --cov=awf",
+            },
+            "requested_tier": 2,
+            "retry_budget": 1,
+        },
+        "monitor": {
+            "initial_review_grace_period_seconds": 60,
+            "non_check_reviewer_settle_seconds": 60,
+            "non_check_reviewer_logins": ["greptile-apps"],
+        },
+        "planning": {
+            "required": True,
+            "plan_path": "docs/awf-plans/{workspace_id}.md",
+            "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+        },
+        "security": {
+            "egress": {
+                "mode": "allowlist",
+                "allowlist": ["github.com", "pypi.org"],
+            }
+        },
+        "secrets": [
+            {
+                "name": "github-token",
+                "target": "GITHUB_TOKEN",
+                "kind": "env",
+                "provider": "vault",
+                "ref": "secret/data/github/token",
+            }
+        ],
+    }
+    body.update(overrides)
+    return WorkspaceProfile.model_validate(body)
+
+
+@pytest.mark.unit
+def test_environment_identity_digest_is_stable_across_mapping_and_service_order() -> None:
+    first = _identity_profile()
+    second = _identity_profile(
+        runtime={
+            "toolchain_image": "ghcr.io/acme/toolchain:1",
+            "environment": {
+                "API_TOKEN": "sk-secret-value",
+                "PYTHON_VERSION": "3.12",
+            },
+            "agent_image": "ghcr.io/acme/agent:1",
+        },
+        services=[
+            {
+                "name": "postgres",
+                "environment": {"POSTGRES_PASSWORD": "postgres-secret"},
+                "image": "postgres:16",
+            },
+            {
+                "ports": [(8000, 8000)],
+                "healthcheck_cmd": "curl -fsS http://api:8000/health",
+                "depends_on": ["postgres"],
+                "environment": {"LOG_LEVEL": "debug", "DATABASE_URL": "postgres://secret"},
+                "image": "ghcr.io/acme/api:1",
+                "name": "api",
+            },
+        ],
+    )
+
+    assert environment_identity_digest(first) == environment_identity_digest(second)
+    assert environment_identity_inputs(first) == environment_identity_inputs(second)
+
+
+@pytest.mark.unit
+def test_environment_identity_sorts_services_with_nullable_dockerfile() -> None:
+    profile = _identity_profile()
+    service_without_dockerfile = profile.services[0].model_copy(update={"dockerfile": None})
+    service_with_dockerfile = profile.services[0].model_copy(
+        update={"dockerfile": "services/api.Dockerfile"}
+    )
+    mixed_profile = profile.model_copy(
+        update={"services": [service_with_dockerfile, service_without_dockerfile]}
+    )
+
+    inputs = environment_identity_inputs(mixed_profile)
+
+    assert [service["dockerfile"] for service in inputs["services"]] == [
+        None,
+        "services/api.Dockerfile",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "override",
+    [
+        {"runtime": {"agent_image": "ghcr.io/acme/agent:2"}},
+        {"runtime": {"toolchain_image": "ghcr.io/acme/toolchain:2"}},
+        {"docker": {"mode": "none"}},
+        {
+            "services": [
+                {"name": "api", "image": "ghcr.io/acme/api:2"},
+                {"name": "postgres", "image": "postgres:16"},
+            ]
+        },
+        {
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "api",
+                        "command": "curl -fsS http://api:8000/ready",
+                    }
+                ]
+            }
+        },
+    ],
+)
+def test_environment_identity_digest_changes_for_runtime_toolchain_inputs(
+    override: dict[str, object],
+) -> None:
+    assert environment_identity_digest(_identity_profile()) != environment_identity_digest(
+        _identity_profile(**override)
+    )
+
+
+@pytest.mark.unit
+def test_environment_identity_digest_excludes_non_validation_profile_metadata() -> None:
+    baseline = _identity_profile()
+    changed_metadata = baseline.model_copy(
+        deep=True,
+        update={
+            "description": "A different human-facing description.",
+            "monitor": baseline.monitor.model_copy(
+                update={"initial_review_grace_period_seconds": 3600.0}
+            ),
+            "planning": baseline.planning.model_copy(
+                update={
+                    "plan_path": "docs/alternate/{workspace_id}.md",
+                    "conformance_report_path": "docs/alternate/{workspace_id}.json",
+                }
+            ),
+        },
+    )
+
+    assert environment_identity_digest(baseline) == environment_identity_digest(changed_metadata)
+
+
+@pytest.mark.unit
+def test_resolved_profile_digest_is_canonical_and_covers_full_profile() -> None:
+    first = _identity_profile()
+    reordered = _identity_profile(
+        runtime={
+            "environment": {
+                "API_TOKEN": "sk-secret-value",
+                "PYTHON_VERSION": "3.12",
+            },
+            "toolchain_image": "ghcr.io/acme/toolchain:1",
+            "agent_image": "ghcr.io/acme/agent:1",
+        }
+    )
+    changed_description = first.model_copy(update={"description": "different"})
+
+    assert resolved_profile_digest(first) == resolved_profile_digest(reordered)
+    assert resolved_profile_digest(first) != resolved_profile_digest(changed_description)
+
+
+@pytest.mark.unit
+def test_environment_identity_inputs_sanitize_environment_and_secret_values() -> None:
+    inputs = environment_identity_inputs(
+        _identity_profile(
+            ports={"database": "postgres://user:password@127.0.0.1:5432/app"}
+        )
+    )
+    rendered = str(inputs)
+
+    assert "sk-secret-value" not in rendered
+    assert "postgres://secret" not in rendered
+    assert "postgres-secret" not in rendered
+    assert "secret/data/github/token" not in rendered
+    assert "postgres://user:password@127.0.0.1:5432/app" not in rendered
+    assert inputs["ports"] == [
+        {
+            "name": "database",
+            "value_sha256": (
+                "sha256:"
+                "30e7d9f55ac1fd625ddc82a1f36e9e1e827f18f3f90a4f32630ca8b4f1a7bc6e"
+            ),
+        }
+    ]
+    runtime_env = inputs["runtime"]["environment"]
+    assert runtime_env == [
+        {
+            "name": "API_TOKEN",
+            "value_sha256": (
+                "sha256:"
+                "6a34e9cf66e854e6e1b79ceebaac12897fd6845a57d2cf367ca33a74fdbc1afb"
+            ),
+        },
+        {
+            "name": "PYTHON_VERSION",
+            "value_sha256": (
+                "sha256:"
+                "33307da56af13f791584518fef2e49641180bfbf2ef7b2d256c9ab6fad564f80"
+            ),
+        },
+    ]
 
 
 class TestHappyPath:

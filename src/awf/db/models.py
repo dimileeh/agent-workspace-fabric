@@ -635,8 +635,18 @@ class ValidationRun(Base):
     )
 
     base_commit: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    base_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    workspace_head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
     target_branch: Mapped[str | None] = mapped_column(String(256), nullable=True)
     target_head_sha: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    profile_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    profile_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    profile_source: Mapped[str | None] = mapped_column(String(256), nullable=True)
+    resolved_profile_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    environment_identity_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    environment_identity_inputs: Mapped[dict[str, Any] | None] = mapped_column(
+        JSON, nullable=True
+    )
 
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)

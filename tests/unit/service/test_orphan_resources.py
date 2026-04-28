@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from awf.service import orphan_resources
 from awf.service.orphan_resources import (
+    DetectedResource,
     ResourceScan,
     WorkspaceIdView,
     build_orphan_resource_summary,

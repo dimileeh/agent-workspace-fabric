@@ -20,7 +20,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["ec041f62c7fc"]
+    assert script.get_heads() == ["4f2b9c8d7e6a"]
 
 
 @pytest.mark.unit
@@ -65,6 +65,9 @@ def test_alembic_upgrade_head_creates_scheduler_record_tables(
         workspace_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(workspaces)")
         }
+        validation_run_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(validation_runs)")
+        }
 
     assert {"queue_decisions", "resource_reservations", "policy_findings"} <= tables
     assert {
@@ -106,3 +109,13 @@ def test_alembic_upgrade_head_creates_scheduler_record_tables(
     } <= policy_columns
     assert "policy_blocked" in merge_candidate_columns
     assert "task_policy" in workspace_columns
+    assert {
+        "base_sha",
+        "workspace_head_sha",
+        "profile_name",
+        "profile_version",
+        "profile_source",
+        "resolved_profile_digest",
+        "environment_identity_digest",
+        "environment_identity_inputs",
+    } <= validation_run_columns
