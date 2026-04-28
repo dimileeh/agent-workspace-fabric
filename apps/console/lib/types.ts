@@ -85,13 +85,17 @@ export type MergeBlockerReason =
   | "ready_to_merge_or_waiting_for_github"
   | "manual_merge_required"
   | "waiting_for_monitor"
+  | "waiting_for_older_candidate"
   | "workspace_not_terminal"
   | "completed"
   | "failed_or_cancelled"
   | "not_canonical"
+  | "policy_blocked"
   | "stale";
 
 export type MergeCandidateStatus = "open" | "merged" | "closed";
+
+export type MergeQueueBlockerState = "merge_eligible" | "monitor_owned_recovery";
 
 export interface MergeCandidateReadiness {
   ready: boolean;
@@ -101,6 +105,7 @@ export interface MergeCandidateReadiness {
   completed: boolean;
   not_canonical: boolean;
   stale: boolean;
+  stale_reason: string | null;
 }
 
 export type ValidationTier = 1 | 2 | 3;
@@ -122,6 +127,12 @@ export interface ValidationRunSummary {
   finished_at: string | null;
   log_stream_refs: Record<string, unknown>;
   fresh_for_target: boolean | null;
+  retry_count: number;
+  coverage_percent: number | null;
+  coverage_minimum_percent: number | null;
+  coverage_status: string | null;
+  coverage_reason_code: string | null;
+  coverage_gaps: Record<string, unknown>[];
 }
 
 export type StaleReasonCode =
@@ -155,6 +166,39 @@ export interface StaleReason {
   resolved_at: string | null;
 }
 
+export type PolicyFindingSeverity = "warning" | "blocking";
+export type PolicyFindingStatus = "active" | "resolved";
+export type PolicyFindingReasonCode = "OUT_OF_SCOPE_CHANGE";
+
+export interface PolicyFinding {
+  id: string;
+  workspace_id: string;
+  candidate_id: string | null;
+  attempt_id: string | null;
+  task_id: string | null;
+  reason_code: PolicyFindingReasonCode;
+  severity: PolicyFindingSeverity;
+  subject_path: string | null;
+  explanation: string;
+  details: Record<string, unknown>;
+  status: PolicyFindingStatus;
+  detected_at: string;
+  resolved_at: string | null;
+}
+
+export interface MergeQueueBlocker {
+  candidate_id: string;
+  workspace_id: string;
+  attempt_id: string;
+  task_id: string;
+  title: string;
+  pr_url: string;
+  pr_number: number | null;
+  status: WorkspaceStatus;
+  blocker_state: MergeQueueBlockerState;
+  reason_code: string;
+}
+
 export interface MergeQueueItem {
   candidate_id: string | null;
   candidate_status: MergeCandidateStatus | null;
@@ -176,10 +220,13 @@ export interface MergeQueueItem {
   merged_at: string | null;
   last_event: WorkspaceEvent | null;
   merge_blocker_reason: MergeBlockerReason;
+  required_next_action: string | null;
   readiness: MergeCandidateReadiness | null;
   canonical: boolean;
+  queue_blockers: MergeQueueBlocker[];
   latest_validation: ValidationRunSummary | null;
   stale_reasons: StaleReason[];
+  policy_findings: PolicyFinding[];
 }
 
 export interface Workspace {
