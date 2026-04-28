@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 from sqlalchemy import update as sa_update
@@ -64,6 +65,7 @@ def _make_executor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     max_fix_passes: int = 5,
+    pr_monitor_factory: Any = None,
 ) -> WorkspaceExecutor:
     compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
     validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -84,6 +86,7 @@ def _make_executor(
             },
             max_validation_fix_passes=max_fix_passes,
         ),
+        pr_monitor_factory=pr_monitor_factory,
     )
 
 
@@ -524,6 +527,47 @@ async def test_recovery_skips_push_when_pr_already_exists(
             WorkspaceStatus.completed.value,
             WorkspaceStatus.monitoring_pr.value,
         }
+
+
+@pytest.mark.unit
+async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Recovery with an existing PR and a pr_monitor_factory must transition
+    to monitoring_pr AND immediately hand off to the monitor runner, matching
+    the normal execution path (Step 4)."""
+    monitor_calls: list[dict[str, Any]] = []
+
+    class _FakeMonitor:
+        async def run(
+            self, *, workspace_id: str, compose_project: str, compose_file: Path
+        ) -> None:
+            monitor_calls.append({"workspace_id": workspace_id, "compose_project": compose_project})
+
+    def _monitor_factory(*_args: Any, **_kwargs: Any) -> _FakeMonitor:
+        return _FakeMonitor()
+
+    executor = _make_executor(
+        fake=fake, factory=factory, tmp_path=tmp_path, pr_monitor_factory=_monitor_factory
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, pr_url="https://github.com/x/y/pull/1"
+    )
+
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert _all_push_and_pr_create_calls(fake) == []
+    assert len(monitor_calls) == 1
+    assert monitor_calls[0]["workspace_id"] == ws_id
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
 
 
 @pytest.mark.unit

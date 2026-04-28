@@ -1125,6 +1125,32 @@ class WorkspaceExecutor:
                 pr_url=ws.pr_url,
                 has_monitor=has_monitor,
             )
+            if has_monitor:
+                _monitor: _MonitorRunnerProto | None = self._pr_monitor
+                if _monitor is None and self._pr_monitor_factory is not None:
+                    _monitor = _call_pr_monitor_factory(
+                        self._pr_monitor_factory,
+                        adapter=adapter,
+                        profile=profile,
+                        workspace=persisted,
+                    )
+                if _monitor is not None:
+                    _log.info(
+                        "executor.recovery_handoff_to_pr_monitor",
+                        workspace_id=workspace_id,
+                        pr_url=ws.pr_url,
+                    )
+                    if not await self._recheck_status(
+                        workspace_id,
+                        expected=WorkspaceStatus.monitoring_pr,
+                        action="run_pr_monitor",
+                    ):
+                        return
+                    await _monitor.run(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                    )
             return
 
         # ── Step 3: push + open PR ──────────────────────────────────────────
