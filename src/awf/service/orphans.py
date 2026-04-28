@@ -714,6 +714,8 @@ def _workspace_snapshots(
             WorkspaceLifecycleSnapshot(
                 workspace_id=workspace_id,
                 status=WorkspaceStatus.completed.value,
+                # Synthetic terminal snapshots have no DB freshness boundary.
+                # _within_retention treats this as retention-expired.
                 updated_at=None,
                 compose_project_name=f"awf_{workspace_id}",
             ),
@@ -816,6 +818,8 @@ def _within_retention(
     min_retention_hours: float,
 ) -> bool:
     if updated_at is None:
+        # Missing timestamps are only used by synthetic snapshots. Do not
+        # retain terminal resources indefinitely when no freshness is known.
         return False
     return _to_utc(updated_at) > now - timedelta(hours=min_retention_hours)
 
