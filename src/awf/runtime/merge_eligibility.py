@@ -6,24 +6,22 @@ from awf.db.enums import TaskClass
 from awf.db.models import (
     ValidationRun,
     Workspace,
-)
-from awf.db.models import (
-    stale_reason_blocks_merge as _stale_reason_blocks_merge,
-)
-from awf.db.models import (
-    stale_reason_severity as _stale_reason_severity,
+    stale_reason_blocks_merge,
+    stale_reason_severity,
 )
 
 DOCS_TASK_SCOPE_VIOLATION_STALE_REASON = "docs_task_scope_violation"
 VALIDATION_INSUFFICIENT_TIER_STALE_REASON = "validation_insufficient_tier"
 
-
-def stale_reason_blocks_merge(reason_code: str | None) -> bool:
-    return _stale_reason_blocks_merge(reason_code)
-
-
-def stale_reason_severity(reason_code: str | None) -> str:
-    return _stale_reason_severity(reason_code)
+__all__ = [
+    "DOCS_TASK_SCOPE_VIOLATION_STALE_REASON",
+    "VALIDATION_INSUFFICIENT_TIER_STALE_REASON",
+    "compute_stale_reason",
+    "compute_stale_reason_for_attempt",
+    "stale_reason_blocks_merge",
+    "stale_reason_required_action",
+    "stale_reason_severity",
+]
 
 
 def stale_reason_required_action(reason_code: str | None) -> str | None:
