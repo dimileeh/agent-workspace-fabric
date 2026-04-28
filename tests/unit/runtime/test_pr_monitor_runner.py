@@ -1,24 +1,34 @@
-"""Unit tests for helpers in ``pr_monitor_runner``.
+"""Unit tests for focused ``pr_monitor_runner`` behavior.
 
-These cover the pure, side-effect-free helpers: ``_parse_verdict`` (CLI
+Most cases cover the pure, side-effect-free helpers: ``_parse_verdict`` (CLI
 reply → structured verdict) and ``_collect_defer_items`` (PRStatus +
-MonitorState → bot/human defer buckets for the terminal artifact). The
-full runner loop is exercised in
-``tests/integration/runtime/test_pr_monitor_runner.py`` — this file
-keeps the tight, no-I/O cases alongside the rest of the unit suite so
-they run in the fast default lane.
+MonitorState → bot/human defer buckets for the terminal artifact). Focused
+runtime-path regressions live here when the unit suite needs to cover a
+specific merge-gate branch without running the full monitor integration loop.
 """
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
+from awf.common.github_client import RepoRef
+from awf.db.base import Base
+from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    OperationRepository,
+    StaleReasonCreate,
+    StaleReasonRepository,
+)
+from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import (
     CheckFailure,
     CheckTiming,
@@ -49,7 +59,24 @@ from awf.runtime.pr_monitor_runner import (
     _target_reconcile_payload,
     _with_ci_failures,
 )
+from tests.unit.runtime._monitor_runner_fixtures import (
+    FakeAdapter,
+    RecordedSleep,
+    make_runner,
+    seed_monitoring_workspace,
+)
 from tests.unit.runtime.test_pr_monitor import _status
+
+
+@pytest.fixture
+async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
+    engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'monitor.db'}")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    try:
+        yield make_session_factory(engine)
+    finally:
+        await engine.dispose()
 
 
 def _monitor_runner(tmp_path: Path, fake: FakeCommandRunner) -> PullRequestMonitorRunner:
@@ -60,6 +87,84 @@ def _monitor_runner(tmp_path: Path, fake: FakeCommandRunner) -> PullRequestMonit
         gh=object(),  # type: ignore[arg-type]
         worktrees_root=tmp_path / "work" / "git" / "worktrees",
     )
+
+
+@pytest.mark.unit
+async def test_advisory_plan_artifact_stale_reason_does_not_dispatch_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    async with factory() as session:
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
+        assert candidate is not None
+        await StaleReasonRepository(session).replace_active_findings(
+            workspace_id=workspace_id,
+            candidate_id=candidate.id,
+            attempt_id=candidate.attempt_id,
+            task_id=candidate.task_id,
+            findings=[
+                StaleReasonCreate(
+                    reason_code=ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON,
+                    trigger_type="path_overlap",
+                    trigger_ref="docs/awf-plans/ws_other.md",
+                    explanation=(
+                        "Target branch changed another workspace's AWF plan artifact."
+                    ),
+                )
+            ],
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+    gate = await runner._merge_gate_for_workspace(workspace_id)
+    handled = await runner._handle_merge_gate_blocker(
+        gate=gate,
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef.from_url("git@github.com:dimileeh/aira-web.git"),
+        pr_number=42,
+        status=_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
+        assert candidate is not None
+        stale_reasons = await StaleReasonRepository(session).list_active_for_candidate(
+            candidate.id
+        )
+        operations = await OperationRepository(session).list_all(
+            workspace_id=workspace_id
+        )
+
+    assert gate.stale_reason is None
+    assert gate.req_action is None
+    assert handled is None
+    assert candidate.stale is False
+    assert candidate.stale_reason is None
+    assert [(r.reason_code, r.blocks_merge, r.severity) for r in stale_reasons] == [
+        (ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON, False, "advisory")
+    ]
+    assert operations == []
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
 
 
 class TestParseVerdict:

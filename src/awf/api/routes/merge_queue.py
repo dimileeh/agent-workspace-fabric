@@ -47,6 +47,8 @@ from awf.db.repositories import (
 from awf.runtime.merge_eligibility import (
     DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
     VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+    stale_reason_blocks_merge,
+    stale_reason_required_action,
 )
 from awf.service.merge_queue import (
     MergeQueueBlocker,
@@ -370,10 +372,15 @@ def _merge_blocker_reason(
         return "not_canonical", None
     if candidate.policy_blocked or _has_blocking_policy_finding(policy_findings):
         return "policy_blocked", "resolve_policy_findings"
-    if candidate.stale:
-        reason = _stale_reason_for_action(candidate, stale_reasons=stale_reasons)
-        action = _required_stale_action(reason)
-        return "stale", action
+    blocking_stale_reasons = _blocking_stale_reasons(stale_reasons)
+    if candidate.stale or blocking_stale_reasons:
+        reason = _stale_reason_for_action(
+            candidate,
+            stale_reasons=blocking_stale_reasons,
+        )
+        if stale_reason_blocks_merge(reason):
+            action = _required_stale_action(reason)
+            return "stale", action
     if candidate.manual_merge_required:
         return "manual_merge_required", None
     if candidate.waiting_for_monitor:
@@ -402,11 +409,11 @@ def _stale_reason_for_action(
 
 
 def _required_stale_action(reason: str) -> str:
-    if reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON:
-        return "validate"
-    if reason == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON:
-        return "resolve_task_scope"
-    return "rebase"
+    return stale_reason_required_action(reason) or "rebase"
+
+
+def _blocking_stale_reasons(stale_reasons: list[StaleReason]) -> list[StaleReason]:
+    return [reason for reason in stale_reasons if reason.blocks_merge]
 
 
 def _merge_blocker_reason_from_workspace(workspace: Workspace) -> tuple[MergeBlockerReason, str | None]:

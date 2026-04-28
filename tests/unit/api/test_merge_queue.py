@@ -584,6 +584,119 @@ class TestMergeQueueList:
         assert item["required_next_action"] == "rebase"
         assert item["readiness"]["stale"] is True
         assert [reason["reason_code"] for reason in item["stale_reasons"]] == [reason_code]
+        assert item["stale_reasons"][0]["severity"] == "blocking"
+        assert item["stale_reasons"][0]["blocks_merge"] is True
+
+    @pytest.mark.unit
+    async def test_plan_artifact_advisory_reason_does_not_block_merge_queue(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Plan artifact advisory",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/21",
+            task_class="test_task",
+            owned_paths=["docs/awf-plans/**"],
+        )
+        candidate_id = await _candidate_id_for_workspace(engine, workspace_id)
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="main",
+                    head_sha="b" * 40,
+                    changed_paths=("docs/awf-plans/ws_other.conformance.json",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(row for row in response.json()["items"] if row["workspace_id"] == workspace_id)
+        assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
+        assert item["required_next_action"] is None
+        assert item["readiness"]["stale"] is False
+        assert item["readiness"]["stale_reason"] is None
+        assert [
+            (reason["reason_code"], reason["severity"], reason["blocks_merge"])
+            for reason in item["stale_reasons"]
+        ] == [("ADVISORY_PLAN_ARTIFACT_OVERLAP", "advisory", False)]
+
+    @pytest.mark.unit
+    async def test_mixed_plan_artifact_and_source_overlap_blocks_merge_queue(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Mixed advisory and source overlap",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/22",
+            task_class="test_task",
+            owned_paths=["docs/awf-plans/**", "src/awf/service/**"],
+        )
+        candidate_id = await _candidate_id_for_workspace(engine, workspace_id)
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="main",
+                    head_sha="b" * 40,
+                    changed_paths=(
+                        "docs/awf-plans/ws_other.md",
+                        "src/awf/service/staleness.py",
+                    ),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(row for row in response.json()["items"] if row["workspace_id"] == workspace_id)
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "rebase"
+        assert item["readiness"]["stale"] is True
+        assert {
+            (reason["reason_code"], reason["trigger_ref"], reason["severity"], reason["blocks_merge"])
+            for reason in item["stale_reasons"]
+        } == {
+            (
+                "ADVISORY_PLAN_ARTIFACT_OVERLAP",
+                "docs/awf-plans/ws_other.md",
+                "advisory",
+                False,
+            ),
+            (
+                "STALE_OVERLAP",
+                "src/awf/service/staleness.py",
+                "blocking",
+                True,
+            ),
+        }
 
     @pytest.mark.unit
     async def test_filters_by_repo_base_status_and_limit(

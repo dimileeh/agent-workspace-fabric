@@ -519,6 +519,7 @@ StaleReasonCode = Literal[
     "STALE_DEPENDENCY",
     "STALE_BUILD_CONFIG",
     "STALE_SCHEMA",
+    "ADVISORY_PLAN_ARTIFACT_OVERLAP",
 ]
 StaleReasonTrigger = Literal[
     "target_advanced",
@@ -526,7 +527,9 @@ StaleReasonTrigger = Literal[
     "schema_changed",
     "dependency_changed",
     "build_config_changed",
+    "plan_artifact_overlap",
 ]
+StaleReasonSeverity = Literal["blocking", "advisory"]
 
 
 class StaleReasonResponse(BaseModel):
@@ -544,6 +547,8 @@ class StaleReasonResponse(BaseModel):
     reason_code: StaleReasonCode
     explanation: str
     status: StaleReasonStatus
+    severity: StaleReasonSeverity
+    blocks_merge: bool
     detected_at: datetime
     resolved_at: datetime | None
 

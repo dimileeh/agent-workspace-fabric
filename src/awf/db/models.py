@@ -42,6 +42,22 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from awf.db.base import Base, _now
 
+ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON = "ADVISORY_PLAN_ARTIFACT_OVERLAP"
+_ADVISORY_STALE_REASON_CODES = frozenset({ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON})
+
+
+def stale_reason_blocks_merge(reason_code: str | None) -> bool:
+    """Return whether a stale reason should block merge/recovery.
+
+    Unknown non-empty codes default to blocking for backward compatibility with
+    existing rows and older call sites.
+    """
+    return reason_code is not None and reason_code not in _ADVISORY_STALE_REASON_CODES
+
+
+def stale_reason_severity(reason_code: str | None) -> str:
+    return "blocking" if stale_reason_blocks_merge(reason_code) else "advisory"
+
 
 class Workspace(Base):
     __tablename__ = "workspaces"
@@ -781,6 +797,14 @@ class StaleReason(Base):
 
     workspace: Mapped[Workspace] = relationship()
     candidate: Mapped[MergeCandidate | None] = relationship()
+
+    @property
+    def blocks_merge(self) -> bool:
+        return stale_reason_blocks_merge(self.reason_code)
+
+    @property
+    def severity(self) -> str:
+        return stale_reason_severity(self.reason_code)
 
 
 class PolicyFinding(Base):

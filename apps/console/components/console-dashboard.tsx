@@ -1277,7 +1277,13 @@ function WorkspaceRecoveryBlock({ item }: { item: MergeQueueItem | null }) {
           label="Stale"
           value={recovery.staleReasonLabel}
           detail={recovery.staleReasonDetail}
-          tone={recovery.staleReasonCount > 0 ? "warn" : "neutral"}
+          tone={
+            recovery.staleReasonBlockingCount > 0
+              ? "warn"
+              : recovery.staleReasonAdvisoryCount > 0
+                ? "info"
+                : "neutral"
+          }
           mono={recovery.staleReasonCount > 0}
         />
         <QueueChip
@@ -1637,7 +1643,13 @@ function MergeQueueRow({
           label="Stale"
           value={recovery.staleReasonLabel}
           detail={recovery.staleReasonDetail}
-          tone={recovery.staleReasonCount > 0 ? "warn" : "neutral"}
+          tone={
+            recovery.staleReasonBlockingCount > 0
+              ? "warn"
+              : recovery.staleReasonAdvisoryCount > 0
+                ? "info"
+                : "neutral"
+          }
           mono={recovery.staleReasonCount > 0}
         />
         <QueueChip
@@ -1781,6 +1793,7 @@ function MergeQueueStaleReasonDetails({ reasons }: { reasons: MergeQueueItem["st
         <div key={reason.id} className="grid min-w-0 gap-0.5 text-[11px] text-amber-950">
           <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1">
             <span className="mono font-medium">{reason.reason_code}</span>
+            <span className="mono">{reason.severity}</span>
             <span className="mono">{reason.trigger_type}</span>
             <span className="mono truncate">{reason.trigger_ref ?? "no trigger ref"}</span>
             <span>detected {formatDateTime(reason.detected_at)}</span>
