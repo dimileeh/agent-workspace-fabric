@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from awf.service.disk import check_disk_space
+from awf.service.disk import _nearest_existing_path, check_disk_space
 
 
 @dataclass(frozen=True)
@@ -15,6 +15,24 @@ class _Usage:
     total: int
     used: int
     free: int
+
+
+@pytest.mark.unit
+def test_nearest_existing_path_returns_path_itself(tmp_path: Path) -> None:
+    assert _nearest_existing_path(tmp_path) == tmp_path
+
+
+@pytest.mark.unit
+def test_nearest_existing_path_walks_up_to_existing_parent(tmp_path: Path) -> None:
+    result = _nearest_existing_path(tmp_path / "a" / "b")
+    assert result == tmp_path
+
+
+@pytest.mark.unit
+def test_nearest_existing_path_returns_root_when_nothing_exists(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(Path, "exists", lambda _self: False)
+    result = _nearest_existing_path(Path("/nowhere/fake"))
+    assert result == Path("/")
 
 
 @pytest.mark.unit

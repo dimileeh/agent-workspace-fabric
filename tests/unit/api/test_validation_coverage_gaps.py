@@ -156,7 +156,6 @@ def test_validation_run_summary_response_has_coverage_gaps_field() -> None:
     )
 
     assert response.coverage_gaps == [{"file": "a.py", "missing_lines": ["1"]}]
-    assert response.coverage_gaps == []
 
 
 @pytest.mark.unit
@@ -165,11 +164,13 @@ def test_validation_provenance_item_response_has_coverage_gaps_field() -> None:
         workspace_id="ws_x",
         phase="validate",
         command_index=0,
+        command="pytest",
         stream_ids={},
         stdout_byte_count=0,
         stdout_line_count=0,
         stderr_byte_count=0,
         stderr_line_count=0,
+        opened_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
         closed_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
         base_commit="abc",
         branch_name="branch",
@@ -179,4 +180,3 @@ def test_validation_provenance_item_response_has_coverage_gaps_field() -> None:
     )
 
     assert response.coverage_gaps == [{"file": "b.py", "missing_lines": ["5"]}]
-    assert response.coverage_gaps == []

@@ -594,6 +594,15 @@ def test_workspace_retry_error_allows_custom_message() -> None:
 
 
 @pytest.mark.unit
+def test_workspace_retry_error_uses_default_message() -> None:
+    error = WorkspaceRetryError()
+
+    assert str(error) == "Workspace retry failed."
+    assert error.message == "Workspace retry failed."
+    assert error.detail is None
+
+
+@pytest.mark.unit
 def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> None:
     request = WorkspaceCreateV2Request(
         repo={"url": "git@github.com:example/policy.git", "base_branch": "main"},

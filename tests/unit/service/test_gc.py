@@ -506,6 +506,25 @@ def test_delete_gc_path_rejects_unknown_gc_kind(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_delete_gc_path_handles_rmtree_oserror(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    target = tmp_path / "service" / "git" / "worktrees" / "ws_error"
+    target.mkdir(parents=True)
+    gc_path = WorkspaceGCPath(
+        kind="worktree",
+        path=target,
+        exists=True,
+        estimated_bytes=0,
+    )
+
+    monkeypatch.setattr("shutil.rmtree", lambda _p: (_ for _ in ()).throw(OSError("permission denied")))
+
+    deleted, error = _delete_gc_path(gc_path, work_dir=tmp_path / "service")
+
+    assert deleted is False
+    assert error == "permission denied"
+
+
+@pytest.mark.unit
 def test_estimate_bytes_treats_stat_races_as_zero_or_skipped() -> None:
     class _RacyFile:
         def exists(self) -> bool:

@@ -681,6 +681,48 @@ class TestReconcileAndRefreshStaleCandidates:
             )
 
     @pytest.mark.unit
+    async def test_reconcile_and_refresh_handles_null_base_sha(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        _ws_id, _attempt_id, cand_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="refactor_task",
+        )
+        async with factory() as session:
+            mc_repo = MergeCandidateRepository(session)
+            candidates = await mc_repo.list_queue(repo_url=_REPO_URL, base_branch=_BASE_BRANCH)
+            for c in candidates:
+                c.base_sha = None
+            await session.commit()
+
+        async def _reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            return _fake_reconcile_result(checkout_path=tmp_path / "checkout")
+
+        result = await reconcile_and_refresh_stale_candidates(
+            reconcile_fn=_reconcile,
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            session_factory=factory,
+            target_state_for_base_sha=async_lambda(TargetBranchState(
+                branch=_BASE_BRANCH,
+                head_sha="c" * 40,
+                changed_paths=("src/awf/api/routes/health.py",),
+                advanced_commits=1,
+            )),
+        )
+
+        assert len(result.candidate_refreshes) == 1
+        summary = result.candidate_refreshes[0]
+        assert summary.candidate_id == cand_id
+        assert summary.error is None
+        assert summary.findings_count == 0
+
+    @pytest.mark.unit
     async def test_reconcile_and_refresh_no_candidates_returns_empty_refreshes(
         self,
         factory: async_sessionmaker[AsyncSession],
