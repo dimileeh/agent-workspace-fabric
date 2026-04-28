@@ -2168,6 +2168,13 @@ class OperationRepository:
     async def get(self, operation_id: str) -> Operation | None:
         return await self._session.get(Operation, operation_id)
 
+    async def start(self, operation: Operation) -> Operation:
+        operation.status = OperationStatus.running.value
+        if operation.started_at is None:
+            operation.started_at = datetime.now(UTC)
+        await self._session.flush()
+        return operation
+
     async def get_by_idempotency_key(self, key: str) -> Operation | None:
         stmt = (
             select(Operation)
@@ -2260,9 +2267,13 @@ class OperationRepository:
         result: dict[str, Any] | None = None,
         error_code: str | None = None,
         error_message: str | None = None,
+        log_stream_refs: Mapping[str, Any] | None = None,
     ) -> Operation:
         operation.status = status.value
-        operation.result = result
+        operation.result = _operation_result_with_log_stream_refs(
+            result,
+            log_stream_refs=log_stream_refs,
+        )
         operation.error_code = error_code
         operation.error_message = error_message
         operation.finished_at = datetime.now(UTC)
@@ -2270,6 +2281,23 @@ class OperationRepository:
             operation.started_at = operation.finished_at
         await self._session.flush()
         return operation
+
+
+def _operation_result_with_log_stream_refs(
+    result: dict[str, Any] | None,
+    *,
+    log_stream_refs: Mapping[str, Any] | None,
+) -> dict[str, Any] | None:
+    if log_stream_refs is None:
+        return result
+    merged_result = dict(result or {})
+    existing_refs = merged_result.get("log_stream_refs")
+    merged_refs: dict[str, Any] = {}
+    if isinstance(existing_refs, Mapping):
+        merged_refs.update(existing_refs)
+    merged_refs.update(dict(log_stream_refs))
+    merged_result["log_stream_refs"] = merged_refs
+    return merged_result
 
 
 class WorkspaceLogStreamRepository:

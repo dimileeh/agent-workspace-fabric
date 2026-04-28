@@ -7,6 +7,7 @@ import json
 import os
 import subprocess
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,7 @@ from awf.db.session import make_engine, make_session_factory
 from awf.service.config import ServiceSettings
 from awf.service.status import (
     WorkspaceIdView,
-    _build_orphan_check,
+    WorkspaceLifecycleSnapshot,
     _check_agent_runtime_image,
     _check_api,
     _check_docker,
@@ -28,7 +29,6 @@ from awf.service.status import (
     _docker_socket_path,
     _fail,
     _http_get,
-    _parse_workspace_projects,
     _run_docker_command,
     _run_subprocess,
     _truncate,
@@ -139,6 +139,12 @@ def _make_run_subprocess(
     ps_payload: str = "",
     ps_returncode: int = 0,
     ps_stderr: str = "",
+    network_payload: str = "",
+    network_returncode: int = 0,
+    network_stderr: str = "",
+    volume_payload: str = "",
+    volume_returncode: int = 0,
+    volume_stderr: str = "",
 ) -> Any:
     def _run(args: list[str], **_kwargs: object) -> Any:
         if args[:2] == ["docker", "info"]:
@@ -154,6 +160,26 @@ def _make_run_subprocess(
                 "Completed",
                 (),
                 {"returncode": ps_returncode, "stdout": ps_payload, "stderr": ps_stderr},
+            )()
+        if args[:3] == ["docker", "network", "ls"]:
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": network_returncode,
+                    "stdout": network_payload,
+                    "stderr": network_stderr,
+                },
+            )()
+        if args[:3] == ["docker", "volume", "ls"]:
+            return type(
+                "Completed",
+                (),
+                {
+                    "returncode": volume_returncode,
+                    "stdout": volume_payload,
+                    "stderr": volume_stderr,
+                },
             )()
         raise AssertionError(f"unexpected subprocess call: {args}")
 
@@ -290,6 +316,72 @@ def test_orphan_check_reports_no_orphans_when_no_awf_containers(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_service_status_includes_orphan_resource_summary(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+    worktree = Path(settings.work_dir) / "git" / "worktrees" / "ws_ghost"
+    worktree.mkdir(parents=True)
+
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_ghost-agent-1",
+            state="exited",
+            status="Exited",
+            project="awf_ws_ghost",
+            service="agent",
+        )
+    )
+    network_payload = _docker_ps_payload(
+        {"id": "net", "name": "awf_ws_ghost_default", "project": "awf_ws_ghost"}
+    )
+    volume_payload = _docker_ps_payload(
+        {"name": "awf_ws_ghost_postgres_data", "project": "awf_ws_ghost"}
+    )
+
+    status = asyncio.run(
+        collect_service_status(
+            settings,
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(
+                ps_payload=payload,
+                network_payload=network_payload,
+                volume_payload=volume_payload,
+            ),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+        )
+    )
+
+    assert status["status"] == "fail"
+    orphans = status["checks"]["orphan_workspaces"]
+    assert orphans["reason"] == "ORPHANS_PRESENT"
+    assert orphans["resource_counts"] == {
+        "container": 1,
+        "network": 1,
+        "volume": 1,
+        "worktree": 1,
+    }
+    assert orphans["orphan_counts_by_kind"] == {
+        "container": 1,
+        "network": 1,
+        "volume": 1,
+        "worktree": 1,
+    }
+    examples = orphans["examples"]
+    assert {example["resource_kind"] for example in examples} == {
+        "container",
+        "network",
+        "volume",
+        "worktree",
+    }
+    assert all(example["workspace_id"] == "ws_ghost" for example in examples)
+    assert isinstance(orphans["action"], str) and orphans["action"].strip()
+
+
+@pytest.mark.unit
 def test_orphan_check_treats_active_workspace_containers_as_expected(tmp_path: Path) -> None:
     payload = _docker_ps_payload(
         _container(
@@ -383,8 +475,8 @@ def test_orphan_check_flags_terminal_workspace_with_running_container(tmp_path: 
     example = examples[0]
     assert example["workspace_id"] == "ws_dead"
     assert example["compose_project"] == "awf_ws_dead"
-    assert example["classification"] == "terminal"
-    assert example["reason"] == "WORKSPACE_TERMINAL"
+    assert example["classification"] == "cleanup_ready"
+    assert example["reason"] == "WORKSPACE_TERMINAL_RETENTION_EXPIRED"
     action = orphans.get("action")
     assert isinstance(action, str) and action.strip()
 
@@ -428,7 +520,7 @@ def test_orphan_check_flags_workspace_missing_from_db(tmp_path: Path) -> None:
     examples = orphans["examples"]
     assert examples[0]["workspace_id"] == "ws_ghost"
     assert examples[0]["compose_project"] == "awf-ws_ghost"
-    assert examples[0]["classification"] == "missing"
+    assert examples[0]["classification"] == "cleanup_ready"
     assert examples[0]["reason"] == "WORKSPACE_MISSING"
 
 
@@ -597,6 +689,10 @@ def test_orphan_check_extracts_labels_via_docker_template(tmp_path: Path) -> Non
             return type("Completed", (), {"returncode": 0, "stdout": "sha\n", "stderr": ""})()
         if args[:3] == ["docker", "ps", "-a"]:
             return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if args[:3] == ["docker", "network", "ls"]:
+            return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+        if args[:3] == ["docker", "volume", "ls"]:
+            return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
         raise AssertionError(f"unexpected subprocess call: {args}")
 
     asyncio.run(
@@ -617,6 +713,62 @@ def test_orphan_check_extracts_labels_via_docker_template(tmp_path: Path) -> Non
     fmt = ps_args[fmt_index + 1]
     assert '.Label "com.docker.compose.project"' in fmt
     assert '.Label "com.docker.compose.service"' in fmt
+    network_args = next(args for args in captured_args if args[:3] == ["docker", "network", "ls"])
+    assert "label=com.docker.compose.project" in network_args
+    volume_args = next(args for args in captured_args if args[:3] == ["docker", "volume", "ls"])
+    assert "label=com.docker.compose.project" in volume_args
+
+
+@pytest.mark.unit
+def test_service_status_treats_completed_within_retention_as_retained(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    (Path(settings.work_dir) / "git" / "worktrees" / "ws_done").mkdir(parents=True)
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_done-agent-1",
+            state="exited",
+            status="Exited",
+            project="awf_ws_done",
+            service="agent",
+        )
+    )
+
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset(),
+            terminal_ids=frozenset({"ws_done"}),
+            available=True,
+            snapshots=(
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_done",
+                    status=WorkspaceStatus.completed.value,
+                    updated_at=datetime.now(UTC),
+                    compose_project_name="awf_ws_done",
+                ),
+            ),
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            settings,
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=payload),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    orphans = status["checks"]["orphan_workspaces"]
+    assert status["status"] == "ok"
+    assert orphans["reason"] == "NO_ORPHANS"
+    assert orphans["retained_count"] == 2
+    assert orphans["orphan_count"] == 0
 
 
 @pytest.mark.unit
@@ -927,41 +1079,7 @@ async def test_http_get_fetches_json_from_local_health_server() -> None:
 
 
 @pytest.mark.unit
-def test_workspace_project_parsing_skips_bad_rows_and_extracts_supported_prefixes() -> None:
-    payload = "\n".join(
-        [
-            "",
-            "not-json",
-            json.dumps(["not", "a", "dict"]),
-            json.dumps({"project": ""}),
-            json.dumps({"project": "other"}),
-            json.dumps({"project": "awf_not_workspace"}),
-            json.dumps(
-                {
-                    "id": "abc",
-                    "name": "agent",
-                    "service": "agent",
-                    "state": "running",
-                    "status": "Up",
-                    "project": "awf_ws_one",
-                }
-            ),
-            json.dumps(
-                {
-                    "id": "def",
-                    "name": "agent",
-                    "service": "agent",
-                    "state": "running",
-                    "status": "Up",
-                    "project": "awf-ws_two",
-                }
-            ),
-        ]
-    )
-
-    projects = _parse_workspace_projects(payload)
-
-    assert [project.workspace_id for project in projects] == ["ws_two", "ws_one"]
+def test_status_helper_extracts_supported_workspace_project_prefixes() -> None:
     assert _workspace_id_from_project("awf_ws_three") == "ws_three"
     assert _workspace_id_from_project("awf-ws_four") == "ws_four"
     assert _workspace_id_from_project("awf_not_workspace") is None
@@ -969,28 +1087,6 @@ def test_workspace_project_parsing_skips_bad_rows_and_extracts_supported_prefixe
     assert str(_docker_socket_path("unix:///var/run/docker.sock")) == "/var/run/docker.sock"
     assert len(_truncate("x" * 300)) == 240
     assert _truncate("ok") == "ok"
-
-
-@pytest.mark.unit
-def test_orphan_check_classifies_timeout_and_generic_ps_errors() -> None:
-    view = WorkspaceIdView(
-        active_ids=frozenset(),
-        terminal_ids=frozenset(),
-        available=True,
-    )
-
-    timeout = _build_orphan_check(
-        subprocess.TimeoutExpired(["docker", "ps"], timeout=5),
-        workspace_view=view,
-    )
-    generic = _build_orphan_check(RuntimeError("daemon exploded"), workspace_view=view)
-
-    assert timeout["ok"] is True
-    assert timeout["status"] == "unavailable"
-    assert timeout["reason"] == "DOCKER_UNAVAILABLE"
-    assert "timed out" in str(timeout["detail"])
-    assert generic["reason"] == "DOCKER_UNAVAILABLE"
-    assert "RuntimeError: daemon exploded" in str(generic["detail"])
 
 
 @pytest.mark.unit

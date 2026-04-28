@@ -454,7 +454,11 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
     assert operation.status == "succeeded"
     assert operation.idempotency_key == "remonitor-claims"
     assert operation.payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
         "reason": "operator recovery",
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_action": "remonitor",
         "expected_version": 7,
     }
     assert operation.result == {
@@ -719,7 +723,12 @@ async def test_refresh_endpoint_returns_operation_response_and_coalesces_active_
     assert payload["type"] == "refresh"
     assert payload["status"] == "pending"
     assert payload["idempotency_key"] == "refresh-first"
+    assert payload["owner"] == "operator_api"
+    assert payload["source"] == "operator_api"
+    assert payload["reason"] == "stale policy"
+    assert payload["reason_code"] == "OPERATOR_REFRESH"
     assert payload["payload"] == {
+        "owner": "operator_api",
         "source": "operator_api",
         "reason": "stale policy",
         "reason_code": "OPERATOR_REFRESH",
@@ -782,7 +791,12 @@ async def test_validate_endpoint_returns_operation_response_and_coalesces_active
     assert payload["workspace_id"] == workspace_id
     assert payload["type"] == "validate"
     assert payload["status"] == "pending"
+    assert payload["owner"] == "operator_api"
+    assert payload["source"] == "operator_api"
+    assert payload["reason"] == "rerun required validation"
+    assert payload["reason_code"] == "OPERATOR_VALIDATE"
     assert payload["payload"] == {
+        "owner": "operator_api",
         "source": "operator_api",
         "reason": "rerun required validation",
         "reason_code": "OPERATOR_VALIDATE",

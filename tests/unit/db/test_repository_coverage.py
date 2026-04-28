@@ -1397,3 +1397,98 @@ async def test_operation_active_matching_payload_requires_present_null_keys(
 
     assert found is not None
     assert found.id == matching.id
+
+
+@pytest.mark.unit
+async def test_operation_start_sets_running_started_at_once(session: AsyncSession) -> None:
+    workspace = await _workspace(session, title="operation start audit")
+    repo = OperationRepository(session)
+    operation = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.pending,
+        payload={"source": "pr_monitor", "reason_code": "STALE_TARGET_ADVANCED"},
+    )
+
+    started = await repo.start(operation)
+    first_started_at = started.started_at
+    restarted = await repo.start(operation)
+
+    assert started.status == OperationStatus.running.value
+    assert first_started_at is not None
+    assert restarted.started_at == first_started_at
+
+
+@pytest.mark.unit
+async def test_operation_finish_success_preserves_audit_payload_and_log_refs(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, title="operation finish success audit")
+    repo = OperationRepository(session)
+    payload = {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "rerun validation",
+        "reason_code": "OPERATOR_VALIDATE",
+    }
+    operation = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+        payload=payload,
+    )
+    started_at = operation.started_at
+
+    await repo.finish(
+        operation,
+        status=OperationStatus.succeeded,
+        result={"status": "validated", "log_stream_refs": {"monitor": "monitor.log"}},
+        log_stream_refs={"commands": [{"stdout": "validation.01_validate.stdout"}]},
+    )
+
+    assert operation.payload == payload
+    assert operation.started_at == started_at
+    assert operation.finished_at is not None
+    assert operation.result == {
+        "status": "validated",
+        "log_stream_refs": {
+            "monitor": "monitor.log",
+            "commands": [{"stdout": "validation.01_validate.stdout"}],
+        },
+    }
+
+
+@pytest.mark.unit
+async def test_operation_finish_failure_sets_failure_audit_without_losing_payload(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, title="operation finish failure audit")
+    repo = OperationRepository(session)
+    payload = {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "stop workspace",
+        "reason_code": "OPERATOR_STOP",
+    }
+    operation = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.pending,
+        payload=payload,
+    )
+
+    await repo.finish(
+        operation,
+        status=OperationStatus.failed,
+        error_code="STACK_STOP_FAILED",
+        error_message="docker stop failed",
+        log_stream_refs={"stderr": "stop.stderr"},
+    )
+
+    assert operation.status == OperationStatus.failed.value
+    assert operation.payload == payload
+    assert operation.started_at is not None
+    assert operation.finished_at is not None
+    assert operation.error_code == "STACK_STOP_FAILED"
+    assert operation.error_message == "docker stop failed"
+    assert operation.result == {"log_stream_refs": {"stderr": "stop.stderr"}}

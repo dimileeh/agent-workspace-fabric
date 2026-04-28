@@ -10,7 +10,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
@@ -40,6 +40,8 @@ WorkspaceLifecycleStageStatus = Literal[
     "terminal_skipped",
 ]
 LlmUsageStatus = Literal["available", "unavailable"]
+
+_MAX_LOG_STREAM_REF_DEPTH = 64
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -690,6 +692,109 @@ class OperationResponse(BaseModel):
     created_at: datetime
     started_at: datetime | None
     finished_at: datetime | None
+    owner: str | None = None
+    source: str | None = None
+    reason: str | None = None
+    reason_code: str | None = None
+    failure_code: str | None = None
+    failure_message: str | None = None
+    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
+    log_stream_ids: list[str] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def populate_audit_fields(self) -> OperationResponse:
+        payload = self.payload if isinstance(self.payload, dict) else {}
+        result = self.result if isinstance(self.result, dict) else {}
+        self.owner = self.owner or _first_str(payload, result, key="owner")
+        self.source = self.source or _first_str(payload, result, key="source")
+        self.reason = self.reason or _first_str(payload, result, key="reason")
+        self.reason_code = self.reason_code or _first_str(payload, result, key="reason_code")
+        self.failure_code = (
+            self.failure_code
+            or _first_str(result, payload, key="failure_code")
+            or _first_str(result, payload, key="error_code")
+            or self.error_code
+        )
+        self.failure_message = (
+            self.failure_message
+            or _first_str(result, payload, key="failure_message")
+            or _first_str(result, payload, key="error_message")
+            or self.error_message
+        )
+        refs = _merge_log_stream_refs(
+            self.log_stream_refs,
+            _operation_log_stream_refs(payload, result),
+        )
+        self.log_stream_refs = refs
+        self.log_stream_ids = _log_stream_ids(self.log_stream_refs)
+        return self
+
+
+def _first_str(*sources: dict[str, Any], key: str) -> str | None:
+    for source in sources:
+        value = source.get(key)
+        if isinstance(value, str):
+            return value
+    return None
+
+
+def _operation_log_stream_refs(
+    *sources: dict[str, Any],
+) -> dict[str, Any]:
+    refs: dict[str, Any] = {}
+    for source in sources:
+        value = source.get("log_stream_refs")
+        if isinstance(value, dict):
+            refs = _merge_log_stream_refs(refs, value)
+    return refs
+
+
+def _merge_log_stream_refs(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    refs = dict(existing)
+    for key, value in incoming.items():
+        if key in refs:
+            refs[key] = _merge_log_stream_ref_value(refs[key], value)
+        else:
+            refs[key] = value
+    return refs
+
+
+def _merge_log_stream_ref_value(existing: Any, incoming: Any) -> Any:
+    if existing == incoming:
+        return existing
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        return _merge_log_stream_refs(existing, incoming)
+
+    values = list(existing) if isinstance(existing, list) else [existing]
+    incoming_values = incoming if isinstance(incoming, list) else [incoming]
+    for value in incoming_values:
+        if value not in values:
+            values.append(value)
+    return values
+
+
+def _log_stream_ids(value: Any) -> list[str]:
+    ids: set[str] = set()
+
+    def collect(item: Any, depth: int = 0) -> None:
+        if depth > _MAX_LOG_STREAM_REF_DEPTH:
+            return
+        if isinstance(item, str):
+            ids.add(item)
+            return
+        if isinstance(item, dict):
+            for child in item.values():
+                collect(child, depth + 1)
+            return
+        if isinstance(item, list | tuple):
+            for child in item:
+                collect(child, depth + 1)
+
+    collect(value)
+    return sorted(ids)
 
 
 class OperationListResponse(BaseModel):

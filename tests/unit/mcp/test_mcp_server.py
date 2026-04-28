@@ -408,7 +408,11 @@ class TestWorkspaceControls:
         assert operations[0]["type"] == "cancel"
         assert operations[0]["status"] == "succeeded"
         assert operations[0]["payload"] == {
+            "owner": "operator_api",
+            "source": "operator_api",
             "reason": "no longer needed",
+            "reason_code": "OPERATOR_CANCEL",
+            "requested_action": "cancel",
             "stop_stack": False,
         }
         assert operations[0]["result"] == {"status": "cancelled"}

@@ -36,8 +36,13 @@ _DESTROYING_OR_DESTROYED_STATUSES = frozenset(
     {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}
 )
 _OPERATOR_API_SOURCE = "operator_api"
+_OPERATOR_CANCEL_REASON_CODE = "OPERATOR_CANCEL"
+_OPERATOR_STOP_REASON_CODE = "OPERATOR_STOP"
+_OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
 _OPERATOR_REFRESH_REASON_CODE = "OPERATOR_REFRESH"
 _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
+_OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
+_OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
 
 class WorkspaceCleanerProtocol(Protocol):
@@ -206,7 +211,13 @@ class WorkspaceControlService:
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        payload: dict[str, object | None] = {"reason": reason, "stop_stack": stop_stack}
+        event_payload: dict[str, object | None] = {"reason": reason, "stop_stack": stop_stack}
+        payload = _operator_operation_payload(
+            reason=reason,
+            reason_code=_OPERATOR_CANCEL_REASON_CODE,
+            requested_action=OperationType.cancel.value,
+            extra={"stop_stack": stop_stack},
+        )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
         workspace, replay = await self._prepare_operation(
             repo,
@@ -232,7 +243,17 @@ class WorkspaceControlService:
             idempotency_key=idempotency_key,
         )
         if stop_stack:
-            await self._project_stopper(workspace.compose_project_name)
+            try:
+                await self._project_stopper(workspace.compose_project_name)
+            except WorkspaceStackStopError as exc:
+                await _finish_stack_stop_failed_operation(
+                    self._session,
+                    operations,
+                    operation,
+                    workspace=workspace,
+                    exc=exc,
+                )
+                raise
         if (
             workspace.status != WorkspaceStatus.cancelled.value
             and WorkspaceStateMachine.can_transition(
@@ -241,14 +262,14 @@ class WorkspaceControlService:
             )
         ):
             await repo.transition(
-                workspace, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_CANCEL"
+                workspace, to=WorkspaceStatus.cancelled, reason_code=_OPERATOR_CANCEL_REASON_CODE
             )
         else:
             await repo.add_event(
                 workspace,
                 event_type="workspace.cancel_requested",
-                reason_code="OPERATOR_CANCEL",
-                payload=payload,
+                reason_code=_OPERATOR_CANCEL_REASON_CODE,
+                payload=event_payload,
             )
         await operations.finish(
             operation,
@@ -272,7 +293,12 @@ class WorkspaceControlService:
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        payload: dict[str, object | None] = {"reason": reason}
+        event_payload: dict[str, object | None] = {"reason": reason}
+        payload = _operator_operation_payload(
+            reason=reason,
+            reason_code=_OPERATOR_STOP_REASON_CODE,
+            requested_action=OperationType.stop.value,
+        )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
         workspace, replay = await self._prepare_operation(
             repo,
@@ -297,20 +323,30 @@ class WorkspaceControlService:
             payload=operation_payload,
             idempotency_key=idempotency_key,
         )
-        await self._project_stopper(workspace.compose_project_name)
+        try:
+            await self._project_stopper(workspace.compose_project_name)
+        except WorkspaceStackStopError as exc:
+            await _finish_stack_stop_failed_operation(
+                self._session,
+                operations,
+                operation,
+                workspace=workspace,
+                exc=exc,
+            )
+            raise
         if _is_active(WorkspaceStatus(workspace.status)) and WorkspaceStateMachine.can_transition(
             WorkspaceStatus(workspace.status),
             WorkspaceStatus.cancelled,
         ):
             await repo.transition(
-                workspace, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_STOP"
+                workspace, to=WorkspaceStatus.cancelled, reason_code=_OPERATOR_STOP_REASON_CODE
             )
         else:
             await repo.add_event(
                 workspace,
                 event_type="workspace.stack_stopped",
-                reason_code="OPERATOR_STOP",
-                payload=payload,
+                reason_code=_OPERATOR_STOP_REASON_CODE,
+                payload=event_payload,
             )
         await operations.finish(
             operation,
@@ -334,7 +370,11 @@ class WorkspaceControlService:
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        payload: dict[str, object | None] = {"reason": reason}
+        payload = _operator_operation_payload(
+            reason=reason,
+            reason_code=_OPERATOR_REMONITOR_REASON_CODE,
+            requested_action=OperationType.remonitor.value,
+        )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
         workspace, replay = await self._prepare_operation(
             repo,
@@ -375,7 +415,7 @@ class WorkspaceControlService:
         await repo.add_event(
             workspace,
             event_type="workspace.remonitor_requested",
-            reason_code="OPERATOR_REMONITOR",
+            reason_code=_OPERATOR_REMONITOR_REASON_CODE,
             payload={
                 "reason": reason,
                 "operation_id": operation.id,
@@ -407,12 +447,11 @@ class WorkspaceControlService:
     ) -> Operation:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        payload: dict[str, object | None] = {
-            "source": _OPERATOR_API_SOURCE,
-            "reason": reason,
-            "reason_code": _OPERATOR_REFRESH_REASON_CODE,
-            "requested_action": OperationType.refresh.value,
-        }
+        payload = _operator_operation_payload(
+            reason=reason,
+            reason_code=_OPERATOR_REFRESH_REASON_CODE,
+            requested_action=OperationType.refresh.value,
+        )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
         workspace, replay = await self._prepare_operation(
             repo,
@@ -459,13 +498,12 @@ class WorkspaceControlService:
     ) -> Operation:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        payload: dict[str, object | None] = {
-            "source": _OPERATOR_API_SOURCE,
-            "reason": reason,
-            "reason_code": _OPERATOR_VALIDATE_REASON_CODE,
-            "requested_action": OperationType.validate.value,
-            "recovery_mode": "validate_only",
-        }
+        payload = _operator_operation_payload(
+            reason=reason,
+            reason_code=_OPERATOR_VALIDATE_REASON_CODE,
+            requested_action=OperationType.validate.value,
+            extra={"recovery_mode": "validate_only"},
+        )
         if requested_tier is not None:
             payload["requested_tier"] = requested_tier
         operation_payload = _operation_payload(payload, expected_version=expected_version)
@@ -529,11 +567,16 @@ class WorkspaceControlService:
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        payload: dict[str, object | None] = {
-            "force": force,
-            "remove_volumes": remove_volumes,
-            "remove_worktree": remove_worktree,
-        }
+        payload = _operator_operation_payload(
+            reason=None,
+            reason_code=_OPERATOR_DESTROY_REASON_CODE,
+            requested_action=OperationType.destroy.value,
+            extra={
+                "force": force,
+                "remove_volumes": remove_volumes,
+                "remove_worktree": remove_worktree,
+            },
+        )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
         workspace, replay = await self._prepare_operation(
             repo,
@@ -580,12 +623,12 @@ class WorkspaceControlService:
             current, WorkspaceStatus.cancelled
         ):
             await repo.transition(
-                workspace, to=WorkspaceStatus.cancelled, reason_code="OPERATOR_DESTROY"
+                workspace, to=WorkspaceStatus.cancelled, reason_code=_OPERATOR_DESTROY_REASON_CODE
             )
             current = WorkspaceStatus.cancelled
         if WorkspaceStateMachine.can_transition(current, WorkspaceStatus.destroying):
             await repo.transition(
-                workspace, to=WorkspaceStatus.destroying, reason_code="OPERATOR_DESTROY"
+                workspace, to=WorkspaceStatus.destroying, reason_code=_OPERATOR_DESTROY_REASON_CODE
             )
 
         await self._session.flush()
@@ -790,6 +833,25 @@ def _control_response(
     )
 
 
+def _operator_operation_payload(
+    *,
+    reason: str | None,
+    reason_code: str,
+    requested_action: str,
+    extra: dict[str, object | None] | None = None,
+) -> dict[str, object | None]:
+    payload: dict[str, object | None] = {
+        "owner": _OPERATOR_API_SOURCE,
+        "source": _OPERATOR_API_SOURCE,
+        "reason": reason,
+        "reason_code": reason_code,
+        "requested_action": requested_action,
+    }
+    if extra is not None:
+        payload.update(extra)
+    return payload
+
+
 def _operation_payload(
     payload: dict[str, object | None],
     *,
@@ -799,6 +861,28 @@ def _operation_payload(
     if expected_version is not None:
         operation_payload["expected_version"] = expected_version
     return operation_payload
+
+
+async def _finish_stack_stop_failed_operation(
+    session: AsyncSession,
+    operations: OperationRepository,
+    operation: Operation,
+    *,
+    workspace: Workspace,
+    exc: WorkspaceStackStopError,
+) -> None:
+    await operations.finish(
+        operation,
+        status=OperationStatus.failed,
+        result={"status": workspace.status},
+        error_code=exc.error_code,
+        error_message=_bounded_operation_error_message(exc.message),
+    )
+    await session.commit()
+
+
+def _bounded_operation_error_message(message: str) -> str:
+    return message[:_OPERATION_ERROR_MESSAGE_MAX_LENGTH]
 
 
 def _claim_reset_snapshot(workspace: Workspace) -> dict[str, str | None]:
