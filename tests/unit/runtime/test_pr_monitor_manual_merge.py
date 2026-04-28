@@ -20,7 +20,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import GitHubClient, RepoRef
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.models import MergeCandidate, WorkspaceEvent
+from awf.db.models import MergeCandidate, Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import (
@@ -129,7 +129,10 @@ def _is_run_list(args: list[str]) -> bool:
     return args[:3] == ["gh", "run", "list"]
 
 
-async def _workspace(factory: async_sessionmaker[AsyncSession], workspace_id: str):
+async def _workspace(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> Workspace | None:
     async with factory() as session:
         return await WorkspaceRepository(session).get(workspace_id)
 
