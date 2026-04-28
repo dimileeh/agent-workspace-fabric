@@ -2111,6 +2111,12 @@ class PullRequestMonitorRunner:
                 now_wall_seconds=now_wall.timestamp(),
                 legacy_monotonic_fallback=started_at if started_raw is not None else None,
             )
+            threads_addressed = _non_check_reviewer_settle_state_for_runtime(
+                threads_addressed,
+                pr_number=ws.pr_number,
+                now_monotonic=now_monotonic,
+                now_wall_seconds=now_wall.timestamp(),
+            )
         return MonitorState(
             iter_count=ws.monitor_iter_count,
             last_push_sha=ws.monitor_last_commit_sha,
@@ -2128,6 +2134,12 @@ class PullRequestMonitorRunner:
             threads_addressed = dict(state.threads_addressed_ids)
             if ws.pr_number is not None:
                 threads_addressed = _initial_review_grace_state_for_persistence(
+                    threads_addressed,
+                    pr_number=ws.pr_number,
+                    now_monotonic=now_monotonic,
+                    now_wall_seconds=now_wall.timestamp(),
+                )
+                threads_addressed = _non_check_reviewer_settle_state_for_persistence(
                     threads_addressed,
                     pr_number=ws.pr_number,
                     now_monotonic=now_monotonic,
@@ -2585,7 +2597,11 @@ def _merge_queue_wait_key(*, head_sha: str, blocker_candidate_id: str) -> str:
 
 
 def _non_check_reviewer_settle_started_key(*, pr_number: int, head_sha: str) -> str:
-    return f"__awf_non_check_reviewer_settle_started__:{pr_number}:{head_sha}"
+    return f"{_non_check_reviewer_settle_started_prefix(pr_number=pr_number)}{head_sha}"
+
+
+def _non_check_reviewer_settle_started_prefix(*, pr_number: int) -> str:
+    return f"__awf_non_check_reviewer_settle_started__:{pr_number}:"
 
 
 def _non_check_reviewer_settle_done_key(*, pr_number: int, head_sha: str) -> str:
@@ -2863,6 +2879,62 @@ def _initial_review_grace_state_for_persistence(
     threads_addressed[started_key] = _initial_review_grace_wall_started_value(
         now_wall_seconds - elapsed_seconds
     )
+    return threads_addressed
+
+
+def _non_check_reviewer_settle_state_for_runtime(
+    threads_addressed: dict[str, str],
+    *,
+    pr_number: int,
+    now_monotonic: float,
+    now_wall_seconds: float,
+) -> dict[str, str]:
+    started_prefix = _non_check_reviewer_settle_started_prefix(pr_number=pr_number)
+    for started_key, started_raw in list(threads_addressed.items()):
+        if not started_key.startswith(started_prefix):
+            continue
+        started_wall_seconds = _initial_review_grace_wall_seconds(started_raw)
+        if started_wall_seconds is not None:
+            elapsed_seconds = max(now_wall_seconds - started_wall_seconds, 0.0)
+            threads_addressed[started_key] = f"{now_monotonic - elapsed_seconds:.6f}"
+            continue
+        try:
+            float(started_raw)
+        except (TypeError, ValueError):
+            continue
+        # Legacy persisted settle markers were process-local monotonic values
+        # with no wall-clock anchor. Restarting the wait is conservative after
+        # a process or container restart because it avoids premature elapsed
+        # decisions from comparing unrelated monotonic clocks.
+        threads_addressed[started_key] = f"{now_monotonic:.6f}"
+    return threads_addressed
+
+
+def _non_check_reviewer_settle_state_for_persistence(
+    threads_addressed: dict[str, str],
+    *,
+    pr_number: int,
+    now_monotonic: float,
+    now_wall_seconds: float,
+) -> dict[str, str]:
+    started_prefix = _non_check_reviewer_settle_started_prefix(pr_number=pr_number)
+    for started_key, started_raw in list(threads_addressed.items()):
+        if not started_key.startswith(started_prefix):
+            continue
+        started_wall_seconds = _initial_review_grace_wall_seconds(started_raw)
+        if started_wall_seconds is not None:
+            threads_addressed[started_key] = _initial_review_grace_wall_started_value(
+                started_wall_seconds
+            )
+            continue
+        try:
+            started_monotonic = float(started_raw)
+        except (TypeError, ValueError):
+            continue
+        elapsed_seconds = max(now_monotonic - started_monotonic, 0.0)
+        threads_addressed[started_key] = _initial_review_grace_wall_started_value(
+            now_wall_seconds - elapsed_seconds
+        )
     return threads_addressed
 
 

@@ -50,6 +50,7 @@ from awf.runtime.pr_monitor_runner import (
     _is_pending_check,
     _is_transient_github_client_error,
     _merge_rejection_reason,
+    _non_check_reviewer_settle_started_key,
     _notify_human_reason,
     _stale_pending_check_warnings,
     _target_reconcile_payload,
@@ -1579,12 +1580,19 @@ async def test_load_and_persist_state_convert_monitor_timestamps(
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
     started_key = _initial_review_grace_started_key(42)
+    settle_key = _non_check_reviewer_settle_started_key(
+        pr_number=42,
+        head_sha="head-a",
+    )
     wall_started = datetime(2026, 4, 27, 12, 0, tzinfo=UTC).timestamp()
     await _update_workspace(
         factory,
         workspace_id,
         monitor_started_at=datetime(2026, 4, 27, 12, 0),
-        monitor_threads_addressed={started_key: f"{wall_started:.6f}"},
+        monitor_threads_addressed={
+            started_key: f"{wall_started:.6f}",
+            settle_key: f"{wall_started:.6f}",
+        },
         monitor_last_commit_sha="oldsha",
     )
     runner = make_runner(
@@ -1602,12 +1610,14 @@ async def test_load_and_persist_state_convert_monitor_timestamps(
     await runner._persist_state(workspace_id, state)
 
     assert float(state.threads_addressed_ids[started_key]) < 1_000_000_000
+    assert float(state.threads_addressed_ids[settle_key]) < 1_000_000_000
     async with factory() as s:
         persisted = await WorkspaceRepository(s).get(workspace_id)
         assert persisted is not None
         assert persisted.monitor_last_commit_sha == "newsha"
         assert persisted.monitor_threads_addressed["review-1"] == "false_positive"
         assert float(persisted.monitor_threads_addressed[started_key]) >= 1_000_000_000
+        assert float(persisted.monitor_threads_addressed[settle_key]) >= 1_000_000_000
 
 
 @pytest.mark.unit
