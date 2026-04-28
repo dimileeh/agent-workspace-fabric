@@ -498,6 +498,7 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
             "execution_claimed_by": "dead-execution-worker",
             "execution_claim_expires_at": _ACTIVE_CLAIM_EXPIRES_AT_JSON,
         },
+        "expected_version": 7,
     }
 
 
@@ -519,6 +520,35 @@ async def test_remonitor_same_key_with_different_reason_returns_idempotency_conf
         f"/v1/workspaces/{workspace_id}/remonitor",
         json={"reason": "different recovery reason"},
         headers=headers,
+    )
+
+    assert first.status_code == 200
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.unit
+async def test_remonitor_same_key_with_different_if_match_returns_idempotency_conflict(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine)
+    headers = {
+        **_auth(monkeypatch),
+        "Idempotency-Key": "remonitor-if-match-conflict",
+        "If-Match": "7",
+    }
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "operator recovery"},
+        headers=headers,
+    )
+    conflict = await client.post(
+        f"/v1/workspaces/{workspace_id}/remonitor",
+        json={"reason": "operator recovery"},
+        headers={**headers, "If-Match": "8"},
     )
 
     assert first.status_code == 200
@@ -838,6 +868,7 @@ async def test_refresh_endpoint_returns_operation_response_and_coalesces_active_
         "source": "operator_api",
         "reason": "stale policy",
         "operation_id": payload["id"],
+        "expected_version": 3,
     }
 
 
@@ -914,7 +945,174 @@ async def test_validate_endpoint_returns_operation_response_and_coalesces_active
         "operation_id": payload["id"],
         "recovery_mode": "validate_only",
         "requested_tier": 2,
+        "expected_version": 7,
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("action", "first_status", "body", "changed_body"),
+    [
+        (
+            "refresh",
+            WorkspaceStatus.ready,
+            {"reason": "stale policy"},
+            {"reason": "different stale policy"},
+        ),
+        (
+            "validate",
+            WorkspaceStatus.monitoring_pr,
+            {"reason": "rerun required validation", "requested_tier": 2},
+            {"reason": "rerun required validation", "requested_tier": 3},
+        ),
+    ],
+)
+async def test_recovery_same_key_replay_and_conflicting_payloads(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    first_status: WorkspaceStatus,
+    body: dict[str, object],
+    changed_body: dict[str, object],
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine, final_status=first_status)
+    headers = {**_auth(monkeypatch), "Idempotency-Key": f"{action}-same-key"}
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=body,
+        headers=headers,
+    )
+    before_counts = await _counts(engine, workspace_id)
+    replay = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=body,
+        headers=headers,
+    )
+    conflict = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=changed_body,
+        headers=headers,
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["id"] == first.json()["id"]
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+    assert after_counts == before_counts
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("action", "first_status", "if_match", "body"),
+    [
+        ("refresh", WorkspaceStatus.ready, "3", {"reason": "stale policy"}),
+        (
+            "validate",
+            WorkspaceStatus.monitoring_pr,
+            "7",
+            {"reason": "rerun required validation", "requested_tier": 2},
+        ),
+    ],
+)
+async def test_recovery_fresh_key_stale_if_match_rejects_before_active_coalesce(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    first_status: WorkspaceStatus,
+    if_match: str,
+    body: dict[str, object],
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine, final_status=first_status)
+    headers = {
+        **_auth(monkeypatch),
+        "Idempotency-Key": f"{action}-original",
+        "If-Match": if_match,
+    }
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=body,
+        headers=headers,
+    )
+    if action == "refresh":
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await session.get(Workspace, workspace_id)
+            assert workspace is not None
+            workspace.version += 1
+            await session.commit()
+    replay = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=body,
+        headers=headers,
+    )
+    before_counts = await _counts(engine, workspace_id)
+    conflict = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=body,
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": f"{action}-fresh-stale-version",
+            "If-Match": if_match,
+        },
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["id"] == first.json()["id"]
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "VERSION_CONFLICT"
+    assert conflict.json()["detail"]["detail"] == {
+        "expected_version": int(if_match),
+        "actual_version": int(if_match) + 1,
+    }
+    assert after_counts == before_counts
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["refresh", "validate"])
+async def test_recovery_same_key_with_different_if_match_returns_conflict(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    final_status = (
+        WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
+    )
+    if_match = "3" if action == "refresh" else "7"
+    workspace_id = await _seed_monitoring_workspace(engine, final_status=final_status)
+    body = (
+        {"reason": "stale policy"}
+        if action == "refresh"
+        else {"reason": "rerun required validation", "requested_tier": 2}
+    )
+    headers = {
+        **_auth(monkeypatch),
+        "Idempotency-Key": f"{action}-if-match-conflict",
+        "If-Match": if_match,
+    }
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=body,
+        headers=headers,
+    )
+    conflict = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=body,
+        headers={**headers, "If-Match": str(int(if_match) + 1)},
+    )
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
 
 
 @pytest.mark.unit
