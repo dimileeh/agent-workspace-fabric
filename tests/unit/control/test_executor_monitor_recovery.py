@@ -24,7 +24,7 @@ from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
-    _pending_monitor_recovery,
+    _get_active_recovery_payload,
 )
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
@@ -194,9 +194,9 @@ def _all_adapter_prompts(fake: FakeCommandRunner) -> str:
 
 
 @pytest.mark.unit
-def test_pending_monitor_recovery_predicate_returns_payload_when_pending() -> None:
+def test_get_active_recovery_payload_returns_payload_when_pending() -> None:
     """The predicate must surface the recovery payload when an active
-    pr_monitor operation exists, and return ``None`` otherwise."""
+    validate-only recovery operation exists, and return ``None`` otherwise."""
 
     class _FakeOperation:
         def __init__(
@@ -244,14 +244,14 @@ def test_pending_monitor_recovery_predicate_returns_payload_when_pending() -> No
         payload="operator_api",
     )
 
-    assert _pending_monitor_recovery(_FakeWorkspace([pending])) == pending.payload
-    assert _pending_monitor_recovery(_FakeWorkspace([running])) == running.payload
-    assert _pending_monitor_recovery(_FakeWorkspace([operator_api])) == operator_api.payload
-    assert _pending_monitor_recovery(_FakeWorkspace([succeeded])) is None
-    assert _pending_monitor_recovery(_FakeWorkspace([operator])) is None
-    assert _pending_monitor_recovery(_FakeWorkspace([wrong_type])) is None
-    assert _pending_monitor_recovery(_FakeWorkspace([invalid_payload])) is None
-    assert _pending_monitor_recovery(_FakeWorkspace([])) is None
+    assert _get_active_recovery_payload(_FakeWorkspace([pending])) == pending.payload
+    assert _get_active_recovery_payload(_FakeWorkspace([running])) == running.payload
+    assert _get_active_recovery_payload(_FakeWorkspace([operator_api])) == operator_api.payload
+    assert _get_active_recovery_payload(_FakeWorkspace([succeeded])) is None
+    assert _get_active_recovery_payload(_FakeWorkspace([operator])) is None
+    assert _get_active_recovery_payload(_FakeWorkspace([wrong_type])) is None
+    assert _get_active_recovery_payload(_FakeWorkspace([invalid_payload])) is None
+    assert _get_active_recovery_payload(_FakeWorkspace([])) is None
 
 
 @pytest.mark.unit
@@ -512,7 +512,7 @@ async def test_executor_normal_path_unchanged_when_no_recovery_op(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Regression guard: workspaces without a pr_monitor recovery op
+    """Regression guard: workspaces without a validate-only recovery op
     must continue running planning/agent/feature execution as before.
     """
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)

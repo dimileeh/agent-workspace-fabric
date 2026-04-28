@@ -98,7 +98,7 @@ _log = get_logger(__name__)
 
 WORKTREE_MISSING_REASON_CODE = "WORKTREE_MISSING"
 
-_MONITOR_RECOVERY_ACTIVE_OPERATION_STATUSES = {
+_RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
     OperationStatus.running.value,
 }
@@ -106,7 +106,7 @@ _VALIDATE_ONLY_RECOVERY_SOURCES = {"pr_monitor", "operator_api"}
 _VALIDATE_ONLY_RECOVERY_MODES = {"validate_only", "rebase_only"}
 
 
-def _pending_monitor_recovery(workspace: Any) -> dict[str, Any] | None:
+def _get_active_recovery_payload(workspace: Any) -> dict[str, Any] | None:
     """Return the active validate-only recovery payload (or ``None``).
 
     Recovery operations use a pending/running ``validate`` operation with
@@ -115,7 +115,7 @@ def _pending_monitor_recovery(workspace: Any) -> dict[str, Any] | None:
     """
     operations = getattr(workspace, "operations", None) or []
     for operation in operations:
-        if operation.status not in _MONITOR_RECOVERY_ACTIVE_OPERATION_STATUSES:
+        if operation.status not in _RECOVERY_ACTIVE_OPERATION_STATUSES:
             continue
         if getattr(operation, "type", None) != OperationType.validate.value:
             continue
@@ -250,7 +250,7 @@ class WorkspaceExecutor:
         # CLI, or any post-agent commit hooks — those would rewrite the
         # plan artifact and re-implement the feature mid-merge. Recovery
         # only re-runs validation against the already-pushed work.
-        recovery = _pending_monitor_recovery(ws)
+        recovery = _get_active_recovery_payload(ws)
         baseline_coverage: ValidationCoverageResult | None = None
         try:
             agent = AgentRuntime(ws.agent)
@@ -275,7 +275,7 @@ class WorkspaceExecutor:
             if not setup_result.all_passed:
                 first_fail = setup_result.first_failure
                 if recovery is not None:
-                    await self._finish_pending_monitor_recovery_operations(
+                    await self._finish_active_recovery_operations(
                         workspace_id=workspace_id,
                         status=OperationStatus.failed,
                         reason_code="MONITOR_RECOVERY_SETUP_FAILED",
@@ -327,12 +327,12 @@ class WorkspaceExecutor:
                     )
                     return
             else:
-                # The monitor created the recovery Operation in ``pending``;
+                # Recovery dispatch created the validate Operation in ``pending``;
                 # flush it to ``running`` before validation so observability
                 # tooling sees a real ``started_at`` (otherwise the row jumps
                 # straight from pending → succeeded/failed when the validate
                 # finalizer fires, with started_at == finished_at).
-                await self._start_pending_monitor_recovery_operations(
+                await self._start_pending_recovery_operations(
                     workspace_id=workspace_id,
                 )
                 _log.info(
@@ -1958,7 +1958,7 @@ class WorkspaceExecutor:
             await session.commit()
             return run.id
 
-    async def _start_pending_monitor_recovery_operations(
+    async def _start_pending_recovery_operations(
         self,
         *,
         workspace_id: str,
@@ -1987,7 +1987,7 @@ class WorkspaceExecutor:
                     operation.started_at = now
             await session.commit()
 
-    async def _finish_pending_monitor_recovery_operations(
+    async def _finish_active_recovery_operations(
         self,
         *,
         workspace_id: str,
