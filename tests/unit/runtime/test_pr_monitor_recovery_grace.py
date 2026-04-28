@@ -250,8 +250,9 @@ async def test_grace_elapsed_then_stale_recovery_dispatches_with_event(
     assert operation.payload == {
         "owner": "pr_monitor",
         "source": "pr_monitor",
-        "reason": "validation_insufficient_tier",
-        "reason_code": "validation_insufficient_tier",
+        "reason": "Required validation tier has not passed for this merge candidate.",
+        "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+        "stale_reason": "validation_insufficient_tier",
         "requested_action": "validate",
         "recovery_mode": "validate_only",
     }
@@ -476,8 +477,9 @@ async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
     assert operation.payload == {
         "owner": "pr_monitor",
         "source": "pr_monitor",
-        "reason": "STALE_TARGET_ADVANCED",
+        "reason": "Target branch advanced after this merge candidate was validated.",
         "reason_code": "STALE_TARGET_ADVANCED",
+        "stale_reason": "STALE_TARGET_ADVANCED",
         "requested_action": "rebase",
         "recovery_mode": "rebase_only",
     }
@@ -531,8 +533,9 @@ async def test_monitor_recovery_operation_includes_monitor_log_ref_when_availabl
     assert operations[0].payload == {
         "owner": "pr_monitor",
         "source": "pr_monitor",
-        "reason": "validation_insufficient_tier",
-        "reason_code": "validation_insufficient_tier",
+        "reason": "Required validation tier has not passed for this merge candidate.",
+        "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+        "stale_reason": "validation_insufficient_tier",
         "requested_action": "validate",
         "recovery_mode": "validate_only",
         "log_stream_refs": {"monitor": "monitor.log"},
@@ -563,8 +566,9 @@ async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
             payload={
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
-                "reason": "validation_insufficient_tier",
-                "reason_code": "validation_insufficient_tier",
+                "reason": "Required validation tier has not passed for this merge candidate.",
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                "stale_reason": "validation_insufficient_tier",
                 "requested_action": "validate",
                 "recovery_mode": "validate_only",
             },
@@ -617,8 +621,9 @@ async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
         assert operations[0].payload == {
             "owner": "pr_monitor",
             "source": "pr_monitor",
-            "reason": "validation_insufficient_tier",
-            "reason_code": "validation_insufficient_tier",
+            "reason": "Required validation tier has not passed for this merge candidate.",
+            "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+            "stale_reason": "validation_insufficient_tier",
             "requested_action": "validate",
             "recovery_mode": "validate_only",
         }

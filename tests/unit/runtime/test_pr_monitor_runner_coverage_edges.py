@@ -407,8 +407,9 @@ async def test_stale_auto_merge_dispatches_validation_recovery(
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
-                "reason": "validation_insufficient_tier",
-                "reason_code": "validation_insufficient_tier",
+                "reason": "Required validation tier has not passed for this merge candidate.",
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                "stale_reason": "validation_insufficient_tier",
                 "requested_action": "validate",
                 "recovery_mode": "validate_only",
             },

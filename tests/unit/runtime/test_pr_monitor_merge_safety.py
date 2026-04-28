@@ -340,8 +340,9 @@ async def test_auto_merge_blocks_when_required_validation_is_only_on_other_attem
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
-                "reason": "validation_insufficient_tier",
-                "reason_code": "validation_insufficient_tier",
+                "reason": "Required validation tier has not passed for this merge candidate.",
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                "stale_reason": "validation_insufficient_tier",
                 "requested_action": "validate",
                 "recovery_mode": "validate_only",
             },
@@ -388,8 +389,9 @@ async def test_auto_merge_blocks_persisted_stale_candidate(
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
-                "reason": "STALE_TARGET_ADVANCED",
+                "reason": "Target branch advanced after this merge candidate was validated.",
                 "reason_code": "STALE_TARGET_ADVANCED",
+                "stale_reason": "STALE_TARGET_ADVANCED",
                 "requested_action": "rebase",
                 "recovery_mode": "rebase_only",
             },
@@ -437,8 +439,9 @@ async def test_auto_merge_materializes_active_stale_reason(
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
-                "reason": "STALE_TARGET_ADVANCED",
+                "reason": "Target branch advanced after this merge candidate was validated.",
                 "reason_code": "STALE_TARGET_ADVANCED",
+                "stale_reason": "STALE_TARGET_ADVANCED",
                 "requested_action": "rebase",
                 "recovery_mode": "rebase_only",
             },
@@ -520,8 +523,9 @@ async def test_auto_merge_rechecks_candidate_gate_inside_merge_lock(
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
-                "reason": "STALE_TARGET_ADVANCED",
+                "reason": "Target branch advanced after this merge candidate was validated.",
                 "reason_code": "STALE_TARGET_ADVANCED",
+                "stale_reason": "STALE_TARGET_ADVANCED",
                 "requested_action": "rebase",
                 "recovery_mode": "rebase_only",
             },
@@ -608,8 +612,9 @@ async def test_auto_merge_does_not_duplicate_active_monitor_recovery(
             payload={
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
-                "reason": "validation_insufficient_tier",
-                "reason_code": "validation_insufficient_tier",
+                "reason": "Required validation tier has not passed for this merge candidate.",
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                "stale_reason": "validation_insufficient_tier",
                 "requested_action": "validate",
                 "recovery_mode": "validate_only",
             },
@@ -636,8 +641,9 @@ async def test_auto_merge_does_not_duplicate_active_monitor_recovery(
     assert operations[0].payload == {
         "owner": "pr_monitor",
         "source": "pr_monitor",
-        "reason": "validation_insufficient_tier",
-        "reason_code": "validation_insufficient_tier",
+        "reason": "Required validation tier has not passed for this merge candidate.",
+        "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+        "stale_reason": "validation_insufficient_tier",
         "requested_action": "validate",
         "recovery_mode": "validate_only",
     }

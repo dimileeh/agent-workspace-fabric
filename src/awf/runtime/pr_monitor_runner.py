@@ -1222,11 +1222,14 @@ class PullRequestMonitorRunner:
         if stale_reason is not None:
             recovery_mode = "rebase_only" if req_action == "rebase" else "validate_only"
             requested_action = req_action or "validate"
+            recovery_reason = _pr_monitor_recovery_reason(stale_reason)
+            recovery_reason_code = _pr_monitor_recovery_reason_code(stale_reason)
             operation_payload: dict[str, object] = {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
-                "reason": stale_reason,
-                "reason_code": stale_reason,
+                "reason": recovery_reason,
+                "reason_code": recovery_reason_code,
+                "stale_reason": stale_reason,
                 "requested_action": requested_action,
                 "recovery_mode": recovery_mode,
             }
@@ -2807,6 +2810,40 @@ def _candidate_stale_required_action(reason: str | None) -> str | None:
     if reason == "validation_insufficient_tier":
         return "validate"
     return "rebase"
+
+
+_PR_MONITOR_STALE_REASON_MESSAGES = {
+    "validation_insufficient_tier": (
+        "Required validation tier has not passed for this merge candidate."
+    ),
+    "docs_task_scope_violation": "Changed files are outside the docs task scope.",
+    "STALE_TARGET_ADVANCED": "Target branch advanced after this merge candidate was validated.",
+    "STALE_OVERLAP": "Target branch changed an owned path for this merge candidate.",
+    "STALE_DEPENDENCY": "Target branch changed dependency files for this merge candidate.",
+    "STALE_BUILD_CONFIG": "Target branch changed build configuration for this merge candidate.",
+    "STALE_SCHEMA": "Target branch changed schema files for this merge candidate.",
+    "stale": "Merge candidate is stale.",
+}
+
+_PR_MONITOR_REASON_CODES_BY_STALE_REASON = {
+    "validation_insufficient_tier": "VALIDATION_INSUFFICIENT_TIER",
+    "docs_task_scope_violation": "DOCS_TASK_SCOPE_VIOLATION",
+    "stale": "STALE",
+}
+
+
+def _pr_monitor_recovery_reason(stale_reason: str) -> str:
+    return _PR_MONITOR_STALE_REASON_MESSAGES.get(
+        stale_reason,
+        f"Merge candidate is stale: {stale_reason}.",
+    )
+
+
+def _pr_monitor_recovery_reason_code(stale_reason: str) -> str:
+    if mapped := _PR_MONITOR_REASON_CODES_BY_STALE_REASON.get(stale_reason):
+        return mapped
+    reason_code = re.sub(r"[^A-Za-z0-9]+", "_", stale_reason).strip("_").upper()
+    return reason_code or "STALE"
 
 
 def _initial_review_grace_started_key(pr_number: int) -> str:
