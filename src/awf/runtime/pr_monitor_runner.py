@@ -1221,11 +1221,17 @@ class PullRequestMonitorRunner:
 
         if stale_reason is not None:
             recovery_mode = "rebase_only" if req_action == "rebase" else "validate_only"
+            requested_action = req_action or "validate"
             operation_payload: dict[str, object] = {
+                "owner": "pr_monitor",
                 "source": "pr_monitor",
                 "reason": stale_reason,
+                "reason_code": stale_reason,
+                "requested_action": requested_action,
                 "recovery_mode": recovery_mode,
             }
+            if monitor_log is not None:
+                operation_payload["log_stream_refs"] = {"monitor": monitor_log.stream_id}
             async with self._deps.session_factory() as s:
                 from awf.db.repositories import OperationRepository, WorkspaceRepository
 

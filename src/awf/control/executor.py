@@ -1978,13 +1978,10 @@ class WorkspaceExecutor:
                 status=OperationStatus.pending,
                 limit=100,
             )
-            now = datetime.now(UTC)
             for operation in pending:
                 if not _is_validate_only_recovery_payload(operation.payload):
                     continue
-                operation.status = OperationStatus.running.value
-                if operation.started_at is None:
-                    operation.started_at = now
+                await repo.start(operation)
             await session.commit()
 
     async def _finish_active_recovery_operations(
@@ -2074,6 +2071,9 @@ class WorkspaceExecutor:
             "requested_tier": requested_tier,
             "reason_code": reason_code,
         }
+        validation_run = await ValidationRunRepository(session).get(validation_run_id)
+        if validation_run is not None and isinstance(validation_run.log_stream_refs, dict):
+            result["log_stream_refs"] = dict(validation_run.log_stream_refs)
         if coverage is not None:
             result["coverage"] = coverage
         for operation in [*pending, *running]:

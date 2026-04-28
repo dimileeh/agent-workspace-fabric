@@ -5,6 +5,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+from awf.api.schemas import OperationResponse
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -119,6 +120,186 @@ async def test_get_operation_not_found(client: AsyncClient):
         "error_code": "NOT_FOUND",
         "message": "No operation with id op_missing",
     }
+
+
+@pytest.mark.unit
+async def test_operation_response_serializes_stable_audit_fields(
+    client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    ws_repo = WorkspaceRepository(session)
+    op_repo = OperationRepository(session)
+    ws = await ws_repo.create(
+        repo_url="https://github.com/org/repo_audit",
+        branch_base="main",
+        task_title="audit operation",
+        task_prompt="prompt",
+        agent="claude-3-sonnet",
+        test_commands=[],
+    )
+    operation = await op_repo.create(
+        workspace_id=ws.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.running,
+        payload={
+            "owner": "operator_api",
+            "source": "operator_api",
+            "reason": "rerun checks",
+            "reason_code": "OPERATOR_VALIDATE",
+            "log_stream_refs": {"monitor": "monitor.log"},
+        },
+    )
+    await op_repo.finish(
+        operation,
+        status=OperationStatus.succeeded,
+        result={
+            "status": "validated",
+            "log_stream_refs": {
+                "validation": {
+                    "stdout": "validation.01_validate.stdout",
+                    "stderr": "validation.01_validate.stderr",
+                }
+            },
+        },
+    )
+    await session.commit()
+
+    detail_response = await client.get(f"/v1/operations/{operation.id}")
+    list_response = await client.get(f"/v1/operations?workspace_id={ws.id}")
+
+    assert detail_response.status_code == 200
+    assert list_response.status_code == 200
+    detail = detail_response.json()
+    listed = list_response.json()["items"][0]
+    for item in (detail, listed):
+        assert item["owner"] == "operator_api"
+        assert item["source"] == "operator_api"
+        assert item["reason"] == "rerun checks"
+        assert item["reason_code"] == "OPERATOR_VALIDATE"
+        assert item["failure_code"] is None
+        assert item["failure_message"] is None
+        assert item["log_stream_refs"] == {
+            "monitor": "monitor.log",
+            "validation": {
+                "stdout": "validation.01_validate.stdout",
+                "stderr": "validation.01_validate.stderr",
+            },
+        }
+        assert item["log_stream_ids"] == [
+            "monitor.log",
+            "validation.01_validate.stderr",
+            "validation.01_validate.stdout",
+        ]
+        assert item["payload"] == operation.payload
+        assert item["result"] == operation.result
+
+
+@pytest.mark.unit
+async def test_operation_response_derives_failure_fields_from_error_columns(
+    client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    ws_repo = WorkspaceRepository(session)
+    op_repo = OperationRepository(session)
+    ws = await ws_repo.create(
+        repo_url="https://github.com/org/repo_failure_audit",
+        branch_base="main",
+        task_title="audit failed operation",
+        task_prompt="prompt",
+        agent="claude-3-sonnet",
+        test_commands=[],
+    )
+    operation = await op_repo.create(
+        workspace_id=ws.id,
+        operation_type=OperationType.stop,
+        status=OperationStatus.running,
+        payload={"source": "operator_api", "reason_code": "OPERATOR_STOP"},
+    )
+    await op_repo.finish(
+        operation,
+        status=OperationStatus.failed,
+        error_code="STACK_STOP_FAILED",
+        error_message="docker stop failed",
+    )
+    await session.commit()
+
+    response = await client.get(f"/v1/operations/{operation.id}")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["failure_code"] == "STACK_STOP_FAILED"
+    assert body["failure_message"] == "docker stop failed"
+    assert body["error_code"] == "STACK_STOP_FAILED"
+    assert body["error_message"] == "docker stop failed"
+    assert body["log_stream_refs"] == {}
+    assert body["log_stream_ids"] == []
+
+
+@pytest.mark.unit
+def test_operation_response_extracts_log_stream_ids_from_nested_lists() -> None:
+    now = datetime(2026, 4, 28, tzinfo=UTC)
+
+    response = OperationResponse(
+        id="op_nested_logs",
+        workspace_id="ws_nested_logs",
+        type=OperationType.validate.value,
+        status=OperationStatus.succeeded.value,
+        error_code=None,
+        error_message=None,
+        payload={
+            "source": "operator_api",
+            "log_stream_refs": {
+                "commands": [
+                    {"stdout": "validation.01_validate.stdout"},
+                    {"stderr": "validation.01_validate.stderr"},
+                ]
+            },
+        },
+        result=None,
+        idempotency_key=None,
+        created_at=now,
+        started_at=now,
+        finished_at=now,
+    )
+
+    assert response.log_stream_ids == [
+        "validation.01_validate.stderr",
+        "validation.01_validate.stdout",
+    ]
+
+    empty_response = OperationResponse(
+        id="op_empty_logs",
+        workspace_id="ws_empty_logs",
+        type=OperationType.validate.value,
+        status=OperationStatus.succeeded.value,
+        error_code=None,
+        error_message=None,
+        payload={"log_stream_refs": {"commands": []}},
+        result=None,
+        idempotency_key=None,
+        created_at=now,
+        started_at=now,
+        finished_at=now,
+    )
+
+    assert empty_response.log_stream_ids == []
+
+    non_stream_response = OperationResponse(
+        id="op_non_stream_logs",
+        workspace_id="ws_non_stream_logs",
+        type=OperationType.validate.value,
+        status=OperationStatus.succeeded.value,
+        error_code=None,
+        error_message=None,
+        payload={"log_stream_refs": {"bytes": 123}},
+        result=None,
+        idempotency_key=None,
+        created_at=now,
+        started_at=now,
+        finished_at=now,
+    )
+
+    assert non_stream_response.log_stream_ids == []
 
 
 @pytest.mark.unit

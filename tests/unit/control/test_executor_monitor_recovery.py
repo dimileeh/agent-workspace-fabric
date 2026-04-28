@@ -351,6 +351,14 @@ async def test_executor_recovery_marks_validate_operation_succeeded_on_clean_pas
     assert op.status == OperationStatus.succeeded.value
     assert isinstance(op.result, dict)
     assert "validation_run_id" in op.result
+    assert op.result["log_stream_refs"] == {
+        "commands": [
+            {
+                "stdout": "validation.01_validate.stdout",
+                "stderr": "validation.01_validate.stderr",
+            }
+        ]
+    }
     assert op.started_at is not None
     assert op.finished_at is not None
     assert op.started_at < op.finished_at
@@ -504,6 +512,14 @@ async def test_failed_recovery_operation_includes_reason_code(
     assert isinstance(pr_monitor_ops[0].result, dict)
     # Phase-level command failures surface the concrete reason code.
     assert pr_monitor_ops[0].result.get("reason_code") == "COMMAND_FAILED"
+    assert pr_monitor_ops[0].result.get("log_stream_refs") == {
+        "commands": [
+            {
+                "stdout": "validation.01_validate.stdout",
+                "stderr": "validation.01_validate.stderr",
+            }
+        ]
+    }
 
 
 @pytest.mark.unit

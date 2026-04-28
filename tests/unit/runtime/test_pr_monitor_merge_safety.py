@@ -338,8 +338,11 @@ async def test_auto_merge_blocks_when_required_validation_is_only_on_other_attem
         (
             OperationType.validate.value,
             {
+                "owner": "pr_monitor",
                 "source": "pr_monitor",
                 "reason": "validation_insufficient_tier",
+                "reason_code": "validation_insufficient_tier",
+                "requested_action": "validate",
                 "recovery_mode": "validate_only",
             },
         )
@@ -383,8 +386,11 @@ async def test_auto_merge_blocks_persisted_stale_candidate(
         (
             OperationType.validate.value,
             {
+                "owner": "pr_monitor",
                 "source": "pr_monitor",
                 "reason": "STALE_TARGET_ADVANCED",
+                "reason_code": "STALE_TARGET_ADVANCED",
+                "requested_action": "rebase",
                 "recovery_mode": "rebase_only",
             },
         )
@@ -429,8 +435,11 @@ async def test_auto_merge_materializes_active_stale_reason(
         (
             OperationType.validate.value,
             {
+                "owner": "pr_monitor",
                 "source": "pr_monitor",
                 "reason": "STALE_TARGET_ADVANCED",
+                "reason_code": "STALE_TARGET_ADVANCED",
+                "requested_action": "rebase",
                 "recovery_mode": "rebase_only",
             },
         )
@@ -509,8 +518,11 @@ async def test_auto_merge_rechecks_candidate_gate_inside_merge_lock(
         (
             OperationType.validate.value,
             {
+                "owner": "pr_monitor",
                 "source": "pr_monitor",
                 "reason": "STALE_TARGET_ADVANCED",
+                "reason_code": "STALE_TARGET_ADVANCED",
+                "requested_action": "rebase",
                 "recovery_mode": "rebase_only",
             },
         )
@@ -593,7 +605,14 @@ async def test_auto_merge_does_not_duplicate_active_monitor_recovery(
         await OperationRepository(session).create(
             workspace_id=seed.workspace_id,
             operation_type=OperationType.validate,
-            payload={"source": "pr_monitor", "reason": "validation_insufficient_tier"},
+            payload={
+                "owner": "pr_monitor",
+                "source": "pr_monitor",
+                "reason": "validation_insufficient_tier",
+                "reason_code": "validation_insufficient_tier",
+                "requested_action": "validate",
+                "recovery_mode": "validate_only",
+            },
         )
         await session.commit()
 
@@ -615,8 +634,12 @@ async def test_auto_merge_does_not_duplicate_active_monitor_recovery(
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
     assert len(operations) == 1
     assert operations[0].payload == {
+        "owner": "pr_monitor",
         "source": "pr_monitor",
         "reason": "validation_insufficient_tier",
+        "reason_code": "validation_insufficient_tier",
+        "requested_action": "validate",
+        "recovery_mode": "validate_only",
     }
 
 

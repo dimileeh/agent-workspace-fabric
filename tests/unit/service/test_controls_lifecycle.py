@@ -24,6 +24,7 @@ from awf.service.controls import (
     WorkspaceRefreshStateError,
     WorkspaceRemonitorMissingPrUrlError,
     WorkspaceRemonitorStateError,
+    WorkspaceStackStopError,
     WorkspaceValidateMissingPrUrlError,
     WorkspaceValidateStateError,
     _json_datetime,
@@ -51,6 +52,20 @@ class RecordingStopper:
 
     async def __call__(self, compose_project_name: str | None) -> None:
         self.calls.append(compose_project_name)
+
+
+@dataclass
+class FailingStopper:
+    calls: list[str | None] = field(default_factory=list)
+
+    async def __call__(self, compose_project_name: str | None) -> None:
+        self.calls.append(compose_project_name)
+        raise WorkspaceStackStopError(
+            operation="stop",
+            returncode=17,
+            stdout="",
+            stderr="compose stop denied",
+        )
 
 
 @dataclass
@@ -174,7 +189,11 @@ async def test_cancel_active_workspace_stops_stack_transitions_and_replays(
     assert [operation.type for operation in operations] == [OperationType.cancel.value]
     assert operations[0].status == "succeeded"
     assert operations[0].payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
         "reason": "operator requested",
+        "reason_code": "OPERATOR_CANCEL",
+        "requested_action": "cancel",
         "stop_stack": True,
         "expected_version": 1,
     }
@@ -255,6 +274,112 @@ async def test_stop_workspace_replays_existing_idempotent_operation(
 
 
 @pytest.mark.unit
+async def test_idempotent_replay_returns_original_operation_audit_unchanged(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.completed)
+    service, _stopper, _cleaner = _service(session)
+
+    first = await service.stop_workspace(
+        workspace.id,
+        reason="preserve audit",
+        idempotency_key="stop-audit-replay",
+    )
+    operation = (await _operations(session, workspace.id))[0]
+    original_payload = dict(operation.payload or {})
+    original_result = dict(operation.result or {})
+    original_started_at = operation.started_at
+    original_finished_at = operation.finished_at
+    replay = await service.stop_workspace(
+        workspace.id,
+        reason="preserve audit",
+        idempotency_key="stop-audit-replay",
+    )
+    replayed = (await _operations(session, workspace.id))[0]
+
+    assert replay.operation_id == first.operation_id
+    assert replayed.id == operation.id
+    assert replayed.payload == original_payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "preserve audit",
+        "reason_code": "OPERATOR_STOP",
+        "requested_action": "stop",
+    }
+    assert replayed.result == original_result
+    assert replayed.started_at == original_started_at
+    assert replayed.finished_at == original_finished_at
+    assert replayed.idempotency_key == "stop-audit-replay"
+
+
+@pytest.mark.unit
+async def test_stop_stack_failure_finishes_operation_failed_with_audit(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    stopper = FailingStopper()
+    service, _stopper, _cleaner = _service(session, stopper=stopper)
+
+    with pytest.raises(WorkspaceStackStopError) as exc_info:
+        await service.stop_workspace(
+            workspace.id,
+            reason="operator stop",
+            idempotency_key="stop-fails",
+        )
+    operations = await _operations(session, workspace.id)
+
+    assert exc_info.value.error_code == "STACK_STOP_FAILED"
+    assert stopper.calls == [workspace.compose_project_name]
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert len(operations) == 1
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "STACK_STOP_FAILED"
+    assert "compose stop denied" in (operations[0].error_message or "")
+    assert operations[0].payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "operator stop",
+        "reason_code": "OPERATOR_STOP",
+        "requested_action": "stop",
+    }
+    assert operations[0].started_at is not None
+    assert operations[0].finished_at is not None
+
+
+@pytest.mark.unit
+async def test_cancel_stack_failure_finishes_operation_failed_with_audit(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    stopper = FailingStopper()
+    service, _stopper, _cleaner = _service(session, stopper=stopper)
+
+    with pytest.raises(WorkspaceStackStopError):
+        await service.cancel_workspace(
+            workspace.id,
+            reason="operator cancel",
+            stop_stack=True,
+            idempotency_key="cancel-fails",
+        )
+    operations = await _operations(session, workspace.id)
+
+    assert stopper.calls == [workspace.compose_project_name]
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert len(operations) == 1
+    assert operations[0].status == OperationStatus.failed.value
+    assert operations[0].error_code == "STACK_STOP_FAILED"
+    assert "compose stop denied" in (operations[0].error_message or "")
+    assert operations[0].payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "operator cancel",
+        "reason_code": "OPERATOR_CANCEL",
+        "requested_action": "cancel",
+        "stop_stack": True,
+    }
+
+
+@pytest.mark.unit
 async def test_control_prepare_operation_rejects_missing_conflicting_and_stale_requests(
     session: AsyncSession,
 ) -> None:
@@ -292,6 +417,18 @@ async def test_control_prepare_operation_rejects_missing_conflicting_and_stale_r
     assert version.value.detail == {"expected_version": 999, "actual_version": 2}
     assert missing.value.error_code == "NOT_FOUND"
     assert stopper.calls == []
+
+
+@pytest.mark.unit
+async def test_control_require_workspace_reports_missing_workspace(
+    session: AsyncSession,
+) -> None:
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceNotFoundError) as missing:
+        await service._require_workspace(WorkspaceRepository(session), "ws_missing")
+
+    assert missing.value.error_code == "NOT_FOUND"
 
 
 @pytest.mark.unit
@@ -379,6 +516,67 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
 
 
 @pytest.mark.unit
+async def test_cancel_stop_destroy_remonitor_payloads_include_operator_audit(
+    session: AsyncSession,
+) -> None:
+    cancel = await _workspace(session, status=WorkspaceStatus.completed, title="cancel audit")
+    stop = await _workspace(session, status=WorkspaceStatus.completed, title="stop audit")
+    destroy = await _workspace(session, status=WorkspaceStatus.destroyed, title="destroy audit")
+    remonitor = await _workspace(session, status=WorkspaceStatus.monitoring_pr, title="remonitor audit")
+    remonitor.pr_url = "https://github.com/example/control-lifecycle/pull/45"
+    remonitor.pr_number = 45
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.cancel_workspace(cancel.id, reason="cancel it", stop_stack=False)
+    await service.stop_workspace(stop.id, reason="stop it")
+    await service.destroy_workspace(
+        destroy.id,
+        force=False,
+        remove_volumes=True,
+        remove_worktree=False,
+    )
+    await service.remonitor_workspace(remonitor.id, reason="rerun monitor")
+
+    operations_by_type = {
+        operation.type: operation for operation in await OperationRepository(session).list_all(limit=20)
+    }
+
+    assert operations_by_type[OperationType.cancel.value].payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "cancel it",
+        "reason_code": "OPERATOR_CANCEL",
+        "requested_action": "cancel",
+        "stop_stack": False,
+    }
+    assert operations_by_type[OperationType.stop.value].payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "stop it",
+        "reason_code": "OPERATOR_STOP",
+        "requested_action": "stop",
+    }
+    assert operations_by_type[OperationType.destroy.value].payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": None,
+        "reason_code": "OPERATOR_DESTROY",
+        "requested_action": "destroy",
+        "force": False,
+        "remove_volumes": True,
+        "remove_worktree": False,
+    }
+    assert operations_by_type[OperationType.remonitor.value].payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "rerun monitor",
+        "reason_code": "OPERATOR_REMONITOR",
+        "requested_action": "remonitor",
+    }
+
+
+@pytest.mark.unit
 async def test_refresh_active_workspace_creates_pending_operation_and_coalesces_by_reason(
     session: AsyncSession,
 ) -> None:
@@ -409,6 +607,7 @@ async def test_refresh_active_workspace_creates_pending_operation_and_coalesces_
     assert operation.status == OperationStatus.pending.value
     assert operation.idempotency_key == "refresh-first"
     assert operation.payload == {
+        "owner": "operator_api",
         "source": "operator_api",
         "reason": "stale merge queue",
         "reason_code": "OPERATOR_REFRESH",
@@ -492,6 +691,7 @@ async def test_validate_monitoring_pr_creates_validate_only_operation_and_coales
     assert operation.status == OperationStatus.pending.value
     assert operation.idempotency_key == "validate-first"
     assert operation.payload == {
+        "owner": "operator_api",
         "source": "operator_api",
         "reason": "rerun required validation",
         "reason_code": "OPERATOR_VALIDATE",
@@ -621,6 +821,7 @@ async def test_validate_replay_rejects_workspace_that_left_replay_states(
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.completed)
     payload = {
+        "owner": "operator_api",
         "source": "operator_api",
         "reason": "rerun after completion",
         "reason_code": "OPERATOR_VALIDATE",
@@ -840,6 +1041,11 @@ async def test_destroy_replay_uses_in_progress_message_for_non_destroyed_workspa
 ) -> None:
     workspace = await _workspace(session, status=WorkspaceStatus.failed)
     payload = {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": None,
+        "reason_code": "OPERATOR_DESTROY",
+        "requested_action": "destroy",
         "force": False,
         "remove_volumes": True,
         "remove_worktree": True,

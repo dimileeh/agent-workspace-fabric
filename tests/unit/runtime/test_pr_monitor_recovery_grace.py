@@ -26,6 +26,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
+from awf.runtime.logs import LogStore
 from awf.runtime.pr_monitor import (
     AbortReason,
     CheckState,
@@ -247,8 +248,11 @@ async def test_grace_elapsed_then_stale_recovery_dispatches_with_event(
     operation = operations[0]
     assert operation.type == OperationType.validate.value
     assert operation.payload == {
+        "owner": "pr_monitor",
         "source": "pr_monitor",
         "reason": "validation_insufficient_tier",
+        "reason_code": "validation_insufficient_tier",
+        "requested_action": "validate",
         "recovery_mode": "validate_only",
     }
 
@@ -470,9 +474,68 @@ async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
     # The ``rebase_only`` recovery_mode survives in the payload as the
     # discriminator the future rebase slice can read.
     assert operation.payload == {
+        "owner": "pr_monitor",
         "source": "pr_monitor",
         "reason": "STALE_TARGET_ADVANCED",
+        "reason_code": "STALE_TARGET_ADVANCED",
+        "requested_action": "rebase",
         "recovery_mode": "rebase_only",
+    }
+
+
+@pytest.mark.unit
+async def test_monitor_recovery_operation_includes_monitor_log_ref_when_available(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    adapter = FakeAdapter()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+    log_store = LogStore(root=tmp_path / "logs", session_factory=factory)
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        log_store=log_store,
+    )
+
+    monitor_log = await runner._open_monitor_log(workspace_id)
+    state = MonitorState(started_at=0.0)
+    state.mark_addressed(_initial_review_grace_started_key(42), f"{0.0:.6f}")
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_pr_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=monitor_log,
+    )
+    if monitor_log is not None:
+        await monitor_log.close()
+
+    assert terminal is True
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+    assert operations[0].payload == {
+        "owner": "pr_monitor",
+        "source": "pr_monitor",
+        "reason": "validation_insufficient_tier",
+        "reason_code": "validation_insufficient_tier",
+        "requested_action": "validate",
+        "recovery_mode": "validate_only",
+        "log_stream_refs": {"monitor": "monitor.log"},
     }
 
 
@@ -498,8 +561,11 @@ async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
             workspace_id=workspace_id,
             operation_type=OperationType.validate,
             payload={
+                "owner": "pr_monitor",
                 "source": "pr_monitor",
                 "reason": "validation_insufficient_tier",
+                "reason_code": "validation_insufficient_tier",
+                "requested_action": "validate",
                 "recovery_mode": "validate_only",
             },
         )
@@ -549,8 +615,11 @@ async def test_recovery_dispatch_is_idempotent_when_active_recovery_op_exists(
         # Only the pre-seeded operation exists — no duplicate was created.
         assert len(operations) == 1
         assert operations[0].payload == {
+            "owner": "pr_monitor",
             "source": "pr_monitor",
             "reason": "validation_insufficient_tier",
+            "reason_code": "validation_insufficient_tier",
+            "requested_action": "validate",
             "recovery_mode": "validate_only",
         }
         assert operations[0].status == OperationStatus.pending.value

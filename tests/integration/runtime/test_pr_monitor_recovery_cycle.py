@@ -263,8 +263,11 @@ async def test_recovery_round_trip_does_not_rewrite_plan_files(
     op = pr_monitor_ops[0]
     assert op.type == OperationType.validate.value
     assert op.payload == {
+        "owner": "pr_monitor",
         "source": "pr_monitor",
         "reason": "validation_insufficient_tier",
+        "reason_code": "validation_insufficient_tier",
+        "requested_action": "validate",
         "recovery_mode": "validate_only",
     }
     assert op.status == OperationStatus.pending.value
