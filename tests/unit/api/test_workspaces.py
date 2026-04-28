@@ -8,7 +8,8 @@ true integration + E2E tests live under tests/integration/ and tests/e2e/.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
@@ -146,6 +147,33 @@ def _request_with_disk_check() -> SimpleNamespace:
             )
         )
     )
+
+
+def _assert_effective_identity(
+    row: dict[str, Any],
+    *,
+    model: str,
+    effort: str = "xhigh",
+    model_source: str = "default",
+    effort_source: str = "default",
+) -> None:
+    assert row["agent_model"] == model
+    assert row["agent_effort"] == effort
+    assert row["agent_model_source"] == model_source
+    assert row["agent_effort_source"] == effort_source
+
+
+def _assert_usage_unavailable(row: dict[str, Any]) -> None:
+    assert row["llm_usage"] == {
+        "input_tokens": None,
+        "output_tokens": None,
+        "total_tokens": None,
+        "cost_estimate": None,
+        "currency": None,
+        "status": "unavailable",
+        "source": "none",
+        "reason": "usage_not_reported",
+    }
 
 
 @pytest.fixture
@@ -584,10 +612,89 @@ class TestCreateWorkspaceV2PolicyMetadata:
 
         assert response.status_code == 200
         assert response.json()["task_policy"]["agent_model"] == "ollama/glm-5.1:cloud"
+        _assert_effective_identity(
+            response.json(),
+            model="ollama/glm-5.1:cloud",
+            model_source="task_policy",
+        )
+        _assert_usage_unavailable(response.json())
         assert overview.status_code == 200
-        assert overview.json()["items"][0]["agent_model"] == "ollama/glm-5.1:cloud"
+        _assert_effective_identity(
+            overview.json()["items"][0],
+            model="ollama/glm-5.1:cloud",
+            model_source="task_policy",
+        )
+        _assert_usage_unavailable(overview.json()["items"][0])
         assert tasks.status_code == 200
-        assert tasks.json()["items"][0]["agent_model"] == "ollama/glm-5.1:cloud"
+        _assert_effective_identity(
+            tasks.json()["items"][0],
+            model="ollama/glm-5.1:cloud",
+            model_source="task_policy",
+        )
+        _assert_usage_unavailable(tasks.json()["items"][0])
+
+    @pytest.mark.unit
+    async def test_exposes_default_effective_agent_identity_on_workspace_surfaces(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = _v2_body(title="default gemini model")
+        payload["task"] = {
+            **payload["task"],  # type: ignore[index]
+            "agent": "gemini",
+        }
+
+        create = await client.post("/v2/workspaces", json=payload)
+        assert create.status_code == 202
+        workspace_id = create.json()["workspace_id"]
+
+        detail = await client.get(f"/v1/workspaces/{workspace_id}")
+        listed = await client.get("/v1/workspaces")
+        overview = await client.get("/v1/workspaces/overview")
+        tasks = await client.get("/v1/tasks")
+
+        assert detail.status_code == 200
+        assert listed.status_code == 200
+        assert overview.status_code == 200
+        assert tasks.status_code == 200
+        rows = [
+            detail.json(),
+            listed.json()[0],
+            overview.json()["items"][0],
+            tasks.json()["items"][0],
+        ]
+        for row in rows:
+            _assert_effective_identity(row, model="gemini-3-pro-preview")
+            _assert_usage_unavailable(row)
+
+    @pytest.mark.unit
+    async def test_legacy_v1_workspace_exposes_default_effective_identity(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        workspace_id = await _create_workspace(client, agent="claude_code")
+
+        detail = await client.get(f"/v1/workspaces/{workspace_id}")
+        overview = await client.get("/v1/workspaces/overview")
+
+        assert detail.status_code == 200
+        assert overview.status_code == 200
+        _assert_effective_identity(detail.json(), model="claude-opus-4-7")
+        _assert_effective_identity(overview.json()["items"][0], model="claude-opus-4-7")
+
+    @pytest.mark.unit
+    async def test_v2_idempotency_replay_ignores_defaulted_identity_projection(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        headers = {"Idempotency-Key": "default-model-idempotency"}
+
+        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        replay = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
 
     @pytest.mark.unit
     async def test_workspace_response_exposes_latest_decision_and_active_reservation(
@@ -660,6 +767,106 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert response.status_code == 200
         assert response.json()["task_class"] is None
         assert response.json()["owned_paths"] == []
+
+    @pytest.mark.unit
+    async def test_lifecycle_summary_exposed_on_detail_and_overview(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        await _transition_workspace(
+            engine,
+            workspace_id,
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+        )
+        base = datetime.now(UTC) - timedelta(minutes=5)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            for event, occurred_at in zip(
+                sorted(workspace.events, key=lambda item: item.occurred_at),
+                [
+                    base,
+                    base + timedelta(seconds=10),
+                    base + timedelta(seconds=25),
+                    base + timedelta(seconds=40),
+                ],
+                strict=True,
+            ):
+                event.occurred_at = occurred_at
+            await session.commit()
+
+        detail = await client.get(f"/v1/workspaces/{workspace_id}")
+        overview = await client.get("/v1/workspaces/overview")
+
+        assert detail.status_code == 200
+        assert overview.status_code == 200
+        for body in [detail.json(), overview.json()["items"][0]]:
+            stages = {item["stage"]: item for item in body["lifecycle"]}
+            assert stages["requested"]["started_at"] == base.isoformat().replace("+00:00", "Z")
+            assert stages["requested"]["ended_at"] == (
+                base + timedelta(seconds=10)
+            ).isoformat().replace("+00:00", "Z")
+            assert stages["requested"]["duration_seconds"] == 10
+            assert stages["requested"]["status"] == "completed"
+            assert stages["running"]["started_at"] == (
+                base + timedelta(seconds=40)
+            ).isoformat().replace("+00:00", "Z")
+            assert stages["running"]["ended_at"] is None
+            assert stages["running"]["duration_seconds"] >= 0
+            assert stages["running"]["status"] == "active"
+
+    @pytest.mark.unit
+    async def test_terminal_lifecycle_marks_future_stages_skipped(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        await _transition_workspace(
+            engine,
+            workspace_id,
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.failed,
+        )
+        base = datetime.now(UTC) - timedelta(minutes=5)
+        failed_at = base + timedelta(seconds=75)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            assert workspace is not None
+            for event, occurred_at in zip(
+                sorted(workspace.events, key=lambda item: item.occurred_at),
+                [
+                    base,
+                    base + timedelta(seconds=10),
+                    base + timedelta(seconds=25),
+                    base + timedelta(seconds=40),
+                    base + timedelta(seconds=60),
+                    failed_at,
+                ],
+                strict=True,
+            ):
+                event.occurred_at = occurred_at
+            await session.commit()
+
+        response = await client.get(f"/v1/workspaces/{workspace_id}")
+
+        assert response.status_code == 200
+        stages = {item["stage"]: item for item in response.json()["lifecycle"]}
+        assert stages["validating"]["ended_at"] == failed_at.isoformat().replace("+00:00", "Z")
+        assert stages["validating"]["duration_seconds"] == 15
+        assert stages["validating"]["status"] == "completed"
+        assert stages["pushing"]["status"] == "terminal_skipped"
+        assert stages["monitoring_pr"]["status"] == "terminal_skipped"
+        assert stages["completed"]["status"] == "terminal_skipped"
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -1077,6 +1284,89 @@ class TestWorkspaceDirectRoutes:
         assert item.title == "overview direct"
         assert item.active_operation is None
         assert item.last_event is not None
+
+    @pytest.mark.unit
+    async def test_overview_route_reuses_ordered_events_for_last_event(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class SinglePassEvents:
+            def __init__(self, events: list[SimpleNamespace]) -> None:
+                self._events = events
+                self.iterations = 0
+
+            def __iter__(self) -> Iterator[SimpleNamespace]:
+                self.iterations += 1
+                if self.iterations > 1:
+                    raise AssertionError("workspace events were iterated more than once")
+                return iter(self._events)
+
+        base = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+        workspace_id = "ws_singlepass"
+        created_event = SimpleNamespace(
+            id="evt_created",
+            workspace_id=workspace_id,
+            event_type="workspace.created",
+            old_state=None,
+            new_state=WorkspaceStatus.requested.value,
+            reason_code="CREATED",
+            payload=None,
+            occurred_at=base,
+        )
+        latest_event = SimpleNamespace(
+            id="evt_latest",
+            workspace_id=workspace_id,
+            event_type="workspace.test_marker",
+            old_state=None,
+            new_state=None,
+            reason_code="TEST",
+            payload={"source": "unit"},
+            occurred_at=base + timedelta(seconds=5),
+        )
+        events = SinglePassEvents([latest_event, created_event])
+        workspace = SimpleNamespace(
+            id=workspace_id,
+            task_external_id=None,
+            task_title="single pass overview",
+            repo_url="git@github.com:example/app.git",
+            branch_base="main",
+            branch_name="awf/ws-singlepass",
+            task_class=None,
+            owned_paths=[],
+            agent="codex",
+            task_policy={},
+            events=events,
+            operations=[],
+            status=WorkspaceStatus.requested.value,
+            pr_url=None,
+            failure_reason=None,
+            failure_message=None,
+            created_at=base,
+            updated_at=base,
+        )
+
+        class FakeWorkspaceRepository:
+            def __init__(self, session: object) -> None:
+                del session
+
+            async def list(self, **kwargs: object) -> list[SimpleNamespace]:
+                del kwargs
+                return [workspace]
+
+        monkeypatch.setattr(
+            workspaces_route,
+            "WorkspaceRepository",
+            FakeWorkspaceRepository,
+        )
+
+        response = await workspaces_route.list_workspace_overview(
+            session=SimpleNamespace(),
+        )
+
+        item = response.items[0]
+        assert item.last_event is not None
+        assert item.last_event.event_type == "workspace.test_marker"
+        assert events.iterations == 1
 
     @pytest.mark.unit
     async def test_existing_events_stale_reasons_get_retry_and_list_routes_directly(

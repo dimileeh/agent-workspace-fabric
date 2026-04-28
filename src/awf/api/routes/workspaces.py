@@ -45,6 +45,10 @@ from awf.db.repositories import (
 )
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.workspace_observability import (
+    workspace_events_by_occurrence,
+    workspace_observability_payload,
+)
 from awf.service.workspaces import (
     WorkspaceRetryError,
     WorkspaceRetryNotAllowedError,
@@ -52,6 +56,7 @@ from awf.service.workspaces import (
     create_workspace_v2_row,
     owned_path_overlap_warnings,
     retry_workspace_row,
+    workspace_response,
     workspace_retry_response,
 )
 
@@ -234,7 +239,12 @@ async def list_workspace_overview(
     )
     items: list[WorkspaceOverviewResponse] = []
     for ws in rows:
-        latest_event = max(ws.events, key=lambda e: e.occurred_at, default=None)
+        ordered_events = workspace_events_by_occurrence(ws)
+        observability = workspace_observability_payload(
+            ws,
+            ordered_events=ordered_events,
+        )
+        latest_event = ordered_events[-1] if ordered_events else None
         active_operation = next(
             (
                 op
@@ -254,7 +264,12 @@ async def list_workspace_overview(
                 task_class=ws.task_class,
                 owned_paths=list(ws.owned_paths),
                 agent=AgentRuntime(ws.agent),
-                agent_model=_stored_task_agent_model(ws),
+                agent_model=observability["agent_model"],
+                agent_effort=observability["agent_effort"],
+                agent_model_source=observability["agent_model_source"],
+                agent_effort_source=observability["agent_effort_source"],
+                lifecycle=observability["lifecycle"],
+                llm_usage=observability["llm_usage"],
                 status=WorkspaceStatus(ws.status),
                 current_phase=ws.status,
                 active_operation=active_operation.type if active_operation is not None else None,
@@ -355,7 +370,7 @@ async def get_workspace(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
         )
-    return WorkspaceResponse.model_validate(ws)
+    return workspace_response(ws)
 
 
 @router.get("", response_model=list[WorkspaceResponse])
@@ -373,7 +388,7 @@ async def list_workspaces(
         repo_url=repo_url,
         limit=limit,
     )
-    return [WorkspaceResponse.model_validate(r) for r in rows]
+    return [workspace_response(r) for r in rows]
 
 
 def _accepted(

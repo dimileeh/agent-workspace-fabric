@@ -1,4 +1,4 @@
-import type { WorkspaceStatus } from "@/lib/types";
+import type { WorkspaceLifecycleStage, WorkspaceStatus } from "@/lib/types";
 
 export const lifecycleStages: WorkspaceStatus[] = [
   "requested",
@@ -10,6 +10,37 @@ export const lifecycleStages: WorkspaceStatus[] = [
   "monitoring_pr",
   "completed",
 ];
+
+export function fallbackLifecycleStages(
+  status: WorkspaceStatus,
+  terminalSourceStage?: string | null,
+): WorkspaceLifecycleStage[] {
+  const activeIndex = lifecycleStages.indexOf(status);
+  const terminal = status === "failed" || status === "cancelled";
+  const terminalSourceIndex = lifecycleStages.indexOf(terminalSourceStage as WorkspaceStatus);
+  const completedThroughIndex = terminal ? Math.max(0, terminalSourceIndex) : activeIndex - 1;
+
+  return lifecycleStages.map((stage, index): WorkspaceLifecycleStage => {
+    let stageStatus: WorkspaceLifecycleStage["status"];
+    if (terminal) {
+      stageStatus = index <= completedThroughIndex ? "completed" : "terminal_skipped";
+    } else if (stage === status) {
+      stageStatus = "active";
+    } else if (index < activeIndex) {
+      stageStatus = "completed";
+    } else {
+      stageStatus = "pending";
+    }
+
+    return {
+      stage,
+      started_at: null,
+      ended_at: null,
+      duration_seconds: null,
+      status: stageStatus,
+    };
+  });
+}
 
 export function compactId(value: string | null | undefined, head = 8): string {
   if (!value) {
@@ -56,6 +87,23 @@ export function relativeTime(value: string | null | undefined): string {
     Math.round(diff / size),
     unit,
   );
+}
+
+export function compactDuration(seconds: number | null | undefined): string {
+  if (seconds === null || seconds === undefined || !Number.isFinite(seconds)) {
+    return "—";
+  }
+  const totalSeconds = Math.max(0, Math.round(seconds));
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const remainingSeconds = totalSeconds % 60;
+  if (hours > 0) {
+    return `${hours}h ${minutes}m`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${remainingSeconds}s`;
+  }
+  return `${remainingSeconds}s`;
 }
 
 export function bytes(value: number): string {
