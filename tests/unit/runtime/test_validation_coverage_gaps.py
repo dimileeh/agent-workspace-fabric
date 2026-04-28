@@ -102,6 +102,28 @@ def test_parse_term_missing_handles_malformed_lines(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_parse_term_missing_ignores_lines_before_header(tmp_path: Path) -> None:
+    coverage_output = tmp_path / "coverage.txt"
+    coverage_output.write_text(
+        "pytest started\n"
+        "src/awf/before_header.py                 10      5    50%   1-5\n"
+        "Name                                      Stmts   Miss  Cover   Missing\n"
+        "---------------------------------------------------------------------\n"
+        "src/awf/after_header.py                  100     10    90%   5-10\n",
+        encoding="utf-8",
+    )
+
+    gaps = _parse_term_missing_gaps([coverage_output])
+
+    assert gaps == [{"file": "src/awf/after_header.py", "missing_lines": ["5-10"]}]
+
+
+@pytest.mark.unit
+def test_missing_line_count_handles_ranges_non_strings_and_malformed_tokens() -> None:
+    assert _missing_line_count([10, None, "7-9", "12-nope", "abc", "14"]) == 6
+
+
+@pytest.mark.unit
 def test_parse_term_missing_sorts_by_most_missing_and_caps_at_ten(
     tmp_path: Path,
 ) -> None:

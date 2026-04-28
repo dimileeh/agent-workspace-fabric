@@ -1057,9 +1057,14 @@ def test_agent_defaults_for_workspace_handles_policy_without_base_defaults() -> 
         SimpleNamespace(task_policy={"agent_model": "gpt-special", "agent_effort": "high"}),
         None,
     )
+    created = _agent_defaults_for_workspace(  # type: ignore[arg-type]
+        SimpleNamespace(task_policy={"agent_model": "gpt-5.5", "agent_effort": "xhigh"}),
+        None,
+    )
 
     assert effort_only is None
     assert bound == AgentDefaults(model="gpt-special", effort="high")
+    assert created == AgentDefaults(model="gpt-5.5", effort="xhigh")
 
 
 @pytest.mark.unit
