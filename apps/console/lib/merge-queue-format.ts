@@ -204,6 +204,8 @@ const requiredNextActionFallbacks: Partial<Record<MergeBlockerReason, RequiredNe
   waiting_for_monitor: { label: "wait for monitor", tone: "warn" },
   waiting_for_older_candidate: { label: "wait for queue", tone: "warn" },
   workspace_not_terminal: { label: "wait for workspace", tone: "neutral" },
+  failed_or_cancelled: { label: "inspect failure", tone: "bad" },
+  not_canonical: { label: "superseded", tone: "bad" },
   policy_blocked: { label: "resolve policy", tone: "bad" },
   stale: { label: "rebase", tone: "warn" },
 };

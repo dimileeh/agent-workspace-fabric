@@ -172,6 +172,10 @@ test("required next action tone maps raw action codes and blocker fallbacks", ()
   assert.equal(requiredNextActionTone(null, "waiting_for_older_candidate"), "warn");
   assert.equal(requiredNextActionTone(null, "stale"), "warn");
   assert.equal(requiredNextActionTone(null, "workspace_not_terminal"), "neutral");
+  assert.equal(formatRequiredNextAction(null, "failed_or_cancelled"), "inspect failure");
+  assert.equal(requiredNextActionTone(null, "failed_or_cancelled"), "bad");
+  assert.equal(formatRequiredNextAction(null, "not_canonical"), "superseded");
+  assert.equal(requiredNextActionTone(null, "not_canonical"), "bad");
   assert.equal(requiredNextActionTone(null, "completed"), "good");
 });
 
