@@ -104,6 +104,11 @@ def _queue_pre_push_diagnostics(fake: FakeCommandRunner) -> None:
     fake.queue_result(returncode=0, stdout="abc1234 commit\n")  # log ahead-of-base
 
 
+def _created_pr_body(fake: FakeCommandRunner) -> str:
+    create_call = next(call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "create"])
+    return create_call[create_call.index("--body") + 1]
+
+
 class TestCoverageBaselineRatchet:
     @pytest.mark.unit
     def test_accepts_below_threshold_coverage_when_baseline_is_preserved(
@@ -294,6 +299,9 @@ class TestHappyPath:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/123"
+        pr_body = _created_pr_body(fake)
+        assert f"Automatically opened by AWF workspace `{ws_id}`" in pr_body
+        assert "(agent: `codex`, model: `gpt-5`, effort: `xhigh`)." in pr_body
 
     @pytest.mark.unit
     async def test_task_policy_agent_model_overrides_adapter_default(
@@ -328,6 +336,8 @@ class TestHappyPath:
         adapter_args = fake.calls[0].args
         assert "--model" in adapter_args
         assert "ollama/gemma4:31b-cloud" in adapter_args
+        pr_body = _created_pr_body(fake)
+        assert "(agent: `opencode`, model: `ollama/gemma4:31b-cloud`, effort: `xhigh`)." in pr_body
 
     @pytest.mark.unit
     async def test_planning_profile_runs_plan_execute_compare_before_validation(

@@ -544,6 +544,7 @@ class MergeQueueItemResponse(BaseModel):
     owned_paths: list[str]
     created_at: datetime
     updated_at: datetime
+    merged_at: datetime | None = None
     last_event: WorkspaceEventResponse | None
     merge_blocker_reason: MergeBlockerReason
     required_next_action: str | None = None

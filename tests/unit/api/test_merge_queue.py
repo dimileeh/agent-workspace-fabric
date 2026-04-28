@@ -344,6 +344,7 @@ class TestMergeQueueList:
             "owned_paths",
             "created_at",
             "updated_at",
+            "merged_at",
             "last_event",
             "merge_blocker_reason",
             "required_next_action",
@@ -369,6 +370,7 @@ class TestMergeQueueList:
         assert item["auto_merge"] is True
         assert item["task_class"] == "test_task"
         assert item["owned_paths"] == ["src/awf/api/**"]
+        assert item["merged_at"] is None
         assert item["last_event"]["event_type"] == "merge_queue.test_marker"
         assert item["merge_blocker_reason"] == "ready_to_merge_or_waiting_for_github"
         assert item["queue_blockers"] == []
@@ -721,6 +723,10 @@ class TestMergeQueueList:
             assert item["queue_blockers"] == []
             assert item["merge_blocker_reason"] == reason
             assert item["required_next_action"] == action
+            if reason == "completed":
+                assert item["merged_at"] == item["updated_at"]
+            else:
+                assert item["merged_at"] is None
             assert item["last_event"]["event_type"] == "merge_queue.legacy_marker"
 
     @pytest.mark.unit

@@ -173,6 +173,7 @@ export interface MergeQueueItem {
   owned_paths: string[];
   created_at: string;
   updated_at: string;
+  merged_at: string | null;
   last_event: WorkspaceEvent | null;
   merge_blocker_reason: MergeBlockerReason;
   readiness: MergeCandidateReadiness | null;
@@ -368,6 +369,7 @@ export interface ResourceSaturationSummary {
 }
 
 export type AwfStreamFrame =
+  | { type: "connected"; workspace_id: string }
   | { type: "snapshot"; workspace: Workspace }
   | { type: "event"; event: WorkspaceEvent }
   | {
@@ -383,6 +385,7 @@ export type AwfStreamFrame =
       occurred_at?: string;
     }
   | { type: "heartbeat"; workspace_id: string }
+  | { type: "closed"; workspace_id: string; code: number; reason: string }
   | { type: "error"; error_code: string; message: string };
 
 export interface FailureExample {
