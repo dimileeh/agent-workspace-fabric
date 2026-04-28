@@ -13,8 +13,10 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters import registry as _registry  # noqa: F401 — populates registry
@@ -26,6 +28,7 @@ from awf.control.executor import (
 )
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Workspace as WorkspaceModel
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
@@ -62,6 +65,7 @@ def _make_executor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
     max_fix_passes: int = 5,
+    pr_monitor_factory: Any = None,
 ) -> WorkspaceExecutor:
     compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
     validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -82,6 +86,7 @@ def _make_executor(
             },
             max_validation_fix_passes=max_fix_passes,
         ),
+        pr_monitor_factory=pr_monitor_factory,
     )
 
 
@@ -414,6 +419,40 @@ async def test_executor_recovery_marks_validate_operation_failed_when_validation
 
 
 @pytest.mark.unit
+async def test_failed_recovery_operation_includes_reason_code(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A failed recovery operation row must carry the validation failure
+    reason_code in its result so observability tooling can classify the
+    failure without parsing the error_message."""
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path, max_fix_passes=0)
+    ws_id = await _seed_ready_workspace_with_recovery(factory)
+
+    fake.queue_result(
+        returncode=1,
+        stdout="FAILED tests/foo.py::test_bar",
+        stderr="AssertionError",
+    )
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    pr_monitor_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(pr_monitor_ops) == 1
+    assert pr_monitor_ops[0].status == OperationStatus.failed.value
+    assert isinstance(pr_monitor_ops[0].result, dict)
+    # Phase-level command failures surface the concrete reason code.
+    assert pr_monitor_ops[0].result.get("reason_code") == "COMMAND_FAILED"
+
+
+@pytest.mark.unit
 async def test_executor_normal_path_unchanged_when_no_recovery_op(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
@@ -449,6 +488,243 @@ async def test_executor_normal_path_unchanged_when_no_recovery_op(
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.completed.value
+
+
+def _all_push_and_pr_create_calls(fake: FakeCommandRunner) -> list[list[str]]:
+    """Every git push or gh pr create invocation."""
+    return [
+        c.args
+        for c in fake.calls
+        if ("push" in c.args and "git" in c.args)
+        or (c.args[:3] == ["gh", "pr", "create"])
+    ]
+
+
+@pytest.mark.unit
+async def test_recovery_skips_push_when_pr_already_exists(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """A workspace in recovery with an existing PR must NOT re-push or
+    re-create the PR. The executor should skip the entire push/PR-creation
+    path and transition directly back to monitoring_pr (or completed if
+    no monitor is wired)."""
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(factory, pr_url="https://github.com/x/y/pull/1")
+
+    # Only validation should run; no push or PR creation commands.
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert _all_push_and_pr_create_calls(fake) == []
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status in {
+            WorkspaceStatus.completed.value,
+            WorkspaceStatus.monitoring_pr.value,
+        }
+
+
+@pytest.mark.unit
+async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Recovery with an existing PR and a pr_monitor_factory must transition
+    to monitoring_pr AND immediately hand off to the monitor runner, matching
+    the normal execution path (Step 4)."""
+    monitor_calls: list[dict[str, Any]] = []
+
+    class _FakeMonitor:
+        async def run(
+            self, *, workspace_id: str, compose_project: str, compose_file: Path
+        ) -> None:
+            monitor_calls.append({"workspace_id": workspace_id, "compose_project": compose_project})
+
+    def _monitor_factory(*_args: Any, **_kwargs: Any) -> _FakeMonitor:
+        return _FakeMonitor()
+
+    executor = _make_executor(
+        fake=fake, factory=factory, tmp_path=tmp_path, pr_monitor_factory=_monitor_factory
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, pr_url="https://github.com/x/y/pull/1"
+    )
+
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert _all_push_and_pr_create_calls(fake) == []
+    assert len(monitor_calls) == 1
+    assert monitor_calls[0]["workspace_id"] == ws_id
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_validate_only_recovery_zero_adapter_calls_on_clean_pass(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Even stricter than the existing skip-planning test: recovery must
+    issue zero ``docker compose exec`` adapter invocations on a clean
+    validation pass (no fix-cycle needed)."""
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(factory)
+
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    # Zero adapter calls of any kind — not planning, not execution, not
+    # conformance, and not fix-cycle prompts.
+    adapter_invocations = _all_adapter_args(fake)
+    assert adapter_invocations == []
+
+    # Note: validation legitimately issues ``docker compose exec`` for profile
+    # phase commands; only the *agent adapter* (coding CLI) must be absent.
+
+
+@pytest.mark.unit
+async def test_rebase_only_recovery_skips_push(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """Rebase-only recovery semantics must mirror validate-only: skip push
+    and transition back to monitoring_pr."""
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, recovery_mode="rebase_only"
+    )
+
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert _all_push_and_pr_create_calls(fake) == []
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status in {
+            WorkspaceStatus.completed.value,
+            WorkspaceStatus.monitoring_pr.value,
+        }
+
+
+
+
+@pytest.mark.unit
+async def test_stale_callback_cancelled_blocks_recovery(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """If a workspace is cancelled after the executor claims it, the
+    recovery path must stop and must NOT silently mark the recovery
+    operation succeeded."""
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(factory)
+
+    original_recheck = executor._recheck_status
+
+    async def _patched_recheck(
+        workspace_id: str,
+        *,
+        expected: WorkspaceStatus,
+        action: str,
+        reason_code: str = "EXECUTOR_STALE_STATUS",
+    ) -> bool:
+        if action == "execute" and expected == WorkspaceStatus.running:
+            async with factory() as s:
+                repo = WorkspaceRepository(s)
+                ws = await repo.get(workspace_id)
+                if ws is not None and ws.status == WorkspaceStatus.running.value:
+                    await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="CANCELLED")
+                    await s.commit()
+        return await original_recheck(workspace_id, expected=expected, action=action, reason_code=reason_code)
+
+    executor._recheck_status = _patched_recheck
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.cancelled.value
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    pr_monitor_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(pr_monitor_ops) == 1
+    # The operation must NOT be silently succeeded.
+    assert pr_monitor_ops[0].status != OperationStatus.succeeded.value
+
+
+@pytest.mark.unit
+async def test_stale_callback_destroyed_blocks_recovery(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """If a workspace is destroyed after the executor claims it, the
+    recovery path must stop and must NOT silently mark the recovery
+    operation succeeded."""
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(factory)
+
+    original_recheck = executor._recheck_status
+
+    async def _patched_recheck(
+        workspace_id: str,
+        *,
+        expected: WorkspaceStatus,
+        action: str,
+        reason_code: str = "EXECUTOR_STALE_STATUS",
+    ) -> bool:
+        if action == "execute" and expected == WorkspaceStatus.running:
+            async with factory() as s:
+                ws = await WorkspaceRepository(s).get(workspace_id)
+                if ws is not None and ws.status == WorkspaceStatus.running.value:
+                    # Bypass state machine: the point is a stale callback
+                    # on a destroyed workspace, not a valid transition.
+                    await s.execute(
+                        sa_update(WorkspaceModel)
+                        .where(WorkspaceModel.id == workspace_id)
+                        .values(status=WorkspaceStatus.destroyed.value)
+                    )
+                    await s.commit()
+        return await original_recheck(workspace_id, expected=expected, action=action, reason_code=reason_code)
+
+    executor._recheck_status = _patched_recheck
+
+    await executor.execute(ws_id)
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.destroyed.value
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    pr_monitor_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(pr_monitor_ops) == 1
+    assert pr_monitor_ops[0].status != OperationStatus.succeeded.value
 
 
 @pytest.mark.unit

@@ -1080,6 +1080,79 @@ class WorkspaceExecutor:
                     )
             # Loop back to re-validate.
 
+        # ── Recovery skip-push guard ───────────────────────────────────────
+        # Validate-only or rebase-only recovery for a workspace that already
+        # has an open PR must NOT re-push or re-create it. The executor
+        # transitions directly back to monitoring_pr (if a monitor is wired)
+        # or completed (legacy/no-monitor path) without entering the full
+        # agent execution or PR-creation flow again.
+        if recovery is not None and ws.pr_url:
+            if not await self._recheck_status(
+                workspace_id,
+                expected=WorkspaceStatus.validating,
+                action="recovery_skip_push",
+            ):
+                return
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                persisted = await repo.get(workspace_id)
+                if persisted is None:  # pragma: no cover - destroyed mid-flight
+                    return
+                if persisted.status != WorkspaceStatus.validating.value:
+                    await self._record_stale_action_skip(
+                        repo,
+                        persisted,
+                        action="recovery_skip_push",
+                        expected=WorkspaceStatus.validating,
+                        reason_code="EXECUTOR_STALE_STATUS",
+                    )
+                    await session.commit()
+                    return
+                has_monitor = (
+                    self._pr_monitor is not None or self._pr_monitor_factory is not None
+                )
+                await repo.transition(
+                    persisted,
+                    to=WorkspaceStatus.monitoring_pr
+                    if has_monitor
+                    else WorkspaceStatus.completed,
+                    reason_code="RECOVERY_VALIDATION_OK",
+                )
+                await session.commit()
+            _log.info(
+                "executor.recovery_skip_push",
+                workspace_id=workspace_id,
+                pr_url=ws.pr_url,
+                has_monitor=has_monitor,
+            )
+            if has_monitor:
+                _monitor: _MonitorRunnerProto | None = self._pr_monitor
+                if _monitor is None and self._pr_monitor_factory is not None:
+                    _monitor = _call_pr_monitor_factory(
+                        self._pr_monitor_factory,
+                        adapter=adapter,
+                        profile=profile,
+                        workspace=persisted,
+                    )
+                if _monitor is not None:
+                    _log.info(
+                        "executor.recovery_handoff_to_pr_monitor",
+                        workspace_id=workspace_id,
+                        pr_url=ws.pr_url,
+                    )
+                    if not await self._recheck_status(
+                        workspace_id,
+                        expected=WorkspaceStatus.monitoring_pr,
+                        action="run_pr_monitor",
+                    ):
+                        return
+                    await _monitor.run(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                    )
+            return
+
         # ── Step 3: push + open PR ──────────────────────────────────────────
         if not await self._transition_if_current(
             workspace_id,
