@@ -113,7 +113,8 @@ async def list_merge_queue(
         _row_workspace(row).id for row in page_rows
     )
     validation_runs_by_workspace = await ValidationRunRepository(session).list_by_workspace_ids(
-        _row_workspace(row).id for row in page_rows
+        (_row_workspace(row).id for row in page_rows),
+        status="succeeded",
     )
 
     stale_reasons_by_candidate = await _load_active_stale_reasons(session, page_rows)
