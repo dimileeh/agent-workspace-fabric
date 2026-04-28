@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import os
 import subprocess
 from collections.abc import Awaitable, Callable, Iterable, Mapping
@@ -13,53 +12,31 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 import httpx
-from sqlalchemy import bindparam, text
+from sqlalchemy import text
 
-from awf.db.enums import WorkspaceStatus
 from awf.db.session import make_engine
 from awf.service.config import ServiceSettings
 from awf.service.disk import DiskUsage, check_disk_space
+from awf.service.orphan_resources import (
+    ResourceScan,
+    WorkspaceIdView,
+    build_orphan_resource_summary,
+    default_workspace_id_lookup,
+    empty_worktree_scan,
+    legacy_orphan_workspaces_payload,
+    parse_docker_resource_rows,
+    scan_docker_resources,
+    scan_managed_worktrees,
+    workspace_id_from_project,
+)
 from awf.service.provider_readiness import HttpGet as ProviderHttpGet
 from awf.service.provider_readiness import collect_agent_readiness
 
 _CHECK_TIMEOUT_SECONDS = 5.0
-_ORPHAN_EXAMPLE_LIMIT = 5
-_AWF_PROJECT_PREFIXES = ("awf_", "awf-")
-
-_ACTIVE_WORKSPACE_STATUSES = frozenset(
-    {
-        WorkspaceStatus.requested.value,
-        WorkspaceStatus.provisioning.value,
-        WorkspaceStatus.ready.value,
-        WorkspaceStatus.running.value,
-        WorkspaceStatus.validating.value,
-        WorkspaceStatus.pushing.value,
-        WorkspaceStatus.monitoring_pr.value,
-        WorkspaceStatus.destroying.value,
-    }
-)
-_TERMINAL_WORKSPACE_STATUSES = frozenset(
-    {
-        WorkspaceStatus.completed.value,
-        WorkspaceStatus.failed.value,
-        WorkspaceStatus.cancelled.value,
-        WorkspaceStatus.destroyed.value,
-    }
-)
-_KNOWN_WORKSPACE_STATUSES = sorted(_ACTIVE_WORKSPACE_STATUSES | _TERMINAL_WORKSPACE_STATUSES)
 
 CheckPayload = dict[str, object]
 DbProbe = Callable[[str], Awaitable[CheckPayload]]
 SocketExists = Callable[[Path], bool]
-
-
-@dataclass(frozen=True)
-class WorkspaceIdView:
-    """Snapshot of workspace ids partitioned by lifecycle, used for orphan checks."""
-
-    active_ids: frozenset[str]
-    terminal_ids: frozenset[str]
-    available: bool
 
 
 WorkspaceIdLookup = Callable[[str], Awaitable[WorkspaceIdView]]
@@ -132,8 +109,8 @@ async def collect_service_status(
     async def _await_workspace_view() -> WorkspaceIdView:
         return await resolved_workspace_lookup(settings.database_url)
 
-    ps_task: asyncio.Task[CompletedProcessLike | Exception] = asyncio.create_task(
-        asyncio.to_thread(_run_workspace_ps, settings, resolved_run)
+    resource_scan_task: asyncio.Task[tuple[ResourceScan, ResourceScan]] = asyncio.create_task(
+        asyncio.to_thread(_scan_orphan_resources, settings, resolved_run)
     )
     workspace_lookup_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
         _await_workspace_view()
@@ -170,22 +147,29 @@ async def collect_service_status(
             ),
             provider_task,
         )
-        ps_result = await ps_task
+        docker_resource_scan, worktree_scan = await resource_scan_task
         workspace_view = await workspace_lookup_task
     finally:
-        for pending in (ps_task, workspace_lookup_task, provider_task):
+        for pending in (resource_scan_task, workspace_lookup_task, provider_task):
             if not pending.done():
                 pending.cancel()
             with contextlib.suppress(BaseException):
                 await pending
-    orphan_check = _build_orphan_check(ps_result, workspace_view=workspace_view)
+    orphan_summary = build_orphan_resource_summary(
+        docker_scan=docker_resource_scan,
+        worktree_scan=worktree_scan,
+        workspace_view=workspace_view,
+    )
+    orphan_resources_check = orphan_summary.to_dict()
+    orphan_workspaces_check = legacy_orphan_workspaces_payload(orphan_summary)
     checks = {
         "api": api_check,
         "db": db_check,
         "docker": docker_check,
         "agent_runtime_image": image_check,
         "disk": disk_check.to_dict(),
-        "orphan_workspaces": orphan_check,
+        "orphan_resources": orphan_resources_check,
+        "orphan_workspaces": orphan_workspaces_check,
     }
     overall_ok = (
         all(bool(check["ok"]) for check in checks.values())
@@ -297,140 +281,115 @@ def _run_workspace_ps(
     )
 
 
+def _scan_orphan_resources(
+    settings: ServiceSettings,
+    run_subprocess: SubprocessRun,
+) -> tuple[ResourceScan, ResourceScan]:
+    return (
+        scan_docker_resources(
+            docker_host=settings.docker_host,
+            run_subprocess=run_subprocess,
+            timeout=_CHECK_TIMEOUT_SECONDS,
+        ),
+        scan_managed_worktrees(settings.work_dir),
+    )
+
+
 def _build_orphan_check(
     result: CompletedProcessLike | Exception,
     *,
     workspace_view: WorkspaceIdView,
 ) -> CheckPayload:
     if isinstance(result, FileNotFoundError):
-        return _orphan_unavailable("DOCKER_CLI_NOT_FOUND", "docker binary not found on PATH")
+        docker_scan = ResourceScan(
+            ok=False,
+            status="unavailable",
+            reason="DOCKER_RESOURCE_SCAN_UNAVAILABLE",
+            detail="docker binary not found on PATH",
+        )
+        return legacy_orphan_workspaces_payload(
+            build_orphan_resource_summary(
+                docker_scan=docker_scan,
+                worktree_scan=empty_worktree_scan(),
+                workspace_view=workspace_view,
+            )
+        )
     if isinstance(result, subprocess.TimeoutExpired):
-        return _orphan_unavailable("DOCKER_UNAVAILABLE", _truncate(str(result)))
+        docker_scan = ResourceScan(
+            ok=False,
+            status="unavailable",
+            reason="DOCKER_RESOURCE_SCAN_UNAVAILABLE",
+            detail=_truncate(str(result)),
+        )
+        return legacy_orphan_workspaces_payload(
+            build_orphan_resource_summary(
+                docker_scan=docker_scan,
+                worktree_scan=empty_worktree_scan(),
+                workspace_view=workspace_view,
+            )
+        )
     if isinstance(result, Exception):
-        return _orphan_unavailable(
-            "DOCKER_UNAVAILABLE",
-            _truncate(f"{type(result).__name__}: {result}"),
+        docker_scan = ResourceScan(
+            ok=False,
+            status="unavailable",
+            reason="DOCKER_RESOURCE_SCAN_UNAVAILABLE",
+            detail=_truncate(f"{type(result).__name__}: {result}"),
+        )
+        return legacy_orphan_workspaces_payload(
+            build_orphan_resource_summary(
+                docker_scan=docker_scan,
+                worktree_scan=empty_worktree_scan(),
+                workspace_view=workspace_view,
+            )
         )
     if result.returncode != 0:
         detail = _truncate(result.stderr or result.stdout) or "docker ps exited non-zero"
-        return _orphan_unavailable("DOCKER_UNAVAILABLE", detail)
-
-    workspace_projects = _parse_workspace_projects(result.stdout)
-
-    if not workspace_view.available:
-        examples = [
-            {
-                "compose_project": project.compose_project,
-                "workspace_id": project.workspace_id,
-                "containers": project.containers,
-                "classification": "unknown",
-                "reason": "DB_UNAVAILABLE",
-            }
-            for project in workspace_projects[:_ORPHAN_EXAMPLE_LIMIT]
-        ]
-        return {
-            "ok": True,
-            "status": "unknown",
-            "reason": "DB_UNAVAILABLE",
-            "detail": (
-                "Workspace database is unreachable; cannot classify AWF compose projects."
-            ),
-            "container_count": len(workspace_projects),
-            "examples": examples,
-            "action": (
-                "Re-run `awf service status` once the control-plane database is reachable."
-            ),
-        }
-
-    orphans: list[dict[str, object]] = []
-    expected_count = 0
-    for project in workspace_projects:
-        if project.workspace_id in workspace_view.active_ids:
-            expected_count += 1
-            continue
-        if project.workspace_id in workspace_view.terminal_ids:
-            classification = "terminal"
-            reason = "WORKSPACE_TERMINAL"
-        else:
-            classification = "missing"
-            reason = "WORKSPACE_MISSING"
-        orphans.append(
-            {
-                "compose_project": project.compose_project,
-                "workspace_id": project.workspace_id,
-                "containers": project.containers,
-                "classification": classification,
-                "reason": reason,
-            }
+        docker_scan = ResourceScan(
+            ok=False,
+            status="unavailable",
+            reason="DOCKER_RESOURCE_SCAN_UNAVAILABLE",
+            detail=detail,
+        )
+        return legacy_orphan_workspaces_payload(
+            build_orphan_resource_summary(
+                docker_scan=docker_scan,
+                worktree_scan=empty_worktree_scan(),
+                workspace_view=workspace_view,
+            )
         )
 
-    if not orphans:
-        return {
-            "ok": True,
-            "status": "ok",
-            "reason": "NO_ORPHANS",
-            "active_count": expected_count,
-            "orphan_count": 0,
-            "examples": [],
-        }
-
-    missing_count = sum(1 for orphan in orphans if orphan["classification"] == "missing")
-    terminal_count = len(orphans) - missing_count
-    return {
-        "ok": False,
-        "status": "fail",
-        "reason": "ORPHANS_PRESENT",
-        "active_count": expected_count,
-        "orphan_count": len(orphans),
-        "orphan_missing_count": missing_count,
-        "orphan_terminal_count": terminal_count,
-        "examples": orphans[:_ORPHAN_EXAMPLE_LIMIT],
-        "action": (
-            "Run `docker compose -p <project> down -v --remove-orphans` for each "
-            "orphan project, then `awf service gc --execute` to reclaim filesystem state."
-        ),
-    }
-
-
-def _orphan_unavailable(reason: str, detail: str) -> CheckPayload:
-    return {
-        "ok": True,
-        "status": "unavailable",
-        "reason": reason,
-        "detail": detail,
-        "orphan_count": 0,
-        "examples": [],
-    }
+    docker_scan = ResourceScan(
+        ok=True,
+        status="ok",
+        reason="DOCKER_RESOURCE_SCAN_OK",
+        resources=parse_docker_resource_rows("container", result.stdout),
+    )
+    return legacy_orphan_workspaces_payload(
+        build_orphan_resource_summary(
+            docker_scan=docker_scan,
+            worktree_scan=empty_worktree_scan(),
+            workspace_view=workspace_view,
+        )
+    )
 
 
 def _parse_workspace_projects(stdout: str) -> list[_WorkspaceProject]:
     grouped: dict[str, list[dict[str, str]]] = {}
     workspace_ids: dict[str, str] = {}
-    for line in stdout.splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if not isinstance(row, dict):
-            continue
-        project = str(row.get("project") or "")
-        if not project:
-            continue
-        ws_id = _workspace_id_from_project(project)
-        if ws_id is None:
+    for resource in parse_docker_resource_rows("container", stdout):
+        project = resource.compose_project
+        if project is None:
             continue
         grouped.setdefault(project, []).append(
             {
-                "id": str(row.get("id") or ""),
-                "name": str(row.get("name") or ""),
-                "service": str(row.get("service") or ""),
-                "state": str(row.get("state") or ""),
-                "status": str(row.get("status") or ""),
+                "id": resource.id or "",
+                "name": resource.name or "",
+                "service": resource.service or "",
+                "state": resource.state or "",
+                "status": resource.status_text or "",
             }
         )
-        workspace_ids[project] = ws_id
+        workspace_ids[project] = resource.workspace_id
     return [
         _WorkspaceProject(
             compose_project=project,
@@ -442,57 +401,11 @@ def _parse_workspace_projects(stdout: str) -> list[_WorkspaceProject]:
 
 
 def _workspace_id_from_project(project: str) -> str | None:
-    for prefix in _AWF_PROJECT_PREFIXES:
-        if project.startswith(prefix):
-            ws_id = project[len(prefix) :]
-            if ws_id.startswith("ws_"):
-                return ws_id
-    return None
+    return workspace_id_from_project(project)
 
 
 async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
-    """Read live workspace ids from the control-plane DB.
-
-    Failures (missing tables, unreachable host, auth errors, or even a
-    malformed URL that trips engine construction) collapse to
-    ``available=False`` so the orphan check can degrade gracefully instead
-    of raising.
-    """
-
-    stmt = text("SELECT id, status FROM workspaces WHERE status IN :statuses").bindparams(
-        bindparam("statuses", expanding=True)
-    )
-    engine = None
-    try:
-        engine = make_engine(database_url)
-        async with engine.connect() as conn:
-            rows = (
-                await conn.execute(stmt, {"statuses": _KNOWN_WORKSPACE_STATUSES})
-            ).all()
-    except Exception:
-        return WorkspaceIdView(
-            active_ids=frozenset(),
-            terminal_ids=frozenset(),
-            available=False,
-        )
-    finally:
-        if engine is not None:
-            await engine.dispose()
-
-    active: set[str] = set()
-    terminal: set[str] = set()
-    for ws_id, status in rows:
-        ws_id_str = str(ws_id)
-        status_str = str(status)
-        if status_str in _ACTIVE_WORKSPACE_STATUSES:
-            active.add(ws_id_str)
-        elif status_str in _TERMINAL_WORKSPACE_STATUSES:
-            terminal.add(ws_id_str)
-    return WorkspaceIdView(
-        active_ids=frozenset(active),
-        terminal_ids=frozenset(terminal),
-        available=True,
-    )
+    return await default_workspace_id_lookup(database_url)
 
 
 async def _http_get(url: str, *, timeout: float) -> HttpResponse:

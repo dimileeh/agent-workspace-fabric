@@ -26,6 +26,15 @@ from awf import __version__
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
 from awf.service.config import resolve_service_settings
+from awf.service.orphan_resources import (
+    ResourceScan,
+    WorkspaceIdView,
+    build_orphan_resource_summary,
+    scan_docker_resources_async,
+    scan_managed_worktrees,
+    unavailable_workspace_view,
+    workspace_id_view_from_session,
+)
 from awf.service.provider_readiness import (
     ProviderReadinessError,
     collect_agent_readiness,
@@ -60,6 +69,19 @@ class CheckResult(BaseModel):
     reason: str | None = None
     detail: str | None = None
     version: str | None = None
+    resource_count: int | None = None
+    expected_count: int | None = None
+    active_count: int | None = None
+    orphan_count: int | None = None
+    unknown_count: int | None = None
+    counts_by_kind: dict[str, int] | None = None
+    orphan_counts_by_kind: dict[str, int] | None = None
+    expected_counts_by_kind: dict[str, int] | None = None
+    unknown_counts_by_kind: dict[str, int] | None = None
+    orphan_classification_counts: dict[str, int] | None = None
+    cleanup_readiness: dict[str, Any] | None = None
+    scanners: dict[str, dict[str, Any]] | None = None
+    examples: list[dict[str, Any]] | None = None
 
 
 class ReadyResponse(BaseModel):
@@ -254,6 +276,58 @@ async def _check_agent_runtime_image(runner: AsyncCommandRunner, image: str) -> 
     )
 
 
+async def _workspace_view_for_readyz(factory: Any) -> WorkspaceIdView:
+    if factory is None:
+        return unavailable_workspace_view()
+    try:
+        session = factory()
+    except Exception:
+        return unavailable_workspace_view()
+    try:
+        return await workspace_id_view_from_session(session)
+    except Exception:
+        return unavailable_workspace_view()
+    finally:
+        close = getattr(session, "close", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await close()
+
+
+async def _check_orphan_resources(
+    *,
+    runner: AsyncCommandRunner,
+    factory: Any,
+    work_dir: str,
+    db_check: CheckResult,
+    docker_check: CheckResult,
+) -> CheckResult:
+    if not db_check.ok:
+        workspace_view = unavailable_workspace_view()
+    else:
+        workspace_view = await _workspace_view_for_readyz(factory)
+
+    if not docker_check.ok:
+        docker_scan = ResourceScan(
+            ok=False,
+            status="unavailable",
+            reason="DOCKER_RESOURCE_SCAN_UNAVAILABLE",
+            detail=docker_check.detail or docker_check.reason,
+        )
+    else:
+        docker_scan = await scan_docker_resources_async(
+            runner=runner,
+            timeout=_CHECK_TIMEOUT_SECONDS,
+        )
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker_scan,
+        worktree_scan=await asyncio.to_thread(scan_managed_worktrees, work_dir),
+        workspace_view=workspace_view,
+    )
+    return CheckResult(**summary.to_dict())
+
+
 @router.get("/readyz", response_model=ReadyResponse)
 async def readyz(
     request: Request,
@@ -297,12 +371,20 @@ async def readyz(
             validated_strict_providers=strict_providers,
         ),
     )
+    orphan_check = await _check_orphan_resources(
+        runner=runner,
+        factory=factory,
+        work_dir=settings.work_dir,
+        db_check=db_check,
+        docker_check=daemon_check,
+    )
     checks = {
         "db": db_check,
         "docker_cli": cli_check,
         "docker_daemon": daemon_check,
         "docker_compose": compose_check,
         "agent_runtime_image": image_check,
+        "orphan_resources": orphan_check,
     }
 
     overall_ok = all(check.ok for check in checks.values()) and agent_readiness["status"] == "ok"

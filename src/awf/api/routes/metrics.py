@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Callable
+import inspect
+import subprocess
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime
-from typing import Annotated, cast
+from typing import Annotated, Any, Literal, cast
 
 from fastapi import APIRouter, Depends, Query, Request
 from pydantic import BaseModel, ConfigDict, Field
@@ -26,9 +28,21 @@ from awf.service.metrics import (
     summarize_slo_metrics_for_session,
     summarize_workspace_reliability_for_session,
 )
+from awf.service.orphan_resources import (
+    OrphanResourceSummary,
+    build_orphan_resource_summary,
+    scan_docker_resources,
+    scan_managed_worktrees,
+    unavailable_workspace_view,
+    workspace_id_view_from_session,
+)
 
 router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
 DiskCheckProvider = Callable[[Settings], DiskCheck]
+OrphanResourceSummaryProvider = Callable[
+    [Settings, AsyncSession],
+    OrphanResourceSummary | Awaitable[OrphanResourceSummary],
+]
 
 
 class WorkspaceReliabilitySummaryResponse(BaseModel):
@@ -254,6 +268,37 @@ class AdmissionSummaryResponse(BaseModel):
     detail: str | None = None
 
 
+class CleanupReadinessResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    ready: bool
+    status: str
+    reason: str
+    action: str
+    dry_run_only: bool
+
+
+class OrphanResourceSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    ok: bool
+    status: str
+    reason: str
+    detail: str | None = None
+    resource_count: int
+    expected_count: int
+    orphan_count: int
+    unknown_count: int
+    counts_by_kind: dict[str, int]
+    orphan_counts_by_kind: dict[str, int]
+    expected_counts_by_kind: dict[str, int]
+    unknown_counts_by_kind: dict[str, int]
+    orphan_classification_counts: dict[str, int]
+    cleanup_readiness: CleanupReadinessResponse
+    scanners: dict[str, dict[str, Any]]
+    examples: list[dict[str, Any]]
+
+
 class ResourceSaturationSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -275,6 +320,9 @@ class ResourceSaturationSummaryResponse(BaseModel):
     )
     disk: DiskCheckResponse = Field(
         description="Disk pressure check for the AWF work directory.",
+    )
+    orphan_resources: OrphanResourceSummaryResponse = Field(
+        description="Read-only orphan AWF Docker resource and worktree cleanup readiness.",
     )
     admission: AdmissionSummaryResponse = Field(
         description="Actionable summary explaining whether new workspace admission is blocked.",
@@ -344,10 +392,16 @@ async def get_resource_saturation_summary(
     session: AsyncSession = Depends(get_db_session),
 ) -> ResourceSaturationSummaryResponse:
     disk_check = await _resource_saturation_disk_check(request, settings)
+    orphan_resources = await _resource_saturation_orphan_resources(
+        request,
+        settings,
+        session,
+    )
     summary = await summarize_resource_saturation_for_session(
         session,
         settings=settings,
         disk_check=disk_check,
+        orphan_resources=orphan_resources,
     )
     return ResourceSaturationSummaryResponse.model_validate(summary)
 
@@ -386,4 +440,63 @@ async def _resource_saturation_disk_check(request: Request, settings: Settings) 
         check_disk_space,
         settings.work_dir,
         min_free_bytes=settings.min_free_disk_bytes,
+    )
+
+
+async def _resource_saturation_orphan_resources(
+    request: Request,
+    settings: Settings,
+    session: AsyncSession,
+) -> OrphanResourceSummary:
+    provider = cast(
+        OrphanResourceSummaryProvider | None,
+        getattr(request.app.state, "orphan_resource_summary_provider", None),
+    )
+    if provider is not None:
+        result = provider(settings, session)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    return await _default_orphan_resource_summary(settings, session)
+
+
+async def _default_orphan_resource_summary(
+    settings: Settings,
+    session: AsyncSession,
+) -> OrphanResourceSummary:
+    try:
+        workspace_view = await workspace_id_view_from_session(session)
+    except Exception:
+        workspace_view = unavailable_workspace_view()
+    docker_scan, worktree_scan = await asyncio.gather(
+        asyncio.to_thread(
+            scan_docker_resources,
+            docker_host=settings.docker_host,
+            run_subprocess=_run_subprocess,
+        ),
+        asyncio.to_thread(scan_managed_worktrees, settings.work_dir),
+    )
+    return build_orphan_resource_summary(
+        docker_scan=docker_scan,
+        worktree_scan=worktree_scan,
+        workspace_view=workspace_view,
+    )
+
+
+def _run_subprocess(
+    args: list[str],
+    *,
+    check: bool,
+    capture_output: bool,
+    text: Literal[True],
+    timeout: float,
+    env: Mapping[str, str],
+) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        args,
+        check=check,
+        capture_output=capture_output,
+        text=text,
+        timeout=timeout,
+        env=env,
     )

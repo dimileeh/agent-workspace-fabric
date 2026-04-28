@@ -13,7 +13,9 @@ specific failing check rather than a generic 503.
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -27,7 +29,9 @@ import awf.service.provider_readiness as provider_readiness
 from awf import __version__
 from awf.api.app import configure_database, create_app
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
+from awf.db.enums import WorkspaceStatus
 from awf.db.session import make_session_factory
+from tests.unit.helpers import create_workspace
 
 _PROVIDER_ENV_KEYS = (
     "AWF_GITHUB_TOKEN",
@@ -149,11 +153,18 @@ async def test_readyz_response_shape_matches_contract(
         "docker_daemon",
         "docker_compose",
         "agent_runtime_image",
+        "orphan_resources",
     }
     for name, check in checks.items():
         assert check["ok"] is True, f"{name} should be ok"
-        assert check["status"] == "ok"
-        assert check.get("reason") is None
+        if name == "orphan_resources":
+            assert check["status"] == "ok"
+            assert check["reason"] == "NO_ORPHANS"
+            assert check["orphan_count"] == 0
+            assert check["cleanup_readiness"]["ready"] is True
+        else:
+            assert check["status"] == "ok"
+            assert check.get("reason") is None
     assert body["agent_readiness"]["status"] == "ok"
     assert body["agent_readiness"]["providers"]["github"]["reason"] == (
         "GITHUB_TOKEN_ENV_MISSING"
@@ -222,6 +233,20 @@ async def test_readyz_reuses_validated_provider_names(
 
     assert response.status_code == 503
     assert validation_calls == [("github",)]
+
+
+@pytest.mark.unit
+async def test_readyz_invalid_provider_returns_422(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz?provider=unknown")
+
+    assert response.status_code == 422
 
 
 @pytest.mark.unit
@@ -294,6 +319,10 @@ async def test_readyz_db_query_failure_returns_503(
     assert db_check["ok"] is False
     assert db_check["reason"] == "DB_CONNECTION_FAILED"
     assert "connection refused" in (db_check["detail"] or "")
+    orphan_check = response.json()["checks"]["orphan_resources"]
+    assert orphan_check["ok"] is True
+    assert orphan_check["status"] == "unknown"
+    assert orphan_check["reason"] == "DB_UNAVAILABLE"
 
 
 @pytest.mark.unit
@@ -370,6 +399,46 @@ async def test_readyz_db_success_allows_sessions_without_close_method() -> None:
 
     assert result.ok is True
     assert result.status == "ok"
+
+
+@pytest.mark.unit
+async def test_readyz_workspace_view_handles_factory_and_session_failures(
+    tmp_path: Path,
+) -> None:
+    missing = await health_route._workspace_view_for_readyz(None)
+
+    def _factory_raises() -> Any:
+        raise RuntimeError("factory failed")
+
+    factory_failed = await health_route._workspace_view_for_readyz(_factory_raises)
+
+    class _BadSession:
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("query failed")
+
+        async def close(self) -> None:
+            raise RuntimeError("close failed")
+
+    session_failed = await health_route._workspace_view_for_readyz(lambda: _BadSession())
+    orphan_check = await health_route._check_orphan_resources(
+        runner=FakeCommandRunner(),
+        factory=None,
+        work_dir=str(tmp_path),
+        db_check=health_route.CheckResult(ok=True, status="ok"),
+        docker_check=health_route.CheckResult(
+            ok=False,
+            status="fail",
+            reason="DOCKER_DAEMON_UNREACHABLE",
+            detail="Cannot connect",
+        ),
+    )
+
+    assert missing.available is False
+    assert factory_failed.available is False
+    assert session_failed.available is False
+    assert orphan_check.ok is True
+    assert orphan_check.status == "unknown"
+    assert orphan_check.reason == "DB_UNAVAILABLE"
 
 
 @pytest.mark.unit
@@ -471,6 +540,53 @@ async def test_readyz_docker_daemon_unreachable_returns_503(
     assert daemon["ok"] is False
     assert daemon["reason"] == "DOCKER_DAEMON_UNREACHABLE"
     assert "Cannot connect" in (daemon["detail"] or "")
+    orphan_check = response.json()["checks"]["orphan_resources"]
+    assert orphan_check["ok"] is True
+    assert orphan_check["status"] == "unavailable"
+    assert orphan_check["reason"] == "DOCKER_RESOURCE_SCAN_UNAVAILABLE"
+
+
+@pytest.mark.unit
+async def test_readyz_orphan_resources_present_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = ready_app_and_client
+    workspace_id = await create_workspace(
+        engine,
+        status=WorkspaceStatus.completed,
+        updated_at=datetime.now(UTC),
+    )
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    runner.queue_result(
+        stdout=json.dumps(
+            {
+                "id": "abc",
+                "name": f"awf_{workspace_id}-agent-1",
+                "project": f"awf_{workspace_id}",
+                "service": "agent",
+                "state": "exited",
+                "status": "Exited (0)",
+            }
+        )
+        + "\n"
+    )
+    runner.queue_result(stdout="")
+    runner.queue_result(stdout="")
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+    body = response.json()
+
+    assert response.status_code == 503
+    assert body["status"] == "fail"
+    orphan_check = body["checks"]["orphan_resources"]
+    assert orphan_check["ok"] is False
+    assert orphan_check["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_check["orphan_count"] == 1
+    assert orphan_check["cleanup_readiness"]["dry_run_only"] is True
+    assert orphan_check["examples"][0]["workspace_id"] == workspace_id
 
 
 @pytest.mark.unit

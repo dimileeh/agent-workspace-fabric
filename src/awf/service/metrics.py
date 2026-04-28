@@ -13,6 +13,7 @@ from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, ResourceReservation, Workspace
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
+from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
 
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
 MIN_SUMMARY_WINDOW_HOURS = 1
@@ -224,6 +225,7 @@ class ResourceSaturationSummary:
     reserved_resources: ReservedResources
     concurrency: ResourceConcurrency
     disk: DiskCheck
+    orphan_resources: OrphanResourceSummary
     admission: AdmissionSummary
 
 
@@ -482,6 +484,7 @@ async def summarize_resource_saturation(
     settings: Settings,
     disk_check: DiskCheck | None = None,
     disk_usage: DiskUsage | None = None,
+    orphan_resources: OrphanResourceSummary | None = None,
     now: datetime | None = None,
 ) -> ResourceSaturationSummary:
     """Summarize local resource saturation using deterministic backend inputs."""
@@ -492,6 +495,7 @@ async def summarize_resource_saturation(
             settings=settings,
             disk_check=disk_check,
             disk_usage=disk_usage,
+            orphan_resources=orphan_resources,
             now=now,
         )
 
@@ -502,6 +506,7 @@ async def summarize_resource_saturation_for_session(
     settings: Settings,
     disk_check: DiskCheck | None = None,
     disk_usage: DiskUsage | None = None,
+    orphan_resources: OrphanResourceSummary | None = None,
     now: datetime | None = None,
 ) -> ResourceSaturationSummary:
     """Build the resource saturation payload for local console capacity views."""
@@ -537,6 +542,7 @@ async def summarize_resource_saturation_for_session(
         disk_check=resolved_disk_check,
         concurrency=concurrency,
     )
+    resolved_orphan_resources = orphan_resources or summary_not_collected()
 
     return ResourceSaturationSummary(
         generated_at=generated_at,
@@ -546,6 +552,7 @@ async def summarize_resource_saturation_for_session(
         reserved_resources=reserved_resources,
         concurrency=concurrency,
         disk=resolved_disk_check,
+        orphan_resources=resolved_orphan_resources,
         admission=admission,
     )
 

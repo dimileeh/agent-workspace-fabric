@@ -31,6 +31,7 @@ from awf.service.status import (
     _parse_workspace_projects,
     _run_docker_command,
     _run_subprocess,
+    _run_workspace_ps,
     _truncate,
     _workspace_id_from_project,
     check_database,
@@ -137,6 +138,8 @@ def _container(
 def _make_run_subprocess(
     *,
     ps_payload: str = "",
+    network_payload: str = "",
+    volume_payload: str = "",
     ps_returncode: int = 0,
     ps_stderr: str = "",
 ) -> Any:
@@ -155,6 +158,10 @@ def _make_run_subprocess(
                 (),
                 {"returncode": ps_returncode, "stdout": ps_payload, "stderr": ps_stderr},
             )()
+        if args[:3] == ["docker", "network", "ls"]:
+            return type("Completed", (), {"returncode": 0, "stdout": network_payload, "stderr": ""})()
+        if args[:3] == ["docker", "volume", "ls"]:
+            return type("Completed", (), {"returncode": 0, "stdout": volume_payload, "stderr": ""})()
         raise AssertionError(f"unexpected subprocess call: {args}")
 
     return _run
@@ -287,6 +294,78 @@ def test_orphan_check_reports_no_orphans_when_no_awf_containers(tmp_path: Path) 
     assert orphans["orphan_count"] == 0
     assert orphans["active_count"] == 0
     assert orphans["examples"] == []
+
+
+@pytest.mark.unit
+def test_service_status_exposes_orphan_resources_for_all_resource_kinds(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "work" / "git" / "worktrees" / "ws_dead").mkdir(parents=True)
+    payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_dead-agent-1",
+            state="exited",
+            status="Exited (0)",
+            project="awf_ws_dead",
+            service="agent",
+        )
+    )
+    network_payload = _docker_ps_payload(
+        {
+            "id": "net1",
+            "name": "awf_ws_dead_default",
+            "project": "awf_ws_dead",
+            "driver": "bridge",
+            "scope": "local",
+        }
+    )
+    volume_payload = _docker_ps_payload(
+        {
+            "name": "awf_ws_dead_pgdata",
+            "project": "awf_ws_dead",
+            "driver": "local",
+            "scope": "local",
+        }
+    )
+
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset(),
+            terminal_ids=frozenset({"ws_dead"}),
+            available=True,
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(
+                ps_payload=payload,
+                network_payload=network_payload,
+                volume_payload=volume_payload,
+            ),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    assert status["status"] == "fail"
+    orphan_resources = status["checks"]["orphan_resources"]
+    assert orphan_resources["ok"] is False
+    assert orphan_resources["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_resources["orphan_count"] == 4
+    assert orphan_resources["orphan_counts_by_kind"] == {
+        "container": 1,
+        "network": 1,
+        "volume": 1,
+        "worktree": 1,
+    }
+    assert orphan_resources["cleanup_readiness"]["dry_run_only"] is True
+    assert "orphan_workspaces" in status["checks"]
 
 
 @pytest.mark.unit
@@ -679,6 +758,53 @@ def test_orphan_check_handles_missing_docker_binary(tmp_path: Path) -> None:
     assert orphans["ok"] is True
     assert orphans["status"] == "unavailable"
     assert orphans["reason"] == "DOCKER_CLI_NOT_FOUND"
+
+
+@pytest.mark.unit
+def test_legacy_orphan_helper_maps_result_failures_and_success(tmp_path: Path) -> None:
+    view = WorkspaceIdView(
+        active_ids=frozenset({"ws_alive"}),
+        terminal_ids=frozenset(),
+        available=True,
+    )
+    settings = _settings(tmp_path)
+    captured: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> Any:
+        captured.append(args)
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    assert _build_orphan_check(FileNotFoundError("docker"), workspace_view=view)["reason"] == (
+        "DOCKER_CLI_NOT_FOUND"
+    )
+    assert _build_orphan_check(
+        subprocess.TimeoutExpired(["docker", "ps"], timeout=0.1),
+        workspace_view=view,
+    )["reason"] == "DOCKER_UNAVAILABLE"
+    assert _build_orphan_check(RuntimeError("boom"), workspace_view=view)["reason"] == (
+        "DOCKER_UNAVAILABLE"
+    )
+    nonzero = type(
+        "Completed",
+        (),
+        {"returncode": 1, "stdout": "", "stderr": "docker ps failed"},
+    )()
+    assert _build_orphan_check(nonzero, workspace_view=view)["reason"] == "DOCKER_UNAVAILABLE"
+
+    ok_payload = _docker_ps_payload(
+        _container(
+            id="abc",
+            name="awf_ws_alive-agent-1",
+            state="running",
+            status="Up",
+            project="awf_ws_alive",
+            service="agent",
+        )
+    )
+    ok = type("Completed", (), {"returncode": 0, "stdout": ok_payload, "stderr": ""})()
+    assert _build_orphan_check(ok, workspace_view=view)["reason"] == "NO_ORPHANS"
+    assert _run_workspace_ps(settings, _run).returncode == 0
+    assert captured[0][:3] == ["docker", "ps", "-a"]
 
 
 @pytest.mark.unit
