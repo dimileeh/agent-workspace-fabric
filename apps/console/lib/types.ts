@@ -221,6 +221,8 @@ export interface MergeQueueItem {
   last_event: WorkspaceEvent | null;
   merge_blocker_reason: MergeBlockerReason;
   required_next_action: string | null;
+  required_validation_tier?: ValidationTier | null;
+  latest_satisfied_validation_tier?: ValidationTier | null;
   readiness: MergeCandidateReadiness | null;
   canonical: boolean;
   queue_blockers: MergeQueueBlocker[];

@@ -69,8 +69,7 @@ def compute_stale_reason(workspace: Workspace) -> tuple[str | None, str | None]:
         if run_tier is None:
             continue
 
-        completed_at = run.finished_at or run.started_at
-        if rebase_time and completed_at <= rebase_time:
+        if rebase_time and run.started_at <= rebase_time:
             continue
 
         actual_tier = max(actual_tier, run_tier)
@@ -112,8 +111,7 @@ def compute_stale_reason_for_attempt(
         if run_tier is None:
             continue
 
-        completed_at = run.finished_at or run.started_at
-        if rebase_time and completed_at <= rebase_time:
+        if rebase_time and run.started_at <= rebase_time:
             continue
 
         actual_tier = max(actual_tier, run_tier)
