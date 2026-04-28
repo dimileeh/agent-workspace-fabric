@@ -520,12 +520,12 @@ def _resource_from_docker_row(
     resource_id = _row_text(row, "id", "ID") or name
     workspace_id = workspace_id_from_project(project, project_to_workspace=project_to_workspace)
 
-    if workspace_id is None and resource_kind == "volume":
+    if workspace_id is None and resource_kind == "volume" and not project:
         workspace_id = _workspace_id_from_managed_name(
             name,
             known_workspace_ids=project_to_workspace.values(),
         )
-        if workspace_id is not None and not project:
+        if workspace_id is not None:
             project = _infer_project_from_managed_name(name, workspace_id)
 
     if workspace_id is None:

@@ -494,11 +494,32 @@ def test_volume_name_fallback_handles_dash_prefix_and_skips_unmanaged_names(
         ),
     ).to_check_payload()
 
-    assert summary["orphan_counts_by_kind"] == {"volume": 2}
+    assert summary["orphan_counts_by_kind"] == {"volume": 1}
     examples = summary["examples"]
-    assert [example["workspace_id"] for example in examples] == ["ws_dash", "ws_bad"]
+    assert [example["workspace_id"] for example in examples] == ["ws_dash"]
     assert examples[0]["compose_project"] == "awf-ws_dash"
-    assert examples[1]["compose_project"] == "not-awf"
+
+
+def test_volume_name_fallback_skips_non_awf_project_labels(
+    tmp_path: Path,
+) -> None:
+    summary = detect_orphan_resources(
+        work_dir=tmp_path,
+        docker_host="unix:///var/run/docker.sock",
+        workspace_view=_view(),
+        run_subprocess=_run_with(
+            volumes=[
+                {
+                    "name": "awf_ws_foreign_postgres_data",
+                    "project": "foreign",
+                }
+            ]
+        ),
+    ).to_check_payload()
+
+    assert summary["reason"] == "NO_ORPHANS"
+    assert summary["resource_counts"] == {}
+    assert summary["examples"] == []
 
 
 def test_worktree_scan_skips_unmanaged_entries_and_reports_scan_warning(
