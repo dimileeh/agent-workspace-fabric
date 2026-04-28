@@ -274,6 +274,29 @@ def test_volume_name_fallback_prefers_known_workspace_with_underscores(
     assert summary["orphan_count"] == 0
 
 
+def test_volume_name_fallback_preserves_unknown_workspace_underscores(
+    tmp_path: Path,
+) -> None:
+    summary = detect_orphan_resources(
+        work_dir=tmp_path,
+        docker_host="unix:///var/run/docker.sock",
+        workspace_view=_view(),
+        run_subprocess=_run_with(
+            volumes=[
+                {
+                    "name": "awf-ws_foo_bar-postgres_data",
+                    "project": "",
+                }
+            ]
+        ),
+    ).to_check_payload()
+
+    assert summary["orphan_counts_by_kind"] == {"volume": 1}
+    example = summary["examples"][0]
+    assert example["workspace_id"] == "ws_foo_bar"
+    assert example["compose_project"] == "awf-ws_foo_bar"
+
+
 def test_orphan_worktree_missing_workspace_is_structured(tmp_path: Path) -> None:
     (tmp_path / "git" / "worktrees" / "ws_ghost").mkdir(parents=True)
     summary = detect_orphan_resources(

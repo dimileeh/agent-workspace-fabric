@@ -29,7 +29,11 @@ KNOWN_WORKSPACE_STATUSES = tuple(sorted(ACTIVE_WORKSPACE_STATUSES | TERMINAL_WOR
 
 _AWF_PROJECT_PREFIXES = ("awf_", "awf-")
 _RESOURCE_KINDS = ("container", "network", "volume", "worktree")
-_WORKSPACE_ID_RE = re.compile(r"^ws_[A-Za-z0-9][A-Za-z0-9_]*$")
+_WORKSPACE_ID_PATTERN = r"ws_[A-Za-z0-9][A-Za-z0-9_]*"
+_WORKSPACE_ID_RE = re.compile(rf"^{_WORKSPACE_ID_PATTERN}$")
+_HYPHEN_DELIMITED_MANAGED_TAIL_RE = re.compile(
+    rf"^(?P<workspace_id>{_WORKSPACE_ID_PATTERN})-"
+)
 
 
 class CompletedProcessLike(Protocol):
@@ -787,6 +791,10 @@ def _known_workspace_id_from_managed_tail(
 
 
 def _legacy_workspace_id_from_managed_tail(tail: str) -> str | None:
+    match = _HYPHEN_DELIMITED_MANAGED_TAIL_RE.match(tail)
+    if match is not None:
+        return match.group("workspace_id")
+
     if not tail.startswith("ws_"):
         return None
 
