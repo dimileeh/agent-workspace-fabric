@@ -371,9 +371,9 @@ test("validation recovery summary shows required tier, satisfied tier, freshness
   assert.equal(recovery.latestSatisfiedTierLabel, "T2 satisfied");
   assert.equal(recovery.latestSatisfiedTierDetail, "VALIDATION_OK / retries 2");
   assert.equal(recovery.freshnessLabel, "stale target");
-  assert.equal(recovery.baseShaLabel, "base abcdef1");
-  assert.equal(recovery.validatedTargetShaLabel, "validated target 1234567");
-  assert.equal(recovery.currentTargetShaLabel, "current target fedcba9");
+  assert.equal(recovery.baseShaLabel, "abcdef1");
+  assert.equal(recovery.validatedTargetShaLabel, "1234567");
+  assert.equal(recovery.currentTargetShaLabel, "fedcba9");
   assert.equal(recovery.targetRangeLabel, "1234567 -> fedcba9");
 });
 
@@ -494,9 +494,9 @@ test("recovery summary falls back safely for legacy or missing validation data",
   assert.equal(recovery.requiredTierLabel, "T1 required");
   assert.equal(recovery.latestSatisfiedTierLabel, "none satisfied");
   assert.equal(recovery.freshnessLabel, "unknown");
-  assert.equal(recovery.baseShaLabel, "base unknown");
-  assert.equal(recovery.validatedTargetShaLabel, "validated target unknown");
-  assert.equal(recovery.currentTargetShaLabel, "current target unknown");
+  assert.equal(recovery.baseShaLabel, "unknown");
+  assert.equal(recovery.validatedTargetShaLabel, "unknown");
+  assert.equal(recovery.currentTargetShaLabel, "unknown");
   assert.equal(recovery.targetRangeLabel, "unknown -> unknown");
   assert.equal(recovery.candidateLabel, "legacy");
   assert.equal(recovery.blockerLabel, "manual merge");
