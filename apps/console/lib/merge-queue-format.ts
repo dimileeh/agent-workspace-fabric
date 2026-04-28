@@ -217,7 +217,7 @@ export function summarizeValidation(item: Pick<MergeQueueItem, "latest_validatio
     label: `T${validation.tier} ${validation.status} / ${freshLabel}`,
     detail,
     freshLabel,
-    headLabel: `${validation.target_head_sha ?? "unknown"} -> ${validation.current_target_head_sha ?? "unknown"}`,
+    headLabel: `${compactSha(validation.target_head_sha)} -> ${compactSha(validation.current_target_head_sha)}`,
     coverageLabel: formatCoverageLabel(validation),
   };
 }
@@ -258,6 +258,13 @@ function staleReasonDetail(reason: StaleReason): string {
 
 function formatPrNumber(prNumber: number | null): string {
   return prNumber === null ? "" : ` #${prNumber}`;
+}
+
+function compactSha(value: string | null | undefined): string {
+  if (!value) {
+    return "unknown";
+  }
+  return /^[0-9a-f]{12,}$/i.test(value) ? value.slice(0, 7) : value;
 }
 
 function formatCoverageLabel(validation: NonNullable<MergeQueueItem["latest_validation"]>): string {
