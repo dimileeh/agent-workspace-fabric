@@ -41,6 +41,8 @@ WorkspaceLifecycleStageStatus = Literal[
 ]
 LlmUsageStatus = Literal["available", "unavailable"]
 
+_MAX_LOG_STREAM_REF_DEPTH = 64
+
 
 class MergeCandidateReadinessResponse(BaseModel):
     ready: bool
@@ -777,17 +779,19 @@ def _merge_log_stream_ref_value(existing: Any, incoming: Any) -> Any:
 def _log_stream_ids(value: Any) -> list[str]:
     ids: set[str] = set()
 
-    def collect(item: Any) -> None:
+    def collect(item: Any, depth: int = 0) -> None:
+        if depth > _MAX_LOG_STREAM_REF_DEPTH:
+            return
         if isinstance(item, str):
             ids.add(item)
             return
         if isinstance(item, dict):
             for child in item.values():
-                collect(child)
+                collect(child, depth + 1)
             return
         if isinstance(item, list | tuple):
             for child in item:
-                collect(child)
+                collect(child, depth + 1)
 
     collect(value)
     return sorted(ids)

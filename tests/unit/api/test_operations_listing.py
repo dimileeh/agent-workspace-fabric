@@ -303,6 +303,31 @@ def test_operation_response_extracts_log_stream_ids_from_nested_lists() -> None:
 
 
 @pytest.mark.unit
+def test_operation_response_ignores_log_stream_ids_past_depth_limit() -> None:
+    now = datetime(2026, 4, 28, tzinfo=UTC)
+    refs: dict[str, object] = {"stream": "validation.stdout"}
+    for _ in range(1200):
+        refs = {"nested": refs}
+
+    response = OperationResponse(
+        id="op_deep_logs",
+        workspace_id="ws_deep_logs",
+        type=OperationType.validate.value,
+        status=OperationStatus.succeeded.value,
+        error_code=None,
+        error_message=None,
+        payload={"log_stream_refs": refs},
+        result=None,
+        idempotency_key=None,
+        created_at=now,
+        started_at=now,
+        finished_at=now,
+    )
+
+    assert response.log_stream_ids == []
+
+
+@pytest.mark.unit
 def test_operation_response_preserves_colliding_log_stream_refs() -> None:
     now = datetime(2026, 4, 28, tzinfo=UTC)
 
