@@ -3,6 +3,8 @@ import { compactId } from "./format.ts";
 
 export interface StaleReasonSummary {
   count: number;
+  blockingCount: number;
+  advisoryCount: number;
   label: string;
   detail: string;
   overflowCount: number;
@@ -48,6 +50,8 @@ export interface RecoverySummary {
   candidateLabel: string;
   attemptLabel: string;
   staleReasonCount: number;
+  staleReasonBlockingCount: number;
+  staleReasonAdvisoryCount: number;
   staleReasonLabel: string;
   staleReasonDetail: string;
   queueBlockerCount: number;
@@ -90,9 +94,13 @@ export function formatMergeBlockerReason(reason: MergeBlockerReason): string {
 
 export function summarizeStaleReasons(item: Pick<MergeQueueItem, "stale_reasons">): StaleReasonSummary {
   const activeReasons = activeStaleReasons(item);
+  const blockingReasons = activeReasons.filter(staleReasonBlocksMerge);
+  const advisoryReasons = activeReasons.filter((reason) => !staleReasonBlocksMerge(reason));
   if (activeReasons.length === 0) {
     return {
       count: 0,
+      blockingCount: 0,
+      advisoryCount: 0,
       label: "none",
       detail: "no active stale reasons",
       overflowCount: 0,
@@ -100,12 +108,17 @@ export function summarizeStaleReasons(item: Pick<MergeQueueItem, "stale_reasons"
     };
   }
 
-  const visibleReasons = activeReasons.slice(0, 2);
-  const overflowCount = Math.max(0, activeReasons.length - visibleReasons.length);
-  const label = `${visibleReasons.map(staleReasonLabel).join(", ")}${overflowCount ? ` +${overflowCount}` : ""}`;
+  const primaryReasons = blockingReasons.length > 0 ? blockingReasons : advisoryReasons;
+  const visibleReasons = primaryReasons.slice(0, 2);
+  const overflowCount = Math.max(0, primaryReasons.length - visibleReasons.length);
+  const label = blockingReasons.length > 0
+    ? `${visibleReasons.map(staleReasonLabel).join(", ")}${overflowCount ? ` +${overflowCount}` : ""}`
+    : `${advisoryReasons.length} advisory overlap${advisoryReasons.length === 1 ? "" : "s"}`;
 
   return {
     count: activeReasons.length,
+    blockingCount: blockingReasons.length,
+    advisoryCount: advisoryReasons.length,
     label,
     detail: activeReasons.map(staleReasonDetail).join("; "),
     overflowCount,
@@ -225,6 +238,8 @@ export function summarizeRecovery(item: MergeQueueItem): RecoverySummary {
     candidateLabel: identity.candidateLabel,
     attemptLabel: identity.attemptLabel,
     staleReasonCount: stale.count,
+    staleReasonBlockingCount: stale.blockingCount,
+    staleReasonAdvisoryCount: stale.advisoryCount,
     staleReasonLabel: stale.label,
     staleReasonDetail: stale.detail,
     queueBlockerCount: queueBlockers.count,
@@ -293,7 +308,12 @@ function staleReasonLabel(reason: StaleReason): string {
 
 function staleReasonDetail(reason: StaleReason): string {
   const trigger = reason.trigger_ref ? `${reason.trigger_type} @ ${reason.trigger_ref}` : reason.trigger_type;
-  return `${reason.reason_code} / ${trigger}`;
+  const prefix = staleReasonBlocksMerge(reason) ? "" : "advisory ";
+  return `${prefix}${reason.reason_code} / ${trigger}`;
+}
+
+function staleReasonBlocksMerge(reason: StaleReason): boolean {
+  return reason.blocks_merge !== false && reason.severity !== "advisory";
 }
 
 function queueBlockerDetail(summary: QueueBlockerSummary): string {

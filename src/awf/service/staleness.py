@@ -32,6 +32,9 @@ Reason codes:
 * ``STALE_BUILD_CONFIG``    — a build-config file (``Dockerfile``,
   ``docker-compose``, CI workflows) changed while policy marks the candidate's
   task class build-config-sensitive.
+* ``ADVISORY_PLAN_ARTIFACT_OVERLAP`` — workspace-specific AWF plan/conformance
+  artifacts under ``docs/awf-plans/**`` overlapped. Visible to operators, but
+  does not block merge by itself.
 """
 
 from __future__ import annotations
@@ -46,7 +49,13 @@ from typing import Final
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.common.logging import get_logger
-from awf.db.models import MergeCandidate, StaleReason, TaskAttempt, Workspace
+from awf.db.models import (
+    ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON,
+    MergeCandidate,
+    StaleReason,
+    TaskAttempt,
+    Workspace,
+)
 from awf.db.repositories import (
     StaleReasonCreate,
     StaleReasonRepository,
@@ -96,6 +105,8 @@ class StalenessFinding:
     trigger_type: str
     trigger_ref: str | None
     explanation: str
+    blocks_merge: bool = True
+    severity: str = "blocking"
 
 
 @dataclass(frozen=True)
@@ -129,12 +140,16 @@ REASON_OVERLAP: Final[str] = "STALE_OVERLAP"
 REASON_SCHEMA: Final[str] = "STALE_SCHEMA"
 REASON_DEPENDENCY: Final[str] = "STALE_DEPENDENCY"
 REASON_BUILD_CONFIG: Final[str] = "STALE_BUILD_CONFIG"
+REASON_PLAN_ARTIFACT_OVERLAP: Final[str] = ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON
 
 TRIGGER_TARGET_ADVANCED: Final[str] = "target_advanced"
 TRIGGER_PATH_OVERLAP: Final[str] = "path_overlap"
 TRIGGER_SCHEMA_CHANGED: Final[str] = "schema_changed"
 TRIGGER_DEPENDENCY_CHANGED: Final[str] = "dependency_changed"
 TRIGGER_BUILD_CONFIG_CHANGED: Final[str] = "build_config_changed"
+TRIGGER_PLAN_ARTIFACT_OVERLAP: Final[str] = "plan_artifact_overlap"
+
+PLAN_ARTIFACT_PATH_PATTERN: Final[str] = "docs/awf-plans/**"
 
 DEFAULT_STALE_POLICY: Final[StalePolicy] = StalePolicy(
     schema_paths=(
@@ -211,6 +226,8 @@ def evaluate_staleness(
     dep_changes = _matched(target.changed_paths, policy.dependency_paths)
     build_changes = _matched(target.changed_paths, policy.build_config_paths)
     overlap = _matched(target.changed_paths, candidate.owned_paths)
+    plan_artifact_overlap = [path for path in overlap if _is_plan_artifact_path(path)]
+    blocking_overlap = [path for path in overlap if not _is_plan_artifact_path(path)]
 
     if _is_sensitive_task_class(
         candidate.task_class,
@@ -264,7 +281,22 @@ def evaluate_staleness(
             )
             break
 
-    for path in overlap:
+    for path in plan_artifact_overlap[:1]:
+        findings.append(
+            StalenessFinding(
+                reason_code=REASON_PLAN_ARTIFACT_OVERLAP,
+                trigger_type=TRIGGER_PLAN_ARTIFACT_OVERLAP,
+                trigger_ref=path,
+                explanation=(
+                    f"AWF plan/conformance artifact '{path}' changed on target "
+                    f"branch '{target.branch}'."
+                ),
+                blocks_merge=False,
+                severity="advisory",
+            )
+        )
+
+    for path in blocking_overlap:
         findings.append(
             StalenessFinding(
                 reason_code=REASON_OVERLAP,
@@ -278,9 +310,10 @@ def evaluate_staleness(
         break
 
     if (
-        not findings
+        not any(finding.blocks_merge for finding in findings)
         and target.advanced_commits > 0
         and candidate.task_class not in policy.lenient_task_classes
+        and not _target_changes_are_only_plan_artifacts(target.changed_paths)
     ):
         findings.append(
             StalenessFinding(
@@ -343,6 +376,15 @@ def _path_matches(path: str, pattern: str) -> bool:
     if _has_wildcard(pattern):
         return fnmatchcase(path, pattern)
     return path.startswith(pattern + "/")
+
+
+def _is_plan_artifact_path(path: str) -> bool:
+    normalized = path.strip().replace("\\", "/").removeprefix("./")
+    return _path_matches(normalized, PLAN_ARTIFACT_PATH_PATTERN)
+
+
+def _target_changes_are_only_plan_artifacts(changed_paths: Sequence[str]) -> bool:
+    return bool(changed_paths) and all(_is_plan_artifact_path(path) for path in changed_paths)
 
 
 def _has_wildcard(pattern: str) -> bool:
@@ -431,7 +473,7 @@ class StalenessRefreshService:
             ],
         )
 
-        stale = bool(findings)
+        stale = any(finding.blocks_merge for finding in findings)
         await self._mark_candidate_stale(candidate, stale=stale)
 
         if newly_added:
@@ -518,6 +560,8 @@ class StalenessRefreshService:
                     "trigger_type": row.trigger_type,
                     "trigger_ref": row.trigger_ref,
                     "explanation": row.explanation,
+                    "severity": row.severity,
+                    "blocks_merge": row.blocks_merge,
                     "target_branch": target.branch,
                     "target_head_sha": target.head_sha,
                     "advanced_commits": target.advanced_commits,

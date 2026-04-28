@@ -159,8 +159,12 @@ class TestMergeQueueExposesStaleReasons:
             "status",
             "detected_at",
             "resolved_at",
+            "severity",
+            "blocks_merge",
         } <= set(first.keys())
         assert first["status"] == "active"
+        assert first["severity"] == "blocking"
+        assert first["blocks_merge"] is True
         assert first["reason_code"] in {
             "STALE_OVERLAP",
             "STALE_TARGET_ADVANCED",

@@ -3,10 +3,37 @@ from __future__ import annotations
 from sqlalchemy import inspect
 
 from awf.db.enums import TaskClass
-from awf.db.models import ValidationRun, Workspace
+from awf.db.models import (
+    ValidationRun,
+    Workspace,
+)
+from awf.db.models import (
+    stale_reason_blocks_merge as _stale_reason_blocks_merge,
+)
+from awf.db.models import (
+    stale_reason_severity as _stale_reason_severity,
+)
 
 DOCS_TASK_SCOPE_VIOLATION_STALE_REASON = "docs_task_scope_violation"
 VALIDATION_INSUFFICIENT_TIER_STALE_REASON = "validation_insufficient_tier"
+
+
+def stale_reason_blocks_merge(reason_code: str | None) -> bool:
+    return _stale_reason_blocks_merge(reason_code)
+
+
+def stale_reason_severity(reason_code: str | None) -> str:
+    return _stale_reason_severity(reason_code)
+
+
+def stale_reason_required_action(reason_code: str | None) -> str | None:
+    if not stale_reason_blocks_merge(reason_code):
+        return None
+    if reason_code == VALIDATION_INSUFFICIENT_TIER_STALE_REASON:
+        return "validate"
+    if reason_code == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON:
+        return "resolve_task_scope"
+    return "rebase"
 
 
 def _task_class_tier(task_class: str | None) -> int:
