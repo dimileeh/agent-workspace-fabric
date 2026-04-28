@@ -853,6 +853,30 @@ class ValidationRunRepository:
         )
         return list((await self._session.execute(stmt)).scalars())
 
+    async def list_by_workspace_ids(
+        self,
+        workspace_ids: Iterable[str],
+    ) -> dict[str, builtins.list[ValidationRun]]:
+        unique_workspace_ids = tuple(dict.fromkeys(workspace_ids))
+        if not unique_workspace_ids:
+            return {}
+
+        stmt = (
+            select(ValidationRun)
+            .where(ValidationRun.workspace_id.in_(unique_workspace_ids))
+            .order_by(
+                ValidationRun.workspace_id.asc(),
+                ValidationRun.started_at.asc(),
+                ValidationRun.id.asc(),
+            )
+        )
+        out: dict[str, builtins.list[ValidationRun]] = {
+            workspace_id: [] for workspace_id in unique_workspace_ids
+        }
+        for run in (await self._session.execute(stmt)).scalars():
+            out[run.workspace_id].append(run)
+        return out
+
     async def latest_by_workspace_ids(
         self,
         workspace_ids: Iterable[str],

@@ -198,6 +198,27 @@ async def _add_monitor_recovery_operation(engine: AsyncEngine, workspace_id: str
         await session.commit()
 
 
+async def _add_operation(
+    engine: AsyncEngine,
+    workspace_id: str,
+    *,
+    operation_type: OperationType,
+    status: OperationStatus,
+    created_at: datetime,
+    payload: dict[str, object] | None = None,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            status=status,
+            payload=payload,
+        )
+        operation.created_at = created_at
+        await session.commit()
+
+
 async def _insert_validation_run(
     engine: AsyncEngine,
     *,
@@ -205,7 +226,9 @@ async def _insert_validation_run(
     workspace_id: str,
     attempt_id: str,
     target_head_sha: str,
+    tier: int = 1,
     status: str = "succeeded",
+    started_at: datetime = datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
     finished_at: datetime = datetime(2026, 4, 26, 12, 5, tzinfo=UTC),
     coverage: dict[str, object] | None = None,
 ) -> None:
@@ -245,7 +268,7 @@ async def _insert_validation_run(
                     :id,
                     :workspace_id,
                     :attempt_id,
-                    1,
+                    :tier,
                     :command_set_hash,
                     :commands,
                     'base123',
@@ -264,6 +287,7 @@ async def _insert_validation_run(
                 "workspace_id": workspace_id,
                 "attempt_id": attempt_id,
                 "target_head_sha": target_head_sha,
+                "tier": tier,
                 "status": status,
                 "command_set_hash": "b" * 64,
                 "commands": json.dumps(
@@ -279,7 +303,7 @@ async def _insert_validation_run(
                         }
                     ]
                 ),
-                "started_at": datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+                "started_at": started_at,
                 "finished_at": finished_at,
                 "log_stream_refs": json.dumps(log_stream_refs),
             },
@@ -348,6 +372,8 @@ class TestMergeQueueList:
             "last_event",
             "merge_blocker_reason",
             "required_next_action",
+            "required_validation_tier",
+            "latest_satisfied_validation_tier",
             "readiness",
             "canonical",
             "queue_blockers",
@@ -386,6 +412,8 @@ class TestMergeQueueList:
             "stale_reason": None,
         }
         assert item["latest_validation"] is None
+        assert item["required_validation_tier"] == 1
+        assert item["latest_satisfied_validation_tier"] is None
         assert newer_id not in {row["workspace_id"] for row in body["items"]}
 
     @pytest.mark.unit
@@ -1043,6 +1071,75 @@ class TestMergeQueueList:
             "coverage_reason_code": None,
             "coverage_gaps": [],
         }
+        assert item["required_validation_tier"] == 1
+        assert item["latest_satisfied_validation_tier"] == 1
+
+    @pytest.mark.unit
+    async def test_exposes_required_and_latest_satisfied_validation_tiers(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Tier recovery",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/24",
+            branch_name="codex/merge-queue",
+            task_class="test_task",
+            updated_at=datetime(2026, 4, 26, 12, 8, tzinfo=UTC),
+        )
+        attempt_id = await _attempt_id_for_workspace(engine, workspace_id)
+        await _insert_validation_run(
+            engine,
+            run_id="vr_240000000000000000000001",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="head123",
+            tier=1,
+            started_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+            finished_at=datetime(2026, 4, 26, 12, 1, tzinfo=UTC),
+        )
+        await _add_operation(
+            engine,
+            workspace_id,
+            operation_type=OperationType.rebase,
+            status=OperationStatus.succeeded,
+            created_at=datetime(2026, 4, 26, 12, 2, tzinfo=UTC),
+        )
+        await _insert_validation_run(
+            engine,
+            run_id="vr_240000000000000000000002",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="head123",
+            tier=2,
+            started_at=datetime(2026, 4, 26, 12, 3, tzinfo=UTC),
+            finished_at=datetime(2026, 4, 26, 12, 4, tzinfo=UTC),
+        )
+        await _insert_validation_run(
+            engine,
+            run_id="vr_240000000000000000000003",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="head123",
+            tier=3,
+            status="failed",
+            started_at=datetime(2026, 4, 26, 12, 5, tzinfo=UTC),
+            finished_at=datetime(2026, 4, 26, 12, 6, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["required_validation_tier"] == 2
+        assert item["latest_satisfied_validation_tier"] == 2
+        assert item["latest_validation"]["validation_run_id"] == "vr_240000000000000000000003"
+        assert item["latest_validation"]["tier"] == 3
+        assert item["latest_validation"]["status"] == "failed"
 
     @pytest.mark.unit
     async def test_latest_validation_summary_exposes_coverage_policy(
