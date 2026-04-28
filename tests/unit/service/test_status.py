@@ -380,6 +380,18 @@ def test_service_status_includes_orphan_resource_summary(tmp_path: Path) -> None
     assert all(example["workspace_id"] == "ws_ghost" for example in examples)
     assert isinstance(orphans["action"], str) and orphans["action"].strip()
 
+    orphan_resources = status["checks"]["orphan_resources"]
+    assert orphan_resources["ok"] is False
+    assert orphan_resources["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_resources["orphan_count"] == 4
+    assert orphan_resources["orphan_counts_by_kind"] == {
+        "container": 1,
+        "network": 1,
+        "volume": 1,
+        "worktree": 1,
+    }
+    assert orphan_resources["cleanup_readiness"]["dry_run_only"] is True
+
 
 @pytest.mark.unit
 def test_orphan_check_treats_active_workspace_containers_as_expected(tmp_path: Path) -> None:
@@ -678,6 +690,36 @@ def test_collect_status_cancels_pending_auxiliary_tasks_on_probe_error(tmp_path:
 
 
 @pytest.mark.unit
+def test_collect_status_cleanup_does_not_suppress_base_exceptions(tmp_path: Path) -> None:
+    class FatalCleanup(BaseException):
+        pass
+
+    async def failing_db_probe(_database_url: str) -> dict[str, Any]:
+        raise RuntimeError("db probe exploded")
+
+    async def fatal_workspace_lookup(_database_url: str) -> WorkspaceIdView:
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError as exc:
+            raise FatalCleanup("cleanup should escape") from exc
+        raise AssertionError("workspace lookup should have been cancelled")
+
+    with pytest.raises(FatalCleanup, match="cleanup should escape"):
+        asyncio.run(
+            collect_service_status(
+                _settings(tmp_path),
+                api_get=_api_get,
+                db_probe=failing_db_probe,
+                run_subprocess=_make_run_subprocess(),
+                socket_exists=lambda _path: True,
+                disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+                workspace_id_lookup=fatal_workspace_lookup,
+                provider_environ={},
+            )
+        )
+
+
+@pytest.mark.unit
 def test_orphan_check_extracts_labels_via_docker_template(tmp_path: Path) -> None:
     captured_args: list[list[str]] = []
 
@@ -831,7 +873,6 @@ def test_orphan_check_handles_missing_docker_binary(tmp_path: Path) -> None:
     assert orphans["ok"] is True
     assert orphans["status"] == "unavailable"
     assert orphans["reason"] == "DOCKER_CLI_NOT_FOUND"
-
 
 @pytest.mark.unit
 def test_default_workspace_id_lookup_returns_unavailable_for_malformed_url() -> None:

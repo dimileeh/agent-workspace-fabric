@@ -26,6 +26,15 @@ from awf import __version__
 from awf.common.commands import AsyncCommandRunner, AsyncioSubprocessRunner, CommandResult
 from awf.common.config import get_settings
 from awf.service.config import resolve_service_settings
+from awf.service.orphan_resources import (
+    ResourceScan,
+    WorkspaceIdView,
+    build_orphan_resource_summary,
+    scan_docker_resources_async,
+    scan_managed_worktrees,
+    unavailable_workspace_view,
+    workspace_id_view_from_session,
+)
 from awf.service.provider_readiness import (
     ProviderReadinessError,
     collect_agent_readiness,
@@ -60,6 +69,19 @@ class CheckResult(BaseModel):
     reason: str | None = None
     detail: str | None = None
     version: str | None = None
+    resource_count: int | None = None
+    expected_count: int | None = None
+    active_count: int | None = None
+    orphan_count: int | None = None
+    unknown_count: int | None = None
+    counts_by_kind: dict[str, int] | None = None
+    orphan_counts_by_kind: dict[str, int] | None = None
+    expected_counts_by_kind: dict[str, int] | None = None
+    unknown_counts_by_kind: dict[str, int] | None = None
+    orphan_classification_counts: dict[str, int] | None = None
+    cleanup_readiness: dict[str, Any] | None = None
+    scanners: dict[str, dict[str, Any]] | None = None
+    examples: list[dict[str, Any]] | None = None
 
 
 class ReadyResponse(BaseModel):
@@ -254,6 +276,135 @@ async def _check_agent_runtime_image(runner: AsyncCommandRunner, image: str) -> 
     )
 
 
+async def _workspace_view_for_readyz(factory: Any) -> WorkspaceIdView:
+    if factory is None:
+        return unavailable_workspace_view()
+    try:
+        session = factory()
+    except Exception:
+        return unavailable_workspace_view()
+    try:
+        return await workspace_id_view_from_session(session)
+    except Exception:
+        return unavailable_workspace_view()
+    finally:
+        close = getattr(session, "close", None)
+        if close is not None:
+            with contextlib.suppress(Exception):
+                await close()
+
+
+async def _check_orphan_resources(
+    *,
+    runner: AsyncCommandRunner,
+    factory: Any,
+    work_dir: str,
+    db_check: CheckResult,
+    docker_check: CheckResult,
+) -> CheckResult:
+    if not db_check.ok:
+        workspace_view = unavailable_workspace_view()
+    else:
+        workspace_view = await _workspace_view_for_readyz(factory)
+
+    if not docker_check.ok:
+        docker_scan = _docker_resource_scan_unavailable(docker_check)
+    else:
+        docker_scan = await scan_docker_resources_async(
+            runner=runner,
+            timeout=_CHECK_TIMEOUT_SECONDS,
+        )
+
+    worktree_scan = await asyncio.to_thread(scan_managed_worktrees, work_dir)
+    return _orphan_resources_check_result(
+        db_check=db_check,
+        docker_check=docker_check,
+        workspace_view=workspace_view,
+        docker_scan=docker_scan,
+        worktree_scan=worktree_scan,
+    )
+
+
+def _docker_resource_scan_unavailable(docker_check: CheckResult) -> ResourceScan:
+    return ResourceScan(
+        ok=False,
+        status="unavailable",
+        reason="DOCKER_RESOURCE_SCAN_UNAVAILABLE",
+        detail=docker_check.detail or docker_check.reason,
+    )
+
+
+def _orphan_resources_check_result(
+    *,
+    db_check: CheckResult,
+    docker_check: CheckResult,
+    workspace_view: WorkspaceIdView,
+    docker_scan: ResourceScan,
+    worktree_scan: ResourceScan,
+) -> CheckResult:
+    if not db_check.ok:
+        workspace_view = unavailable_workspace_view()
+    if not docker_check.ok:
+        docker_scan = _docker_resource_scan_unavailable(docker_check)
+
+    summary = build_orphan_resource_summary(
+        docker_scan=docker_scan,
+        worktree_scan=worktree_scan,
+        workspace_view=workspace_view,
+    )
+    return CheckResult(**summary.to_dict())
+
+
+async def _cancel_unneeded_task(task: asyncio.Task[Any]) -> None:
+    if not task.done():
+        task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await task
+
+
+async def _check_orphan_resources_with_concurrent_scans(
+    *,
+    runner: AsyncCommandRunner,
+    factory: Any,
+    work_dir: str,
+    db_check_task: asyncio.Task[CheckResult],
+    docker_check_task: asyncio.Task[CheckResult],
+) -> CheckResult:
+    workspace_view_task = asyncio.create_task(_workspace_view_for_readyz(factory))
+    docker_scan_task = asyncio.create_task(
+        scan_docker_resources_async(
+            runner=runner,
+            timeout=_CHECK_TIMEOUT_SECONDS,
+        )
+    )
+    worktree_scan_task = asyncio.create_task(
+        asyncio.to_thread(scan_managed_worktrees, work_dir)
+    )
+
+    db_check, docker_check = await asyncio.gather(db_check_task, docker_check_task)
+
+    if db_check.ok:
+        workspace_view = await workspace_view_task
+    else:
+        workspace_view = unavailable_workspace_view()
+        await _cancel_unneeded_task(workspace_view_task)
+
+    if docker_check.ok:
+        docker_scan = await docker_scan_task
+    else:
+        docker_scan = _docker_resource_scan_unavailable(docker_check)
+        await _cancel_unneeded_task(docker_scan_task)
+
+    worktree_scan = await worktree_scan_task
+    return _orphan_resources_check_result(
+        db_check=db_check,
+        docker_check=docker_check,
+        workspace_view=workspace_view,
+        docker_scan=docker_scan,
+        worktree_scan=worktree_scan,
+    )
+
+
 @router.get("/readyz", response_model=ReadyResponse)
 async def readyz(
     request: Request,
@@ -274,35 +425,60 @@ async def readyz(
     factory = getattr(request.app.state, "db_session_factory", None)
 
     # Run checks concurrently so the worst-case latency stays bounded by the
-    # single _CHECK_TIMEOUT_SECONDS rather than summing across all five (a
-    # k8s/uptime probe with multiple slow deps would otherwise hit 25s and
-    # time out at the orchestrator). Each check already returns a structured
-    # CheckResult on failure, so gather() never sees an exception.
-    (
-        db_check,
-        cli_check,
-        daemon_check,
-        compose_check,
-        image_check,
-        agent_readiness,
-    ) = await asyncio.gather(
-        _check_db(factory),
-        _check_docker_cli(runner),
-        _check_docker_daemon(runner),
-        _check_docker_compose(runner),
-        _check_agent_runtime_image(runner, settings.agent_runtime_image),
+    # single _CHECK_TIMEOUT_SECONDS rather than summing across dependencies (a
+    # k8s/uptime probe with multiple slow deps would otherwise time out at the
+    # orchestrator). Orphan detection starts its read-only scans in the same
+    # wave, then gates classification on DB and daemon readiness results.
+    db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(factory))
+    cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
+    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_docker_daemon(runner)
+    )
+    compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_docker_compose(runner)
+    )
+    image_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_agent_runtime_image(runner, settings.agent_runtime_image)
+    )
+    agent_readiness_task: asyncio.Task[dict[str, Any]] = asyncio.create_task(
         asyncio.to_thread(
             collect_agent_readiness,
             service_settings,
             validated_strict_providers=strict_providers,
-        ),
+        )
     )
+    orphan_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_orphan_resources_with_concurrent_scans(
+            runner=runner,
+            factory=factory,
+            work_dir=settings.work_dir,
+            db_check_task=db_check_task,
+            docker_check_task=daemon_check_task,
+        )
+    )
+    await asyncio.gather(
+        db_check_task,
+        cli_check_task,
+        daemon_check_task,
+        compose_check_task,
+        image_check_task,
+        agent_readiness_task,
+        orphan_check_task,
+    )
+    db_check = db_check_task.result()
+    cli_check = cli_check_task.result()
+    daemon_check = daemon_check_task.result()
+    compose_check = compose_check_task.result()
+    image_check = image_check_task.result()
+    agent_readiness = agent_readiness_task.result()
+    orphan_check = orphan_check_task.result()
     checks = {
         "db": db_check,
         "docker_cli": cli_check,
         "docker_daemon": daemon_check,
         "docker_compose": compose_check,
         "agent_runtime_image": image_check,
+        "orphan_resources": orphan_check,
     }
 
     overall_ok = all(check.ok for check in checks.values()) and agent_readiness["status"] == "ok"

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +23,13 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
+from awf.service.orphan_resources import (
+    WorkspaceIdView,
+    build_orphan_resource_summary,
+    empty_docker_scan,
+    scan_docker_resources,
+    scan_managed_worktrees,
+)
 
 
 async def _workspace(
@@ -120,12 +129,38 @@ def _disk_check(
     )
 
 
+def _empty_docker_run(args: list[str], **_kwargs: object) -> Any:
+    if args[:3] in (
+        ["docker", "ps", "-a"],
+        ["docker", "network", "ls"],
+        ["docker", "volume", "ls"],
+    ):
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    raise AssertionError(f"unexpected subprocess call: {args}")
+
+
+def _no_orphan_summary(settings: Settings, _session: Any) -> Any:
+    return build_orphan_resource_summary(
+        docker_scan=scan_docker_resources(
+            docker_host=settings.docker_host,
+            run_subprocess=_empty_docker_run,
+        ),
+        worktree_scan=scan_managed_worktrees(settings.work_dir),
+        workspace_view=WorkspaceIdView(
+            active_ids=frozenset(),
+            terminal_ids=frozenset(),
+            available=True,
+        ),
+    )
+
+
 @pytest.fixture
 async def metrics_app_and_client(
     engine: AsyncEngine,
 ) -> AsyncIterator[tuple[Any, AsyncClient]]:
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
+    app.state.orphan_resource_summary_provider = _no_orphan_summary
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
         yield app, c
 
@@ -194,9 +229,90 @@ async def test_resource_saturation_endpoint_reports_local_capacity_inputs(
         "available": 0,
     }
     assert body["disk"]["reason"] == "SUFFICIENT_DISK"
+    assert body["orphan_resources"]["reason"] == "NO_ORPHANS"
     assert body["admission"]["ok"] is True
     assert body["admission"]["status"] == "saturated"
     assert body["admission"]["reason"] == "WORKER_EXECUTION_CONCURRENCY_SATURATED"
+
+
+@pytest.mark.unit
+async def test_resource_saturation_endpoint_serializes_orphan_resource_summary(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+    tmp_path: Path,
+) -> None:
+    app, client = metrics_app_and_client
+    settings = Settings(
+        _env_file=None,
+        work_dir=str(tmp_path),
+        min_free_disk_bytes=700,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
+        provider_settings,
+        ok=True,
+    )
+    (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
+
+    def _orphan_provider(provider_settings: Settings, _session: Any) -> Any:
+        return build_orphan_resource_summary(
+            docker_scan=scan_docker_resources(
+                docker_host=provider_settings.docker_host,
+                run_subprocess=_empty_docker_run,
+            ),
+            worktree_scan=scan_managed_worktrees(provider_settings.work_dir),
+            workspace_view=WorkspaceIdView(
+                active_ids=frozenset(),
+                terminal_ids=frozenset({"ws_done"}),
+                available=True,
+            ),
+        )
+
+    app.state.orphan_resource_summary_provider = _orphan_provider
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    orphan_resources = response.json()["orphan_resources"]
+    assert orphan_resources["ok"] is False
+    assert orphan_resources["reason"] == "ORPHAN_RESOURCES_PRESENT"
+    assert orphan_resources["orphan_count"] == 1
+    assert orphan_resources["orphan_counts_by_kind"]["worktree"] == 1
+    assert orphan_resources["cleanup_readiness"]["dry_run_only"] is True
+
+
+@pytest.mark.unit
+async def test_resource_saturation_orphan_provider_supports_async_and_db_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import awf.api.routes.metrics as metrics_route
+
+    settings = Settings(_env_file=None, work_dir=str(tmp_path))
+    expected = _no_orphan_summary(settings, None)
+
+    async def _async_provider(_settings: Settings, _session: Any) -> Any:
+        return expected
+
+    request = SimpleNamespace(
+        app=SimpleNamespace(
+            state=SimpleNamespace(orphan_resource_summary_provider=_async_provider)
+        )
+    )
+    provided = await metrics_route._resource_saturation_orphan_resources(
+        request,
+        settings,
+        session=None,
+    )
+
+    class _BadSession:
+        async def execute(self, *_args: object, **_kwargs: object) -> None:
+            raise RuntimeError("db down")
+
+    monkeypatch.setattr(metrics_route, "scan_docker_resources", lambda **_kwargs: empty_docker_scan())
+    defaulted = await metrics_route._default_orphan_resource_summary(settings, _BadSession())
+
+    assert provided is expected
+    assert defaulted.reason == "DB_UNAVAILABLE"
 
 
 @pytest.mark.unit

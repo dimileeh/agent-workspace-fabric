@@ -20,6 +20,12 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
+from awf.service.orphan_resources import (
+    WorkspaceIdView,
+    build_orphan_resource_summary,
+    scan_docker_resources,
+    scan_managed_worktrees,
+)
 from tests.unit.helpers import create_operation, create_workspace, zero_status_counts
 
 
@@ -98,6 +104,16 @@ def _disk_check(
         reason=reason,
         detail=None if ok else "Free disk is below the configured admission threshold.",
     )
+
+
+def _empty_run(args: list[str], **_kwargs: object) -> Any:
+    if args[:3] in (
+        ["docker", "ps", "-a"],
+        ["docker", "network", "ls"],
+        ["docker", "volume", "ls"],
+    ):
+        return type("Completed", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+    raise AssertionError(f"unexpected subprocess call: {args}")
 
 
 @pytest.mark.unit
@@ -573,6 +589,39 @@ async def test_resource_saturation_reports_active_counts_and_configured_defaults
     assert summary.admission.ok is True
     assert summary.admission.status == "saturated"
     assert summary.admission.reason == "WORKER_EXECUTION_CONCURRENCY_SATURATED"
+
+
+@pytest.mark.unit
+async def test_resource_saturation_includes_orphan_resource_summary(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    (tmp_path / "git" / "worktrees" / "ws_dead").mkdir(parents=True)
+    orphan_summary = build_orphan_resource_summary(
+        docker_scan=scan_docker_resources(
+            docker_host="unix:///var/run/docker.sock",
+            run_subprocess=_empty_run,
+        ),
+        worktree_scan=scan_managed_worktrees(tmp_path),
+        workspace_view=WorkspaceIdView(
+            active_ids=frozenset(),
+            terminal_ids=frozenset({"ws_dead"}),
+            available=True,
+        ),
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=Settings(_env_file=None, work_dir=str(tmp_path)),
+        disk_check=_disk_check(),
+        orphan_resources=orphan_summary,
+    )
+
+    assert summary.orphan_resources.orphan_count == 1
+    assert summary.orphan_resources.orphan_counts_by_kind["worktree"] == 1
+    assert summary.orphan_resources.cleanup_readiness.reason == "ORPHAN_RESOURCES_PRESENT"
 
 
 @pytest.mark.unit

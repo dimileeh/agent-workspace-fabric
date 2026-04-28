@@ -139,7 +139,7 @@ async def collect_service_status(
         for pending in (workspace_lookup_task, provider_task):
             if not pending.done():
                 pending.cancel()
-            with contextlib.suppress(BaseException):
+            with contextlib.suppress(asyncio.CancelledError):
                 await pending
     orphan_summary = await asyncio.to_thread(
         detect_orphan_resources,
@@ -148,14 +148,16 @@ async def collect_service_status(
         workspace_view=workspace_view,
         run_subprocess=resolved_run,
     )
-    orphan_check = orphan_summary.to_check_payload()
+    orphan_workspaces_check = orphan_summary.to_check_payload()
+    orphan_resources_check = _orphan_resources_check_payload(orphan_workspaces_check)
     checks = {
         "api": api_check,
         "db": db_check,
         "docker": docker_check,
         "agent_runtime_image": image_check,
         "disk": disk_check.to_dict(),
-        "orphan_workspaces": orphan_check,
+        "orphan_resources": orphan_resources_check,
+        "orphan_workspaces": orphan_workspaces_check,
     }
     overall_ok = (
         all(bool(check["ok"]) for check in checks.values())
@@ -241,6 +243,55 @@ def _check_agent_runtime_image(
         fail_reason="AGENT_RUNTIME_IMAGE_MISSING",
         detail_prefix=f"{settings.agent_runtime_image}: ",
     )
+
+
+def _orphan_resources_check_payload(
+    orphan_workspaces_check: Mapping[str, object],
+) -> CheckPayload:
+    payload: CheckPayload = dict(orphan_workspaces_check)
+    payload["reason"] = _orphan_resources_reason(payload.get("reason"))
+    if "resource_counts" in payload:
+        payload.setdefault("counts_by_kind", payload["resource_counts"])
+    payload["cleanup_readiness"] = _orphan_resources_cleanup_readiness(payload)
+    return payload
+
+
+def _orphan_resources_reason(reason: object) -> str:
+    if reason == "ORPHANS_PRESENT":
+        return "ORPHAN_RESOURCES_PRESENT"
+    return str(reason or "UNKNOWN")
+
+
+def _orphan_resources_cleanup_readiness(payload: Mapping[str, object]) -> dict[str, object]:
+    reason = _orphan_resources_reason(payload.get("reason"))
+    action = payload.get("action")
+    if bool(payload.get("orphan_count")):
+        return {
+            "ready": False,
+            "status": "blocked",
+            "reason": reason,
+            "action": action
+            if isinstance(action, str) and action
+            else "Review the listed AWF resources before running cleanup.",
+            "dry_run_only": True,
+        }
+    if payload.get("status") == "ok":
+        return {
+            "ready": True,
+            "status": "ready",
+            "reason": reason,
+            "action": "No orphan AWF resources were detected; no cleanup action is required.",
+            "dry_run_only": True,
+        }
+    return {
+        "ready": False,
+        "status": str(payload.get("status") or "unknown"),
+        "reason": reason,
+        "action": action
+        if isinstance(action, str) and action
+        else "Restore detector dependencies and re-run orphan resource detection.",
+        "dry_run_only": True,
+    }
 
 
 def _workspace_id_from_project(project: str) -> str | None:
