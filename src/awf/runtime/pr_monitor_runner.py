@@ -2192,6 +2192,15 @@ class PullRequestMonitorRunner:
             ws = await repo.get(workspace_id)
             if ws is None:
                 return
+            if ws.status != WorkspaceStatus.monitoring_pr.value:
+                await _record_ignored_monitor_terminal_callback(
+                    repo,
+                    ws,
+                    requested_status=WorkspaceStatus.completed,
+                    reason_code="MONITOR_DONE",
+                )
+                await s.commit()
+                return
             if pr_merge_sha:
                 ws.pr_merge_sha = pr_merge_sha
             await repo.transition(ws, to=WorkspaceStatus.completed, reason_code="MONITOR_DONE")
@@ -2402,10 +2411,19 @@ class PullRequestMonitorRunner:
             ws = await repo.get(workspace_id)
             if ws is None:
                 return
-            ws.failure_reason = FailureReason.infrastructure_failure.value
-            ws.failure_message = message
             rc = reason_code.value if isinstance(reason_code, AbortReason) else reason_code
             rc = rc or "MONITOR_ABORT"
+            if ws.status != WorkspaceStatus.monitoring_pr.value:
+                await _record_ignored_monitor_terminal_callback(
+                    repo,
+                    ws,
+                    requested_status=WorkspaceStatus.failed,
+                    reason_code=rc,
+                )
+                await s.commit()
+                return
+            ws.failure_reason = FailureReason.infrastructure_failure.value
+            ws.failure_message = message
             if rc == EXEC_PROCESS_CLEANUP_FAILED:
                 await repo.add_event(
                     ws,
@@ -2418,6 +2436,25 @@ class PullRequestMonitorRunner:
 
 
 # ── Helpers ────────────────────────────────────────────────────────────────
+
+
+async def _record_ignored_monitor_terminal_callback(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    *,
+    requested_status: WorkspaceStatus,
+    reason_code: str,
+) -> None:
+    await repo.add_event(
+        workspace,
+        event_type="workspace.monitor_terminal_ignored",
+        reason_code="STALE_MONITOR_TERMINAL_CALLBACK",
+        payload={
+            "current_status": workspace.status,
+            "requested_status": requested_status.value,
+            "reason_code": reason_code,
+        },
+    )
 
 
 _VERDICT_FALSE_POSITIVE = re.compile(r"\bFALSE\s+POSITIVE\s*:", re.IGNORECASE)

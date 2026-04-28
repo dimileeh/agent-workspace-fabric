@@ -274,6 +274,47 @@ async def test_stop_workspace_replays_existing_idempotent_operation(
 
 
 @pytest.mark.unit
+async def test_terminal_cancel_stop_events_include_expected_version(
+    session: AsyncSession,
+) -> None:
+    cancel = await _workspace(
+        session,
+        status=WorkspaceStatus.completed,
+        title="terminal cancel with expected version",
+    )
+    stop = await _workspace(
+        session,
+        status=WorkspaceStatus.completed,
+        title="terminal stop with expected version",
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    await service.cancel_workspace(
+        cancel.id,
+        reason="cancel audit",
+        stop_stack=False,
+        expected_version=cancel.version,
+    )
+    await service.stop_workspace(
+        stop.id,
+        reason="stop audit",
+        expected_version=stop.version,
+    )
+    cancel_event = (await _events(session, cancel.id))[0]
+    stop_event = (await _events(session, stop.id))[0]
+
+    assert cancel_event.payload == {
+        "reason": "cancel audit",
+        "stop_stack": False,
+        "expected_version": 1,
+    }
+    assert stop_event.payload == {
+        "reason": "stop audit",
+        "expected_version": 1,
+    }
+
+
+@pytest.mark.unit
 async def test_idempotent_replay_returns_original_operation_audit_unchanged(
     session: AsyncSession,
 ) -> None:
@@ -515,6 +556,7 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
         "reason": "worker restarted",
         "operation_id": operations[0].id,
         "claims_reset": expected_snapshot,
+        "expected_version": 1,
     }
 
 
@@ -622,7 +664,43 @@ async def test_refresh_active_workspace_creates_pending_operation_and_coalesces_
         "source": "operator_api",
         "reason": "stale merge queue",
         "operation_id": operation.id,
+        "expected_version": 1,
     }
+
+
+@pytest.mark.unit
+async def test_refresh_fresh_key_with_stale_if_match_does_not_coalesce_active_operation(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_refresh_workspace(
+        workspace.id,
+        reason="stale merge queue",
+        idempotency_key="refresh-original",
+        expected_version=workspace.version,
+    )
+    workspace.version += 1
+    await session.flush()
+
+    replay = await service.request_refresh_workspace(
+        workspace.id,
+        reason="stale merge queue",
+        idempotency_key="refresh-original",
+        expected_version=1,
+    )
+    with pytest.raises(VersionConflictError) as exc_info:
+        await service.request_refresh_workspace(
+            workspace.id,
+            reason="stale merge queue",
+            idempotency_key="refresh-fresh-stale-version",
+            expected_version=1,
+        )
+
+    assert replay.id == operation.id
+    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 2}
+    assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
 
 
 @pytest.mark.unit
@@ -747,9 +825,50 @@ async def test_validate_monitoring_pr_creates_validate_only_operation_and_coales
         "operation_id": operation.id,
         "recovery_mode": "validate_only",
         "requested_tier": 2,
+        "expected_version": 1,
     }
     assert state_event.old_state == WorkspaceStatus.monitoring_pr.value
     assert state_event.new_state == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_validate_fresh_key_with_stale_if_match_does_not_coalesce_active_operation(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/48"
+    workspace.pr_number = 48
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_validate_workspace(
+        workspace.id,
+        reason="rerun required validation",
+        requested_tier=2,
+        idempotency_key="validate-original",
+        expected_version=workspace.version,
+    )
+
+    replay = await service.request_validate_workspace(
+        workspace.id,
+        reason="rerun required validation",
+        requested_tier=2,
+        idempotency_key="validate-original",
+        expected_version=1,
+    )
+    with pytest.raises(VersionConflictError) as exc_info:
+        await service.request_validate_workspace(
+            workspace.id,
+            reason="rerun required validation",
+            requested_tier=2,
+            idempotency_key="validate-fresh-stale-version",
+            expected_version=1,
+        )
+
+    assert replay.id == operation.id
+    assert workspace.version == 2
+    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 2}
+    assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
 
 
 @pytest.mark.unit
