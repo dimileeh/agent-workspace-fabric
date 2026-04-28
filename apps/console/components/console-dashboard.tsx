@@ -42,6 +42,16 @@ import {
   toneClass,
 } from "@/lib/format";
 import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "@/lib/agent-format";
+import {
+  formatMergeBlockerReason,
+  formatRequiredNextAction,
+  mergeQueueMergedAt,
+  requiredNextActionTone,
+  summarizeQueueBlockers,
+  summarizeReadiness,
+  summarizeStaleReasons,
+  summarizeValidation,
+} from "@/lib/merge-queue-format";
 import type {
   ApiEnvelope,
   AwfStreamFrame,
@@ -1394,6 +1404,13 @@ function MergeQueueRow({
   onToggle: () => void;
 }) {
   const rowDetailsId = `merge-candidate-${item.candidate_id ?? item.workspace_id}`;
+  const actionLabel = formatRequiredNextAction(item.required_next_action, item.merge_blocker_reason);
+  const blockerLabel = formatMergeBlockerReason(item.merge_blocker_reason);
+  const readiness = summarizeReadiness(item);
+  const stale = summarizeStaleReasons(item);
+  const queueBlockers = summarizeQueueBlockers(item);
+  const validation = summarizeValidation(item);
+  const mergedAt = mergeQueueMergedAt(item);
   return (
     <article className="grid gap-2 border-b border-slate-100 pb-2 text-xs last:border-b-0 last:pb-0">
       <div className="flex min-w-0 items-start justify-between gap-2">
@@ -1407,14 +1424,9 @@ function MergeQueueRow({
           <div className="mono mt-1 truncate text-[11px] text-slate-500">{item.workspace_id}</div>
           <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[11px] text-slate-500">
             <span className="truncate">created {formatDateTime(item.created_at)}</span>
-            <span className="truncate">merged {formatDateTime(mergeQueueMergedAt(item))}</span>
-          </div>
-          <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[11px] text-slate-500">
+            <span className="truncate">merged {formatDateTime(mergedAt)}</span>
             <span className="truncate">
-              blocker <span className="mono text-slate-700">{item.merge_blocker_reason}</span>
-            </span>
-            <span className="truncate">
-              readiness <span className="mono text-slate-700">{readinessSummary(item)}</span>
+              base <span className="mono text-slate-700">{item.base_branch}</span>
             </span>
           </div>
         </div>
@@ -1433,34 +1445,89 @@ function MergeQueueRow({
           </button>
         </div>
       </div>
+      <div className="grid gap-1 sm:grid-cols-2 2xl:grid-cols-4">
+        <QueueChip
+          label="Action"
+          value={actionLabel}
+          tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
+        />
+        <QueueChip
+          label="Blocker"
+          value={blockerLabel}
+          detail={item.merge_blocker_reason}
+          tone={mergeBlockerTone(item.merge_blocker_reason)}
+        />
+        <QueueChip
+          label="Readiness"
+          value={`${readiness.canonicalLabel} / ${readiness.label}`}
+          detail={readiness.detail}
+          tone={readinessTone(readiness.label)}
+        />
+        <QueueChip
+          label="Candidate"
+          value={`${readiness.candidateLabel} / ${readiness.attemptLabel}`}
+          detail={item.candidate_status ?? "unknown"}
+          mono
+        />
+        <QueueChip
+          label="Stale"
+          value={stale.label}
+          detail={stale.detail}
+          tone={stale.count > 0 ? "warn" : "neutral"}
+          mono={stale.count > 0}
+        />
+        <QueueChip
+          label="Queue"
+          value={queueBlockers.label}
+          detail={queueBlockers.detail}
+          tone={queueBlockers.count > 0 ? "warn" : "neutral"}
+        />
+        <QueueChip label="Validation" value={validation.label} detail={validation.detail} tone={validationTone(item)} />
+        <QueueChip label="Heads" value={validation.headLabel} detail={validation.coverageLabel} mono />
+      </div>
       {expanded ? (
         <div id={rowDetailsId} className="grid gap-2">
           <div className="grid gap-1 sm:grid-cols-3">
             <QueueDatum label="Candidate" value={item.candidate_id ? compactId(item.candidate_id, 10) : "legacy"} mono />
             <QueueDatum label="Attempt" value={item.attempt_id ? compactId(item.attempt_id, 10) : "none"} mono />
-            <QueueDatum label="Canonical" value={item.canonical ? "canonical" : "superseded"} tone={item.canonical ? statusTone("completed") : statusTone("failed")} />
+            <QueueDatum
+              label="Canonical"
+              value={readiness.canonicalLabel}
+              tone={item.canonical ? statusTone("completed") : statusTone("failed")}
+            />
             <QueueDatum label="Candidate status" value={item.candidate_status ?? "unknown"} mono />
-            <QueueDatum label="Readiness" value={readinessSummary(item)} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
+            <QueueDatum
+              label="Action"
+              value={actionLabel}
+              tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
+            />
+            <QueueDatum label="Readiness" value={readiness.detail} mono tone={readinessTone(readiness.label)} />
             <QueueDatum label="Mode" value={item.auto_merge ? "auto-merge" : "manual"} />
             <QueueDatum label="Created" value={formatDateTime(item.created_at)} />
-            <QueueDatum label="Merged" value={formatDateTime(mergeQueueMergedAt(item))} />
+            <QueueDatum label="Merged" value={formatDateTime(mergedAt)} />
             <QueueDatum label="Last event" value={lastEventReason(item.last_event)} mono />
             <QueueDatum label="Blocker" value={item.merge_blocker_reason} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
+            <QueueDatum label="Validation" value={validation.label} tone={validationTone(item)} />
+            <QueueDatum label="Freshness" value={validation.freshLabel} />
+            <QueueDatum label="Validation heads" value={validation.headLabel} mono />
+            <QueueDatum label="Coverage" value={validation.coverageLabel} mono />
           </div>
           <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
             <span className="truncate">
               base <span className="mono text-slate-700">{item.base_branch}</span>
             </span>
+            <span className="truncate">
+              branch <span className="mono text-slate-700">{item.branch_name ?? "none"}</span>
+            </span>
             <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
           </div>
+          <MergeQueueBlockerDetails blockers={item.queue_blockers ?? []} />
+          <MergeQueueStaleReasonDetails reasons={stale.activeReasons} />
+          <MergeQueuePolicyFindingDetails findings={item.policy_findings ?? []} />
         </div>
       ) : null}
     </article>
   );
-}
-
-function mergeQueueMergedAt(item: MergeQueueItem): string | null {
-  return item.merged_at ?? (item.status === "completed" ? item.updated_at : null);
 }
 
 function QueueDatum({
@@ -1482,6 +1549,96 @@ function QueueDatum({
   );
 }
 
+function QueueChip({
+  label,
+  value,
+  detail,
+  mono = false,
+  tone = "neutral",
+}: {
+  label: string;
+  value: string;
+  detail?: string;
+  mono?: boolean;
+  tone?: ReturnType<typeof statusTone>;
+}) {
+  return (
+    <div
+      title={detail ? `${label}: ${value} (${detail})` : `${label}: ${value}`}
+      className={`min-w-0 rounded-md border px-2 py-1 ${toneClass(tone)}`}
+    >
+      <div className="text-[10px] font-medium text-slate-500">{label}</div>
+      <div className={`${mono ? "mono" : ""} truncate text-[11px] font-medium text-slate-900`}>{value}</div>
+      {detail ? <div className="truncate text-[10px] text-slate-500">{detail}</div> : null}
+    </div>
+  );
+}
+
+function MergeQueueBlockerDetails({ blockers }: { blockers: MergeQueueItem["queue_blockers"] }) {
+  if (blockers.length === 0) {
+    return null;
+  }
+  return (
+    <div className="grid gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5">
+      <div className="text-[10px] font-medium text-amber-900">Queue blockers</div>
+      {blockers.map((blocker) => (
+        <div key={blocker.candidate_id} className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-[11px] text-amber-950">
+          <span className="truncate font-medium">{blocker.title}</span>
+          <span className="mono">{blocker.pr_number ? `#${blocker.pr_number}` : compactId(blocker.candidate_id, 10)}</span>
+          <span className="mono">{blocker.blocker_state}</span>
+          <span className="mono">{blocker.status}</span>
+          <span className="mono truncate">{blocker.reason_code}</span>
+          <SmallExternalAnchor href={blocker.pr_url} label="PR" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MergeQueueStaleReasonDetails({ reasons }: { reasons: MergeQueueItem["stale_reasons"] }) {
+  if (reasons.length === 0) {
+    return null;
+  }
+  return (
+    <div className="grid gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 py-1.5">
+      <div className="text-[10px] font-medium text-amber-900">Active stale reasons</div>
+      {reasons.map((reason) => (
+        <div key={reason.id} className="grid min-w-0 gap-0.5 text-[11px] text-amber-950">
+          <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1">
+            <span className="mono font-medium">{reason.reason_code}</span>
+            <span className="mono">{reason.trigger_type}</span>
+            <span className="mono truncate">{reason.trigger_ref ?? "no trigger ref"}</span>
+            <span>detected {formatDateTime(reason.detected_at)}</span>
+          </div>
+          <div className="truncate text-amber-900">{reason.explanation}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function MergeQueuePolicyFindingDetails({ findings }: { findings: MergeQueueItem["policy_findings"] }) {
+  if (findings.length === 0) {
+    return null;
+  }
+  return (
+    <div className="grid gap-1 rounded-md border border-red-200 bg-red-50 px-2 py-1.5">
+      <div className="text-[10px] font-medium text-red-900">Policy findings</div>
+      {findings.map((finding) => (
+        <div key={finding.id} className="grid min-w-0 gap-0.5 text-[11px] text-red-950">
+          <div className="flex min-w-0 flex-wrap gap-x-2 gap-y-1">
+            <span className="mono font-medium">{finding.reason_code}</span>
+            <span className="mono">{finding.severity}</span>
+            <span className="mono truncate">{finding.subject_path ?? "no subject path"}</span>
+            <span>detected {formatDateTime(finding.detected_at)}</span>
+          </div>
+          <div className="truncate text-red-900">{finding.explanation}</div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 function lastEventReason(event: WorkspaceEvent | null): string {
   if (!event) {
     return "none";
@@ -1496,10 +1653,12 @@ function mergeBlockerTone(reason: MergeQueueItem["merge_blocker_reason"]): Retur
       return "good";
     case "manual_merge_required":
     case "waiting_for_monitor":
+    case "waiting_for_older_candidate":
     case "stale":
       return "warn";
     case "failed_or_cancelled":
     case "not_canonical":
+    case "policy_blocked":
       return "bad";
     case "workspace_not_terminal":
       return "info";
@@ -1508,33 +1667,44 @@ function mergeBlockerTone(reason: MergeQueueItem["merge_blocker_reason"]): Retur
   }
 }
 
-function readinessSummary(item: MergeQueueItem): string {
-  const readiness = item.readiness;
-  if (!readiness) {
-    return "legacy";
+function readinessTone(label: string): ReturnType<typeof statusTone> {
+  switch (label) {
+    case "ready":
+    case "completed":
+      return "good";
+    case "manual":
+    case "waiting":
+    case "stale":
+    case "blocked":
+      return "warn";
+    case "failed/cancelled":
+    case "not canonical":
+      return "bad";
+    case "legacy":
+      return "neutral";
+    default:
+      return "info";
   }
-  if (readiness.ready) {
-    return "ready";
+}
+
+function validationTone(item: MergeQueueItem): ReturnType<typeof statusTone> {
+  const validation = item.latest_validation;
+  if (!validation) {
+    return "neutral";
   }
-  if (readiness.completed) {
-    return "completed";
+  if (validation.status === "failed" || validation.coverage_status === "failed") {
+    return "bad";
   }
-  if (readiness.manual_merge_required) {
-    return "manual";
+  if (validation.fresh_for_target === false) {
+    return "warn";
   }
-  if (readiness.waiting_for_monitor) {
-    return "waiting";
+  if (validation.status === "succeeded") {
+    return "good";
   }
-  if (readiness.failed_or_cancelled) {
-    return "failed_or_cancelled";
+  if (validation.status === "running") {
+    return "info";
   }
-  if (readiness.not_canonical) {
-    return "not_canonical";
-  }
-  if (readiness.stale) {
-    return "stale";
-  }
-  return "blocked";
+  return "neutral";
 }
 
 function StatusCountStrip({ counts }: { counts: ResourceSaturationSummary["workspace_counts"] }) {
