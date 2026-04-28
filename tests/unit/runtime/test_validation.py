@@ -154,6 +154,25 @@ def test_environment_identity_digest_is_stable_across_mapping_and_service_order(
 
 
 @pytest.mark.unit
+def test_environment_identity_sorts_services_with_nullable_dockerfile() -> None:
+    profile = _identity_profile()
+    service_without_dockerfile = profile.services[0].model_copy(update={"dockerfile": None})
+    service_with_dockerfile = profile.services[0].model_copy(
+        update={"dockerfile": "services/api.Dockerfile"}
+    )
+    mixed_profile = profile.model_copy(
+        update={"services": [service_with_dockerfile, service_without_dockerfile]}
+    )
+
+    inputs = environment_identity_inputs(mixed_profile)
+
+    assert [service["dockerfile"] for service in inputs["services"]] == [
+        None,
+        "services/api.Dockerfile",
+    ]
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "override",
     [

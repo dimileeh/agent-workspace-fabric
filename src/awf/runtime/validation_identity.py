@@ -107,7 +107,7 @@ def _sorted_services(services: list[ProfileService]) -> list[ProfileService]:
             item.name,
             item.image or "",
             item.build_context or "",
-            item.dockerfile,
+            item.dockerfile or "",
         ),
     )
 
