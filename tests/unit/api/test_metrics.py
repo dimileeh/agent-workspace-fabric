@@ -11,36 +11,9 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from starlette.requests import Request
 
 from awf.common.config import get_settings
-from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.session import make_session_factory
-
-
-async def _workspace(
-    engine: AsyncEngine,
-    *,
-    status: WorkspaceStatus,
-    updated_at: datetime,
-    failure_reason: FailureReason | None = None,
-) -> None:
-    factory = make_session_factory(engine)
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).create(
-            repo_url="git@github.com:example/metrics-api.git",
-            branch_base="main",
-            task_title=f"{status.value} workspace",
-            task_prompt="Collect workspace reliability metrics.",
-            agent="codex",
-            test_commands=[],
-        )
-        workspace.status = status.value
-        workspace.updated_at = updated_at
-        workspace.failure_reason = failure_reason.value if failure_reason is not None else None
-        await session.commit()
-
-
-def _zero_status_counts() -> dict[str, int]:
-    return {status.value: 0 for status in WorkspaceStatus}
+from tests.unit.helpers import create_workspace, zero_status_counts
 
 
 @pytest.mark.unit
@@ -55,7 +28,7 @@ async def test_workspace_summary_returns_zero_counts_for_empty_db(
     window_start = datetime.fromisoformat(body["window_start"])
     assert window_start == generated_at - timedelta(hours=24)
     assert body["since_hours"] == 24
-    assert body["status_counts"] == _zero_status_counts()
+    assert body["status_counts"] == zero_status_counts()
     assert body["failure_reason_counts"] == {}
     assert body["active_count"] == 0
     assert body["destroying_count"] == 0
@@ -84,14 +57,14 @@ async def test_workspace_summary_rolls_up_mixed_statuses_and_failure_reasons(
         WorkspaceStatus.cancelled,
         WorkspaceStatus.destroyed,
     ):
-        await _workspace(engine, status=status, updated_at=now - timedelta(minutes=5))
-    await _workspace(
+        await create_workspace(engine, status=status, updated_at=now - timedelta(minutes=5))
+    await create_workspace(
         engine,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=5),
         failure_reason=FailureReason.agent_failure,
     )
-    await _workspace(
+    await create_workspace(
         engine,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=5),
@@ -102,7 +75,7 @@ async def test_workspace_summary_rolls_up_mixed_statuses_and_failure_reasons(
 
     assert response.status_code == 200
     body = response.json()
-    expected_status_counts = _zero_status_counts()
+    expected_status_counts = zero_status_counts()
     expected_status_counts.update(
         {
             WorkspaceStatus.requested.value: 1,
@@ -138,12 +111,12 @@ async def test_workspace_summary_filters_by_since_hours(
     engine: AsyncEngine,
 ) -> None:
     now = datetime.now(UTC)
-    await _workspace(
+    await create_workspace(
         engine,
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=3),
     )
-    await _workspace(
+    await create_workspace(
         engine,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=30),
@@ -154,7 +127,7 @@ async def test_workspace_summary_filters_by_since_hours(
 
     assert response.status_code == 200
     body = response.json()
-    expected_status_counts = _zero_status_counts()
+    expected_status_counts = zero_status_counts()
     expected_status_counts[WorkspaceStatus.failed.value] = 1
     assert body["since_hours"] == 1
     assert body["status_counts"] == expected_status_counts
@@ -245,29 +218,6 @@ async def test_metrics_route_functions_return_response_models_directly(
     assert slo.creation_total == 0
 
 
-async def _operation(
-    engine: AsyncEngine,
-    workspace_id: str,
-    *,
-    operation_type: OperationType,
-    status: OperationStatus,
-    finished_at: datetime | None = None,
-) -> None:
-    factory = make_session_factory(engine)
-    async with factory() as session:
-        repo = OperationRepository(session)
-        op = await repo.create(
-            workspace_id=workspace_id,
-            operation_type=operation_type,
-            status=OperationStatus.running,
-        )
-        if status in (OperationStatus.succeeded, OperationStatus.failed, OperationStatus.cancelled):
-            await repo.finish(op, status=status)
-            if finished_at is not None:
-                op.finished_at = finished_at
-        await session.commit()
-
-
 @pytest.mark.unit
 async def test_slo_endpoint_returns_zero_counts_for_empty_db(
     client: AsyncClient,
@@ -302,7 +252,7 @@ async def test_slo_endpoint_respects_since_hours_param(
     engine: AsyncEngine,
 ) -> None:
     now = datetime.now(UTC)
-    await _workspace(
+    await create_workspace(
         engine,
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(minutes=10),
@@ -331,7 +281,7 @@ async def test_slo_endpoint_returns_expected_fields_after_seeding(
     engine: AsyncEngine,
 ) -> None:
     now = datetime.now(UTC)
-    await _workspace(
+    await create_workspace(
         engine,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=10),
