@@ -505,6 +505,33 @@ class MergeCandidateRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def get_open_for_workspace_with_merge_inputs(
+        self,
+        workspace_id: str,
+    ) -> MergeCandidate | None:
+        stmt = (
+            select(MergeCandidate)
+            .where(
+                MergeCandidate.workspace_id == workspace_id,
+                MergeCandidate.status == "open",
+            )
+            .options(
+                selectinload(MergeCandidate.attempt),
+                selectinload(MergeCandidate.task),
+                selectinload(MergeCandidate.policy_findings),
+                selectinload(MergeCandidate.workspace).selectinload(Workspace.operations),
+                selectinload(MergeCandidate.workspace).selectinload(
+                    Workspace.validation_runs
+                ),
+                selectinload(MergeCandidate.workspace).selectinload(
+                    Workspace.policy_findings
+                ),
+            )
+            .order_by(MergeCandidate.created_at.desc(), MergeCandidate.id.desc())
+            .limit(1)
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def list_for_task(
         self,
         task_id: str,

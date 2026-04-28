@@ -18,7 +18,9 @@ from awf.db.repositories import (
     OperationRepository,
     TaskAttemptRepository,
     TaskRepository,
+    ValidationRunRepository,
     WorkspaceRepository,
+    sync_candidate_readiness,
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import Merge, MonitorState
@@ -106,6 +108,25 @@ async def _seed_monitoring_candidate(
             head_sha=f"head-{pr_number}",
             base_sha="base",
         )
+        validation_repo = ValidationRunRepository(session)
+        validation_run = await validation_repo.start(
+            workspace_id=workspace.id,
+            attempt_id=attempt.id,
+            tier=1,
+            commands=[],
+            base_commit="base",
+            target_branch=workspace.remote_push_branch,
+            target_head_sha=f"head-{pr_number}",
+            log_stream_refs={},
+            started_at=created_at + timedelta(seconds=1),
+        )
+        await validation_repo.finish(
+            validation_run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+            finished_at=created_at + timedelta(seconds=2),
+        )
+        sync_candidate_readiness(candidate, workspace=workspace, attempt=attempt)
         candidate.created_at = created_at
         candidate.updated_at = created_at
         await session.commit()
@@ -206,6 +227,71 @@ async def test_monitor_waits_for_older_candidate_without_notify_human(
         if recovery_operation
         else "merge_eligible",
     }
+
+
+@pytest.mark.unit
+async def test_later_eligible_candidate_still_waits_for_older_candidate(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    older_workspace_id, _older_attempt_id, older_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Older validated candidate",
+        pr_number=151,
+        created_at=now,
+    )
+    later_workspace_id, _later_attempt_id, _later_candidate_id = await _seed_monitoring_candidate(
+        factory,
+        title="Later validated candidate",
+        pr_number=152,
+        created_at=now + timedelta(minutes=5),
+    )
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=later_workspace_id,
+        repo_url=REPO_URL,
+        repo=RepoRef.from_url(REPO_URL),
+        pr_number=152,
+        status=_status(),
+        state=MonitorState(),
+        base_branch="development",
+        remote_branch=f"awf/{later_workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(later_workspace_id)
+        assert workspace is not None
+        queue_wait_events = [
+            event
+            for event in workspace.events
+            if event.reason_code == "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE"
+        ]
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+    assert len(queue_wait_events) == 1
+    assert queue_wait_events[0].payload is not None
+    assert queue_wait_events[0].payload["blocker_candidate_id"] == older_candidate_id
+    assert queue_wait_events[0].payload["blocker_workspace_id"] == older_workspace_id
 
 
 @pytest.mark.unit

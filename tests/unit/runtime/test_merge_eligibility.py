@@ -8,6 +8,7 @@ from awf.db.repositories import sync_candidate_readiness
 from awf.runtime.merge_eligibility import (
     VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
     compute_stale_reason,
+    compute_stale_reason_for_attempt,
 )
 
 
@@ -238,6 +239,23 @@ def test_compute_stale_reason_uses_profile_requested_tier_when_operation_has_no_
 
 
 @pytest.mark.unit
+def test_compute_stale_reason_uses_profile_requested_tier_for_malformed_payload() -> None:
+    workspace = _workspace_with_operations(
+        task_class=TaskClass.refactor_task.value,
+        requested_tier=2,
+        operations=[
+            _operation(
+                operation_type="validate",
+                created_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+                payload={"requested_tier": "2"},
+            )
+        ],
+    )
+
+    assert compute_stale_reason(workspace) == (None, None)
+
+
+@pytest.mark.unit
 def test_compute_stale_reason_requires_tier_two_validation_after_rebase() -> None:
     now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
     workspace = _workspace_with_operations(
@@ -321,6 +339,56 @@ def test_compute_stale_reason_ignores_failed_validation_and_rebase_operations() 
     )
 
     assert compute_stale_reason(workspace) == (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        "validate",
+    )
+
+
+@pytest.mark.unit
+def test_compute_stale_reason_for_attempt_requires_post_rebase_validation() -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    workspace = _workspace_with_operations(
+        task_class=TaskClass.test_task.value,
+        operations=[
+            _operation(operation_type="rebase", created_at=now),
+        ],
+    )
+    workspace.validation_runs = [
+        _validation_run(
+            tier=3,
+            started_at=now - timedelta(minutes=10),
+            finished_at=now - timedelta(minutes=9),
+        ),
+        _validation_run(
+            tier=3,
+            status="failed",
+            started_at=now + timedelta(minutes=1),
+        ),
+        _validation_run(
+            tier=2,
+            started_at=now + timedelta(minutes=2),
+            finished_at=now + timedelta(minutes=3),
+        ),
+    ]
+
+    assert compute_stale_reason_for_attempt(workspace, attempt_id="att_1") == (None, None)
+
+
+@pytest.mark.unit
+def test_compute_stale_reason_for_attempt_ignores_other_attempt_validation() -> None:
+    now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+    workspace = _workspace_with_operations(
+        task_class=TaskClass.refactor_task.value,
+        operations=[],
+    )
+    other_attempt_run = _validation_run(
+        tier=2,
+        started_at=now,
+    )
+    other_attempt_run.attempt_id = "att_other"
+    workspace.validation_runs = [other_attempt_run]
+
+    assert compute_stale_reason_for_attempt(workspace, attempt_id="att_1") == (
         VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
         "validate",
     )
