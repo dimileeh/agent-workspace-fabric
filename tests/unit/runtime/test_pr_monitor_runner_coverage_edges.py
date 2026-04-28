@@ -51,6 +51,8 @@ from awf.runtime.pr_monitor_runner import (
     _is_transient_github_client_error,
     _merge_rejection_reason,
     _non_check_reviewer_settle_started_key,
+    _non_check_reviewer_settle_state_for_persistence,
+    _non_check_reviewer_settle_state_for_runtime,
     _notify_human_reason,
     _stale_pending_check_warnings,
     _target_reconcile_payload,
@@ -1968,6 +1970,54 @@ def test_initial_review_grace_state_converts_wall_and_legacy_values() -> None:
         _initial_review_grace_wall_started_value_from_datetime(datetime(2026, 4, 27, 12, 0))
         == f"{wall_started:.6f}"
     )
+
+
+@pytest.mark.unit
+def test_non_check_reviewer_settle_state_converts_wall_legacy_and_invalid_values() -> None:
+    started_key = _non_check_reviewer_settle_started_key(pr_number=42, head_sha="head-1")
+    other_key = _non_check_reviewer_settle_started_key(pr_number=99, head_sha="head-2")
+    wall_started = datetime(2026, 4, 27, 12, 0, tzinfo=UTC).timestamp()
+
+    runtime_wall = _non_check_reviewer_settle_state_for_runtime(
+        {started_key: f"{wall_started:.6f}", other_key: "untouched"},
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started + 75,
+    )
+    assert runtime_wall[started_key] == "1025.000000"
+    assert runtime_wall[other_key] == "untouched"
+
+    runtime_legacy = _non_check_reviewer_settle_state_for_runtime(
+        {started_key: "500.0"},
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started + 75,
+    )
+    assert runtime_legacy[started_key] == "1100.000000"
+
+    runtime_invalid = _non_check_reviewer_settle_state_for_runtime(
+        {started_key: "not-a-number"},
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started,
+    )
+    assert runtime_invalid[started_key] == "not-a-number"
+
+    persisted_wall = _non_check_reviewer_settle_state_for_persistence(
+        {started_key: f"{wall_started:.6f}"},
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started + 75,
+    )
+    assert persisted_wall[started_key] == f"{wall_started:.6f}"
+
+    persisted_invalid = _non_check_reviewer_settle_state_for_persistence(
+        {started_key: "not-a-number"},
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started,
+    )
+    assert persisted_invalid[started_key] == "not-a-number"
 
 
 @pytest.mark.unit
