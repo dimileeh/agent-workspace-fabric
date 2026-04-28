@@ -85,11 +85,15 @@ def _json_dict(value: object) -> dict[str, Any]:
 
 def validation_coverage_fields(run: ValidationRun) -> dict[str, Any]:
     coverage = _json_dict(_json_dict(run.log_stream_refs).get("coverage"))
+    gaps = coverage.get("gaps")
+    if not isinstance(gaps, list):
+        gaps = []
     return {
         "coverage_percent": _json_float(coverage.get("percent")),
         "coverage_minimum_percent": _json_float(coverage.get("minimum_percent")),
         "coverage_status": _json_str(coverage.get("status")),
         "coverage_reason_code": _json_str(coverage.get("reason_code")),
+        "coverage_gaps": gaps,
     }
 
 

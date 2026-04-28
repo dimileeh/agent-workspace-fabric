@@ -1041,6 +1041,7 @@ class TestMergeQueueList:
             "coverage_minimum_percent": None,
             "coverage_status": None,
             "coverage_reason_code": None,
+            "coverage_gaps": [],
         }
 
     @pytest.mark.unit
