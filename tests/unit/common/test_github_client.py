@@ -188,12 +188,20 @@ class TestFetchPrStatus:
                         "startedAt": "2026-04-26T12:00:00Z",
                         "completedAt": None,
                         "detailsUrl": "https://checks.example/greptile",
+                        "checkSuite": {
+                            "app": {
+                                "slug": "greptile-apps",
+                                "name": "Greptile",
+                            },
+                            "creator": {"login": "octocat"},
+                        },
                     },
                     {
                         "__typename": "StatusContext",
                         "context": "ci/build",
                         "state": "PENDING",
                         "targetUrl": "https://checks.example/build",
+                        "creator": {"login": "github-actions[bot]"},
                     },
                 ],
             ),
@@ -212,11 +220,17 @@ class TestFetchPrStatus:
         assert check_run.started_at.isoformat() == "2026-04-26T12:00:00+00:00"
         assert check_run.completed_at is None
         assert check_run.details_url == "https://checks.example/greptile"
+        assert check_run.app_slug == "greptile-apps"
+        assert check_run.app_name == "Greptile"
+        assert check_run.creator_login == "octocat"
 
         status_context = status.checks[1]
         assert status_context.name == "ci/build"
         assert status_context.status == "PENDING"
         assert status_context.details_url == "https://checks.example/build"
+        assert status_context.app_slug is None
+        assert status_context.app_name is None
+        assert status_context.creator_login == "github-actions[bot]"
 
     @pytest.mark.unit
     async def test_warns_when_check_contexts_are_truncated(self) -> None:

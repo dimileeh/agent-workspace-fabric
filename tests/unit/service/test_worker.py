@@ -214,10 +214,16 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     )
     assert default_monitor is not None
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 900
+    assert created["feature_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 180
+    assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == ["greptile-apps"]
 
     profile = WorkspaceProfile(
         name="custom",
-        monitor=ProfileMonitor(initial_review_grace_period_seconds=321),
+        monitor=ProfileMonitor(
+            initial_review_grace_period_seconds=321,
+            non_check_reviewer_settle_seconds=45,
+            non_check_reviewer_logins=["custom-reviewer"],
+        ),
     )
     monitor = created["executor_monitor_factory"](
         object(),
@@ -227,6 +233,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
 
     assert monitor is not None
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 321
+    assert created["feature_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 45
+    assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == [
+        "custom-reviewer"
+    ]
     assert created["feature_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["feature_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "post_merge_target_reconciler" in created["feature_monitor_kwargs"]
@@ -251,6 +261,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
 
     assert manual_monitor is not None
     assert created["release_monitor_kwargs"]["initial_review_grace_period_seconds"] == 12.5
+    assert created["release_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 45
+    assert created["release_monitor_kwargs"]["non_check_reviewer_logins"] == [
+        "custom-reviewer"
+    ]
     assert created["release_monitor_kwargs"]["log_store"] is created["executor_log_store"]
     assert created["release_monitor_kwargs"]["worktrees_root"] == work_dir / "git" / "worktrees"
     assert "post_merge_target_reconciler" in created["release_monitor_kwargs"]

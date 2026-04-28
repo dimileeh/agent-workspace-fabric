@@ -882,6 +882,10 @@ async def _run_task(
                 initial_review_grace_period_seconds=_initial_review_grace_period_seconds(
                     cfg, monitor_profile
                 ),
+                non_check_reviewer_settle_seconds=(
+                    monitor_profile.monitor.non_check_reviewer_settle_seconds
+                ),
+                non_check_reviewer_logins=monitor_profile.monitor.non_check_reviewer_logins,
                 log_store=log_store,
             )
 
@@ -1117,6 +1121,8 @@ async def _run_sync_release_pr(
         worktrees_root=work_dir / "git" / "worktrees",
         artifacts_root=work_dir / "artifacts",
         initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
+        non_check_reviewer_settle_seconds=profile.monitor.non_check_reviewer_settle_seconds,
+        non_check_reviewer_logins=profile.monitor.non_check_reviewer_logins,
         log_store=log_store,
     )
     print(
@@ -1353,6 +1359,8 @@ async def _run_sync_feature_pr(
         worktrees_root=work_dir / "git" / "worktrees",
         artifacts_root=work_dir / "artifacts",
         initial_review_grace_period_seconds=_initial_review_grace_period_seconds(cfg, profile),
+        non_check_reviewer_settle_seconds=profile.monitor.non_check_reviewer_settle_seconds,
+        non_check_reviewer_logins=profile.monitor.non_check_reviewer_logins,
         log_store=log_store,
     )
     print(

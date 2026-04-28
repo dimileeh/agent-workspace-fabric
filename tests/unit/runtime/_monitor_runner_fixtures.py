@@ -280,6 +280,8 @@ def make_runner(
     auto_merge: bool = True,
     pre_merge_settle_seconds: float = 0,
     initial_review_grace_period_seconds: float = 0,
+    non_check_reviewer_settle_seconds: float = 0,
+    non_check_reviewer_logins: tuple[str, ...] | list[str] = ("greptile-apps",),
     stale_pending_check_warning_seconds: float = 900,
     max_outer_iterations: int = 20,
     artifacts_root: Path | None = None,
@@ -298,6 +300,8 @@ def make_runner(
             settle_interval_seconds=30,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
             pre_merge_settle_seconds=pre_merge_settle_seconds,
+            non_check_reviewer_settle_seconds=non_check_reviewer_settle_seconds,
+            non_check_reviewer_logins=tuple(non_check_reviewer_logins),
             stale_pending_check_warning_seconds=stale_pending_check_warning_seconds,
         ),
         "runner_config": MonitorRunnerConfig(

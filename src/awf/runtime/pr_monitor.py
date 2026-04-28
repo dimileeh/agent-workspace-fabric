@@ -82,6 +82,9 @@ class CheckState(StrEnum):
     NEUTRAL = "NEUTRAL"
 
 
+DEFAULT_NON_CHECK_REVIEWER_LOGINS: tuple[str, ...] = ("greptile-apps",)
+
+
 @dataclass(frozen=True)
 class ReviewThread:
     """An inline (file + line) review thread.
@@ -135,6 +138,9 @@ class CheckTiming:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     details_url: str | None = None
+    app_slug: str | None = None
+    app_name: str | None = None
+    creator_login: str | None = None
 
 
 @dataclass(frozen=True)
@@ -215,6 +221,14 @@ class MonitorConfig:
     """Final quiet-period wait before an auto-merge. Review apps often
     post comments shortly after checks first turn green; merging on the
     first green snapshot can race those reviewers."""
+
+    non_check_reviewer_settle_seconds: float = 180.0
+    """Per-head quiet-period wait for configured async reviewers that do
+    not expose a GitHub-visible check/status. Set to 0 to disable."""
+
+    non_check_reviewer_logins: tuple[str, ...] = DEFAULT_NON_CHECK_REVIEWER_LOGINS
+    """Reviewer logins that are known to post async comments without a
+    reliable GitHub-visible check/status on every head SHA."""
 
     stale_pending_check_warning_seconds: float = 900.0
     """Warn operators when an individual pending/in-progress check has
