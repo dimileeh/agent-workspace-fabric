@@ -37,6 +37,7 @@ import {
   formatDateTime,
   lifecycleStages,
   relativeTime,
+  renderLogEntries,
   statusTone,
   toneClass,
 } from "@/lib/format";
@@ -440,6 +441,8 @@ export function ConsoleDashboard() {
     const source = new EventSource(
       `/api/awf/workspaces/${selectedId}/stream?channels=events,agent,validation,services&tail_bytes=65536`,
     );
+    let closedByServer = false;
+    let terminalError = false;
 
     source.onmessage = (message) => {
       const frame = parseFrame(message.data);
@@ -489,13 +492,24 @@ export function ConsoleDashboard() {
         return;
       }
       if (frame.type === "error") {
+        terminalError = true;
         setStreamState("error");
         setError(frame.message);
+        return;
+      }
+      if (frame.type === "closed") {
+        closedByServer = true;
+        setStreamState("idle");
+        source.close();
       }
     };
 
     source.onerror = () => {
-      setStreamState("error");
+      if (terminalError) {
+        setStreamState("error");
+        return;
+      }
+      setStreamState(closedByServer || source.readyState === EventSource.CLOSED ? "idle" : "connecting");
     };
 
     return () => source.close();
@@ -2075,6 +2089,8 @@ function WorkspaceLogColumn({
     const source = new EventSource(
       `/api/awf/workspaces/${workspace.workspace_id}/stream?channels=events,agent,validation,services&tail_bytes=65536`,
     );
+    let closedByServer = false;
+    let terminalError = false;
 
     source.onmessage = (message) => {
       const frame = parseFrame(message.data);
@@ -2117,13 +2133,24 @@ function WorkspaceLogColumn({
         return;
       }
       if (frame.type === "error") {
+        terminalError = true;
         setStreamState("error");
         setError(frame.message);
+        return;
+      }
+      if (frame.type === "closed") {
+        closedByServer = true;
+        setStreamState("idle");
+        source.close();
       }
     };
 
     source.onerror = () => {
-      setStreamState("error");
+      if (terminalError) {
+        setStreamState("error");
+        return;
+      }
+      setStreamState(closedByServer || source.readyState === EventSource.CLOSED ? "idle" : "connecting");
     };
 
     return () => source.close();
@@ -2198,7 +2225,7 @@ function LogBrowser({
   onSelectAll: () => void;
   onClear: () => void;
 }) {
-  const renderedLog = useMemo(() => renderLogEntries(entries), [entries]);
+  const renderedLog = useMemo(() => renderLogEntries(entries, sortDirection), [entries, sortDirection]);
   const selectedBytes = selectedStreamMetas.reduce((total, stream) => total + stream.byte_count, 0);
   const selectedLines = selectedStreamMetas.reduce((total, stream) => total + stream.line_count, 0);
 
@@ -2592,9 +2619,9 @@ async function readLogTailEntry(
   };
 }
 
-function parseFrame(raw: string): AwfStreamFrame | ({ type: "connected"; workspace_id: string } & Record<string, unknown>) | null {
+function parseFrame(raw: string): AwfStreamFrame | null {
   try {
-    return JSON.parse(raw) as AwfStreamFrame | ({ type: "connected"; workspace_id: string } & Record<string, unknown>);
+    return JSON.parse(raw) as AwfStreamFrame;
   } catch {
     return null;
   }
@@ -2754,30 +2781,6 @@ function trimLogEntries(entries: LogEntry[]): LogEntry[] {
     }
   }
   return kept.reverse();
-}
-
-function renderLogEntries(entries: LogEntry[]): string {
-  return entries.map(renderLogEntry).join("\n\n");
-}
-
-function renderLogEntry(entry: LogEntry): string {
-  const stamp = formatLogStamp(entry.occurredAt);
-  const stream = entry.fd ? `${entry.streamId} ${entry.fd}` : entry.streamId;
-  const header = `[${stamp}] ${stream}`;
-  const data = entry.data.endsWith("\n") ? entry.data.slice(0, -1) : entry.data;
-  return data ? `${header}\n${data}` : header;
-}
-
-function formatLogStamp(value: string): string {
-  const date = new Date(value);
-  if (Number.isNaN(date.getTime())) {
-    return value;
-  }
-  return new Intl.DateTimeFormat(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-    second: "2-digit",
-  }).format(date);
 }
 
 function FailureAnalysisPanel({

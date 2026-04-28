@@ -91,7 +91,10 @@ async function streamWorkspace(request: NextRequest, workspaceId: string): Promi
         }
       });
       socket.on("error", (error) => {
-        send(normalizeError(error, "AWF_STREAM_ERROR", "AWF workspace stream failed."), "error");
+        send({
+          type: "error",
+          ...normalizeError(error, "AWF_STREAM_ERROR", "AWF workspace stream failed."),
+        });
         if (!socketOpened) {
           close();
         }
@@ -104,7 +107,6 @@ async function streamWorkspace(request: NextRequest, workspaceId: string): Promi
             code,
             reason: reason.toString("utf-8"),
           },
-          "closed",
         );
         close();
       });

@@ -1,5 +1,14 @@
 import type { LlmUsageSummary, WorkspaceLifecycleStage, WorkspaceStatus } from "@/lib/types";
 
+export type LogSortDirection = "asc" | "desc";
+
+export type RenderableLogEntry = {
+  streamId: string;
+  fd?: string | null;
+  data: string;
+  occurredAt: string;
+};
+
 export const lifecycleStages: WorkspaceStatus[] = [
   "requested",
   "provisioning",
@@ -134,6 +143,44 @@ export function bytes(value: number): string {
     index += 1;
   }
   return `${amount.toFixed(index === 0 ? 0 : 1)} ${units[index]}`;
+}
+
+export function renderLogEntries(
+  entries: RenderableLogEntry[],
+  direction: LogSortDirection,
+): string {
+  return entries.map((entry) => renderLogEntry(entry, direction)).join("\n\n");
+}
+
+export function renderLogEntry(
+  entry: RenderableLogEntry,
+  direction: LogSortDirection,
+): string {
+  const stamp = formatLogStamp(entry.occurredAt);
+  const stream = entry.fd ? `${entry.streamId} ${entry.fd}` : entry.streamId;
+  const header = `[${stamp}] ${stream}`;
+  const data = orderLogData(entry.data, direction);
+  return data ? `${header}\n${data}` : header;
+}
+
+function orderLogData(data: string, direction: LogSortDirection): string {
+  const trimmed = data.endsWith("\n") ? data.slice(0, -1) : data;
+  if (direction === "asc" || !trimmed) {
+    return trimmed;
+  }
+  return trimmed.split("\n").reverse().join("\n");
+}
+
+function formatLogStamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
 }
 
 export function statusTone(status: string): "neutral" | "info" | "good" | "warn" | "bad" {

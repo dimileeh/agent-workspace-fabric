@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fallbackLifecycleStages, fallbackLlmUsage } from "./format.ts";
+import { fallbackLifecycleStages, fallbackLlmUsage, renderLogEntries } from "./format.ts";
 
 test("fallbackLifecycleStages marks terminal successors skipped", () => {
   const stages = Object.fromEntries(
@@ -64,4 +64,58 @@ test("fallbackLlmUsage preserves available provider usage", () => {
       reason: null,
     },
   );
+});
+
+test("renderLogEntries preserves message order inside chunks in asc mode", () => {
+  const rendered = renderLogEntries(
+    [
+      {
+        streamId: "agent.stdout",
+        fd: null,
+        data: "first\nsecond\nthird\n",
+        occurredAt: "stamp",
+      },
+    ],
+    "asc",
+  );
+
+  assert.equal(rendered, "[stamp] agent.stdout\nfirst\nsecond\nthird");
+});
+
+test("renderLogEntries reverses message order inside chunks in desc mode", () => {
+  const rendered = renderLogEntries(
+    [
+      {
+        streamId: "agent.stdout",
+        fd: null,
+        data: "first\nsecond\nthird\n",
+        occurredAt: "stamp",
+      },
+    ],
+    "desc",
+  );
+
+  assert.equal(rendered, "[stamp] agent.stdout\nthird\nsecond\nfirst");
+});
+
+test("renderLogEntries leaves chunk ordering to the caller", () => {
+  const rendered = renderLogEntries(
+    [
+      {
+        streamId: "agent.stdout",
+        fd: null,
+        data: "older",
+        occurredAt: "old",
+      },
+      {
+        streamId: "agent.stdout",
+        fd: null,
+        data: "newer",
+        occurredAt: "new",
+      },
+    ],
+    "desc",
+  );
+
+  assert.equal(rendered, "[old] agent.stdout\nolder\n\n[new] agent.stdout\nnewer");
 });
