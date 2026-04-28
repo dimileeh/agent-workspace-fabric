@@ -175,6 +175,18 @@ class _MergeGateResult:
     notify_message: str | None = None
 
 
+@dataclass(frozen=True)
+class _NonCheckReviewerSettleDecision:
+    action: str
+    wait_seconds: float = 0.0
+    configured_reviewers: tuple[str, ...] = ()
+    missing_reviewers: tuple[str, ...] = ()
+    visible_reviewers: tuple[str, ...] = ()
+    started_at: float | None = None
+    elapsed_seconds: float | None = None
+    state_changed: bool = False
+
+
 class PullRequestMonitorRunner:
     """Drives the ``monitoring_pr`` stage for a single workspace."""
 
@@ -714,6 +726,24 @@ class PullRequestMonitorRunner:
                     state=state,
                     monitor_log=monitor_log,
                 )
+                return False
+
+            settle_decision = _non_check_reviewer_settle_decision(
+                status,
+                state,
+                self._config,
+                pr_number=pr_number,
+                now=time.monotonic(),
+            )
+            await self._record_non_check_reviewer_settle_decision(
+                decision=settle_decision,
+                workspace_id=workspace_id,
+                pr_number=pr_number,
+                status=status,
+                monitor_log=monitor_log,
+            )
+            if settle_decision.wait_seconds > 0:
+                await self._deps.sleep(settle_decision.wait_seconds)
                 return False
 
             await self._record_merge_coordination_event(
@@ -1295,6 +1325,60 @@ class PullRequestMonitorRunner:
         }
         _log.info(event, **payload)
         await self._write_monitor_log(monitor_log, {"event": event, **payload})
+
+    async def _record_non_check_reviewer_settle_decision(
+        self,
+        *,
+        decision: _NonCheckReviewerSettleDecision,
+        workspace_id: str,
+        pr_number: int,
+        status: PRStatus,
+        monitor_log: WorkspaceLogSink | None,
+    ) -> None:
+        event_by_action = {
+            "started": "monitor.non_check_reviewer_settle_started",
+            "waiting": "monitor.non_check_reviewer_settle_waiting",
+            "elapsed": "monitor.non_check_reviewer_settle_elapsed",
+            "visible_check": "monitor.non_check_reviewer_settle_skipped_visible_check",
+        }
+        event = event_by_action.get(decision.action)
+        if event is None:
+            return
+
+        payload: dict[str, object] = {
+            "workspace_id": workspace_id,
+            "pr_number": pr_number,
+            "head_sha": status.head_sha,
+            "wait_seconds": decision.wait_seconds,
+            "settle_seconds": self._config.non_check_reviewer_settle_seconds,
+            "poll_interval_seconds": self._config.poll_interval_seconds,
+            "configured_reviewers": list(decision.configured_reviewers),
+            "missing_reviewers": list(decision.missing_reviewers),
+            "visible_reviewers": list(decision.visible_reviewers),
+            "started_at": decision.started_at,
+            "elapsed_seconds": decision.elapsed_seconds,
+        }
+        _log.info(event, **payload)
+        await self._write_monitor_log(monitor_log, {"event": event, **payload})
+
+        if decision.action == "waiting" or not decision.state_changed:
+            return
+        reason_by_action = {
+            "started": "NON_CHECK_REVIEWER_SETTLE_STARTED",
+            "elapsed": "NON_CHECK_REVIEWER_SETTLE_ELAPSED",
+            "visible_check": "NON_CHECK_REVIEWER_VISIBLE_CHECK",
+        }
+        reason_code = reason_by_action[decision.action]
+        await self._append_workspace_events(
+            workspace_id=workspace_id,
+            events=[
+                WorkspaceEventCreate(
+                    event_type=event,
+                    reason_code=reason_code,
+                    payload={k: v for k, v in payload.items() if k != "workspace_id"},
+                )
+            ],
+        )
 
     async def _merge_queue_blockers_for_workspace(
         self,
@@ -2027,6 +2111,12 @@ class PullRequestMonitorRunner:
                 now_wall_seconds=now_wall.timestamp(),
                 legacy_monotonic_fallback=started_at if started_raw is not None else None,
             )
+            threads_addressed = _non_check_reviewer_settle_state_for_runtime(
+                threads_addressed,
+                pr_number=ws.pr_number,
+                now_monotonic=now_monotonic,
+                now_wall_seconds=now_wall.timestamp(),
+            )
         return MonitorState(
             iter_count=ws.monitor_iter_count,
             last_push_sha=ws.monitor_last_commit_sha,
@@ -2044,6 +2134,12 @@ class PullRequestMonitorRunner:
             threads_addressed = dict(state.threads_addressed_ids)
             if ws.pr_number is not None:
                 threads_addressed = _initial_review_grace_state_for_persistence(
+                    threads_addressed,
+                    pr_number=ws.pr_number,
+                    now_monotonic=now_monotonic,
+                    now_wall_seconds=now_wall.timestamp(),
+                )
+                threads_addressed = _non_check_reviewer_settle_state_for_persistence(
                     threads_addressed,
                     pr_number=ws.pr_number,
                     now_monotonic=now_monotonic,
@@ -2500,6 +2596,201 @@ def _merge_queue_wait_key(*, head_sha: str, blocker_candidate_id: str) -> str:
     return f"__awf_merge_queue_wait__:{head_sha}:{blocker_candidate_id}"
 
 
+def _non_check_reviewer_settle_started_key(*, pr_number: int, head_sha: str) -> str:
+    return f"{_non_check_reviewer_settle_started_prefix(pr_number=pr_number)}{head_sha}"
+
+
+def _non_check_reviewer_settle_started_prefix(*, pr_number: int) -> str:
+    return f"__awf_non_check_reviewer_settle_started__:{pr_number}:"
+
+
+def _non_check_reviewer_settle_done_key(*, pr_number: int, head_sha: str) -> str:
+    return f"__awf_non_check_reviewer_settle_done__:{pr_number}:{head_sha}"
+
+
+def _non_check_reviewer_settle_skip_visible_key(*, pr_number: int, head_sha: str) -> str:
+    return f"__awf_non_check_reviewer_settle_skipped_visible__:{pr_number}:{head_sha}"
+
+
+def _non_check_reviewer_settle_decision(
+    status: PRStatus,
+    state: MonitorState,
+    config: MonitorConfig,
+    *,
+    pr_number: int,
+    now: float,
+) -> _NonCheckReviewerSettleDecision:
+    configured_reviewers = _normalize_non_check_reviewer_logins(
+        config.non_check_reviewer_logins
+    )
+    if not config.auto_merge:
+        return _NonCheckReviewerSettleDecision(
+            action="not_auto_merge",
+            configured_reviewers=configured_reviewers,
+        )
+    if config.non_check_reviewer_settle_seconds <= 0:
+        return _NonCheckReviewerSettleDecision(
+            action="disabled",
+            configured_reviewers=configured_reviewers,
+        )
+    if not configured_reviewers:
+        return _NonCheckReviewerSettleDecision(action="no_configured_reviewers")
+
+    visible_reviewers, missing_reviewers = _non_check_reviewer_visibility(
+        configured_reviewers=configured_reviewers,
+        checks=status.checks,
+    )
+    if not missing_reviewers:
+        skip_key = _non_check_reviewer_settle_skip_visible_key(
+            pr_number=pr_number,
+            head_sha=status.head_sha,
+        )
+        state_changed = state.threads_addressed_ids.get(skip_key) != "visible_check"
+        if state_changed:
+            state.mark_addressed(skip_key, "visible_check")
+        return _NonCheckReviewerSettleDecision(
+            action="visible_check",
+            configured_reviewers=configured_reviewers,
+            visible_reviewers=visible_reviewers,
+            state_changed=state_changed,
+        )
+
+    done_key = _non_check_reviewer_settle_done_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+    )
+    if state.threads_addressed_ids.get(done_key) == "elapsed":
+        return _NonCheckReviewerSettleDecision(
+            action="already_elapsed",
+            configured_reviewers=configured_reviewers,
+            missing_reviewers=missing_reviewers,
+            visible_reviewers=visible_reviewers,
+        )
+
+    started_key = _non_check_reviewer_settle_started_key(
+        pr_number=pr_number,
+        head_sha=status.head_sha,
+    )
+    started_raw = state.threads_addressed_ids.get(started_key)
+    started_now = False
+    if started_raw is None:
+        started_at = now
+        state.mark_addressed(started_key, f"{started_at:.6f}")
+        started_now = True
+    else:
+        try:
+            started_at = float(started_raw)
+        except (TypeError, ValueError):
+            started_at = now
+            state.mark_addressed(started_key, f"{started_at:.6f}")
+            started_now = True
+
+    elapsed_seconds = max(now - started_at, 0.0)
+    remaining_seconds = config.non_check_reviewer_settle_seconds - elapsed_seconds
+    if remaining_seconds <= 0:
+        state.mark_addressed(done_key, "elapsed")
+        return _NonCheckReviewerSettleDecision(
+            action="elapsed",
+            configured_reviewers=configured_reviewers,
+            missing_reviewers=missing_reviewers,
+            visible_reviewers=visible_reviewers,
+            started_at=started_at,
+            elapsed_seconds=elapsed_seconds,
+            state_changed=True,
+        )
+
+    wait_seconds = (
+        remaining_seconds
+        if config.poll_interval_seconds <= 0
+        else min(config.poll_interval_seconds, remaining_seconds)
+    )
+
+    return _NonCheckReviewerSettleDecision(
+        action="started" if started_now else "waiting",
+        wait_seconds=wait_seconds,
+        configured_reviewers=configured_reviewers,
+        missing_reviewers=missing_reviewers,
+        visible_reviewers=visible_reviewers,
+        started_at=started_at,
+        elapsed_seconds=elapsed_seconds,
+        state_changed=started_now,
+    )
+
+
+def _normalize_non_check_reviewer_logins(logins: tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for login in logins:
+        value = _normalize_non_check_reviewer_identity(login)
+        if not value or value in seen:
+            continue
+        normalized.append(value)
+        seen.add(value)
+    return tuple(normalized)
+
+
+def _non_check_reviewer_visibility(
+    *,
+    configured_reviewers: tuple[str, ...],
+    checks: tuple[CheckTiming, ...],
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    visible_identities = _visible_check_identities(checks)
+    visible_reviewers: list[str] = []
+    missing_reviewers: list[str] = []
+    for reviewer in configured_reviewers:
+        if _reviewer_has_visible_check(reviewer, visible_identities=visible_identities):
+            visible_reviewers.append(reviewer)
+        else:
+            missing_reviewers.append(reviewer)
+    return tuple(visible_reviewers), tuple(missing_reviewers)
+
+
+def _visible_check_identities(checks: tuple[CheckTiming, ...]) -> frozenset[str]:
+    values: set[str] = set()
+    for check in checks:
+        for raw in (
+            check.name,
+            getattr(check, "app_slug", None),
+            getattr(check, "app_name", None),
+            getattr(check, "creator_login", None),
+        ):
+            normalized = _normalize_non_check_reviewer_identity(raw)
+            if normalized:
+                values.add(normalized)
+    return frozenset(values)
+
+
+def _reviewer_has_visible_check(
+    reviewer: str,
+    *,
+    visible_identities: frozenset[str],
+) -> bool:
+    aliases = _non_check_reviewer_visible_aliases(reviewer)
+    for identity in visible_identities:
+        for alias in aliases:
+            if identity == alias or identity.startswith(f"{alias}-"):
+                return True
+            if alias == "greptile" and identity.endswith("-greptile"):
+                return True
+    return False
+
+
+def _non_check_reviewer_visible_aliases(reviewer: str) -> frozenset[str]:
+    aliases = {reviewer}
+    if reviewer == "greptile-apps" or reviewer.startswith("greptile-"):
+        aliases.update({"greptile", "greptile-apps"})
+    return frozenset(aliases)
+
+
+def _normalize_non_check_reviewer_identity(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip().lower()
+    if text.endswith("[bot]"):
+        text = text[: -len("[bot]")]
+    return re.sub(r"[^a-z0-9]+", "-", text).strip("-")
+
+
 def _merge_gate_blocks(gate: _MergeGateResult) -> bool:
     return gate.stale_reason is not None or gate.notify_message is not None
 
@@ -2594,6 +2885,62 @@ def _initial_review_grace_state_for_persistence(
     threads_addressed[started_key] = _initial_review_grace_wall_started_value(
         now_wall_seconds - elapsed_seconds
     )
+    return threads_addressed
+
+
+def _non_check_reviewer_settle_state_for_runtime(
+    threads_addressed: dict[str, str],
+    *,
+    pr_number: int,
+    now_monotonic: float,
+    now_wall_seconds: float,
+) -> dict[str, str]:
+    started_prefix = _non_check_reviewer_settle_started_prefix(pr_number=pr_number)
+    for started_key, started_raw in list(threads_addressed.items()):
+        if not started_key.startswith(started_prefix):
+            continue
+        started_wall_seconds = _initial_review_grace_wall_seconds(started_raw)
+        if started_wall_seconds is not None:
+            elapsed_seconds = max(now_wall_seconds - started_wall_seconds, 0.0)
+            threads_addressed[started_key] = f"{now_monotonic - elapsed_seconds:.6f}"
+            continue
+        try:
+            float(started_raw)
+        except (TypeError, ValueError):
+            continue
+        # Legacy persisted settle markers were process-local monotonic values
+        # with no wall-clock anchor. Restarting the wait is conservative after
+        # a process or container restart because it avoids premature elapsed
+        # decisions from comparing unrelated monotonic clocks.
+        threads_addressed[started_key] = f"{now_monotonic:.6f}"
+    return threads_addressed
+
+
+def _non_check_reviewer_settle_state_for_persistence(
+    threads_addressed: dict[str, str],
+    *,
+    pr_number: int,
+    now_monotonic: float,
+    now_wall_seconds: float,
+) -> dict[str, str]:
+    started_prefix = _non_check_reviewer_settle_started_prefix(pr_number=pr_number)
+    for started_key, started_raw in list(threads_addressed.items()):
+        if not started_key.startswith(started_prefix):
+            continue
+        started_wall_seconds = _initial_review_grace_wall_seconds(started_raw)
+        if started_wall_seconds is not None:
+            threads_addressed[started_key] = _initial_review_grace_wall_started_value(
+                started_wall_seconds
+            )
+            continue
+        try:
+            started_monotonic = float(started_raw)
+        except (TypeError, ValueError):
+            continue
+        elapsed_seconds = max(now_monotonic - started_monotonic, 0.0)
+        threads_addressed[started_key] = _initial_review_grace_wall_started_value(
+            now_wall_seconds - elapsed_seconds
+        )
     return threads_addressed
 
 

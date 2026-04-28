@@ -87,11 +87,23 @@ query($owner: String!, $repo: String!, $number: Int!) {
                     startedAt
                     completedAt
                     detailsUrl
+                    checkSuite {
+                      app {
+                        slug
+                        name
+                      }
+                      creator {
+                        login
+                      }
+                    }
                   }
                   ... on StatusContext {
                     context
                     state
                     targetUrl
+                    creator {
+                      login
+                    }
                   }
                 }
                 pageInfo { hasNextPage }
@@ -617,6 +629,7 @@ def _parse_check_contexts(rollup: Any) -> tuple[CheckTiming, ...]:
                     name=name,
                     status=_clean_optional_str(node.get("state")),
                     details_url=_clean_optional_str(node.get("targetUrl")),
+                    creator_login=_clean_optional_str(_dig(node, "creator", "login")),
                 )
             )
             continue
@@ -632,6 +645,9 @@ def _parse_check_contexts(rollup: Any) -> tuple[CheckTiming, ...]:
                 started_at=_parse_github_datetime(node.get("startedAt")),
                 completed_at=_parse_github_datetime(node.get("completedAt")),
                 details_url=_clean_optional_str(node.get("detailsUrl") or node.get("targetUrl")),
+                app_slug=_clean_optional_str(_dig(node, "checkSuite", "app", "slug")),
+                app_name=_clean_optional_str(_dig(node, "checkSuite", "app", "name")),
+                creator_login=_clean_optional_str(_dig(node, "checkSuite", "creator", "login")),
             )
         )
     return tuple(checks)
