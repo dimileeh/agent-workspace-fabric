@@ -54,6 +54,7 @@ from awf.runtime.pr_monitor_runner import (
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
     _notify_human_reason,
+    _redact_and_truncate_github_error,
     _stale_pending_check_warnings,
     _target_reconcile_payload,
     _with_ci_failures,
@@ -447,6 +448,25 @@ def test_transient_github_error_classifier_keeps_auth_errors_terminal() -> None:
             stderr="review is required before merging",
         )
     )
+
+
+@pytest.mark.unit
+def test_github_error_redaction_covers_app_jwt_and_bearer_tokens() -> None:
+    app_token = "gha_11AA22BB33CC44DD"
+    jwt_token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signature123"
+    bearer_token = "opaqueBearerToken123"
+    redacted = _redact_and_truncate_github_error(
+        "HTTP 503 "
+        f"{app_token} "
+        f"jwt={jwt_token} "
+        f"Authorization: Bearer {bearer_token}"
+    )
+
+    assert app_token not in redacted
+    assert jwt_token not in redacted
+    assert bearer_token not in redacted
+    assert redacted.count("<redacted>") == 3
+    assert "Authorization: Bearer <redacted>" in redacted
 
 
 @pytest.mark.unit

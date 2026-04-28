@@ -155,10 +155,15 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 _REDACTION = "<redacted>"
 _URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s:@]+(?::[^/\s@]+)?@)")
+_AUTHORIZATION_BEARER_RE = re.compile(
+    r"(\bAuthorization:\s*Bearer\s+)([A-Za-z0-9._~+/=-]{8,})",
+    re.IGNORECASE,
+)
 _TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])("
-    r"gh[pousr]_[A-Za-z0-9_]{8,}|"
+    r"gh[apousr]_[A-Za-z0-9_]{8,}|"
     r"github_pat_[A-Za-z0-9_]{8,}|"
+    r"eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}|"
     r"sk-ant-[A-Za-z0-9_-]{8,}|"
     r"AIza[A-Za-z0-9_-]{12,}|"
     r"xox[baprs]-[A-Za-z0-9-]{8,}"
@@ -2687,6 +2692,7 @@ def _transient_github_retry_payload(
 
 def _redact_and_truncate_github_error(value: str, *, limit: int = 400) -> str:
     redacted = _URL_CREDENTIAL_RE.sub(r"\1<redacted>@", value)
+    redacted = _AUTHORIZATION_BEARER_RE.sub(r"\1<redacted>", redacted)
     redacted = _TOKEN_RE.sub(_REDACTION, redacted).strip()
     if len(redacted) <= limit:
         return redacted
