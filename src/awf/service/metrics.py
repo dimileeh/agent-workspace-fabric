@@ -6,12 +6,12 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
-from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.models import ResourceReservation, Workspace
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
+from awf.db.models import Operation, ResourceReservation, Workspace
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
@@ -120,6 +120,36 @@ class FailureAnalysisSummary:
     failure_groups: list[FailureReasonGroup]
     latest_examples: list[FailedWorkspaceExample]
     root_cause_clusters: list[RootCauseCluster] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class SloMetricsSummary:
+    generated_at: datetime
+    window_start: datetime
+    since_hours: int
+
+    creation_total: int
+    creation_succeeded: int
+    creation_failed: int
+    creation_cancelled: int
+
+    cleanup_total: int
+    cleanup_succeeded: int
+    cleanup_failure_count: int
+
+    stuck_running_count: int
+    stuck_with_reason_count: int
+
+    recovery_total: int
+    recovery_succeeded: int
+    recovery_failed_count: int
+
+    monitor_completed_total: int
+    completed_after_monitor_count: int
+    monitor_stuck_count: int
+
+    actionable_failure_count: int
+    unactionable_failure_count: int
 
 
 @dataclass(frozen=True)
@@ -911,6 +941,239 @@ def _resource_admission_summary(
 
 def _sum_status_counts(status_counts: dict[str, int], statuses: frozenset[str]) -> int:
     return sum(status_counts[status] for status in statuses)
+
+
+_RECOVERY_OPERATION_TYPES = frozenset(
+    {OperationType.remonitor.value, OperationType.rebase.value, OperationType.retry.value}
+)
+
+
+async def summarize_slo_metrics(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    settings: Settings,
+    since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
+    now: datetime | None = None,
+) -> SloMetricsSummary:
+    async with session_factory() as session:
+        return await summarize_slo_metrics_for_session(
+            session,
+            settings=settings,
+            since_hours=since_hours,
+            now=now,
+        )
+
+
+async def summarize_slo_metrics_for_session(
+    session: AsyncSession,
+    *,
+    settings: Settings,
+    since_hours: int = DEFAULT_SUMMARY_WINDOW_HOURS,
+    now: datetime | None = None,
+) -> SloMetricsSummary:
+    _validate_since_hours(since_hours)
+    generated_at = _to_utc(now or datetime.now(UTC))
+    window_start = generated_at - timedelta(hours=since_hours)
+    sla_seconds = settings.agent_wall_timeout_seconds
+
+    creation = await _count_creation_metrics(session, window_start=window_start)
+    cleanup = await _count_cleanup_metrics(session, window_start=window_start)
+    stuck_running, stuck_with_reason = await _count_stuck_detailed(
+        session, sla_seconds=sla_seconds, now=generated_at
+    )
+    recovery = await _count_recovery_operations(session, window_start=window_start)
+    monitor_completed, completed_after_monitor, monitor_stuck = await _count_monitor_completions(
+        session, window_start=window_start, sla_seconds=sla_seconds, now=generated_at
+    )
+    actionable, unactionable = await _count_slo_reason_code_coverage(
+        session, window_start=window_start
+    )
+
+    return SloMetricsSummary(
+        generated_at=generated_at,
+        window_start=window_start,
+        since_hours=since_hours,
+        creation_total=creation["total"],
+        creation_succeeded=creation["succeeded"],
+        creation_failed=creation["failed"],
+        creation_cancelled=creation["cancelled"],
+        cleanup_total=cleanup["total"],
+        cleanup_succeeded=cleanup["succeeded"],
+        cleanup_failure_count=cleanup["failed"],
+        stuck_running_count=stuck_running,
+        stuck_with_reason_count=stuck_with_reason,
+        recovery_total=recovery["total"],
+        recovery_succeeded=recovery["succeeded"],
+        recovery_failed_count=recovery["failed"],
+        monitor_completed_total=monitor_completed,
+        completed_after_monitor_count=completed_after_monitor,
+        monitor_stuck_count=monitor_stuck,
+        actionable_failure_count=actionable,
+        unactionable_failure_count=unactionable,
+    )
+
+
+async def _count_creation_metrics(
+    session: AsyncSession,
+    *,
+    window_start: datetime,
+) -> dict[str, int]:
+    stmt = (
+        select(
+            func.count().label("total"),
+            func.sum(case((Workspace.status == WorkspaceStatus.completed.value, 1), else_=0)).label("succeeded"),
+            func.sum(case((Workspace.status == WorkspaceStatus.failed.value, 1), else_=0)).label("failed"),
+            func.sum(case((Workspace.status == WorkspaceStatus.cancelled.value, 1), else_=0)).label("cancelled"),
+        )
+        .where(Workspace.created_at >= window_start)
+    )
+    row = (await session.execute(stmt)).one()
+    return {
+        "total": int(row.total or 0),
+        "succeeded": int(row.succeeded or 0),
+        "failed": int(row.failed or 0),
+        "cancelled": int(row.cancelled or 0),
+    }
+
+
+async def _count_cleanup_metrics(
+    session: AsyncSession,
+    *,
+    window_start: datetime,
+) -> dict[str, int]:
+    stmt = (
+        select(
+            func.count().label("total"),
+            func.sum(case((Operation.status == OperationStatus.succeeded.value, 1), else_=0)).label("succeeded"),
+            func.sum(case((Operation.status == OperationStatus.failed.value, 1), else_=0)).label("failed"),
+        )
+        .where(
+            Operation.type == OperationType.destroy.value,
+            Operation.finished_at >= window_start,
+        )
+    )
+    row = (await session.execute(stmt)).one()
+    return {
+        "total": int(row.total or 0),
+        "succeeded": int(row.succeeded or 0),
+        "failed": int(row.failed or 0),
+    }
+
+
+async def _count_stuck_detailed(
+    session: AsyncSession,
+    *,
+    sla_seconds: float,
+    now: datetime,
+) -> tuple[int, int]:
+    cutoff = now - timedelta(seconds=2 * sla_seconds)
+    stmt = (
+        select(
+            func.sum(case((Workspace.failure_reason.is_(None), 1), else_=0)).label("stuck_running"),
+            func.sum(case((Workspace.failure_reason.is_not(None), 1), else_=0)).label("stuck_with_reason"),
+        )
+        .select_from(Workspace)
+        .where(
+            ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
+            Workspace.status != WorkspaceStatus.destroying.value,
+            Workspace.status != WorkspaceStatus.monitoring_pr.value,
+            Workspace.created_at < cutoff,
+        )
+    )
+    row = (await session.execute(stmt)).one()
+    stuck_running = int(row.stuck_running or 0)
+    stuck_with_reason = int(row.stuck_with_reason or 0)
+    return stuck_running, stuck_with_reason
+
+
+async def _count_recovery_operations(
+    session: AsyncSession,
+    *,
+    window_start: datetime,
+) -> dict[str, int]:
+    stmt = (
+        select(
+            func.count().label("total"),
+            func.sum(case((Operation.status == OperationStatus.succeeded.value, 1), else_=0)).label("succeeded"),
+            func.sum(case((Operation.status == OperationStatus.failed.value, 1), else_=0)).label("failed"),
+        )
+        .where(
+            Operation.type.in_(_RECOVERY_OPERATION_TYPES),
+            Operation.created_at >= window_start,
+        )
+    )
+    row = (await session.execute(stmt)).one()
+    return {
+        "total": int(row.total or 0),
+        "succeeded": int(row.succeeded or 0),
+        "failed": int(row.failed or 0),
+    }
+
+
+async def _count_monitor_completions(
+    session: AsyncSession,
+    *,
+    window_start: datetime,
+    sla_seconds: float,
+    now: datetime,
+) -> tuple[int, int, int]:
+    monitor_completed_total_stmt = select(func.count()).select_from(Workspace).where(
+        Workspace.updated_at >= window_start,
+        Workspace.pr_url.is_not(None),
+    )
+
+    completed_after_monitor_stmt = select(func.count()).select_from(Workspace).where(
+        Workspace.status == WorkspaceStatus.completed.value,
+        Workspace.updated_at >= window_start,
+        Workspace.pr_url.is_not(None),
+    )
+
+    cutoff = now - timedelta(seconds=2 * sla_seconds)
+    monitor_stuck_stmt = select(func.count()).select_from(Workspace).where(
+        Workspace.status == WorkspaceStatus.monitoring_pr.value,
+        Workspace.created_at < cutoff,
+    )
+
+    monitor_completed_total, completed_after_monitor, monitor_stuck = await asyncio.gather(
+        session.scalar(monitor_completed_total_stmt),
+        session.scalar(completed_after_monitor_stmt),
+        session.scalar(monitor_stuck_stmt),
+    )
+
+    return (
+        int(monitor_completed_total or 0),
+        int(completed_after_monitor or 0),
+        int(monitor_stuck or 0),
+    )
+
+
+async def _count_slo_reason_code_coverage(
+    session: AsyncSession,
+    *,
+    window_start: datetime,
+) -> tuple[int, int]:
+    stmt = (
+        select(Workspace.failure_reason, func.count())
+        .where(
+            Workspace.status.in_(
+                [
+                    WorkspaceStatus.failed.value,
+                    WorkspaceStatus.cancelled.value,
+                ]
+            ),
+            Workspace.updated_at >= window_start,
+        )
+        .group_by(Workspace.failure_reason)
+    )
+    rows = await session.execute(stmt)
+    actionable = 0
+    unactionable = 0
+    for reason, count in rows.all():
+        if reason is not None and reason in _KNOWN_FAILURE_REASONS:
+            actionable += int(count)
+        else:
+            unactionable += int(count)
+    return actionable, unactionable
 
 
 def _validate_since_hours(since_hours: int) -> None:
