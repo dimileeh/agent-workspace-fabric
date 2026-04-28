@@ -58,7 +58,7 @@ export interface WorkspaceRecoverySummary {
   recovery_mode: string | null;
   started_at: string;
   current_operation: WorkspaceRecoveryCurrentOperation | null;
-  summary: string | null;
+  summary: string;
   payload: Record<string, unknown> | null;
 }
 

@@ -30,13 +30,12 @@ export function formatRecoveryCallout(
     ? `${recovery.current_operation.type} ${recovery.current_operation.status}`
     : "no active operation";
   const statusText = currentStatus ? `now ${currentStatus}` : "now status unknown";
-  const backendSummary = recovery.summary ? ` ${recovery.summary}` : "";
   return {
     title: `Reverted from ${fromState} to ${toState}`,
     reason,
     action,
     current,
-    body: `${reason} / ${action} / ${current} / ${statusText}.${backendSummary}`,
+    body: `${reason} / ${action} / ${current} / ${statusText}. ${recovery.summary}`,
   };
 }
 

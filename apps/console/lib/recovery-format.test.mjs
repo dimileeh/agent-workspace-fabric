@@ -65,7 +65,7 @@ test("action labels map validate-only recovery and avoid undefined text", () => 
       action: null,
       recovery_mode: null,
       current_operation: null,
-      summary: null,
+      summary: "Reverted unknown -> unknown for recovery.",
     },
     undefined,
   );
@@ -74,6 +74,7 @@ test("action labels map validate-only recovery and avoid undefined text", () => 
   assert.equal(callout.reason, "recovery");
   assert.equal(callout.action, "recovery");
   assert.equal(callout.current, "no active operation");
+  assert.match(callout.body, /Reverted unknown -> unknown for recovery\./);
   assert.doesNotMatch(`${callout.title} ${callout.body}`, /undefined/);
 });
 
