@@ -162,16 +162,19 @@ export type StaleReasonCode =
   | "STALE_OVERLAP"
   | "STALE_DEPENDENCY"
   | "STALE_BUILD_CONFIG"
-  | "STALE_SCHEMA";
+  | "STALE_SCHEMA"
+  | "ADVISORY_PLAN_ARTIFACT_OVERLAP";
 
 export type StaleReasonTrigger =
   | "target_advanced"
   | "path_overlap"
   | "schema_changed"
   | "dependency_changed"
-  | "build_config_changed";
+  | "build_config_changed"
+  | "plan_artifact_overlap";
 
 export type StaleReasonStatus = "active" | "resolved";
+export type StaleReasonSeverity = "blocking" | "advisory";
 
 export interface StaleReason {
   id: string;
@@ -184,6 +187,8 @@ export interface StaleReason {
   reason_code: StaleReasonCode;
   explanation: string;
   status: StaleReasonStatus;
+  severity: StaleReasonSeverity;
+  blocks_merge: boolean;
   detected_at: string;
   resolved_at: string | null;
 }

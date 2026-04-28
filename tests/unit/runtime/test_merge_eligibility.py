@@ -206,6 +206,48 @@ def test_compute_stale_reason_blocks_when_tier_is_too_low() -> None:
 
 
 @pytest.mark.unit
+def test_advisory_stale_reason_does_not_block_or_require_recovery() -> None:
+    from awf.runtime.merge_eligibility import (
+        stale_reason_blocks_merge,
+        stale_reason_required_action,
+        stale_reason_severity,
+    )
+
+    reason_code = "ADVISORY_PLAN_ARTIFACT_OVERLAP"
+
+    assert stale_reason_blocks_merge(reason_code) is False
+    assert stale_reason_severity(reason_code) == "advisory"
+    assert stale_reason_required_action(reason_code) is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("reason_code", "required_action"),
+    [
+        ("STALE_TARGET_ADVANCED", "rebase"),
+        ("STALE_OVERLAP", "rebase"),
+        ("STALE_DEPENDENCY", "rebase"),
+        ("STALE_BUILD_CONFIG", "rebase"),
+        ("STALE_SCHEMA", "rebase"),
+        (VALIDATION_INSUFFICIENT_TIER_STALE_REASON, "validate"),
+    ],
+)
+def test_blocking_stale_reasons_require_recovery(
+    reason_code: str,
+    required_action: str,
+) -> None:
+    from awf.runtime.merge_eligibility import (
+        stale_reason_blocks_merge,
+        stale_reason_required_action,
+        stale_reason_severity,
+    )
+
+    assert stale_reason_blocks_merge(reason_code) is True
+    assert stale_reason_severity(reason_code) == "blocking"
+    assert stale_reason_required_action(reason_code) == required_action
+
+
+@pytest.mark.unit
 def test_compute_stale_reason_accepts_nested_validation_requested_tier() -> None:
     workspace = _workspace_with_operations(
         task_class=TaskClass.refactor_task.value,
