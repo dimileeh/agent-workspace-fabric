@@ -7,7 +7,7 @@ import os
 import re
 import subprocess
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -30,7 +30,6 @@ KNOWN_WORKSPACE_STATUSES = tuple(sorted(ACTIVE_WORKSPACE_STATUSES | TERMINAL_WOR
 _AWF_PROJECT_PREFIXES = ("awf_", "awf-")
 _RESOURCE_KINDS = ("container", "network", "volume", "worktree")
 _WORKSPACE_ID_RE = re.compile(r"^ws_[A-Za-z0-9][A-Za-z0-9_]*$")
-_WORKSPACE_ID_IN_NAME_RE = re.compile(r"^(?:awf[_-])(?P<workspace_id>ws_[A-Za-z0-9]+)")
 
 
 class CompletedProcessLike(Protocol):
@@ -493,7 +492,10 @@ def _resource_from_docker_row(
     workspace_id = workspace_id_from_project(project, project_to_workspace=project_to_workspace)
 
     if workspace_id is None and resource_kind == "volume":
-        workspace_id = _workspace_id_from_managed_name(name)
+        workspace_id = _workspace_id_from_managed_name(
+            name,
+            known_workspace_ids=project_to_workspace.values(),
+        )
         if workspace_id is not None and not project:
             project = _infer_project_from_managed_name(name, workspace_id)
 
@@ -716,12 +718,60 @@ def _nonzero_counts(counts: Mapping[str, int]) -> dict[str, int]:
     return {kind: count for kind, count in counts.items() if count}
 
 
-def _workspace_id_from_managed_name(name: str) -> str | None:
-    match = _WORKSPACE_ID_IN_NAME_RE.match(name)
-    if match is None:
+def _workspace_id_from_managed_name(
+    name: str,
+    *,
+    known_workspace_ids: Iterable[str] = (),
+) -> str | None:
+    tail = _managed_name_tail(name)
+    if tail is None:
         return None
-    workspace_id = match.group("workspace_id")
-    return workspace_id if _looks_like_workspace_id(workspace_id) else None
+
+    workspace_id = _known_workspace_id_from_managed_tail(tail, known_workspace_ids)
+    if workspace_id is not None:
+        return workspace_id
+
+    workspace_id = _legacy_workspace_id_from_managed_tail(tail)
+    return workspace_id if workspace_id is not None and _looks_like_workspace_id(workspace_id) else None
+
+
+def _managed_name_tail(name: str) -> str | None:
+    for prefix in _AWF_PROJECT_PREFIXES:
+        if name.startswith(prefix):
+            return name.removeprefix(prefix)
+    return None
+
+
+def _known_workspace_id_from_managed_tail(
+    tail: str,
+    known_workspace_ids: Iterable[str],
+) -> str | None:
+    matches = [
+        workspace_id
+        for workspace_id in set(known_workspace_ids)
+        if _looks_like_workspace_id(workspace_id)
+        and (
+            tail == workspace_id
+            or tail.startswith(f"{workspace_id}_")
+            or tail.startswith(f"{workspace_id}-")
+        )
+    ]
+    return max(matches, key=len, default=None)
+
+
+def _legacy_workspace_id_from_managed_tail(tail: str) -> str | None:
+    if not tail.startswith("ws_"):
+        return None
+
+    suffix = tail.removeprefix("ws_")
+    workspace_suffix = ""
+    for char in suffix:
+        if not char.isalnum():
+            break
+        workspace_suffix += char
+    if not workspace_suffix:
+        return None
+    return f"ws_{workspace_suffix}"
 
 
 def _infer_project_from_managed_name(name: str, workspace_id: str) -> str:

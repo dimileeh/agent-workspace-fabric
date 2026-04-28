@@ -252,6 +252,28 @@ def test_orphan_volume_missing_workspace_is_structured_with_name_fallback(
     assert example["resource_name"] == "awf_ws_ghost_postgres_data"
 
 
+def test_volume_name_fallback_prefers_known_workspace_with_underscores(
+    tmp_path: Path,
+) -> None:
+    summary = detect_orphan_resources(
+        work_dir=tmp_path,
+        docker_host="unix:///var/run/docker.sock",
+        workspace_view=_view(_snapshot("ws_a_b")),
+        run_subprocess=_run_with(
+            volumes=[
+                {
+                    "name": "awf_ws_a_b_data",
+                    "project": "",
+                }
+            ]
+        ),
+    ).to_check_payload()
+
+    assert summary["reason"] == "NO_ORPHANS"
+    assert summary["expected_counts_by_kind"] == {"volume": 1}
+    assert summary["orphan_count"] == 0
+
+
 def test_orphan_worktree_missing_workspace_is_structured(tmp_path: Path) -> None:
     (tmp_path / "git" / "worktrees" / "ws_ghost").mkdir(parents=True)
     summary = detect_orphan_resources(
