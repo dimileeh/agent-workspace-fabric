@@ -192,7 +192,7 @@ def _normalize_monitor_login(value: str) -> str:
     login = value.strip().lower()
     if login.endswith("[bot]"):
         login = login[: -len("[bot]")]
-    return login
+    return re.sub(r"[^a-z0-9]+", "-", login).strip("-")
 
 
 class ProfilePlanning(BaseModel):

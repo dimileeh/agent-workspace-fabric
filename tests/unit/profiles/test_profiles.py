@@ -61,6 +61,8 @@ def test_profile_schema_accepts_non_check_reviewer_monitor_policy() -> None:
                 "non_check_reviewer_logins": [
                     " Greptile-Apps ",
                     "greptile-apps[bot]",
+                    "Reviewer.Bot",
+                    "reviewer bot [bot]",
                     "custom-reviewer",
                 ],
             },
@@ -70,6 +72,7 @@ def test_profile_schema_accepts_non_check_reviewer_monitor_policy() -> None:
     assert profile.monitor.non_check_reviewer_settle_seconds == 45
     assert profile.monitor.non_check_reviewer_logins == [
         "greptile-apps",
+        "reviewer-bot",
         "custom-reviewer",
     ]
 
