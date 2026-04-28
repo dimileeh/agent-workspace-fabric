@@ -2202,7 +2202,7 @@ class WorkspaceExecutor:
                 rebased=True,
                 pushed=True,
             )
-        except _MonitorRebaseRecoveryError as exc:
+        except Exception as exc:
             await self._finish_rebase_recovery_operation(
                 operation,
                 status=OperationStatus.failed,

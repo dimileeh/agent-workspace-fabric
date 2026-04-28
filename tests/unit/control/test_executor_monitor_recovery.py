@@ -813,6 +813,55 @@ async def test_rebase_only_recovery_rebases_pushes_and_skips_pr_recreate(
 
 
 @pytest.mark.unit
+async def test_rebase_only_recovery_marks_operation_failed_when_recording_raises(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory, recovery_mode="rebase_only"
+    )
+
+    async def fail_record_success(**_kwargs: object) -> None:
+        raise RuntimeError("write exploded")
+
+    monkeypatch.setattr(
+        executor,
+        "_record_rebase_recovery_success",
+        fail_record_success,
+    )
+    _queue_rebase_recovery(fake)
+
+    with pytest.raises(RuntimeError, match="write exploded"):
+        await executor._run_monitor_rebase_recovery(
+            workspace_id=ws_id,
+            worktree_path=_test_worktrees_root(factory) / ws_id,
+            base_branch="development",
+            branch_name=f"awf/{ws_id}",
+            remote_branch=f"awf/{ws_id}",
+            reason="validation_insufficient_tier",
+            recovery_payload={
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                "pr_number": 1,
+                "source_base_sha": "a" * 40,
+                "source_head_sha": "d" * 40,
+            },
+        )
+
+    async with factory() as s:
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
+    assert len(rebase_ops) == 1
+    assert rebase_ops[0].status == OperationStatus.failed.value
+    assert rebase_ops[0].error_code == "MONITOR_RECOVERY_REBASE_FAILED"
+    assert rebase_ops[0].error_message == "write exploded"
+    assert isinstance(rebase_ops[0].result, dict)
+    assert rebase_ops[0].result["reason_code"] == "MONITOR_RECOVERY_REBASE_FAILED"
+
+
+@pytest.mark.unit
 async def test_rebase_only_recovery_skips_rebase_when_target_already_merged(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
