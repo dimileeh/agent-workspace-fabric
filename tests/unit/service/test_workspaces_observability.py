@@ -30,6 +30,7 @@ from awf.service.workspace_observability import (
     workspace_identity_usage_payload,
     workspace_lifecycle_summary,
     workspace_observability_payload,
+    workspace_recovery_summary,
     workspace_usage_summary,
 )
 from awf.service.workspaces import (
@@ -755,6 +756,48 @@ def _lifecycle_event(
     )
 
 
+def _recovery_event(
+    *,
+    event_type: str,
+    occurred_at: datetime,
+    old_state: str | None = None,
+    new_state: str | None = None,
+    reason_code: str | None = "RECOVERY_DISPATCH",
+    payload: dict[str, object] | None = None,
+    event_id: str = "evt_recovery",
+) -> object:
+    return SimpleNamespace(
+        id=event_id,
+        workspace_id="ws_recovery",
+        event_type=event_type,
+        old_state=old_state,
+        new_state=new_state,
+        reason_code=reason_code,
+        payload=payload,
+        occurred_at=occurred_at,
+    )
+
+
+def _recovery_operation(
+    *,
+    operation_id: str = "op_recovery",
+    operation_type: str = OperationType.validate.value,
+    status: str = OperationStatus.pending.value,
+    created_at: datetime,
+    payload: dict[str, object] | None = None,
+    started_at: datetime | None = None,
+) -> object:
+    return SimpleNamespace(
+        id=operation_id,
+        workspace_id="ws_recovery",
+        type=operation_type,
+        status=status,
+        payload=payload,
+        created_at=created_at,
+        started_at=started_at,
+    )
+
+
 def _workspace_for_lifecycle(
     *,
     status: WorkspaceStatus,
@@ -767,6 +810,214 @@ def _workspace_for_lifecycle(
         created_at=created_at,
         events=events,
     )
+
+
+def _workspace_for_recovery(
+    *,
+    status: WorkspaceStatus = WorkspaceStatus.ready,
+    created_at: datetime,
+    events: list[object],
+    operations: list[object] | None = None,
+) -> object:
+    return SimpleNamespace(
+        id="ws_recovery",
+        status=status.value,
+        created_at=created_at,
+        events=events,
+        operations=operations or [],
+    )
+
+
+@pytest.mark.unit
+def test_recovery_summary_is_none_without_reverse_transition() -> None:
+    base = datetime(2026, 4, 27, 20, 0, tzinfo=UTC)
+    workspace = _workspace_for_recovery(
+        status=WorkspaceStatus.monitoring_pr,
+        created_at=base,
+        events=[
+            _recovery_event(
+                event_id="evt_created",
+                event_type="workspace.created",
+                occurred_at=base,
+                new_state=WorkspaceStatus.requested.value,
+                reason_code="CREATED",
+            ),
+            _recovery_event(
+                event_id="evt_forward",
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=10),
+                old_state=WorkspaceStatus.validating.value,
+                new_state=WorkspaceStatus.monitoring_pr.value,
+                reason_code="PR_OPENED",
+            ),
+        ],
+    )
+
+    assert workspace_recovery_summary(workspace) is None  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_recovery_summary_pairs_reverse_transition_with_monitor_event_payload() -> None:
+    base = datetime(2026, 4, 27, 20, 30, tzinfo=UTC)
+    reverse_at = base + timedelta(seconds=40)
+    dispatch_payload = {
+        "reason": "STALE_OVERLAP",
+        "req_action": "rebase",
+        "recovery_mode": "rebase_only",
+        "pr_number": 42,
+    }
+    workspace = _workspace_for_recovery(
+        created_at=base,
+        events=[
+            _recovery_event(
+                event_id="evt_forward",
+                event_type="workspace.state_changed",
+                occurred_at=base + timedelta(seconds=20),
+                old_state=WorkspaceStatus.validating.value,
+                new_state=WorkspaceStatus.monitoring_pr.value,
+                reason_code="PR_OPENED",
+            ),
+            _recovery_event(
+                event_id="evt_reverse",
+                event_type="workspace.state_changed",
+                occurred_at=reverse_at,
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="RECOVERY_DISPATCH",
+            ),
+            _recovery_event(
+                event_id="evt_dispatch",
+                event_type="monitor.recovery_dispatched",
+                occurred_at=reverse_at + timedelta(seconds=1),
+                old_state=WorkspaceStatus.ready.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="RECOVERY_DISPATCH",
+                payload=dispatch_payload,
+            ),
+        ],
+    )
+
+    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
+
+    assert summary is not None
+    assert summary.from_state == "monitoring_pr"
+    assert summary.to_state == "ready"
+    assert summary.reason_code == "STALE_OVERLAP"
+    assert summary.action == "rebase"
+    assert summary.recovery_mode == "rebase_only"
+    assert summary.started_at == reverse_at
+    assert summary.payload == dispatch_payload
+    assert "monitoring_pr -> ready" in summary.summary
+    assert "STALE_OVERLAP" in summary.summary
+
+
+@pytest.mark.unit
+def test_recovery_summary_surfaces_active_pr_monitor_operation() -> None:
+    base = datetime(2026, 4, 27, 21, 0, tzinfo=UTC)
+    reverse_at = base + timedelta(seconds=60)
+    operation_payload = {
+        "owner": "pr_monitor",
+        "source": "pr_monitor",
+        "reason": "Coverage validation must be refreshed.",
+        "reason_code": "COVERAGE_STALE",
+        "requested_action": "validate",
+        "recovery_mode": "validate_only",
+    }
+    operation = _recovery_operation(
+        operation_id="op_validate_recovery",
+        status=OperationStatus.running.value,
+        created_at=reverse_at - timedelta(seconds=2),
+        started_at=reverse_at + timedelta(seconds=3),
+        payload=operation_payload,
+    )
+    workspace = _workspace_for_recovery(
+        status=WorkspaceStatus.validating,
+        created_at=base,
+        operations=[operation],
+        events=[
+            _recovery_event(
+                event_id="evt_reverse",
+                event_type="workspace.state_changed",
+                occurred_at=reverse_at,
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="RECOVERY_DISPATCH",
+            )
+        ],
+    )
+
+    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
+
+    assert summary is not None
+    assert summary.reason_code == "COVERAGE_STALE"
+    assert summary.action == "validate"
+    assert summary.recovery_mode == "validate_only"
+    assert summary.current_operation is not None
+    assert summary.current_operation.id == "op_validate_recovery"
+    assert summary.current_operation.type == "validate"
+    assert summary.current_operation.status == "running"
+    assert summary.current_operation.payload == operation_payload
+    assert "validate recovery is running" in summary.summary
+    assert "workspace is validating" in summary.summary
+
+
+@pytest.mark.unit
+def test_recovery_summary_uses_latest_reverse_recovery_pair() -> None:
+    base = datetime(2026, 4, 27, 21, 30, tzinfo=UTC)
+    older_reverse = base + timedelta(seconds=30)
+    latest_reverse = base + timedelta(seconds=90)
+    workspace = _workspace_for_recovery(
+        created_at=base,
+        events=[
+            _recovery_event(
+                event_id="evt_old_reverse",
+                event_type="workspace.state_changed",
+                occurred_at=older_reverse,
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="RECOVERY_DISPATCH",
+            ),
+            _recovery_event(
+                event_id="evt_old_dispatch",
+                event_type="monitor.recovery_dispatched",
+                occurred_at=older_reverse + timedelta(seconds=1),
+                reason_code="RECOVERY_DISPATCH",
+                payload={
+                    "reason": "STALE_TARGET_ADVANCED",
+                    "req_action": "rebase",
+                    "recovery_mode": "rebase_only",
+                },
+            ),
+            _recovery_event(
+                event_id="evt_latest_reverse",
+                event_type="workspace.state_changed",
+                occurred_at=latest_reverse,
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="RECOVERY_DISPATCH",
+            ),
+            _recovery_event(
+                event_id="evt_latest_dispatch",
+                event_type="monitor.recovery_dispatched",
+                occurred_at=latest_reverse + timedelta(seconds=1),
+                reason_code="RECOVERY_DISPATCH",
+                payload={
+                    "reason": "STALE_OVERLAP",
+                    "req_action": "validate",
+                    "recovery_mode": "validate_only",
+                },
+            ),
+        ],
+    )
+
+    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
+
+    assert summary is not None
+    assert summary.started_at == latest_reverse
+    assert summary.reason_code == "STALE_OVERLAP"
+    assert summary.action == "validate"
+    assert summary.recovery_mode == "validate_only"
+    assert "STALE_TARGET_ADVANCED" not in summary.summary
 
 
 @pytest.mark.unit

@@ -5,10 +5,10 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal, TypedDict
+from typing import Any, Literal, Protocol, TypedDict, cast
 
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
@@ -31,6 +31,31 @@ _TERMINAL_SKIP_STATUSES = frozenset(
         WorkspaceStatus.cancelled,
     }
 )
+_RECOVERY_EVENT_TYPES = frozenset(
+    {
+        "monitor.recovery_dispatched",
+        "workspace.validate_requested",
+    }
+)
+_ACTIVE_OPERATION_STATUSES = frozenset(
+    {
+        OperationStatus.pending.value,
+        OperationStatus.running.value,
+    }
+)
+_RECOVERY_OPERATION_TYPES = frozenset({"validate", "rebase", "remonitor", "retry"})
+_RECOVERY_MODES = frozenset({"validate_only", "rebase_only"})
+_PR_MONITOR_SOURCE = "pr_monitor"
+_OPERATOR_API_SOURCE = "operator_api"
+_GENERIC_RECOVERY_REASON_CODES = frozenset(
+    {
+        "RECOVERY_DISPATCH",
+        "OPERATOR_VALIDATE_REQUESTED",
+    }
+)
+_MAX_RECOVERY_PAYLOAD_KEYS = 32
+_MAX_RECOVERY_PAYLOAD_DEPTH = 4
+_MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS = 20
 
 
 @dataclass(frozen=True)
@@ -62,6 +87,29 @@ class LlmUsageSummary:
     reason: str | None
 
 
+@dataclass(frozen=True)
+class WorkspaceRecoveryCurrentOperation:
+    id: str
+    type: str
+    status: str
+    created_at: datetime
+    started_at: datetime | None
+    payload: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class WorkspaceRecoverySummary:
+    from_state: str | None
+    to_state: str | None
+    reason_code: str | None
+    action: str | None
+    recovery_mode: str | None
+    started_at: datetime
+    current_operation: WorkspaceRecoveryCurrentOperation | None
+    summary: str
+    payload: dict[str, Any] | None
+
+
 class AgentIdentityPayload(TypedDict):
     agent_model: str | None
     agent_effort: str | None
@@ -88,13 +136,44 @@ class LlmUsagePayload(TypedDict):
     reason: str | None
 
 
+class WorkspaceRecoveryCurrentOperationPayload(TypedDict):
+    id: str
+    type: str
+    status: str
+    created_at: datetime
+    started_at: datetime | None
+    payload: dict[str, Any] | None
+
+
+class WorkspaceRecoveryPayload(TypedDict):
+    from_state: str | None
+    to_state: str | None
+    reason_code: str | None
+    action: str | None
+    recovery_mode: str | None
+    started_at: datetime
+    current_operation: WorkspaceRecoveryCurrentOperationPayload | None
+    summary: str
+    payload: dict[str, Any] | None
+
+
 class WorkspaceObservabilityPayload(AgentIdentityPayload):
     lifecycle: list[LifecycleStagePayload]
     llm_usage: LlmUsagePayload
+    recovery: WorkspaceRecoveryPayload | None
 
 
 class WorkspaceIdentityUsagePayload(AgentIdentityPayload):
     llm_usage: LlmUsagePayload
+
+
+class _RecoveryOperationLike(Protocol):
+    id: object
+    type: object
+    status: object
+    payload: object
+    created_at: datetime
+    started_at: datetime | None
 
 
 @dataclass
@@ -288,6 +367,99 @@ def usage_payload(workspace: Workspace) -> LlmUsagePayload:
     }
 
 
+def workspace_recovery_summary(
+    workspace: Workspace,
+    *,
+    ordered_events: Sequence[WorkspaceEvent] | None = None,
+) -> WorkspaceRecoverySummary | None:
+    events = list(
+        ordered_events
+        if ordered_events is not None
+        else workspace_events_by_occurrence(workspace)
+    )
+    reverse_event = _latest_reverse_state_event(events)
+    if reverse_event is None:
+        return None
+
+    recovery_event = _latest_recovery_event_after(events, reverse_event)
+    active_operation = _latest_recovery_operation(workspace, active_only=True)
+    relevant_operation = active_operation or _latest_recovery_operation(
+        workspace,
+        active_only=False,
+    )
+    operation_payload = _payload_mapping(getattr(relevant_operation, "payload", None))
+    event_payload = _payload_mapping(
+        getattr(recovery_event, "payload", None) if recovery_event is not None else None
+    )
+    reverse_payload = _payload_mapping(getattr(reverse_event, "payload", None))
+    payload_sources = [operation_payload, event_payload, reverse_payload]
+
+    reason_code = _recovery_reason_code(
+        payload_sources,
+        fallback=getattr(reverse_event, "reason_code", None),
+    )
+    action = _recovery_action(payload_sources)
+    recovery_mode = _recovery_mode(payload_sources)
+    current_operation = (
+        _recovery_current_operation(active_operation)
+        if active_operation is not None
+        else None
+    )
+    payload = _bounded_payload(operation_payload or event_payload or reverse_payload)
+
+    return WorkspaceRecoverySummary(
+        from_state=getattr(reverse_event, "old_state", None),
+        to_state=getattr(reverse_event, "new_state", None),
+        reason_code=reason_code,
+        action=action,
+        recovery_mode=recovery_mode,
+        started_at=_ensure_utc(reverse_event.occurred_at),
+        current_operation=current_operation,
+        summary=_recovery_summary_text(
+            workspace=workspace,
+            reverse_event=reverse_event,
+            reason_code=reason_code,
+            action=action,
+            recovery_mode=recovery_mode,
+            current_operation=current_operation,
+        ),
+        payload=payload,
+    )
+
+
+def recovery_payload(
+    workspace: Workspace,
+    *,
+    ordered_events: Sequence[WorkspaceEvent] | None = None,
+) -> WorkspaceRecoveryPayload | None:
+    summary = workspace_recovery_summary(workspace, ordered_events=ordered_events)
+    if summary is None:
+        return None
+    current_operation = summary.current_operation
+    return {
+        "from_state": summary.from_state,
+        "to_state": summary.to_state,
+        "reason_code": summary.reason_code,
+        "action": summary.action,
+        "recovery_mode": summary.recovery_mode,
+        "started_at": summary.started_at,
+        "current_operation": (
+            {
+                "id": current_operation.id,
+                "type": current_operation.type,
+                "status": current_operation.status,
+                "created_at": current_operation.created_at,
+                "started_at": current_operation.started_at,
+                "payload": current_operation.payload,
+            }
+            if current_operation is not None
+            else None
+        ),
+        "summary": summary.summary,
+        "payload": summary.payload,
+    }
+
+
 def workspace_observability_payload(
     workspace: Workspace,
     *,
@@ -302,6 +474,10 @@ def workspace_observability_payload(
             ordered_events=ordered_events,
         ),
         "llm_usage": usage_payload(workspace),
+        "recovery": recovery_payload(
+            workspace,
+            ordered_events=ordered_events,
+        ),
     }
 
 
@@ -310,6 +486,239 @@ def workspace_identity_usage_payload(workspace: Workspace) -> WorkspaceIdentityU
         **agent_identity_payload(workspace),
         "llm_usage": usage_payload(workspace),
     }
+
+
+def _latest_reverse_state_event(
+    events: Sequence[WorkspaceEvent],
+) -> WorkspaceEvent | None:
+    reverse_events = [
+        event
+        for event in events
+        if getattr(event, "event_type", None) == "workspace.state_changed"
+        and _is_reverse_lifecycle_transition(
+            getattr(event, "old_state", None),
+            getattr(event, "new_state", None),
+        )
+    ]
+    return reverse_events[-1] if reverse_events else None
+
+
+def _is_reverse_lifecycle_transition(
+    old_state: str | None,
+    new_state: str | None,
+) -> bool:
+    old_status = _coerce_workspace_status(old_state)
+    new_status = _coerce_workspace_status(new_state)
+    if old_status not in LIFECYCLE_STAGES or new_status not in LIFECYCLE_STAGES:
+        return False
+    return LIFECYCLE_STAGES.index(old_status) > LIFECYCLE_STAGES.index(new_status)
+
+
+def _latest_recovery_event_after(
+    events: Sequence[WorkspaceEvent],
+    reverse_event: WorkspaceEvent,
+) -> WorkspaceEvent | None:
+    reverse_at = _ensure_utc(reverse_event.occurred_at)
+    candidates = [
+        event
+        for event in events
+        if getattr(event, "event_type", None) in _RECOVERY_EVENT_TYPES
+        and _ensure_utc(event.occurred_at) >= reverse_at
+    ]
+    if candidates:
+        return candidates[-1]
+
+    previous = [
+        event
+        for event in events
+        if getattr(event, "event_type", None) in _RECOVERY_EVENT_TYPES
+        and _ensure_utc(event.occurred_at) < reverse_at
+    ]
+    return previous[-1] if previous else None
+
+
+def _latest_recovery_operation(
+    workspace: Workspace,
+    *,
+    active_only: bool,
+) -> _RecoveryOperationLike | None:
+    operations = cast(Sequence[object], getattr(workspace, "operations", None) or [])
+    matching: list[_RecoveryOperationLike] = []
+    for operation in operations:
+        if _is_recovery_operation(operation, active_only=active_only):
+            matching.append(cast(_RecoveryOperationLike, operation))
+    if not matching:
+        return None
+    return max(matching, key=_operation_sort_key)
+
+
+def _is_recovery_operation(operation: object, *, active_only: bool) -> bool:
+    status = getattr(operation, "status", None)
+    if active_only and status not in _ACTIVE_OPERATION_STATUSES:
+        return False
+
+    operation_type = getattr(operation, "type", None)
+    if operation_type not in _RECOVERY_OPERATION_TYPES:
+        return False
+
+    payload = _payload_mapping(getattr(operation, "payload", None))
+    if payload is None:
+        return False
+
+    source = payload.get("source")
+    owner = payload.get("owner")
+    if source == _PR_MONITOR_SOURCE or owner == _PR_MONITOR_SOURCE:
+        return True
+
+    return (
+        source == _OPERATOR_API_SOURCE
+        and payload.get("recovery_mode") in _RECOVERY_MODES
+    )
+
+
+def _operation_sort_key(operation: _RecoveryOperationLike) -> tuple[datetime, str]:
+    operation_id = operation.id
+    created_at = operation.created_at
+    safe_created_at = (
+        _ensure_utc(created_at)
+        if isinstance(created_at, datetime)
+        else datetime.min.replace(tzinfo=UTC)
+    )
+    return safe_created_at, operation_id if isinstance(operation_id, str) else ""
+
+
+def _recovery_current_operation(
+    operation: _RecoveryOperationLike,
+) -> WorkspaceRecoveryCurrentOperation:
+    created_at = operation.created_at
+    started_at = operation.started_at
+    payload = _payload_mapping(operation.payload)
+    return WorkspaceRecoveryCurrentOperation(
+        id=str(operation.id),
+        type=str(operation.type),
+        status=str(operation.status),
+        created_at=_ensure_utc(created_at),
+        started_at=_ensure_utc(started_at) if isinstance(started_at, datetime) else None,
+        payload=_bounded_payload(payload),
+    )
+
+
+def _payload_mapping(payload: object) -> Mapping[str, object] | None:
+    return payload if isinstance(payload, Mapping) else None
+
+
+def _recovery_reason_code(
+    payloads: Sequence[Mapping[str, object] | None],
+    *,
+    fallback: object,
+) -> str | None:
+    for key in ("reason_code", "stale_reason", "reason"):
+        for payload in payloads:
+            value = _payload_string(payload, key)
+            if value is None or value in _GENERIC_RECOVERY_REASON_CODES:
+                continue
+            return value
+    return fallback if isinstance(fallback, str) and fallback else None
+
+
+def _recovery_action(payloads: Sequence[Mapping[str, object] | None]) -> str | None:
+    for key in ("requested_action", "req_action", "action"):
+        for payload in payloads:
+            value = _payload_string(payload, key)
+            if value is not None:
+                return value
+    return None
+
+
+def _recovery_mode(payloads: Sequence[Mapping[str, object] | None]) -> str | None:
+    for payload in payloads:
+        value = _payload_string(payload, "recovery_mode")
+        if value is not None:
+            return value
+    return None
+
+
+def _payload_string(payload: Mapping[str, object] | None, key: str) -> str | None:
+    if payload is None:
+        return None
+    value = payload.get(key)
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _bounded_payload(payload: Mapping[str, object] | None) -> dict[str, Any] | None:
+    if payload is None:
+        return None
+    bounded: dict[str, Any] = {}
+    for index, (key, value) in enumerate(payload.items()):
+        if index >= _MAX_RECOVERY_PAYLOAD_KEYS:
+            bounded["__truncated__"] = True
+            break
+        bounded[str(key)] = _json_safe_value(value)
+    return bounded
+
+
+def _json_safe_value(value: object, *, depth: int = 0) -> Any:
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    if isinstance(value, datetime):
+        return _ensure_utc(value).isoformat()
+    if depth >= _MAX_RECOVERY_PAYLOAD_DEPTH:
+        return str(value)
+    if isinstance(value, Mapping):
+        safe: dict[str, Any] = {}
+        for index, (key, nested_value) in enumerate(value.items()):
+            if index >= _MAX_RECOVERY_PAYLOAD_KEYS:
+                safe["__truncated__"] = True
+                break
+            safe[str(key)] = _json_safe_value(nested_value, depth=depth + 1)
+        return safe
+    if isinstance(value, Sequence) and not isinstance(value, str | bytes | bytearray):
+        items = [
+            _json_safe_value(item, depth=depth + 1)
+            for item in list(value)[:_MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS]
+        ]
+        if len(value) > _MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS:
+            items.append("__truncated__")
+        return items
+    return str(value)
+
+
+def _recovery_summary_text(
+    *,
+    workspace: Workspace,
+    reverse_event: WorkspaceEvent,
+    reason_code: str | None,
+    action: str | None,
+    recovery_mode: str | None,
+    current_operation: WorkspaceRecoveryCurrentOperation | None,
+) -> str:
+    from_state = getattr(reverse_event, "old_state", None) or "unknown"
+    to_state = getattr(reverse_event, "new_state", None) or "unknown"
+    reason = reason_code or "recovery"
+    parts = [f"Reverted {from_state} -> {to_state} for {reason}."]
+
+    action_label = _recovery_action_label(action, recovery_mode)
+    if action_label is not None:
+        parts.append(f"AWF dispatched {action_label}.")
+    if current_operation is not None:
+        parts.append(
+            f"current {current_operation.type} recovery is {current_operation.status}."
+        )
+    workspace_status = getattr(workspace, "status", None)
+    if isinstance(workspace_status, str) and workspace_status:
+        parts.append(f"workspace is {workspace_status}.")
+    return " ".join(parts)
+
+
+def _recovery_action_label(action: str | None, recovery_mode: str | None) -> str | None:
+    if recovery_mode == "rebase_only":
+        return "rebase + revalidate"
+    if recovery_mode == "validate_only":
+        return "validate-only recovery"
+    return action
 
 
 def _coerce_agent_runtime(agent: AgentRuntime | str) -> AgentRuntime | None:
