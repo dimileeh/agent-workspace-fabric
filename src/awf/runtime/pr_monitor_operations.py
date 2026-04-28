@@ -101,6 +101,45 @@ def monitor_operation_idempotency_key(
     return f"pr_monitor:{action}:{digest[:48]}"
 
 
+async def retryable_monitor_operation_idempotency_key(
+    repo: OperationRepository,
+    *,
+    workspace_id: str,
+    action: str,
+    pr_number: int | None,
+    reason_code: str | None,
+    source_head_sha: str | None,
+    source_base_sha: str | None,
+    extra: Sequence[object] = (),
+) -> str:
+    """Return an idempotency key that can retry a failed monitor operation.
+
+    The base key is stable for a single monitor-observed PR state, which is
+    what prevents duplicate active dispatches. Once the operation has failed,
+    the same stable key would point back at the failed row forever, so retries
+    derive their identity from the failed operation that triggered them.
+    """
+    retry_extra = tuple(extra)
+    while True:
+        idempotency_key = monitor_operation_idempotency_key(
+            workspace_id=workspace_id,
+            action=action,
+            pr_number=pr_number,
+            reason_code=reason_code,
+            source_head_sha=source_head_sha,
+            source_base_sha=source_base_sha,
+            extra=retry_extra,
+        )
+        existing = await repo.get_by_idempotency_key(idempotency_key)
+        if existing is None or existing.status != OperationStatus.failed.value:
+            return idempotency_key
+        retry_extra = (
+            *tuple(extra),
+            "retry_after_failed_operation",
+            existing.id,
+        )
+
+
 async def create_or_start_monitor_operation(
     session: AsyncSession,
     *,

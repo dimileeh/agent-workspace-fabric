@@ -85,6 +85,7 @@ from awf.runtime.pr_monitor_operations import (
     create_or_start_monitor_operation,
     finish_monitor_operation,
     monitor_operation_idempotency_key,
+    retryable_monitor_operation_idempotency_key,
 )
 from awf.service.gc import run_workspace_filesystem_gc
 from awf.service.merge_queue import (
@@ -1550,18 +1551,21 @@ class PullRequestMonitorRunner:
                         else None
                     ),
                 )
-                await OperationRepository(s).create_idempotent(
+                operation_repo = OperationRepository(s)
+                idempotency_key = await retryable_monitor_operation_idempotency_key(
+                    operation_repo,
+                    workspace_id=workspace_id,
+                    action=recovery_mode,
+                    pr_number=pr_number,
+                    reason_code=recovery_reason_code,
+                    source_head_sha=status.head_sha,
+                    source_base_sha=_ws.base_commit,
+                )
+                await operation_repo.create_idempotent(
                     workspace_id=workspace_id,
                     operation_type="validate",
                     payload=operation_payload,
-                    idempotency_key=monitor_operation_idempotency_key(
-                        workspace_id=workspace_id,
-                        action=recovery_mode,
-                        pr_number=pr_number,
-                        reason_code=recovery_reason_code,
-                        source_head_sha=status.head_sha,
-                        source_base_sha=_ws.base_commit,
-                    ),
+                    idempotency_key=idempotency_key,
                 )
                 await WorkspaceRepository(s).transition(
                     _ws,

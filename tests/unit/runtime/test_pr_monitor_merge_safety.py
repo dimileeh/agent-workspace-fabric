@@ -14,7 +14,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.base import Base
-from awf.db.enums import AgentRuntime, OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    WorkspaceStatus,
+)
 from awf.db.models import MergeCandidate
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -29,6 +35,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import Merge, MonitorState, PRStatus
+from awf.runtime.pr_monitor_operations import monitor_operation_idempotency_key
 from tests.unit.runtime._monitor_runner_fixtures import FakeAdapter, RecordedSleep, make_runner
 from tests.unit.runtime.test_pr_monitor import _status
 
@@ -674,6 +681,100 @@ async def test_auto_merge_does_not_duplicate_active_monitor_recovery(
         "stale_reason": "validation_insufficient_tier",
         "requested_action": "validate",
         "recovery_mode": "validate_only",
+    }
+
+
+@pytest.mark.unit
+async def test_auto_merge_retries_failed_monitor_recovery_with_new_operation(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    seed = await _seed_merge_candidate(
+        factory,
+        pr_number=507,
+        same_attempt_validation_tier=1,
+    )
+    base_key = monitor_operation_idempotency_key(
+        workspace_id=seed.workspace_id,
+        action="validate_only",
+        pr_number=seed.pr_number,
+        reason_code="VALIDATION_INSUFFICIENT_TIER",
+        source_head_sha="abc123",
+        source_base_sha="a" * 40,
+    )
+    async with factory() as session:
+        repo = OperationRepository(session)
+        failed = await repo.create(
+            workspace_id=seed.workspace_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.running,
+            payload={
+                "owner": "pr_monitor",
+                "source": "pr_monitor",
+                "action": "validate_only",
+                "requested_action": "validate",
+                "reason": "Required validation tier has not passed for this merge candidate.",
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                "stale_reason": "validation_insufficient_tier",
+                "recovery_mode": "validate_only",
+                "pr_number": seed.pr_number,
+                "pr_url": f"https://github.com/dimileeh/aira-web/pull/{seed.pr_number}",
+                "source_head_sha": "abc123",
+                "source_base_sha": "a" * 40,
+                "target_branch": "development",
+                "remote_branch": f"awf/{seed.workspace_id}",
+            },
+            idempotency_key=base_key,
+        )
+        await repo.finish(
+            failed,
+            status=OperationStatus.failed,
+            result={"reason_code": "COMMAND_FAILED"},
+            error_code="COMMAND_FAILED",
+            error_message="recovery validation failed",
+        )
+        await session.commit()
+
+    terminal = await _execute_merge(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        tmp_path=tmp_path,
+        seed=seed,
+    )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(
+            workspace_id=seed.workspace_id,
+        )
+
+    assert terminal is True
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    assert len(operations) == 2
+    retry = next(operation for operation in operations if operation.id != failed.id)
+    assert retry.status == OperationStatus.pending.value
+    assert retry.idempotency_key is not None
+    assert retry.idempotency_key != base_key
+    assert retry.idempotency_key.startswith("pr_monitor:validate_only:")
+    assert retry.payload == {
+        "owner": "pr_monitor",
+        "source": "pr_monitor",
+        "action": "validate_only",
+        "requested_action": "validate",
+        "reason": "Required validation tier has not passed for this merge candidate.",
+        "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+        "stale_reason": "validation_insufficient_tier",
+        "recovery_mode": "validate_only",
+        "pr_number": seed.pr_number,
+        "pr_url": f"https://github.com/dimileeh/aira-web/pull/{seed.pr_number}",
+        "source_head_sha": "abc123",
+        "source_base_sha": "a" * 40,
+        "target_branch": "development",
+        "remote_branch": f"awf/{seed.workspace_id}",
     }
 
 
