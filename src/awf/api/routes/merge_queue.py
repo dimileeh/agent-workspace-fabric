@@ -453,8 +453,8 @@ def _latest_satisfied_validation_tier(
             continue
         if run.status != "succeeded":
             continue
-        completed_at = _ensure_utc(run.finished_at or run.started_at)
-        if latest_rebase_time is not None and completed_at <= latest_rebase_time:
+        run_started_at = _ensure_utc(run.started_at)
+        if latest_rebase_time is not None and run_started_at <= latest_rebase_time:
             continue
         satisfied_tier = max(satisfied_tier, run.tier)
     if satisfied_tier <= 0:

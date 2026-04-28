@@ -1142,6 +1142,49 @@ class TestMergeQueueList:
         assert item["latest_validation"]["status"] == "failed"
 
     @pytest.mark.unit
+    async def test_latest_satisfied_validation_tier_ignores_run_started_before_rebase(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Overlapping rebase validation",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/25",
+            branch_name="codex/merge-queue",
+            task_class="test_task",
+            updated_at=datetime(2026, 4, 26, 12, 8, tzinfo=UTC),
+        )
+        attempt_id = await _attempt_id_for_workspace(engine, workspace_id)
+        await _add_operation(
+            engine,
+            workspace_id,
+            operation_type=OperationType.rebase,
+            status=OperationStatus.succeeded,
+            created_at=datetime(2026, 4, 26, 12, 2, tzinfo=UTC),
+        )
+        await _insert_validation_run(
+            engine,
+            run_id="vr_250000000000000000000001",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="head123",
+            tier=2,
+            started_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+            finished_at=datetime(2026, 4, 26, 12, 4, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["required_validation_tier"] == 2
+        assert item["latest_satisfied_validation_tier"] is None
+
+    @pytest.mark.unit
     async def test_latest_validation_summary_exposes_coverage_policy(
         self,
         client: AsyncClient,
