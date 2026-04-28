@@ -294,8 +294,8 @@ def test_docker_scan_unavailable_is_structured(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_docker_scan_reports_missing_binary() -> None:
-    def _missing_binary(_args: list[str], **_kwargs: object) -> _Completed:
-        raise FileNotFoundError("docker")
+    def _missing_binary(args: list[str], **_kwargs: object) -> _Completed:
+        raise FileNotFoundError(args[0])
 
     docker = scan_docker_resources(
         docker_host="unix:///var/run/docker.sock",
@@ -304,7 +304,9 @@ def test_docker_scan_reports_missing_binary() -> None:
 
     assert docker.ok is False
     assert docker.status == "unavailable"
+    assert docker.reason == "DOCKER_RESOURCE_SCAN_UNAVAILABLE"
     assert docker.detail == "docker binary not found on PATH"
+    assert docker.resources == ()
 
 
 @pytest.mark.unit
@@ -451,6 +453,7 @@ def test_worktree_scan_unavailable_is_structured(
 @pytest.mark.unit
 def test_empty_and_not_collected_summaries_are_non_destructive() -> None:
     assert empty_docker_scan().reason == "DOCKER_RESOURCE_SCAN_OK"
+    assert empty_worktree_scan().reason == "WORKTREE_SCAN_OK"
 
     payload = summary_not_collected().to_dict()
 
@@ -469,7 +472,7 @@ def test_docker_templates_include_compose_project_labels() -> None:
 
 
 @pytest.mark.unit
-def test_parse_docker_rows_skips_invalid_non_awf_and_non_workspace_projects() -> None:
+def test_parse_docker_resource_rows_ignores_malformed_and_non_awf_rows() -> None:
     resources = parse_docker_resource_rows(
         "container",
         "\n"
@@ -491,23 +494,29 @@ def test_parse_docker_rows_skips_invalid_non_awf_and_non_workspace_projects() ->
     )
 
     assert [resource.workspace_id for resource in resources] == ["ws_valid"]
+    assert resources[0].compose_project == "awf-ws_valid"
+    assert resources[0].id == "c3"
     assert resources[0].name is None
-    assert workspace_id_from_project("not-awf") is None
-    assert workspace_id_from_project("awf_not_workspace") is None
-    assert workspace_id_from_project("awf-ws_dash") == "ws_dash"
 
 
 @pytest.mark.unit
-def test_legacy_orphan_payloads_cover_unknown_unavailable_ok_and_orphan_grouping(
-    tmp_path: Path,
-) -> None:
-    unknown_summary = build_orphan_resource_summary(
+def test_workspace_id_from_project_accepts_only_awf_workspace_projects() -> None:
+    assert workspace_id_from_project("awf-ws_dash") == "ws_dash"
+    assert workspace_id_from_project("awf_ws_under") == "ws_under"
+    assert workspace_id_from_project("not-awf") is None
+    assert workspace_id_from_project("awf_not_workspace") is None
+    assert workspace_id_from_project("compose_ws_other") is None
+
+
+@pytest.mark.unit
+def test_legacy_payload_reports_db_unavailable_with_container_examples() -> None:
+    summary = build_orphan_resource_summary(
         docker_scan=scan_docker_resources(
             docker_host="unix:///var/run/docker.sock",
             run_subprocess=_run_for(
                 containers=_jsonl(
                     {
-                        "id": "c1",
+                        "id": "container-1",
                         "name": "awf_ws_unknown-agent-1",
                         "project": "awf_ws_unknown",
                         "service": "agent",
@@ -520,32 +529,60 @@ def test_legacy_orphan_payloads_cover_unknown_unavailable_ok_and_orphan_grouping
         worktree_scan=empty_worktree_scan(),
         workspace_view=unavailable_workspace_view(),
     )
-    unknown = legacy_orphan_workspaces_payload(unknown_summary)
-    assert unknown["reason"] == "DB_UNAVAILABLE"
-    assert unknown["container_count"] == 1
-    assert unknown["examples"][0]["containers"][0]["id"] == "c1"
 
-    unavailable_summary = build_orphan_resource_summary(
+    payload = legacy_orphan_workspaces_payload(summary)
+
+    assert payload["ok"] is True
+    assert payload["status"] == "unknown"
+    assert payload["reason"] == "DB_UNAVAILABLE"
+    assert payload["container_count"] == 1
+    examples = payload["examples"]
+    assert isinstance(examples, list)
+    assert examples[0]["compose_project"] == "awf_ws_unknown"
+    assert examples[0]["containers"][0]["id"] == "container-1"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("detail", "reason"),
+    [
+        ("docker binary not found on PATH", "DOCKER_CLI_NOT_FOUND"),
+        ("cannot connect to docker daemon", "DOCKER_UNAVAILABLE"),
+    ],
+)
+def test_legacy_payload_preserves_docker_unavailable_reason(
+    detail: str,
+    reason: str,
+) -> None:
+    summary = build_orphan_resource_summary(
         docker_scan=ResourceScan(
             ok=False,
             status="unavailable",
             reason="DOCKER_RESOURCE_SCAN_UNAVAILABLE",
-            detail="docker binary not found on PATH",
+            detail=detail,
         ),
         worktree_scan=empty_worktree_scan(),
         workspace_view=_ok_view(),
     )
-    unavailable = legacy_orphan_workspaces_payload(unavailable_summary)
-    assert unavailable["reason"] == "DOCKER_CLI_NOT_FOUND"
-    assert unavailable["orphan_count"] == 0
 
-    ok_summary = build_orphan_resource_summary(
+    payload = legacy_orphan_workspaces_payload(summary)
+
+    assert payload["ok"] is True
+    assert payload["status"] == "unavailable"
+    assert payload["reason"] == reason
+    assert payload["orphan_count"] == 0
+    assert payload["examples"] == []
+
+
+@pytest.mark.unit
+def test_legacy_payload_reports_no_orphans_with_expected_workspaces() -> None:
+    summary = build_orphan_resource_summary(
         docker_scan=scan_docker_resources(
             docker_host="unix:///var/run/docker.sock",
             run_subprocess=_run_for(
                 containers=_jsonl(
                     {
-                        "id": "c2",
+                        "id": "container-1",
                         "name": "awf_ws_live-agent-1",
                         "project": "awf_ws_live",
                     }
@@ -555,63 +592,76 @@ def test_legacy_orphan_payloads_cover_unknown_unavailable_ok_and_orphan_grouping
         worktree_scan=empty_worktree_scan(),
         workspace_view=_ok_view(active={"ws_live"}),
     )
-    ok_payload = legacy_orphan_workspaces_payload(ok_summary)
-    assert ok_payload["reason"] == "NO_ORPHANS"
-    assert ok_payload["active_count"] == 1
 
-    orphan_summary = build_orphan_resource_summary(
+    payload = legacy_orphan_workspaces_payload(summary)
+
+    assert payload == {
+        "ok": True,
+        "status": "ok",
+        "reason": "NO_ORPHANS",
+        "active_count": 1,
+        "orphan_count": 0,
+        "examples": [],
+    }
+
+
+@pytest.mark.unit
+def test_legacy_payload_groups_terminal_and_missing_orphan_examples() -> None:
+    summary = build_orphan_resource_summary(
         docker_scan=scan_docker_resources(
             docker_host="unix:///var/run/docker.sock",
             run_subprocess=_run_for(
                 containers=_jsonl(
                     {
-                        "id": "c3",
-                        "name": "awf_ws_dead-agent-1",
-                        "project": "awf_ws_dead",
-                        "service": "agent",
+                        "id": "container-1",
+                        "name": "awf_ws_done-agent-1",
+                        "project": "awf_ws_done",
                     }
                 ),
                 networks=_jsonl(
                     {
-                        "id": "n1",
+                        "id": "network-1",
                         "name": "awf_ws_missing_default",
+                        "project": "awf_ws_missing",
+                    }
+                ),
+                volumes=_jsonl(
+                    {
+                        "name": "awf_ws_missing_pgdata",
                         "project": "awf_ws_missing",
                     }
                 ),
             ),
         ),
-        worktree_scan=scan_managed_worktrees(tmp_path),
-        workspace_view=_ok_view(terminal={"ws_dead"}),
+        worktree_scan=empty_worktree_scan(),
+        workspace_view=_ok_view(terminal={"ws_done"}),
     )
-    orphan_payload = legacy_orphan_workspaces_payload(orphan_summary)
-    assert orphan_payload["reason"] == "ORPHANS_PRESENT"
-    assert orphan_payload["orphan_terminal_count"] == 1
-    assert orphan_payload["orphan_missing_count"] == 1
-    dead = next(
-        example
-        for example in orphan_payload["examples"]
-        if example["workspace_id"] == "ws_dead"
-    )
-    assert dead["containers"][0]["id"] == "c3"
-    missing = next(
-        example
-        for example in orphan_payload["examples"]
-        if example["workspace_id"] == "ws_missing"
-    )
-    assert missing["containers"] == []
+
+    payload = legacy_orphan_workspaces_payload(summary)
+
+    assert payload["ok"] is False
+    assert payload["reason"] == "ORPHANS_PRESENT"
+    assert payload["orphan_count"] == 2
+    assert payload["orphan_missing_count"] == 1
+    assert payload["orphan_terminal_count"] == 1
+    examples = payload["examples"]
+    assert isinstance(examples, list)
+    assert [example["workspace_id"] for example in examples] == ["ws_done", "ws_missing"]
+    assert examples[0]["containers"][0]["id"] == "container-1"
+    assert examples[1]["containers"] == []
 
 
 @pytest.mark.unit
-def test_default_workspace_lookup_disposes_successful_engine(
+def test_workspace_lookup_returns_active_and_terminal_ids(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    disposed = False
-
     class _Rows:
         def all(self) -> list[tuple[str, str]]:
             return [
                 ("ws_active", "running"),
+                ("ws_live", "ready"),
                 ("ws_done", "completed"),
+                ("ws_ignored", "archived"),
                 ("ws_unknown", "future_status"),
             ]
 
@@ -619,24 +669,30 @@ def test_default_workspace_lookup_disposes_successful_engine(
         async def __aenter__(self) -> _Connection:
             return self
 
-        async def __aexit__(self, *_exc: object) -> None:
+        async def __aexit__(self, *_exc_info: object) -> None:
             return None
 
         async def execute(self, *_args: object, **_kwargs: object) -> _Rows:
             return _Rows()
 
     class _Engine:
+        def __init__(self) -> None:
+            self.disposed = False
+
         def connect(self) -> _Connection:
             return _Connection()
 
         async def dispose(self) -> None:
-            nonlocal disposed
-            disposed = True
+            self.disposed = True
 
-    monkeypatch.setattr(orphan_resources, "make_engine", lambda _url: _Engine())
+    engine = _Engine()
+    monkeypatch.setattr(orphan_resources, "make_engine", lambda _url: engine)
 
-    view = asyncio.run(default_workspace_id_lookup("sqlite+aiosqlite:///fake.db"))
+    view = asyncio.run(default_workspace_id_lookup("postgresql+asyncpg://awf@localhost/awf"))
 
-    assert view.active_ids == frozenset({"ws_active"})
-    assert view.terminal_ids == frozenset({"ws_done"})
-    assert disposed is True
+    assert view == WorkspaceIdView(
+        active_ids=frozenset({"ws_active", "ws_live"}),
+        terminal_ids=frozenset({"ws_done"}),
+        available=True,
+    )
+    assert engine.disposed is True

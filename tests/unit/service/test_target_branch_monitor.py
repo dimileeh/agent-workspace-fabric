@@ -509,6 +509,45 @@ class TestReconcileAndRefreshStaleCandidates:
         assert c1.stale is True
 
     @pytest.mark.unit
+    async def test_reconcile_and_refresh_summary_reports_sensitive_stale_reason(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        _ws_id, _attempt_id, cand_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/service/**"],
+            task_class="dependency_task",
+        )
+
+        async def _reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            return _fake_reconcile_result(checkout_path=tmp_path / "checkout")
+
+        result = await reconcile_and_refresh_stale_candidates(
+            reconcile_fn=_reconcile,
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            session_factory=factory,
+            target_state_for_base_sha=async_lambda(
+                TargetBranchState(
+                    branch=_BASE_BRANCH,
+                    head_sha="c" * 40,
+                    changed_paths=("uv.lock",),
+                    advanced_commits=1,
+                )
+            ),
+        )
+
+        assert len(result.candidate_refreshes) == 1
+        summary = result.candidate_refreshes[0]
+        assert summary.candidate_id == cand_id
+        assert summary.stale is True
+        assert summary.findings_count == 1
+        assert summary.stale_reason == "STALE_DEPENDENCY"
+
+    @pytest.mark.unit
     async def test_reconcile_and_refresh_isolates_candidate_refresh_failure(
         self,
         factory: async_sessionmaker[AsyncSession],

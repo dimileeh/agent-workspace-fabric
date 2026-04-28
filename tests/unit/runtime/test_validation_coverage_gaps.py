@@ -266,3 +266,8 @@ def test_parse_term_missing_handles_missing_column_with_no_lines(
     assert b_gap["missing_lines"] == ["15"]
     a_gap = next(g for g in gaps if g["file"] == "src/awf/a.py")
     assert a_gap["missing_lines"] == []
+
+
+@pytest.mark.unit
+def test_missing_line_count_treats_malformed_tokens_as_single_gaps() -> None:
+    assert _missing_line_count([object(), " 4 ", "10-12", "bad-range", "abc"]) == 6
