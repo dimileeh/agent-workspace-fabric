@@ -250,6 +250,24 @@ test("readiness summary distinguishes canonical, superseded, stale, and legacy r
   );
 });
 
+test("recovery summary uses the readiness identity labels", () => {
+  for (const item of [
+    mergeQueueItem(),
+    mergeQueueItem({
+      candidate_id: null,
+      attempt_id: null,
+      readiness: null,
+      canonical: false,
+    }),
+  ]) {
+    const readiness = summarizeReadiness(item);
+    const recovery = summarizeRecovery(item);
+
+    assert.equal(recovery.candidateLabel, readiness.candidateLabel);
+    assert.equal(recovery.attemptLabel, readiness.attemptLabel);
+  }
+});
+
 test("validation summary shows tier, status, freshness, heads, and coverage", () => {
   assert.deepEqual(
     summarizeValidation(

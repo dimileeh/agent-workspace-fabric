@@ -140,12 +140,7 @@ export function summarizeReadiness(
   item: Pick<MergeQueueItem, "attempt_id" | "candidate_id" | "canonical" | "readiness">,
 ): ReadinessSummary {
   const readiness = item.readiness;
-  const canonicalLabel: ReadinessSummary["canonicalLabel"] = item.canonical ? "canonical" : "superseded";
-  const base = {
-    canonicalLabel,
-    candidateLabel: item.candidate_id ? compactId(item.candidate_id, 10) : "legacy",
-    attemptLabel: item.attempt_id ? compactId(item.attempt_id, 10) : "none",
-  };
+  const base = summarizeQueueIdentity(item);
 
   if (!readiness) {
     return {
@@ -208,6 +203,7 @@ export function summarizeValidation(item: Pick<MergeQueueItem, "latest_validatio
 }
 
 export function summarizeRecovery(item: MergeQueueItem): RecoverySummary {
+  const identity = summarizeQueueIdentity(item);
   const validation = summarizeValidation(item);
   const stale = summarizeStaleReasons(item);
   const queueBlockers = summarizeQueueBlockers(item);
@@ -226,8 +222,8 @@ export function summarizeRecovery(item: MergeQueueItem): RecoverySummary {
     targetRangeLabel: validation.headLabel,
     blockerLabel,
     blockerDetail: item.merge_blocker_reason,
-    candidateLabel: item.candidate_id ? compactId(item.candidate_id, 10) : "legacy",
-    attemptLabel: item.attempt_id ? compactId(item.attempt_id, 10) : "none",
+    candidateLabel: identity.candidateLabel,
+    attemptLabel: identity.attemptLabel,
     staleReasonCount: stale.count,
     staleReasonLabel: stale.label,
     staleReasonDetail: stale.detail,
@@ -237,6 +233,16 @@ export function summarizeRecovery(item: MergeQueueItem): RecoverySummary {
     policyFindingCount: policyFindings.count,
     policyFindingLabel: policyFindings.label,
     policyFindingDetail: policyFindings.detail,
+  };
+}
+
+function summarizeQueueIdentity(
+  item: Pick<MergeQueueItem, "attempt_id" | "candidate_id" | "canonical">,
+): Pick<ReadinessSummary, "attemptLabel" | "candidateLabel" | "canonicalLabel"> {
+  return {
+    canonicalLabel: item.canonical ? "canonical" : "superseded",
+    candidateLabel: item.candidate_id ? compactId(item.candidate_id, 10) : "legacy",
+    attemptLabel: item.attempt_id ? compactId(item.attempt_id, 10) : "none",
   };
 }
 
