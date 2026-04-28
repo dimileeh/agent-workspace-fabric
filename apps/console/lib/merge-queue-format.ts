@@ -1,4 +1,4 @@
-import type { MergeBlockerReason, MergeQueueBlocker, MergeQueueItem, StaleReason } from "@/lib/types";
+import type { MergeBlockerReason, MergeQueueBlocker, MergeQueueItem, StaleReason, ValidationTier } from "@/lib/types";
 import { compactId } from "./format.ts";
 
 export interface StaleReasonSummary {
@@ -31,6 +31,31 @@ export interface ValidationSummary {
   freshLabel: string;
   headLabel: string;
   coverageLabel: string;
+}
+
+export interface RecoverySummary {
+  recommendedActionLabel: string;
+  requiredTierLabel: string;
+  latestSatisfiedTierLabel: string;
+  latestSatisfiedTierDetail: string;
+  freshnessLabel: string;
+  baseShaLabel: string;
+  validatedTargetShaLabel: string;
+  currentTargetShaLabel: string;
+  targetRangeLabel: string;
+  blockerLabel: string;
+  blockerDetail: string;
+  candidateLabel: string;
+  attemptLabel: string;
+  staleReasonCount: number;
+  staleReasonLabel: string;
+  staleReasonDetail: string;
+  queueBlockerCount: number;
+  queueBlockerLabel: string;
+  queueBlockerDetail: string;
+  policyFindingCount: number;
+  policyFindingLabel: string;
+  policyFindingDetail: string;
 }
 
 export type QueueTone = "neutral" | "info" | "good" | "warn" | "bad";
@@ -115,12 +140,7 @@ export function summarizeReadiness(
   item: Pick<MergeQueueItem, "attempt_id" | "candidate_id" | "canonical" | "readiness">,
 ): ReadinessSummary {
   const readiness = item.readiness;
-  const canonicalLabel: ReadinessSummary["canonicalLabel"] = item.canonical ? "canonical" : "superseded";
-  const base = {
-    canonicalLabel,
-    candidateLabel: item.candidate_id ? compactId(item.candidate_id, 10) : "legacy",
-    attemptLabel: item.attempt_id ? compactId(item.attempt_id, 10) : "none",
-  };
+  const base = summarizeQueueIdentity(item);
 
   if (!readiness) {
     return {
@@ -182,6 +202,50 @@ export function summarizeValidation(item: Pick<MergeQueueItem, "latest_validatio
   };
 }
 
+export function summarizeRecovery(item: MergeQueueItem): RecoverySummary {
+  const identity = summarizeQueueIdentity(item);
+  const validation = summarizeValidation(item);
+  const stale = summarizeStaleReasons(item);
+  const queueBlockers = summarizeQueueBlockers(item);
+  const policyFindings = summarizePolicyFindings(item);
+  const blockerLabel = formatMergeBlockerReason(item.merge_blocker_reason);
+
+  return {
+    recommendedActionLabel: formatRequiredNextAction(item.required_next_action, item.merge_blocker_reason),
+    requiredTierLabel: formatRequiredTierLabel(requiredValidationTier(item)),
+    latestSatisfiedTierLabel: formatLatestSatisfiedTierLabel(latestSatisfiedValidationTier(item), item.latest_validation),
+    latestSatisfiedTierDetail: validation.detail,
+    freshnessLabel: validation.freshLabel,
+    baseShaLabel: compactSha(item.latest_validation?.base_commit),
+    validatedTargetShaLabel: compactSha(item.latest_validation?.target_head_sha),
+    currentTargetShaLabel: compactSha(item.latest_validation?.current_target_head_sha),
+    targetRangeLabel: validation.headLabel,
+    blockerLabel,
+    blockerDetail: item.merge_blocker_reason,
+    candidateLabel: identity.candidateLabel,
+    attemptLabel: identity.attemptLabel,
+    staleReasonCount: stale.count,
+    staleReasonLabel: stale.label,
+    staleReasonDetail: stale.detail,
+    queueBlockerCount: queueBlockers.count,
+    queueBlockerLabel: queueBlockers.label,
+    queueBlockerDetail: queueBlockerDetail(queueBlockers),
+    policyFindingCount: policyFindings.count,
+    policyFindingLabel: policyFindings.label,
+    policyFindingDetail: policyFindings.detail,
+  };
+}
+
+function summarizeQueueIdentity(
+  item: Pick<MergeQueueItem, "attempt_id" | "candidate_id" | "canonical">,
+): Pick<ReadinessSummary, "attemptLabel" | "candidateLabel" | "canonicalLabel"> {
+  return {
+    canonicalLabel: item.canonical ? "canonical" : "superseded",
+    candidateLabel: item.candidate_id ? compactId(item.candidate_id, 10) : "legacy",
+    attemptLabel: item.attempt_id ? compactId(item.attempt_id, 10) : "none",
+  };
+}
+
 export function mergeQueueMergedAt(item: Pick<MergeQueueItem, "merged_at" | "status" | "updated_at">): string | null {
   return item.merged_at ?? (item.status === "completed" ? item.updated_at : null);
 }
@@ -230,6 +294,115 @@ function staleReasonLabel(reason: StaleReason): string {
 function staleReasonDetail(reason: StaleReason): string {
   const trigger = reason.trigger_ref ? `${reason.trigger_type} @ ${reason.trigger_ref}` : reason.trigger_type;
   return `${reason.reason_code} / ${trigger}`;
+}
+
+function queueBlockerDetail(summary: QueueBlockerSummary): string {
+  if (!summary.first) {
+    return summary.detail;
+  }
+  return `${summary.first.workspace_id} / ${summary.first.candidate_id} / ${summary.detail}`;
+}
+
+interface PolicyFindingSummary {
+  count: number;
+  label: string;
+  detail: string;
+}
+
+function summarizePolicyFindings(item: Pick<MergeQueueItem, "policy_findings">): PolicyFindingSummary {
+  const activeFindings = (item.policy_findings ?? []).filter((finding) => finding.status === "active");
+  if (activeFindings.length === 0) {
+    return {
+      count: 0,
+      label: "none",
+      detail: "no active policy findings",
+    };
+  }
+
+  const blockingCount = activeFindings.filter((finding) => finding.severity === "blocking").length;
+  const first = activeFindings[0];
+  const overflowCount = Math.max(0, activeFindings.length - 1);
+  return {
+    count: activeFindings.length,
+    label:
+      blockingCount > 0
+        ? `${blockingCount} blocking polic${blockingCount === 1 ? "y" : "ies"}`
+        : `${activeFindings.length} policy finding${activeFindings.length === 1 ? "" : "s"}`,
+    detail: `${first.reason_code}${first.subject_path ? ` / ${first.subject_path}` : ""}${overflowCount ? ` +${overflowCount} more` : ""}`,
+  };
+}
+
+function requiredValidationTier(
+  item: Pick<
+    MergeQueueItem,
+    "required_validation_tier" | "task_class" | "required_next_action" | "readiness" | "latest_validation" | "latest_satisfied_validation_tier"
+  >,
+): ValidationTier {
+  const explicitTier = normalizeTier(item.required_validation_tier);
+  if (explicitTier !== null) {
+    return explicitTier;
+  }
+
+  const taskTier = taskClassRequiredTier(item.task_class);
+  if (
+    item.required_next_action === "validate" ||
+    item.readiness?.stale_reason === "validation_insufficient_tier"
+  ) {
+    const satisfiedTier = latestSatisfiedValidationTier(item);
+    if (satisfiedTier !== null) {
+      return normalizeTier(Math.max(taskTier, Math.min(3, satisfiedTier + 1))) ?? taskTier;
+    }
+  }
+
+  return taskTier;
+}
+
+function latestSatisfiedValidationTier(
+  item: Pick<MergeQueueItem, "latest_satisfied_validation_tier" | "latest_validation">,
+): ValidationTier | null {
+  const explicitTier = normalizeTier(item.latest_satisfied_validation_tier);
+  if (explicitTier !== null) {
+    return explicitTier;
+  }
+  const validation = item.latest_validation;
+  if (!validation || validation.status !== "succeeded") {
+    return null;
+  }
+  return normalizeTier(validation.tier);
+}
+
+function taskClassRequiredTier(taskClass: string | null): ValidationTier {
+  if (taskClass === "migration_task") {
+    return 3;
+  }
+  if (taskClass === "refactor_task" || taskClass === "dependency_task" || taskClass === "build_config_task") {
+    return 2;
+  }
+  return 1;
+}
+
+function normalizeTier(value: number | null | undefined): ValidationTier | null {
+  if (value === 1 || value === 2 || value === 3) {
+    return value;
+  }
+  return null;
+}
+
+function formatRequiredTierLabel(tier: ValidationTier): string {
+  return `T${tier} required`;
+}
+
+function formatLatestSatisfiedTierLabel(
+  tier: ValidationTier | null,
+  latestValidation: MergeQueueItem["latest_validation"],
+): string {
+  if (tier !== null) {
+    return `T${tier} satisfied`;
+  }
+  if (latestValidation && latestValidation.status !== "succeeded") {
+    return "unknown satisfied";
+  }
+  return "none satisfied";
 }
 
 function formatPrNumber(prNumber: number | null): string {

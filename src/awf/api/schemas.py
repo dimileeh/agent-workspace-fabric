@@ -550,6 +550,8 @@ class MergeQueueItemResponse(BaseModel):
     last_event: WorkspaceEventResponse | None
     merge_blocker_reason: MergeBlockerReason
     required_next_action: str | None = None
+    required_validation_tier: ValidationTier | None = None
+    latest_satisfied_validation_tier: ValidationTier | None = None
     readiness: MergeCandidateReadinessResponse | None = None
     canonical: bool
     queue_blockers: list[MergeQueueBlockerResponse] = Field(default_factory=list)

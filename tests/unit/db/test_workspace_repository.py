@@ -237,6 +237,114 @@ class TestRelationshipLoading:
 
 class TestValidationRunRepository:
     @pytest.mark.unit
+    async def test_list_by_workspace_ids_can_filter_by_status(
+        self,
+    ) -> None:
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = make_session_factory(engine)
+        async with factory() as s:
+            ws_repo = WorkspaceRepository(s)
+            workspace = await ws_repo.create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="main",
+                task_title="filtered",
+                task_prompt="run validation",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            second_workspace = await ws_repo.create(
+                repo_url="git@github.com:example/b.git",
+                branch_base="main",
+                task_title="second",
+                task_prompt="run validation",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            validation_repo = ValidationRunRepository(s)
+            failed = await validation_repo.start(
+                workspace_id=workspace.id,
+                attempt_id=None,
+                tier=3,
+                commands=[],
+                base_commit=None,
+                target_branch=None,
+                target_head_sha=None,
+                log_stream_refs={},
+                started_at=datetime(2026, 1, 1, tzinfo=UTC),
+            )
+            await validation_repo.finish(
+                failed.id,
+                status="failed",
+                reason_code="TESTS_FAILED",
+                finished_at=datetime(2026, 1, 1, 0, 1, tzinfo=UTC),
+            )
+            succeeded = await validation_repo.start(
+                workspace_id=workspace.id,
+                attempt_id=None,
+                tier=2,
+                commands=[],
+                base_commit=None,
+                target_branch=None,
+                target_head_sha=None,
+                log_stream_refs={},
+                started_at=datetime(2026, 1, 2, tzinfo=UTC),
+            )
+            await validation_repo.finish(
+                succeeded.id,
+                status="succeeded",
+                reason_code=None,
+                finished_at=datetime(2026, 1, 2, 0, 1, tzinfo=UTC),
+            )
+            running = await validation_repo.start(
+                workspace_id=second_workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=[],
+                base_commit=None,
+                target_branch=None,
+                target_head_sha=None,
+                log_stream_refs={},
+                started_at=datetime(2026, 1, 3, tzinfo=UTC),
+            )
+            workspace_id = workspace.id
+            second_workspace_id = second_workspace.id
+            succeeded_id = succeeded.id
+            running_id = running.id
+            await s.commit()
+
+        statements: list[str] = []
+
+        def record_sql(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, parameters, context, executemany
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            async with factory() as s:
+                rows = await ValidationRunRepository(s).list_by_workspace_ids(
+                    [workspace_id, second_workspace_id],
+                    status="succeeded",
+                )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+            await engine.dispose()
+
+        assert [run.id for run in rows[workspace_id]] == [succeeded_id]
+        assert rows[second_workspace_id] == []
+        assert running_id not in {run.id for runs in rows.values() for run in runs}
+        assert any("validation_runs.status =" in statement for statement in statements)
+
+    @pytest.mark.unit
     async def test_latest_by_workspace_ids_uses_window_query(
         self,
     ) -> None:
