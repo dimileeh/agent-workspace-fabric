@@ -807,6 +807,10 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 profile=profile,
                 base_commit=base_commit,
+                workspace_head_sha=await self._capture_workspace_head_sha(
+                    workspace_id=workspace_id,
+                    worktree_path=worktree_path,
+                ),
                 target_branch=expected_branch,
                 target_head_sha=None,
                 tier=validation_tier,
@@ -1998,6 +2002,7 @@ class WorkspaceExecutor:
         workspace_id: str,
         profile: WorkspaceProfile,
         base_commit: str | None,
+        workspace_head_sha: str | None,
         target_branch: str | None,
         target_head_sha: str | None,
         tier: int,
@@ -2016,6 +2021,7 @@ class WorkspaceExecutor:
                 commands=command_records,
                 base_commit=base_commit,
                 base_sha=base_commit,
+                workspace_head_sha=workspace_head_sha,
                 target_branch=target_branch,
                 target_head_sha=target_head_sha,
                 profile_name=profile.name,
@@ -2029,6 +2035,26 @@ class WorkspaceExecutor:
             )
             await session.commit()
             return run.id
+
+    async def _capture_workspace_head_sha(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+    ) -> str | None:
+        result = await self._runner.run(
+            ["git", "-C", str(worktree_path), "rev-parse", "HEAD"],
+        )
+        head_sha = result.stdout.strip()
+        if result.ok and head_sha:
+            return head_sha
+        _log.warning(
+            "executor.validation_workspace_head_sha_capture_failed",
+            workspace_id=workspace_id,
+            returncode=result.returncode,
+            stderr=result.stderr[:400],
+        )
+        return None
 
     async def _run_monitor_rebase_recovery(
         self,

@@ -105,6 +105,10 @@ def _queue_pre_push_diagnostics(fake: FakeCommandRunner) -> None:
     fake.queue_result(returncode=0, stdout="abc1234 commit\n")  # log ahead-of-base
 
 
+def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") -> None:
+    fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
+
+
 def _created_pr_body(fake: FakeCommandRunner) -> str:
     create_call = next(call.args for call in fake.calls if call.args[:3] == ["gh", "pr", "create"])
     return create_call[create_call.index("--body") + 1]
@@ -279,6 +283,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
@@ -324,6 +329,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
@@ -387,6 +393,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
@@ -452,6 +459,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
@@ -518,6 +526,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="1\n")
         fake.queue_result(returncode=0)
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)
@@ -581,6 +590,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # push
@@ -615,6 +625,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="ruff ok")  # validation cmd 1
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd 2
         _queue_pre_push_diagnostics(fake)
@@ -773,6 +784,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="ruff ok")  # validation cmd
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
@@ -871,6 +883,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0)  # git commit (AWF's auto-commit)
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
@@ -925,6 +938,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=1, stderr="pytest: 5 failed")  # validation fails
 
         await executor.execute(ws_id)
@@ -1018,6 +1032,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="tests ok")  # validation cmd
         fake.queue_result(
             returncode=0,
@@ -1109,6 +1124,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation ok
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=128, stderr="remote: perm denied")  # push fails
@@ -1172,6 +1188,7 @@ class TestFailurePaths:
         fake.queue_result(returncode=0)  # git reset --soft <base>
         fake.queue_result(returncode=0)  # git commit (re-anchor)
         fake.queue_result(returncode=0)  # merge-base is-ancestor: OK after recovery
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0, stdout="recovery tests ok")  # validation cmd
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # git push
@@ -1304,6 +1321,7 @@ class TestMonitorHandoff:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation cmd
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # push
@@ -1365,6 +1383,7 @@ class TestIdempotency:
         fake.queue_result(returncode=0)  # git commit
         fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
         fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation
         _queue_pre_push_diagnostics(fake)
         fake.queue_result(returncode=0)  # push

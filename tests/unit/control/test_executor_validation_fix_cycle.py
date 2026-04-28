@@ -129,6 +129,7 @@ def _queue_initial_pass(fake: FakeCommandRunner) -> None:
     fake.queue_result(returncode=0)  # git commit
     fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
     fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
 
 
 def _queue_fix_pass(fake: FakeCommandRunner, *, changed: bool = True) -> None:
@@ -143,6 +144,7 @@ def _queue_fix_pass(fake: FakeCommandRunner, *, changed: bool = True) -> None:
         fake.queue_result(returncode=0)  # git commit
     else:
         fake.queue_result(returncode=0, stdout="")  # diff --cached empty
+    fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
 
 
 def _queue_push_and_pr(
@@ -712,6 +714,7 @@ class TestFixPassAgentFailure:
         fake.queue_result(returncode=0)  # git add -A
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="deadbeef01\n")  # pre-validation rev-parse HEAD
         fake.queue_result(returncode=0)  # validation passes anyway
         _queue_push_and_pr(fake)
 
