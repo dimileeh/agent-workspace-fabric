@@ -7,6 +7,7 @@ import {
   requiredNextActionTone,
   summarizeQueueBlockers,
   summarizeReadiness,
+  summarizeRecovery,
   summarizeStaleReasons,
   summarizeValidation,
 } from "./merge-queue-format.ts";
@@ -249,6 +250,24 @@ test("readiness summary distinguishes canonical, superseded, stale, and legacy r
   );
 });
 
+test("recovery summary uses the readiness identity labels", () => {
+  for (const item of [
+    mergeQueueItem(),
+    mergeQueueItem({
+      candidate_id: null,
+      attempt_id: null,
+      readiness: null,
+      canonical: false,
+    }),
+  ]) {
+    const readiness = summarizeReadiness(item);
+    const recovery = summarizeRecovery(item);
+
+    assert.equal(recovery.candidateLabel, readiness.candidateLabel);
+    assert.equal(recovery.attemptLabel, readiness.attemptLabel);
+  }
+});
+
 test("validation summary shows tier, status, freshness, heads, and coverage", () => {
   assert.deepEqual(
     summarizeValidation(
@@ -321,4 +340,182 @@ test("validation summary shows tier, status, freshness, heads, and coverage", ()
       coverageLabel: "coverage failed 98.4/99%",
     },
   );
+});
+
+test("validation recovery summary shows required tier, satisfied tier, freshness, and heads", () => {
+  const item = mergeQueueItem({
+    required_validation_tier: 2,
+    latest_satisfied_validation_tier: 2,
+    merge_blocker_reason: "stale",
+    required_next_action: "rebase",
+    readiness: {
+      ready: false,
+      manual_merge_required: false,
+      waiting_for_monitor: false,
+      failed_or_cancelled: false,
+      completed: false,
+      not_canonical: false,
+      stale: true,
+      stale_reason: "target_advanced",
+    },
+    latest_validation: {
+      validation_run_id: "vr_recovery",
+      attempt_id: "att_111111111111111111111111",
+      tier: 2,
+      command_set_hash: "c".repeat(64),
+      base_commit: "abcdef1234567890abcdef1234567890abcdef12",
+      target_branch: "main",
+      target_head_sha: "1234567890abcdef1234567890abcdef12345678",
+      current_target_head_sha: "fedcba9876543210fedcba9876543210fedcba98",
+      status: "succeeded",
+      reason_code: "VALIDATION_OK",
+      started_at: "2026-04-26T12:00:00Z",
+      finished_at: "2026-04-26T12:05:00Z",
+      log_stream_refs: {},
+      fresh_for_target: false,
+      retry_count: 2,
+      coverage_percent: null,
+      coverage_minimum_percent: null,
+      coverage_status: null,
+      coverage_reason_code: null,
+      coverage_gaps: [],
+    },
+  });
+
+  const recovery = summarizeRecovery(item);
+
+  assert.equal(recovery.recommendedActionLabel, "rebase");
+  assert.equal(recovery.requiredTierLabel, "T2 required");
+  assert.equal(recovery.latestSatisfiedTierLabel, "T2 satisfied");
+  assert.equal(recovery.latestSatisfiedTierDetail, "VALIDATION_OK / retries 2");
+  assert.equal(recovery.freshnessLabel, "stale target");
+  assert.equal(recovery.baseShaLabel, "abcdef1");
+  assert.equal(recovery.validatedTargetShaLabel, "1234567");
+  assert.equal(recovery.currentTargetShaLabel, "fedcba9");
+  assert.equal(recovery.targetRangeLabel, "1234567 -> fedcba9");
+});
+
+test("recovery summary maps stale reasons and queue blockers into compact details", () => {
+  const item = mergeQueueItem({
+    merge_blocker_reason: "waiting_for_older_candidate",
+    required_next_action: "wait_for_queue",
+    stale_reasons: [
+      staleReason(),
+      staleReason({
+        id: "sr_2",
+        trigger_type: "path_overlap",
+        trigger_ref: "src/awf/api/**",
+        reason_code: "STALE_OVERLAP",
+      }),
+      staleReason({
+        id: "sr_3",
+        trigger_type: "dependency_changed",
+        trigger_ref: "uv.lock",
+        reason_code: "STALE_DEPENDENCY",
+      }),
+      staleReason({
+        id: "sr_4",
+        status: "resolved",
+        trigger_ref: "old-main",
+        resolved_at: "2026-04-26T12:04:00Z",
+      }),
+    ],
+    queue_blockers: [
+      {
+        candidate_id: "mc_old",
+        workspace_id: "ws_old",
+        attempt_id: "att_old",
+        task_id: "task_old",
+        title: "Older queue candidate",
+        pr_url: "https://github.com/example/awf/pull/41",
+        pr_number: 41,
+        status: "monitoring_pr",
+        blocker_state: "merge_eligible",
+        reason_code: "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
+      },
+      {
+        candidate_id: "mc_recovery",
+        workspace_id: "ws_recovery",
+        attempt_id: "att_recovery",
+        task_id: "task_recovery",
+        title: "Recovery in progress",
+        pr_url: "https://github.com/example/awf/pull/42",
+        pr_number: 42,
+        status: "validating",
+        blocker_state: "monitor_owned_recovery",
+        reason_code: "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE",
+      },
+    ],
+    policy_findings: [
+      {
+        id: "pf_1",
+        workspace_id: "ws_1",
+        candidate_id: "mc_111111111111111111111111",
+        attempt_id: "att_111111111111111111111111",
+        task_id: "task_1",
+        reason_code: "OUT_OF_SCOPE_CHANGE",
+        severity: "blocking",
+        subject_path: "src/awf/api/routes/merge_queue.py",
+        explanation: "Changed an unowned API route.",
+        details: {},
+        status: "active",
+        detected_at: "2026-04-26T12:02:00Z",
+        resolved_at: null,
+      },
+      {
+        id: "pf_2",
+        workspace_id: "ws_1",
+        candidate_id: "mc_111111111111111111111111",
+        attempt_id: "att_111111111111111111111111",
+        task_id: "task_1",
+        reason_code: "OUT_OF_SCOPE_CHANGE",
+        severity: "warning",
+        subject_path: "docs/old.md",
+        explanation: "Resolved docs finding.",
+        details: {},
+        status: "resolved",
+        detected_at: "2026-04-26T12:01:00Z",
+        resolved_at: "2026-04-26T12:04:00Z",
+      },
+    ],
+  });
+
+  const recovery = summarizeRecovery(item);
+
+  assert.equal(recovery.staleReasonCount, 3);
+  assert.equal(recovery.staleReasonLabel, "STALE_TARGET_ADVANCED @ main@abc123, STALE_OVERLAP @ src/awf/api/** +1");
+  assert.equal(recovery.queueBlockerCount, 2);
+  assert.equal(
+    recovery.queueBlockerDetail,
+    "ws_old / mc_old / merge_eligible / monitoring_pr / MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE +1 more",
+  );
+  assert.equal(recovery.policyFindingCount, 1);
+  assert.equal(recovery.policyFindingLabel, "1 blocking policy");
+  assert.equal(recovery.recommendedActionLabel, "wait for queue");
+});
+
+test("recovery summary falls back safely for legacy or missing validation data", () => {
+  const item = mergeQueueItem({
+    candidate_id: null,
+    attempt_id: null,
+    task_class: "test_task",
+    merge_blocker_reason: "manual_merge_required",
+    required_next_action: null,
+    readiness: null,
+    canonical: false,
+    latest_validation: null,
+  });
+
+  const recovery = summarizeRecovery(item);
+
+  assert.equal(recovery.recommendedActionLabel, "manual merge");
+  assert.equal(recovery.requiredTierLabel, "T1 required");
+  assert.equal(recovery.latestSatisfiedTierLabel, "none satisfied");
+  assert.equal(recovery.freshnessLabel, "unknown");
+  assert.equal(recovery.baseShaLabel, "unknown");
+  assert.equal(recovery.validatedTargetShaLabel, "unknown");
+  assert.equal(recovery.currentTargetShaLabel, "unknown");
+  assert.equal(recovery.targetRangeLabel, "unknown -> unknown");
+  assert.equal(recovery.candidateLabel, "legacy");
+  assert.equal(recovery.blockerLabel, "manual merge");
 });

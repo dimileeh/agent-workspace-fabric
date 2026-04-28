@@ -43,12 +43,11 @@ import {
 } from "@/lib/format";
 import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "@/lib/agent-format";
 import {
-  formatMergeBlockerReason,
   formatRequiredNextAction,
   mergeQueueMergedAt,
   requiredNextActionTone,
-  summarizeQueueBlockers,
   summarizeReadiness,
+  summarizeRecovery,
   summarizeStaleReasons,
   summarizeValidation,
 } from "@/lib/merge-queue-format";
@@ -549,6 +548,10 @@ export function ConsoleDashboard() {
   }, [overview, searchText, sortDirection, sortKey]);
 
   const selectedOverview = overview.find((item) => item.workspace_id === selectedId) ?? null;
+  const selectedMergeQueueItem = useMemo(
+    () => mergeQueue.find((item) => item.workspace_id === selectedId) ?? null,
+    [mergeQueue, selectedId],
+  );
   const selectedLogEntries = useMemo(
     () => {
       const entries = logEntries
@@ -699,6 +702,7 @@ export function ConsoleDashboard() {
                 <WorkspaceSummary
                   overview={selectedOverview}
                   workspace={detail.workspace}
+                  mergeQueueItem={selectedMergeQueueItem}
                   retryState={retryState}
                   onRetry={retrySelectedWorkspace}
                 />
@@ -1102,11 +1106,13 @@ function WorkspaceList({
 function WorkspaceSummary({
   overview,
   workspace,
+  mergeQueueItem,
   retryState,
   onRetry,
 }: {
   overview: WorkspaceOverview;
   workspace: Workspace | null;
+  mergeQueueItem: MergeQueueItem | null;
   retryState: RetryActionState;
   onRetry: () => void;
 }) {
@@ -1155,6 +1161,7 @@ function WorkspaceSummary({
           <Fact label="Operation" value={overview.active_operation ?? "none"} />
           <Fact label="Updated" value={formatDateTime(overview.updated_at)} />
         </div>
+        <WorkspaceRecoveryBlock item={mergeQueueItem} />
         <UsageSummaryBlock usage={workspace?.llm_usage ?? overview.llm_usage} />
         {overview.failure_reason || overview.failure_message ? (
           <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
@@ -1177,6 +1184,83 @@ function WorkspaceSummary({
         ) : null}
       </div>
     </Panel>
+  );
+}
+
+function WorkspaceRecoveryBlock({ item }: { item: MergeQueueItem | null }) {
+  if (!item) {
+    return (
+      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+        <div className="font-semibold text-slate-900">Validation freshness</div>
+        <div className="mt-1 text-slate-600">Workspace is not in the current merge queue snapshot.</div>
+      </div>
+    );
+  }
+
+  const recovery = summarizeRecovery(item);
+  return (
+    <div className="grid gap-2 rounded-md border border-slate-200 bg-white p-2 text-xs">
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <div className="min-w-0">
+          <div className="font-semibold text-slate-900">Validation freshness</div>
+          <div className="mono mt-0.5 truncate text-[11px] text-slate-500">
+            {item.branch_name ?? "no branch"} / {item.base_branch}
+          </div>
+        </div>
+        <Badge value={item.status} />
+      </div>
+      <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3">
+        <QueueChip
+          label="Action"
+          value={recovery.recommendedActionLabel}
+          tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
+        />
+        <QueueChip
+          label="Blocker"
+          value={recovery.blockerLabel}
+          detail={recovery.blockerDetail}
+          tone={mergeBlockerTone(item.merge_blocker_reason)}
+        />
+        <QueueChip label="Required" value={recovery.requiredTierLabel} detail={item.task_class ?? "task class unknown"} />
+        <QueueChip
+          label="Satisfied"
+          value={recovery.latestSatisfiedTierLabel}
+          detail={recovery.latestSatisfiedTierDetail}
+          tone={satisfiedTierTone(recovery.latestSatisfiedTierLabel)}
+        />
+        <QueueChip
+          label="Freshness"
+          value={recovery.freshnessLabel}
+          detail={recovery.targetRangeLabel}
+          tone={freshnessTone(recovery.freshnessLabel)}
+        />
+        <QueueChip
+          label="Base"
+          value={recovery.baseShaLabel}
+          detail={item.latest_validation?.target_branch ?? item.base_branch}
+          mono
+        />
+        <QueueChip
+          label="Targets"
+          value={recovery.targetRangeLabel}
+          detail={`${recovery.validatedTargetShaLabel} / ${recovery.currentTargetShaLabel}`}
+          mono
+        />
+        <QueueChip
+          label="Stale"
+          value={recovery.staleReasonLabel}
+          detail={recovery.staleReasonDetail}
+          tone={recovery.staleReasonCount > 0 ? "warn" : "neutral"}
+          mono={recovery.staleReasonCount > 0}
+        />
+        <QueueChip
+          label="Queue"
+          value={recovery.queueBlockerLabel}
+          detail={recovery.queueBlockerDetail}
+          tone={recovery.queueBlockerCount > 0 ? "warn" : "neutral"}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -1405,11 +1489,10 @@ function MergeQueueRow({
 }) {
   const rowDetailsId = `merge-candidate-${item.candidate_id ?? item.workspace_id}`;
   const actionLabel = formatRequiredNextAction(item.required_next_action, item.merge_blocker_reason);
-  const blockerLabel = formatMergeBlockerReason(item.merge_blocker_reason);
   const readiness = summarizeReadiness(item);
   const stale = summarizeStaleReasons(item);
-  const queueBlockers = summarizeQueueBlockers(item);
   const validation = summarizeValidation(item);
+  const recovery = summarizeRecovery(item);
   const mergedAt = mergeQueueMergedAt(item);
   return (
     <article className="grid gap-2 border-b border-slate-100 pb-2 text-xs last:border-b-0 last:pb-0">
@@ -1445,17 +1528,30 @@ function MergeQueueRow({
           </button>
         </div>
       </div>
-      <div className="grid gap-1 sm:grid-cols-2 2xl:grid-cols-4">
+      <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
         <QueueChip
           label="Action"
-          value={actionLabel}
+          value={recovery.recommendedActionLabel}
           tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
         />
         <QueueChip
           label="Blocker"
-          value={blockerLabel}
-          detail={item.merge_blocker_reason}
+          value={recovery.blockerLabel}
+          detail={recovery.blockerDetail}
           tone={mergeBlockerTone(item.merge_blocker_reason)}
+        />
+        <QueueChip label="Required" value={recovery.requiredTierLabel} detail={item.task_class ?? "task class unknown"} />
+        <QueueChip
+          label="Satisfied"
+          value={recovery.latestSatisfiedTierLabel}
+          detail={recovery.latestSatisfiedTierDetail}
+          tone={satisfiedTierTone(recovery.latestSatisfiedTierLabel)}
+        />
+        <QueueChip
+          label="Freshness"
+          value={recovery.freshnessLabel}
+          detail={recovery.targetRangeLabel}
+          tone={freshnessTone(recovery.freshnessLabel)}
         />
         <QueueChip
           label="Readiness"
@@ -1465,25 +1561,43 @@ function MergeQueueRow({
         />
         <QueueChip
           label="Candidate"
-          value={`${readiness.candidateLabel} / ${readiness.attemptLabel}`}
+          value={`${recovery.candidateLabel} / ${recovery.attemptLabel}`}
           detail={item.candidate_status ?? "unknown"}
           mono
         />
         <QueueChip
+          label="Base"
+          value={recovery.baseShaLabel}
+          detail={item.latest_validation?.target_branch ?? item.base_branch}
+          mono
+        />
+        <QueueChip
+          label="Targets"
+          value={recovery.targetRangeLabel}
+          detail={`${recovery.validatedTargetShaLabel} / ${recovery.currentTargetShaLabel}`}
+          mono
+        />
+        <QueueChip
           label="Stale"
-          value={stale.label}
-          detail={stale.detail}
-          tone={stale.count > 0 ? "warn" : "neutral"}
-          mono={stale.count > 0}
+          value={recovery.staleReasonLabel}
+          detail={recovery.staleReasonDetail}
+          tone={recovery.staleReasonCount > 0 ? "warn" : "neutral"}
+          mono={recovery.staleReasonCount > 0}
         />
         <QueueChip
           label="Queue"
-          value={queueBlockers.label}
-          detail={queueBlockers.detail}
-          tone={queueBlockers.count > 0 ? "warn" : "neutral"}
+          value={recovery.queueBlockerLabel}
+          detail={recovery.queueBlockerDetail}
+          tone={recovery.queueBlockerCount > 0 ? "warn" : "neutral"}
+        />
+        <QueueChip
+          label="Policy"
+          value={recovery.policyFindingLabel}
+          detail={recovery.policyFindingDetail}
+          tone={recovery.policyFindingCount > 0 ? "bad" : "neutral"}
         />
         <QueueChip label="Validation" value={validation.label} detail={validation.detail} tone={validationTone(item)} />
-        <QueueChip label="Heads" value={validation.headLabel} detail={validation.coverageLabel} mono />
+        <QueueChip label="Coverage" value={validation.coverageLabel} detail={validation.headLabel} mono />
       </div>
       {expanded ? (
         <div id={rowDetailsId} className="grid gap-2">
@@ -1507,9 +1621,14 @@ function MergeQueueRow({
             <QueueDatum label="Merged" value={formatDateTime(mergedAt)} />
             <QueueDatum label="Last event" value={lastEventReason(item.last_event)} mono />
             <QueueDatum label="Blocker" value={item.merge_blocker_reason} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
+            <QueueDatum label="Required tier" value={recovery.requiredTierLabel} />
+            <QueueDatum label="Latest satisfied" value={recovery.latestSatisfiedTierLabel} tone={satisfiedTierTone(recovery.latestSatisfiedTierLabel)} />
             <QueueDatum label="Validation" value={validation.label} tone={validationTone(item)} />
-            <QueueDatum label="Freshness" value={validation.freshLabel} />
-            <QueueDatum label="Validation heads" value={validation.headLabel} mono />
+            <QueueDatum label="Freshness" value={recovery.freshnessLabel} tone={freshnessTone(recovery.freshnessLabel)} />
+            <QueueDatum label="Base SHA" value={recovery.baseShaLabel} mono />
+            <QueueDatum label="Validated target" value={recovery.validatedTargetShaLabel} mono />
+            <QueueDatum label="Current target" value={recovery.currentTargetShaLabel} mono />
+            <QueueDatum label="Validation heads" value={recovery.targetRangeLabel} mono />
             <QueueDatum label="Coverage" value={validation.coverageLabel} mono />
           </div>
           <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
@@ -1703,6 +1822,26 @@ function validationTone(item: MergeQueueItem): ReturnType<typeof statusTone> {
   }
   if (validation.status === "running") {
     return "info";
+  }
+  return "neutral";
+}
+
+function freshnessTone(label: string): ReturnType<typeof statusTone> {
+  if (label === "fresh") {
+    return "good";
+  }
+  if (label.includes("stale")) {
+    return "warn";
+  }
+  return "neutral";
+}
+
+function satisfiedTierTone(label: string): ReturnType<typeof statusTone> {
+  if (label.startsWith("T")) {
+    return "good";
+  }
+  if (label.startsWith("unknown")) {
+    return "warn";
   }
   return "neutral";
 }
