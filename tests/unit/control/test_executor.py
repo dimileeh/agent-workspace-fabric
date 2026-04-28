@@ -485,6 +485,7 @@ class TestHappyPath:
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/oops.py\n",
         )
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
 
         await executor.execute(ws_id)
 
