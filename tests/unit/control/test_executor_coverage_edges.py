@@ -1044,3 +1044,17 @@ def test_agent_defaults_for_workspace_binds_policy_model_for_monitor_recovery() 
     assert bound is not None
     assert bound.model == "ollama/glm-5.1:cloud"
     assert bound.effort == "xhigh"
+
+    assert (
+        _agent_defaults_for_workspace(  # type: ignore[arg-type]
+            SimpleNamespace(task_policy={"agent_effort": "high"}),
+            None,
+        )
+        is None
+    )
+
+    created = _agent_defaults_for_workspace(  # type: ignore[arg-type]
+        SimpleNamespace(task_policy={"agent_model": "gpt-5.5", "agent_effort": "xhigh"}),
+        None,
+    )
+    assert created == AgentDefaults(model="gpt-5.5", effort="xhigh")

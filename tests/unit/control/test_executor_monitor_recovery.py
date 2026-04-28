@@ -337,6 +337,62 @@ async def test_executor_skips_planning_and_agent_run_when_recovery_dispatched(
 
 
 @pytest.mark.unit
+async def test_recovery_operation_helpers_start_and_finish_only_recovery_rows(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(factory)
+    async with factory() as s:
+        repo = OperationRepository(s)
+        non_recovery = await repo.create(
+            workspace_id=ws_id,
+            operation_type=OperationType.validate,
+            payload={"source": "operator_api"},
+        )
+        running_recovery = await repo.create(
+            workspace_id=ws_id,
+            operation_type=OperationType.validate,
+            payload={"source": "operator_api", "recovery_mode": "validate_only"},
+        )
+        running_recovery.status = OperationStatus.running.value
+        await s.commit()
+
+    await executor._start_pending_recovery_operations(workspace_id=ws_id)
+
+    async with factory() as s:
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    by_id = {operation.id: operation for operation in ops}
+    assert by_id[non_recovery.id].status == OperationStatus.pending.value
+    assert by_id[running_recovery.id].status == OperationStatus.running.value
+    started_recovery = next(
+        operation
+        for operation in ops
+        if operation.id not in {non_recovery.id, running_recovery.id}
+    )
+    assert started_recovery.status == OperationStatus.running.value
+
+    await executor._finish_active_recovery_operations(
+        workspace_id=ws_id,
+        status=OperationStatus.failed,
+        reason_code="MONITOR_RECOVERY_SETUP_FAILED",
+        error_message="profile setup failed",
+    )
+
+    async with factory() as s:
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    by_id = {operation.id: operation for operation in ops}
+    assert by_id[non_recovery.id].status == OperationStatus.pending.value
+    for operation_id in {running_recovery.id, started_recovery.id}:
+        operation = by_id[operation_id]
+        assert operation.status == OperationStatus.failed.value
+        assert operation.error_code == "MONITOR_RECOVERY_SETUP_FAILED"
+        assert operation.error_message == "profile setup failed"
+        assert operation.result == {"reason_code": "MONITOR_RECOVERY_SETUP_FAILED"}
+
+
+@pytest.mark.unit
 async def test_executor_recovery_marks_validate_operation_succeeded_on_clean_pass(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
