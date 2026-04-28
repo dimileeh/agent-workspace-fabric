@@ -328,6 +328,45 @@ def test_greptile_visible_check_matching_accepts_provider_context_suffix() -> No
 
 
 @pytest.mark.unit
+def test_visible_check_matching_accepts_provider_identity_metadata() -> None:
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        non_check_reviewer_settle_seconds=180,
+        non_check_reviewer_logins=("greptile-apps", "custom-reviewer", "status-bot"),
+    )
+
+    decision = _non_check_reviewer_settle_decision(
+        _ready_status(
+            checks=(
+                CheckTiming(
+                    name="ci/review",
+                    app_slug="greptile-apps",
+                    conclusion="SUCCESS",
+                ),
+                CheckTiming(
+                    name="Review",
+                    app_name="Custom Reviewer",
+                    conclusion="SUCCESS",
+                ),
+                CheckTiming(
+                    name="commit-status",
+                    creator_login="status-bot[bot]",
+                    conclusion="SUCCESS",
+                ),
+            )
+        ),
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+    )
+
+    assert decision.action == "visible_check"
+    assert decision.visible_reviewers == ("greptile-apps", "custom-reviewer", "status-bot")
+
+
+@pytest.mark.unit
 def test_wait_is_per_head_sha_and_restarts_after_new_head() -> None:
     state = MonitorState()
     cfg = MonitorConfig(

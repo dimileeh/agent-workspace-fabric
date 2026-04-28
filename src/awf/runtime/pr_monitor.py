@@ -138,6 +138,9 @@ class CheckTiming:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     details_url: str | None = None
+    app_slug: str | None = None
+    app_name: str | None = None
+    creator_login: str | None = None
 
 
 @dataclass(frozen=True)
