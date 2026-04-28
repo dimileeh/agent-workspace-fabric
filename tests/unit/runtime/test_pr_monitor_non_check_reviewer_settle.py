@@ -122,6 +122,31 @@ def test_non_check_reviewer_wait_starts_for_green_pr_without_visible_reviewer_ch
 
 
 @pytest.mark.unit
+def test_zero_poll_interval_still_waits_for_non_check_reviewer_settle() -> None:
+    state = MonitorState()
+    cfg = MonitorConfig(
+        poll_interval_seconds=0,
+        non_check_reviewer_settle_seconds=180,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+
+    decision = _non_check_reviewer_settle_decision(
+        _ready_status(checks=(CheckTiming(name="ci/build", conclusion="SUCCESS"),)),
+        state,
+        cfg,
+        pr_number=93,
+        now=1000.0,
+    )
+
+    assert decision.action == "started"
+    assert decision.wait_seconds == 180
+    assert (
+        _non_check_reviewer_settle_done_key(pr_number=93, head_sha="head-a")
+        not in state.threads_addressed_ids
+    )
+
+
+@pytest.mark.unit
 def test_non_check_reviewer_wait_is_disabled_without_state_mutation() -> None:
     state = MonitorState()
     cfg = MonitorConfig(

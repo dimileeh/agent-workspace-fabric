@@ -2699,9 +2699,15 @@ def _non_check_reviewer_settle_decision(
             state_changed=True,
         )
 
+    wait_seconds = (
+        remaining_seconds
+        if config.poll_interval_seconds <= 0
+        else min(config.poll_interval_seconds, remaining_seconds)
+    )
+
     return _NonCheckReviewerSettleDecision(
         action="started" if started_now else "waiting",
-        wait_seconds=min(config.poll_interval_seconds, remaining_seconds),
+        wait_seconds=wait_seconds,
         configured_reviewers=configured_reviewers,
         missing_reviewers=missing_reviewers,
         visible_reviewers=visible_reviewers,
