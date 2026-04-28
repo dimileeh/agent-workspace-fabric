@@ -26,6 +26,7 @@ from awf.service.alembic_resolver import (
     AlembicResolveResult,
 )
 from awf.service.staleness import (
+    StalenessFinding,
     StalenessRefreshService,
     TargetBranchState,
     TargetBranchStateProvider,
@@ -447,7 +448,10 @@ async def reconcile_and_refresh_stale_candidates(
                         candidate_id=candidate.id,
                         workspace_id=candidate.workspace_id,
                         stale=refresh_result.stale,
-                        stale_reason=candidate.stale_reason,
+                        stale_reason=_summary_stale_reason(
+                            refresh_result.findings,
+                            fallback=candidate.stale_reason,
+                        ),
                         findings_count=len(refresh_result.findings),
                     )
                 )
@@ -503,3 +507,13 @@ def _slugify_repo(repo_url: str) -> str:
 
 def _slugify_branch(branch: str) -> str:
     return _SLUG_RE.sub("-", branch).strip("-") or "branch"
+
+
+def _summary_stale_reason(
+    findings: Sequence[StalenessFinding],
+    *,
+    fallback: str | None,
+) -> str | None:
+    first = next(iter(findings), None)
+    reason_code = getattr(first, "reason_code", None)
+    return reason_code if isinstance(reason_code, str) else fallback

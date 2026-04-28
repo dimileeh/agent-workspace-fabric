@@ -10,11 +10,17 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import AsyncEngine
+from sqlalchemy.orm.attributes import set_committed_value
 
 import awf.api.routes.merge_queue as merge_queue_route
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    StaleReasonCreate,
+    StaleReasonRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.runtime.merge_eligibility import VALIDATION_INSUFFICIENT_TIER_STALE_REASON
 
@@ -34,6 +40,7 @@ async def _create_queue_workspace(
     resolved_profile: dict | None = None,
     updated_at: datetime | None = None,
     candidate_created_at: datetime | None = None,
+    successful_validate_tier: int | None = None,
 ) -> str:
     from awf.db.repositories import MergeCandidateRepository, TaskAttemptRepository, TaskRepository
 
@@ -75,6 +82,14 @@ async def _create_queue_workspace(
         )
         if pr_url is not None:
             attempt.is_canonical_for_merge = True
+            if successful_validate_tier is not None:
+                operation = await OperationRepository(session).create(
+                    workspace_id=workspace.id,
+                    operation_type=OperationType.validate,
+                    status=OperationStatus.succeeded,
+                    payload={"requested_tier": successful_validate_tier},
+                )
+                set_committed_value(workspace, "operations", [operation])
             candidate_repo = MergeCandidateRepository(session)
             candidate = await candidate_repo.create_or_update_open_for_attempt(
                 task=task,
@@ -186,6 +201,54 @@ async def _attempt_id_for_workspace(engine: AsyncEngine, workspace_id: str) -> s
         return attempt_id
 
 
+async def _candidate_id_for_workspace(engine: AsyncEngine, workspace_id: str) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT id FROM merge_candidates WHERE workspace_id = :workspace_id"),
+            {"workspace_id": workspace_id},
+        )
+        candidate_id = result.scalar_one()
+        assert isinstance(candidate_id, str)
+        return candidate_id
+
+
+async def _add_active_stale_reason(
+    engine: AsyncEngine,
+    *,
+    workspace_id: str,
+    reason_code: str = "STALE_DEPENDENCY",
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        result = await session.execute(
+            text(
+                """
+                SELECT id, attempt_id, task_id
+                FROM merge_candidates
+                WHERE workspace_id = :workspace_id
+                """
+            ),
+            {"workspace_id": workspace_id},
+        )
+        row = result.one()
+        await StaleReasonRepository(session).replace_active_findings(
+            workspace_id=workspace_id,
+            candidate_id=row.id,
+            attempt_id=row.attempt_id,
+            task_id=row.task_id,
+            findings=[
+                StaleReasonCreate(
+                    reason_code=reason_code,
+                    trigger_type="dependency_changed",
+                    trigger_ref="uv.lock",
+                    explanation="Dependency manifest changed on target branch.",
+                )
+            ],
+        )
+        await session.commit()
+
+
 async def _add_monitor_recovery_operation(engine: AsyncEngine, workspace_id: str) -> None:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -198,6 +261,27 @@ async def _add_monitor_recovery_operation(engine: AsyncEngine, workspace_id: str
         await session.commit()
 
 
+async def _add_operation(
+    engine: AsyncEngine,
+    workspace_id: str,
+    *,
+    operation_type: OperationType,
+    status: OperationStatus,
+    created_at: datetime,
+    payload: dict[str, object] | None = None,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        operation = await OperationRepository(session).create(
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            status=status,
+            payload=payload,
+        )
+        operation.created_at = created_at
+        await session.commit()
+
+
 async def _insert_validation_run(
     engine: AsyncEngine,
     *,
@@ -205,7 +289,9 @@ async def _insert_validation_run(
     workspace_id: str,
     attempt_id: str,
     target_head_sha: str,
+    tier: int = 1,
     status: str = "succeeded",
+    started_at: datetime = datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
     finished_at: datetime = datetime(2026, 4, 26, 12, 5, tzinfo=UTC),
     coverage: dict[str, object] | None = None,
 ) -> None:
@@ -245,7 +331,7 @@ async def _insert_validation_run(
                     :id,
                     :workspace_id,
                     :attempt_id,
-                    1,
+                    :tier,
                     :command_set_hash,
                     :commands,
                     'base123',
@@ -264,6 +350,7 @@ async def _insert_validation_run(
                 "workspace_id": workspace_id,
                 "attempt_id": attempt_id,
                 "target_head_sha": target_head_sha,
+                "tier": tier,
                 "status": status,
                 "command_set_hash": "b" * 64,
                 "commands": json.dumps(
@@ -279,7 +366,7 @@ async def _insert_validation_run(
                         }
                     ]
                 ),
-                "started_at": datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+                "started_at": started_at,
                 "finished_at": finished_at,
                 "log_stream_refs": json.dumps(log_stream_refs),
             },
@@ -348,6 +435,8 @@ class TestMergeQueueList:
             "last_event",
             "merge_blocker_reason",
             "required_next_action",
+            "required_validation_tier",
+            "latest_satisfied_validation_tier",
             "readiness",
             "canonical",
             "queue_blockers",
@@ -386,7 +475,81 @@ class TestMergeQueueList:
             "stale_reason": None,
         }
         assert item["latest_validation"] is None
+        assert item["required_validation_tier"] == 1
+        assert item["latest_satisfied_validation_tier"] is None
         assert newer_id not in {row["workspace_id"] for row in body["items"]}
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("task_class", "owned_paths", "changed_path", "reason_code"),
+        [
+            (
+                "dependency_task",
+                ["src/awf/service/**"],
+                "uv.lock",
+                "STALE_DEPENDENCY",
+            ),
+            (
+                "build_config_task",
+                ["src/awf/service/**"],
+                "Dockerfile",
+                "STALE_BUILD_CONFIG",
+            ),
+            (
+                "migration_task",
+                ["src/awf/service/**"],
+                "migrations/versions/20260428_add_table.py",
+                "STALE_SCHEMA",
+            ),
+        ],
+    )
+    async def test_sensitive_stale_reasons_block_with_rebase_action(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        task_class: str,
+        owned_paths: list[str],
+        changed_path: str,
+        reason_code: str,
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title=f"Sensitive {reason_code}",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/20",
+            task_class=task_class,
+            owned_paths=owned_paths,
+            successful_validate_tier=3,
+        )
+        candidate_id = await _candidate_id_for_workspace(engine, workspace_id)
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="main",
+                    head_sha="b" * 40,
+                    changed_paths=(changed_path,),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(row for row in response.json()["items"] if row["workspace_id"] == workspace_id)
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "rebase"
+        assert item["readiness"]["stale"] is True
+        assert [reason["reason_code"] for reason in item["stale_reasons"]] == [reason_code]
 
     @pytest.mark.unit
     async def test_filters_by_repo_base_status_and_limit(
@@ -479,6 +642,68 @@ class TestMergeQueueList:
         assert item["readiness"]["ready"] is False
         assert item["readiness"]["stale"] is True
         assert item["readiness"]["stale_reason"] == "docs_task_scope_violation"
+
+    @pytest.mark.unit
+    async def test_validation_stale_action_precedes_active_stale_reason(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Validation stale with dependency drift",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/28",
+            task_class="dependency_task",
+            owned_paths=["src/awf/service/**"],
+        )
+        await _add_active_stale_reason(
+            engine,
+            workspace_id=workspace_id,
+            reason_code="STALE_DEPENDENCY",
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "validate"
+        assert item["readiness"]["stale_reason"] == "validation_insufficient_tier"
+        assert [r["reason_code"] for r in item["stale_reasons"]] == ["STALE_DEPENDENCY"]
+
+    @pytest.mark.unit
+    async def test_docs_scope_stale_action_precedes_active_stale_reason(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Docs task with dependency drift",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/29",
+            task_class="docs_task",
+            owned_paths=["docs/**", "src/config.py"],
+        )
+        await _add_active_stale_reason(
+            engine,
+            workspace_id=workspace_id,
+            reason_code="STALE_DEPENDENCY",
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "resolve_task_scope"
+        assert item["readiness"]["stale_reason"] == "docs_task_scope_violation"
+        assert [r["reason_code"] for r in item["stale_reasons"]] == ["STALE_DEPENDENCY"]
 
     @pytest.mark.unit
     async def test_reports_has_more_and_accepts_next_cursor(
@@ -1043,6 +1268,118 @@ class TestMergeQueueList:
             "coverage_reason_code": None,
             "coverage_gaps": [],
         }
+        assert item["required_validation_tier"] == 1
+        assert item["latest_satisfied_validation_tier"] == 1
+
+    @pytest.mark.unit
+    async def test_exposes_required_and_latest_satisfied_validation_tiers(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Tier recovery",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/24",
+            branch_name="codex/merge-queue",
+            task_class="test_task",
+            updated_at=datetime(2026, 4, 26, 12, 8, tzinfo=UTC),
+        )
+        attempt_id = await _attempt_id_for_workspace(engine, workspace_id)
+        await _insert_validation_run(
+            engine,
+            run_id="vr_240000000000000000000001",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="head123",
+            tier=1,
+            started_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+            finished_at=datetime(2026, 4, 26, 12, 1, tzinfo=UTC),
+        )
+        await _add_operation(
+            engine,
+            workspace_id,
+            operation_type=OperationType.rebase,
+            status=OperationStatus.succeeded,
+            created_at=datetime(2026, 4, 26, 12, 2, tzinfo=UTC),
+        )
+        await _insert_validation_run(
+            engine,
+            run_id="vr_240000000000000000000002",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="head123",
+            tier=2,
+            started_at=datetime(2026, 4, 26, 12, 3, tzinfo=UTC),
+            finished_at=datetime(2026, 4, 26, 12, 4, tzinfo=UTC),
+        )
+        await _insert_validation_run(
+            engine,
+            run_id="vr_240000000000000000000003",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="head123",
+            tier=3,
+            status="failed",
+            started_at=datetime(2026, 4, 26, 12, 5, tzinfo=UTC),
+            finished_at=datetime(2026, 4, 26, 12, 6, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["required_validation_tier"] == 2
+        assert item["latest_satisfied_validation_tier"] == 2
+        assert item["latest_validation"]["validation_run_id"] == "vr_240000000000000000000003"
+        assert item["latest_validation"]["tier"] == 3
+        assert item["latest_validation"]["status"] == "failed"
+
+    @pytest.mark.unit
+    async def test_latest_satisfied_validation_tier_ignores_run_started_before_rebase(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Overlapping rebase validation",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/25",
+            branch_name="codex/merge-queue",
+            task_class="test_task",
+            updated_at=datetime(2026, 4, 26, 12, 8, tzinfo=UTC),
+        )
+        attempt_id = await _attempt_id_for_workspace(engine, workspace_id)
+        await _add_operation(
+            engine,
+            workspace_id,
+            operation_type=OperationType.rebase,
+            status=OperationStatus.succeeded,
+            created_at=datetime(2026, 4, 26, 12, 2, tzinfo=UTC),
+        )
+        await _insert_validation_run(
+            engine,
+            run_id="vr_250000000000000000000001",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="head123",
+            tier=2,
+            started_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+            finished_at=datetime(2026, 4, 26, 12, 4, tzinfo=UTC),
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["required_validation_tier"] == 2
+        assert item["latest_satisfied_validation_tier"] is None
 
     @pytest.mark.unit
     async def test_latest_validation_summary_exposes_coverage_policy(
@@ -1118,6 +1455,7 @@ class TestMergeQueueHelpers:
 
         assert merge_queue_route._merge_blocker_reason(
             candidate,
+            stale_reasons=[],
             policy_findings=[],
             queue_blockers=[],
         ) == (expected_reason, expected_action)

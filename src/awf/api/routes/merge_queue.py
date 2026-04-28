@@ -6,7 +6,7 @@ import base64
 import binascii
 import json
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from typing import Annotated, cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -24,6 +24,7 @@ from awf.api.schemas import (
     PolicyFindingResponse,
     StaleReasonResponse,
     ValidationRunSummaryResponse,
+    ValidationTier,
     WorkspaceEventResponse,
 )
 from awf.api.validation_runs import validation_run_summary
@@ -111,6 +112,10 @@ async def list_merge_queue(
     latest_validation_runs = await ValidationRunRepository(session).latest_by_workspace_ids(
         _row_workspace(row).id for row in page_rows
     )
+    validation_runs_by_workspace = await ValidationRunRepository(session).list_by_workspace_ids(
+        (_row_workspace(row).id for row in page_rows),
+        status="succeeded",
+    )
 
     stale_reasons_by_candidate = await _load_active_stale_reasons(session, page_rows)
     policy_findings_by_candidate = await _load_active_policy_findings(session, page_rows)
@@ -121,6 +126,7 @@ async def list_merge_queue(
             _item_from_row(
                 row,
                 latest_validation_runs.get(_row_workspace(row).id),
+                validation_runs_by_workspace.get(_row_workspace(row).id, []),
                 stale_reasons_by_candidate,
                 policy_findings_by_candidate,
                 blockers_by_candidate,
@@ -168,6 +174,7 @@ async def _load_queue_blockers(
 def _item_from_row(
     row: MergeCandidate | Workspace,
     latest_validation_run: ValidationRun | None,
+    validation_runs: list[ValidationRun],
     stale_reasons_by_candidate: dict[str, list[StaleReason]],
     policy_findings_by_candidate: dict[str, list[PolicyFinding]],
     blockers_by_candidate: dict[str, list[MergeQueueBlocker]],
@@ -176,16 +183,18 @@ def _item_from_row(
         return _item_from_candidate(
             row,
             latest_validation_run,
+            validation_runs,
             stale_reasons=stale_reasons_by_candidate.get(row.id, []),
             policy_findings=policy_findings_by_candidate.get(row.id, []),
             queue_blockers=blockers_by_candidate.get(row.id, []),
         )
-    return _item_from_legacy_workspace(row, latest_validation_run)
+    return _item_from_legacy_workspace(row, latest_validation_run, validation_runs)
 
 
 def _item_from_candidate(
     candidate: MergeCandidate,
     latest_validation_run: ValidationRun | None,
+    validation_runs: list[ValidationRun],
     *,
     stale_reasons: list[StaleReason],
     policy_findings: list[PolicyFinding],
@@ -195,9 +204,11 @@ def _item_from_candidate(
     latest_event = _latest_event(workspace.events)
     reason, action = _merge_blocker_reason(
         candidate,
+        stale_reasons=stale_reasons,
         policy_findings=policy_findings,
         queue_blockers=queue_blockers,
     )
+    latest_rebase_time = _latest_successful_rebase_time(workspace)
     return MergeQueueItemResponse(
         candidate_id=candidate.id,
         candidate_status=candidate.status,
@@ -224,6 +235,15 @@ def _item_from_candidate(
         ),
         merge_blocker_reason=reason,
         required_next_action=action,
+        required_validation_tier=_required_validation_tier(
+            workspace,
+            latest_rebase_time=latest_rebase_time,
+        ),
+        latest_satisfied_validation_tier=_latest_satisfied_validation_tier(
+            validation_runs,
+            attempt_id=candidate.attempt_id,
+            latest_rebase_time=latest_rebase_time,
+        ),
         readiness=_readiness_from_candidate(candidate, policy_findings=policy_findings),
         canonical=candidate.attempt.is_canonical_for_merge,
         queue_blockers=[_queue_blocker_response(blocker) for blocker in queue_blockers],
@@ -241,12 +261,14 @@ def _item_from_candidate(
 def _item_from_legacy_workspace(
     workspace: Workspace,
     latest_validation_run: ValidationRun | None,
+    validation_runs: list[ValidationRun],
 ) -> MergeQueueItemResponse:
     latest_event = _latest_event(workspace.events)
     pr_url = workspace.pr_url
     if pr_url is None:  # pragma: no cover - filtered at repository boundary
         raise ValueError("legacy merge queue rows must have a PR URL")
     reason, action = _merge_blocker_reason_from_workspace(workspace)
+    latest_rebase_time = _latest_successful_rebase_time(workspace)
     return MergeQueueItemResponse(
         candidate_id=None,
         candidate_status=None,
@@ -273,6 +295,15 @@ def _item_from_legacy_workspace(
         ),
         merge_blocker_reason=reason,
         required_next_action=action,
+        required_validation_tier=_required_validation_tier(
+            workspace,
+            latest_rebase_time=latest_rebase_time,
+        ),
+        latest_satisfied_validation_tier=_latest_satisfied_validation_tier(
+            validation_runs,
+            attempt_id=None,
+            latest_rebase_time=latest_rebase_time,
+        ),
         readiness=None,
         canonical=False,
         queue_blockers=[],
@@ -327,6 +358,7 @@ def _queue_blocker_response(blocker: MergeQueueBlocker) -> MergeQueueBlockerResp
 def _merge_blocker_reason(
     candidate: MergeCandidate,
     *,
+    stale_reasons: list[StaleReason],
     policy_findings: list[PolicyFinding],
     queue_blockers: list[MergeQueueBlocker],
 ) -> tuple[MergeBlockerReason, str | None]:
@@ -339,7 +371,7 @@ def _merge_blocker_reason(
     if candidate.policy_blocked or _has_blocking_policy_finding(policy_findings):
         return "policy_blocked", "resolve_policy_findings"
     if candidate.stale:
-        reason = candidate.stale_reason or "stale"
+        reason = _stale_reason_for_action(candidate, stale_reasons=stale_reasons)
         action = _required_stale_action(reason)
         return "stale", action
     if candidate.manual_merge_required:
@@ -351,6 +383,22 @@ def _merge_blocker_reason(
     if candidate.ready:
         return "ready_to_merge_or_waiting_for_github", None
     return "workspace_not_terminal", None
+
+
+def _stale_reason_for_action(
+    candidate: MergeCandidate,
+    *,
+    stale_reasons: list[StaleReason],
+) -> str:
+    legacy_reason = candidate.stale_reason or ""
+    if legacy_reason in (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
+    ):
+        return legacy_reason
+    if stale_reasons:
+        return stale_reasons[0].reason_code
+    return legacy_reason or "stale"
 
 
 def _required_stale_action(reason: str) -> str:
@@ -396,6 +444,87 @@ def _readiness_from_candidate(
 
 def _has_blocking_policy_finding(policy_findings: list[PolicyFinding]) -> bool:
     return any(finding.severity == "blocking" for finding in policy_findings)
+
+
+def _required_validation_tier(
+    workspace: Workspace,
+    *,
+    latest_rebase_time: datetime | None,
+) -> ValidationTier:
+    required_tier = max(
+        _task_class_validation_tier(workspace.task_class),
+        _profile_requested_validation_tier(workspace),
+    )
+    if latest_rebase_time is not None:
+        required_tier = max(required_tier, 2)
+    return _validation_tier(required_tier)
+
+
+def _latest_satisfied_validation_tier(
+    runs: list[ValidationRun],
+    *,
+    attempt_id: str | None,
+    latest_rebase_time: datetime | None,
+) -> ValidationTier | None:
+    satisfied_tier = 0
+    for run in runs:
+        if attempt_id is not None and run.attempt_id != attempt_id:
+            continue
+        if run.status != "succeeded":
+            continue
+        run_started_at = _ensure_utc(run.started_at)
+        if latest_rebase_time is not None and run_started_at <= latest_rebase_time:
+            continue
+        satisfied_tier = max(satisfied_tier, run.tier)
+    if satisfied_tier <= 0:
+        return None
+    return _validation_tier(satisfied_tier)
+
+
+def _latest_successful_rebase_time(workspace: Workspace) -> datetime | None:
+    latest_rebase_time: datetime | None = None
+    for operation in workspace.operations:
+        if operation.type != "rebase" or operation.status != "succeeded":
+            continue
+        operation_created_at = _ensure_utc(operation.created_at)
+        if latest_rebase_time is None or operation_created_at > latest_rebase_time:
+            latest_rebase_time = operation_created_at
+    return latest_rebase_time
+
+
+def _task_class_validation_tier(task_class: str | None) -> int:
+    if task_class == "migration_task":
+        return 3
+    if task_class in {"refactor_task", "dependency_task", "build_config_task"}:
+        return 2
+    return 1
+
+
+def _profile_requested_validation_tier(workspace: Workspace) -> int:
+    profile = workspace.resolved_profile
+    if not isinstance(profile, dict):
+        return 1
+    validation = profile.get("validation")
+    if not isinstance(validation, dict):
+        return 1
+    requested_tier = validation.get("requested_tier")
+    if isinstance(requested_tier, int):
+        return requested_tier
+    return 1
+
+
+def _validation_tier(value: int) -> ValidationTier:
+    if value >= 3:
+        return 3
+    if value == 2:
+        return 2
+    return 1
+
+
+def _ensure_utc(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _latest_validation_summary(
