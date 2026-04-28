@@ -1078,6 +1078,7 @@ async def _count_stuck_detailed(
         .where(
             ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
             Workspace.status != WorkspaceStatus.destroying.value,
+            Workspace.status != WorkspaceStatus.monitoring_pr.value,
             Workspace.created_at < cutoff,
         )
     )

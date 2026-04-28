@@ -1484,6 +1484,42 @@ async def test_monitor_metrics_counts_completed_and_stuck(
 
 
 @pytest.mark.unit
+async def test_monitoring_pr_not_counted_in_stuck_detailed(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    settings = Settings(_env_file=None, agent_wall_timeout_seconds=3600)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        pr_url="https://github.com/example/repo/pull/1",
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        pr_url="https://github.com/example/repo/pull/2",
+        failure_reason="network_hiccup",
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=settings,
+            now=now,
+        )
+
+    assert summary.stuck_running_count == 0
+    assert summary.stuck_with_reason_count == 0
+    assert summary.monitor_stuck_count == 2
+
+
+@pytest.mark.unit
 async def test_actionable_vs_unactionable_failure_counts(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
