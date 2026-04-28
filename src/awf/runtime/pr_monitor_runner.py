@@ -978,7 +978,6 @@ class PullRequestMonitorRunner:
         )
         from awf.runtime.merge_eligibility import (
             VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
-            compute_stale_reason,
             compute_stale_reason_for_attempt,
         )
 
@@ -1010,13 +1009,6 @@ class PullRequestMonitorRunner:
                 ws,
                 attempt_id=candidate.attempt_id,
             )
-            workspace_reason, workspace_action = compute_stale_reason(ws)
-            if (
-                validation_reason is not None
-                and workspace_reason == validation_reason
-                and workspace_action is not None
-            ):
-                validation_action = workspace_action
 
             persisted_stale_reason = candidate.stale_reason if candidate.stale else None
             if (
