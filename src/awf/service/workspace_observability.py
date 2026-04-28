@@ -491,16 +491,15 @@ def workspace_identity_usage_payload(workspace: Workspace) -> WorkspaceIdentityU
 def _latest_reverse_state_event(
     events: Sequence[WorkspaceEvent],
 ) -> WorkspaceEvent | None:
-    reverse_events = [
-        event
-        for event in events
-        if getattr(event, "event_type", None) == "workspace.state_changed"
-        and _is_reverse_lifecycle_transition(
+    for event in reversed(events):
+        if getattr(event, "event_type", None) != "workspace.state_changed":
+            continue
+        if _is_reverse_lifecycle_transition(
             getattr(event, "old_state", None),
             getattr(event, "new_state", None),
-        )
-    ]
-    return reverse_events[-1] if reverse_events else None
+        ):
+            return event
+    return None
 
 
 def _is_reverse_lifecycle_transition(

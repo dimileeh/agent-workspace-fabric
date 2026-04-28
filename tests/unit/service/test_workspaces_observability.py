@@ -26,6 +26,7 @@ from awf.db.session import make_engine, make_session_factory
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.workspace_observability import (
+    _latest_reverse_state_event,
     effective_agent_identity,
     workspace_identity_usage_payload,
     workspace_lifecycle_summary,
@@ -1018,6 +1019,28 @@ def test_recovery_summary_uses_latest_reverse_recovery_pair() -> None:
     assert summary.action == "validate"
     assert summary.recovery_mode == "validate_only"
     assert "STALE_TARGET_ADVANCED" not in summary.summary
+
+
+@pytest.mark.unit
+def test_latest_reverse_state_event_scans_from_most_recent_event() -> None:
+    base = datetime(2026, 4, 27, 21, 45, tzinfo=UTC)
+
+    class EarlierStateChange:
+        event_type = "workspace.state_changed"
+
+        @property
+        def old_state(self) -> str:
+            raise AssertionError("older events should not be inspected")
+
+    latest_reverse = _recovery_event(
+        event_id="evt_latest_reverse",
+        event_type="workspace.state_changed",
+        occurred_at=base + timedelta(seconds=60),
+        old_state=WorkspaceStatus.monitoring_pr.value,
+        new_state=WorkspaceStatus.ready.value,
+    )
+
+    assert _latest_reverse_state_event([EarlierStateChange(), latest_reverse]) is latest_reverse
 
 
 @pytest.mark.unit
