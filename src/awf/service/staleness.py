@@ -321,6 +321,11 @@ def _matched(changed_paths: Sequence[str], patterns: Sequence[str]) -> list[str]
 
 
 def _path_matches(path: str, pattern: str) -> bool:
+    """Return whether ``path`` matches ``pattern``.
+
+    Prefix branches only handle patterns with a trailing wildcard; mixed
+    wildcard patterns fall through to the bounded ``fnmatchcase`` fallback.
+    """
     if not pattern:
         return False
     if path == pattern:
