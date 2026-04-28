@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -11,6 +11,7 @@ import pytest
 from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+import awf.service.gc as gc
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -279,6 +280,55 @@ async def test_plan_applies_limit_to_workspace_queries(
     assert len(plan.candidates) == 1
     assert workspace_selects
     assert all("LIMIT" in statement.upper() for statement in workspace_selects)
+
+
+@pytest.mark.unit
+async def test_plan_classifies_workspace_paths_in_threads(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    candidate_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=48),
+        pr=True,
+    )
+    preserved_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=48),
+    )
+    _write(work_dir / "git" / "worktrees" / candidate_id / "repo.txt", "repo")
+
+    to_thread_calls: list[str] = []
+
+    async def _record_to_thread(
+        func: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        to_thread_calls.append(func.__name__)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(gc.asyncio, "to_thread", _record_to_thread)
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert [candidate.workspace_id for candidate in plan.candidates] == [candidate_id]
+    assert [item.workspace_id for item in plan.preserved] == [preserved_id]
+    assert to_thread_calls == [
+        "_classify_workspace_for_gc",
+        "_classify_workspace_for_gc",
+    ]
 
 
 @pytest.mark.unit

@@ -7,6 +7,7 @@ log streams.
 
 from __future__ import annotations
 
+import asyncio
 import shutil
 from collections.abc import Awaitable, Callable, Iterable, Iterator
 from dataclasses import dataclass
@@ -429,7 +430,8 @@ async def plan_terminal_workspace_gc(
     preserved: list[WorkspaceGCPreserved] = []
     candidate_ids: set[str] = set()
     for workspace in candidate_rows:
-        classification = _classify_workspace_for_gc(
+        classification = await asyncio.to_thread(
+            _classify_workspace_for_gc,
             workspace,
             work_dir=normalized_work_dir,
             now=current_time,
@@ -445,7 +447,8 @@ async def plan_terminal_workspace_gc(
     for workspace in preserved_rows:
         if workspace.id in candidate_ids:
             continue
-        classification = _classify_workspace_for_gc(
+        classification = await asyncio.to_thread(
+            _classify_workspace_for_gc,
             workspace,
             work_dir=normalized_work_dir,
             now=current_time,
