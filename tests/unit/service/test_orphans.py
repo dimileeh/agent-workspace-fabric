@@ -17,6 +17,8 @@ from awf.service.orphans import (
     TERMINAL_WORKSPACE_STATUSES,
     WorkspaceIdView,
     WorkspaceLifecycleSnapshot,
+    _label_value,
+    _legacy_workspace_id_from_managed_tail,
     detect_orphan_resources,
 )
 
@@ -689,3 +691,12 @@ def test_completed_workspace_past_retention_is_cleanup_ready(tmp_path: Path) -> 
     assert example["workspace_id"] == "ws_old"
     assert example["reason"] == "WORKSPACE_TERMINAL_RETENTION_EXPIRED"
     assert example["classification"] == "cleanup_ready"
+
+
+def test_label_value_ignores_strings_without_requested_key() -> None:
+    assert _label_value("com.example=one,other=two", "com.docker.compose.project") == ""
+
+
+def test_legacy_workspace_id_from_managed_tail_rejects_invalid_tails() -> None:
+    assert _legacy_workspace_id_from_managed_tail("not-managed") is None
+    assert _legacy_workspace_id_from_managed_tail("ws_") is None

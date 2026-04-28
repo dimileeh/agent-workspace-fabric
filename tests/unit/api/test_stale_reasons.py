@@ -14,10 +14,12 @@ from datetime import datetime
 import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import set_committed_value
 
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
+    OperationRepository,
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceRepository,
@@ -40,6 +42,7 @@ async def _seed_candidate(
     task_class: str | None = "refactor_task",
     base_sha: str = "a" * 40,
     updated_at: datetime | None = None,
+    successful_validate_tier: int | None = None,
 ) -> tuple[str, str, str]:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -86,6 +89,14 @@ async def _seed_candidate(
             to=WorkspaceStatus.monitoring_pr,
             reason_code="PR_OPENED",
         )
+        if successful_validate_tier is not None:
+            operation = await OperationRepository(session).create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.succeeded,
+                payload={"requested_tier": successful_validate_tier},
+            )
+            set_committed_value(workspace, "operations", [operation])
         attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
         assert attempt is not None
         candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
@@ -154,6 +165,49 @@ class TestMergeQueueExposesStaleReasons:
             "STALE_OVERLAP",
             "STALE_TARGET_ADVANCED",
         }
+
+    @pytest.mark.unit
+    async def test_merge_queue_item_uses_sensitive_stale_reason_for_rebase_action(
+        self,
+        client: AsyncClient,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id, _attempt_id, candidate_id = await _seed_candidate(
+            factory,
+            pr_url="https://github.com/example/svc/pull/177",
+            pr_number=177,
+            branch_name="awf/dependency-stale",
+            owned_paths=["src/awf/service/**"],
+            task_class="dependency_task",
+            successful_validate_tier=2,
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("uv.lock",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        response = await client.get("/v1/merge-queue")
+        assert response.status_code == 200
+        item = next(it for it in response.json()["items"] if it["workspace_id"] == workspace_id)
+
+        assert item["readiness"]["stale"] is True
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "rebase"
+        assert [r["reason_code"] for r in item["stale_reasons"]] == ["STALE_DEPENDENCY"]
 
     @pytest.mark.unit
     async def test_docs_class_with_non_overlapping_change_keeps_mergeable(
@@ -234,6 +288,62 @@ class TestWorkspaceStaleReasonsEndpoint:
         assert "items" in body
         assert any(r["status"] == "active" for r in body["items"])
         assert all(r["workspace_id"] == workspace_id for r in body["items"])
+
+    @pytest.mark.unit
+    async def test_workspace_stale_reasons_endpoint_includes_resolved_when_requested(
+        self,
+        client: AsyncClient,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id, _attempt_id, candidate_id = await _seed_candidate(
+            factory,
+            pr_url="https://github.com/example/svc/pull/179",
+            pr_number=179,
+            branch_name="awf/resolved-stale",
+            owned_paths=["src/awf/api/**"],
+            task_class="docs_task",
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("src/awf/api/routes/locks.py",),
+                    advanced_commits=1,
+                ),
+            )
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="a" * 40,
+                    changed_paths=(),
+                    advanced_commits=0,
+                ),
+            )
+            await session.commit()
+
+        active_response = await client.get(f"/v1/workspaces/{workspace_id}/stale-reasons")
+        assert active_response.status_code == 200
+        assert active_response.json()["items"] == []
+
+        resolved_response = await client.get(
+            f"/v1/workspaces/{workspace_id}/stale-reasons",
+            params={"include_resolved": "true"},
+        )
+        assert resolved_response.status_code == 200
+        items = resolved_response.json()["items"]
+        assert [item["reason_code"] for item in items] == ["STALE_OVERLAP"]
+        assert items[0]["status"] == "resolved"
+        assert items[0]["resolved_at"] is not None
 
     @pytest.mark.unit
     async def test_workspace_stale_reasons_endpoint_returns_empty_for_unknown_workspace(

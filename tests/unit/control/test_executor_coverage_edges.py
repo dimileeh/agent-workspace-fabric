@@ -14,6 +14,7 @@ from awf.control.executor import (
     WorkspaceExecutor,
     _agent_defaults_for_workspace,
     _agent_model_for_workspace,
+    _agent_pr_identity,
     _apply_baseline_coverage_ratchet,
     _call_pr_monitor_factory,
     _coverage_preserves_below_threshold_baseline,
@@ -1045,16 +1046,33 @@ def test_agent_defaults_for_workspace_binds_policy_model_for_monitor_recovery() 
     assert bound.model == "ollama/glm-5.1:cloud"
     assert bound.effort == "xhigh"
 
-    assert (
-        _agent_defaults_for_workspace(  # type: ignore[arg-type]
-            SimpleNamespace(task_policy={"agent_effort": "high"}),
-            None,
-        )
-        is None
-    )
 
+@pytest.mark.unit
+def test_agent_defaults_for_workspace_handles_policy_without_base_defaults() -> None:
+    effort_only = _agent_defaults_for_workspace(  # type: ignore[arg-type]
+        SimpleNamespace(task_policy={"agent_effort": "high"}),
+        None,
+    )
+    bound = _agent_defaults_for_workspace(  # type: ignore[arg-type]
+        SimpleNamespace(task_policy={"agent_model": "gpt-special", "agent_effort": "high"}),
+        None,
+    )
     created = _agent_defaults_for_workspace(  # type: ignore[arg-type]
         SimpleNamespace(task_policy={"agent_model": "gpt-5.5", "agent_effort": "xhigh"}),
         None,
     )
+
+    assert effort_only is None
+    assert bound == AgentDefaults(model="gpt-special", effort="high")
     assert created == AgentDefaults(model="gpt-5.5", effort="xhigh")
+
+
+@pytest.mark.unit
+def test_agent_pr_identity_omits_missing_model_and_effort() -> None:
+    assert (
+        _agent_pr_identity(  # type: ignore[arg-type]
+            SimpleNamespace(agent="codex", task_policy={}),
+            defaults=None,
+        )
+        == "agent: `codex`"
+    )

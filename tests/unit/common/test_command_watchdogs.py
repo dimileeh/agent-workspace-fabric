@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from awf.common import commands as commands_module
+import awf.common.commands as commands
 from awf.common.commands import (
     COMMAND_TIMEOUT_REASON,
     AsyncioSubprocessRunner,
@@ -188,18 +188,15 @@ async def test_terminate_process_noops_when_process_already_exited() -> None:
 
 
 @pytest.mark.unit
-async def test_terminate_process_kills_when_grace_period_expires(
+async def test_terminate_process_kills_when_terminate_grace_expires(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    class _SlowExitProcess:
+    class _StubbornProcess:
         def __init__(self) -> None:
             self.returncode: int | None = None
             self.terminated = False
             self.killed = False
-            self._waiter: asyncio.Future[int] = asyncio.get_running_loop().create_future()
-
-        async def wait(self) -> int:
-            return await self._waiter
+            self._done = asyncio.Event()
 
         def terminate(self) -> None:
             self.terminated = True
@@ -207,17 +204,21 @@ async def test_terminate_process_kills_when_grace_period_expires(
         def kill(self) -> None:
             self.killed = True
             self.returncode = -9
-            if not self._waiter.done():
-                self._waiter.set_result(self.returncode)
+            self._done.set()
 
-    monkeypatch.setattr(commands_module, "_TERMINATE_GRACE_SECONDS", 0.0)
-    proc = _SlowExitProcess()
+        async def wait(self) -> int:
+            await self._done.wait()
+            assert self.returncode is not None
+            return self.returncode
+
+    proc = _StubbornProcess()
     wait_task = asyncio.create_task(proc.wait())
+    monkeypatch.setattr(commands, "_TERMINATE_GRACE_SECONDS", 0.01)
 
     await _terminate_process(proc, wait_task)  # type: ignore[arg-type]
 
-    assert proc.terminated
-    assert proc.killed
+    assert proc.terminated is True
+    assert proc.killed is True
     assert await wait_task == -9
 
 

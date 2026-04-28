@@ -204,6 +204,7 @@ def _item_from_candidate(
     latest_event = _latest_event(workspace.events)
     reason, action = _merge_blocker_reason(
         candidate,
+        stale_reasons=stale_reasons,
         policy_findings=policy_findings,
         queue_blockers=queue_blockers,
     )
@@ -357,6 +358,7 @@ def _queue_blocker_response(blocker: MergeQueueBlocker) -> MergeQueueBlockerResp
 def _merge_blocker_reason(
     candidate: MergeCandidate,
     *,
+    stale_reasons: list[StaleReason],
     policy_findings: list[PolicyFinding],
     queue_blockers: list[MergeQueueBlocker],
 ) -> tuple[MergeBlockerReason, str | None]:
@@ -369,7 +371,7 @@ def _merge_blocker_reason(
     if candidate.policy_blocked or _has_blocking_policy_finding(policy_findings):
         return "policy_blocked", "resolve_policy_findings"
     if candidate.stale:
-        reason = candidate.stale_reason or "stale"
+        reason = _stale_reason_for_action(candidate, stale_reasons=stale_reasons)
         action = _required_stale_action(reason)
         return "stale", action
     if candidate.manual_merge_required:
@@ -381,6 +383,22 @@ def _merge_blocker_reason(
     if candidate.ready:
         return "ready_to_merge_or_waiting_for_github", None
     return "workspace_not_terminal", None
+
+
+def _stale_reason_for_action(
+    candidate: MergeCandidate,
+    *,
+    stale_reasons: list[StaleReason],
+) -> str:
+    legacy_reason = candidate.stale_reason or ""
+    if legacy_reason in (
+        VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
+        DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
+    ):
+        return legacy_reason
+    if stale_reasons:
+        return stale_reasons[0].reason_code
+    return legacy_reason or "stale"
 
 
 def _required_stale_action(reason: str) -> str:
