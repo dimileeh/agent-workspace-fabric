@@ -689,6 +689,105 @@ async def test_cleanup_is_idempotent_after_partial_compose_failure(
 
 
 @pytest.mark.unit
+async def test_gc_accepts_sync_compose_teardown_result(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+
+    def _compose_teardown(_candidate: object) -> WorkspaceGCComposeTeardownResult:
+        return WorkspaceGCComposeTeardownResult(
+            status="skipped",
+            reason_code="NO_COMPOSE_STACK",
+        )
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+
+    assert result.status == "succeeded"
+    assert result.to_dict()["candidates"][0]["compose_teardown"] == {
+        "status": "skipped",
+        "reason_code": "NO_COMPOSE_STACK",
+    }
+    assert not worktree.exists()
+
+
+@pytest.mark.unit
+async def test_default_gc_policy_ignores_non_pr_terminal_and_unknown_statuses(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    cancelled_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.cancelled,
+        updated_at=now - timedelta(hours=200),
+    )
+    unknown_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        title="future status",
+        pr=True,
+    )
+    async with session_factory() as session:
+        unknown = await session.get(Workspace, unknown_id)
+        assert unknown is not None
+        unknown.status = "future_status"
+        await session.commit()
+    _write(work_dir / "git" / "worktrees" / cancelled_id / "repo.txt", "repo")
+    _write(work_dir / "git" / "worktrees" / unknown_id / "repo.txt", "repo")
+
+    batch = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        now=now,
+    )
+    single_unknown = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=unknown_id,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+    )
+    single_cancelled = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=cancelled_id,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert batch.candidates == []
+    assert batch.preserved == []
+    assert single_unknown.plan.candidates == []
+    assert single_unknown.deleted_paths == []
+    assert single_cancelled.plan.candidates == []
+    assert single_cancelled.deleted_paths == []
+    assert (work_dir / "git" / "worktrees" / cancelled_id).exists()
+    assert (work_dir / "git" / "worktrees" / unknown_id).exists()
+
+
+@pytest.mark.unit
 async def test_single_workspace_gc_ignores_active_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -807,6 +906,7 @@ async def test_gc_execution_reports_refused_file_symlink_and_out_of_root_paths(
     assert candidate["paths"]["worktree"]["error"] == "refusing to delete non-directory path"
     assert candidate["paths"]["compose"]["error"] == "path is outside the expected service GC roots"
     assert candidate["paths"]["auth"]["error"] == "refusing to delete symlink"
+    assert result.path_outcomes[0].to_dict()["error"] == "refusing to delete non-directory path"
 
 
 @pytest.mark.unit

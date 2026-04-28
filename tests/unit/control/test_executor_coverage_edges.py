@@ -18,6 +18,7 @@ from awf.control.executor import (
     _call_pr_monitor_factory,
     _coverage_preserves_below_threshold_baseline,
     _failure_reason_for_phase,
+    _MonitorRebaseRecoveryError,
     _read_text_if_present,
     _validation_failure_message,
     _validation_run_command_records,
@@ -1044,3 +1045,89 @@ def test_agent_defaults_for_workspace_binds_policy_model_for_monitor_recovery() 
     assert bound is not None
     assert bound.model == "ollama/glm-5.1:cloud"
     assert bound.effort == "xhigh"
+
+    effort_without_model = _agent_defaults_for_workspace(  # type: ignore[arg-type]
+        SimpleNamespace(task_policy={"agent_effort": "high"}),
+        None,
+    )
+    model_without_defaults = _agent_defaults_for_workspace(  # type: ignore[arg-type]
+        SimpleNamespace(task_policy={"agent_model": "gpt-5.4-mini"}),
+        None,
+    )
+
+    assert effort_without_model is None
+    assert model_without_defaults == AgentDefaults(model="gpt-5.4-mini", effort=None)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("queued", "message"),
+    [
+        ([(1, "", "fetch failed")], "git fetch origin main failed"),
+        ([(0, "", ""), (1, "", "switch failed")], "git switch awf/ws failed"),
+        (
+            [(0, "", ""), (0, "", ""), (128, "", "merge-base failed")],
+            "merge-base --is-ancestor origin/main HEAD failed",
+        ),
+        (
+            [
+                (0, "", ""),
+                (0, "", ""),
+                (1, "", ""),
+                (1, "", "conflict"),
+                (0, "", ""),
+            ],
+            "git rebase origin/main failed",
+        ),
+        (
+            [
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (1, "", "no target"),
+            ],
+            "could not resolve origin/main",
+        ),
+        (
+            [
+                (0, "", ""),
+                (0, "", ""),
+                (0, "", ""),
+                (0, "b" * 40 + "\n", ""),
+                (1, "", "no head"),
+            ],
+            "could not resolve HEAD",
+        ),
+        (
+            [
+                (0, "", ""),
+                (0, "", ""),
+                (1, "", ""),
+                (0, "", ""),
+                (0, "b" * 40 + "\n", ""),
+                (0, "c" * 40 + "\n", ""),
+                (1, "", "lease failed"),
+            ],
+            "git push --force-with-lease failed",
+        ),
+    ],
+)
+async def test_monitor_rebase_recovery_reports_git_failures(
+    queued: list[tuple[int, str, str]],
+    message: str,
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    for returncode, stdout, stderr in queued:
+        runner.queue_result(returncode=returncode, stdout=stdout, stderr=stderr)
+    executor = _executor_with_runner(runner, tmp_path)
+
+    with pytest.raises(_MonitorRebaseRecoveryError, match=message):
+        await executor._run_monitor_rebase_recovery(
+            workspace_id="ws_rebase",
+            worktree_path=tmp_path / "worktrees" / "ws_rebase",
+            base_branch="main",
+            branch_name="awf/ws",
+            remote_branch="awf/ws",
+            reason="stale",
+        )

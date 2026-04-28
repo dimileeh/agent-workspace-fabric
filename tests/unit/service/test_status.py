@@ -18,6 +18,7 @@ from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.service import status as status_mod
 from awf.service.config import ServiceSettings
 from awf.service.status import (
     WorkspaceIdView,
@@ -30,6 +31,7 @@ from awf.service.status import (
     _docker_socket_path,
     _fail,
     _http_get,
+    _orphan_resources_check_payload,
     _run_docker_command,
     _run_subprocess,
     _truncate,
@@ -347,6 +349,60 @@ def test_workspace_cleanup_status_reports_disabled_policy(tmp_path: Path) -> Non
         "preserved_count": 0,
         "examples": [],
     }
+
+
+@pytest.mark.unit
+def test_workspace_cleanup_status_reports_plan_unavailable_without_engine_dispose(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    monkeypatch.setattr(
+        status_mod,
+        "make_engine",
+        lambda _url: (_ for _ in ()).throw(RuntimeError("database config missing")),
+    )
+
+    cleanup = asyncio.run(collect_workspace_cleanup_status(_settings(tmp_path)))
+
+    assert cleanup["ok"] is True
+    assert cleanup["status"] == "unavailable"
+    assert cleanup["reason"] == "CLEANUP_PLAN_UNAVAILABLE"
+    assert "database config missing" in cleanup["detail"]
+
+
+@pytest.mark.unit
+def test_status_db_helpers_handle_engine_construction_failures(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        status_mod,
+        "make_engine",
+        lambda _url: (_ for _ in ()).throw(RuntimeError("bad database url")),
+    )
+
+    db = asyncio.run(check_database("sqlite+aiosqlite:///bad.db"))
+    view = asyncio.run(_default_workspace_id_lookup("sqlite+aiosqlite:///bad.db"))
+
+    assert db["ok"] is False
+    assert db["reason"] == "DB_CONNECTION_FAILED"
+    assert view.available is False
+
+
+@pytest.mark.unit
+def test_orphan_resources_check_payload_handles_missing_resource_counts() -> None:
+    payload = _orphan_resources_check_payload(
+        {
+            "ok": True,
+            "status": "ok",
+            "reason": "NO_ORPHANS",
+            "cleanup_readiness": {"ready": True},
+        }
+    )
+
+    assert payload["reason"] == "NO_ORPHANS"
+    assert payload["cleanup_readiness"]["ready"] is True
+    assert payload["cleanup_readiness"]["reason"] == "NO_ORPHANS"
+    assert "counts_by_kind" not in payload
 
 
 @pytest.mark.unit
@@ -1067,6 +1123,48 @@ async def test_database_probe_and_workspace_lookup_read_sqlite_rows(tmp_path: Pa
     assert view.active_ids.isdisjoint(view.terminal_ids)
     assert failed["ok"] is False
     assert failed["reason"] == "DB_CONNECTION_FAILED"
+
+
+@pytest.mark.unit
+def test_status_workspace_lookup_ignores_unknown_status_rows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disposed = False
+
+    class _Rows:
+        def all(self) -> list[tuple[str, str, object, object]]:
+            return [
+                ("ws_active", "running", None, None),
+                ("ws_done", "completed", None, None),
+                ("ws_future", "future_status", None, None),
+            ]
+
+    class _Connection:
+        async def __aenter__(self) -> _Connection:
+            return self
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+        async def execute(self, *_args: object, **_kwargs: object) -> _Rows:
+            return _Rows()
+
+    class _Engine:
+        def connect(self) -> _Connection:
+            return _Connection()
+
+        async def dispose(self) -> None:
+            nonlocal disposed
+            disposed = True
+
+    monkeypatch.setattr(status_mod, "make_engine", lambda _url: _Engine())
+
+    view = asyncio.run(_default_workspace_id_lookup("sqlite+aiosqlite:///fake.db"))
+
+    assert view.active_ids == frozenset({"ws_active"})
+    assert view.terminal_ids == frozenset({"ws_done"})
+    assert view.snapshots[-1].workspace_id == "ws_future"
+    assert disposed is True
 
 
 @pytest.mark.unit
