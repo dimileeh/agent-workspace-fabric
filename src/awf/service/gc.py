@@ -249,6 +249,7 @@ class WorkspaceGCPlan:
     candidates: list[WorkspaceGCCandidate]
     preserved: list[WorkspaceGCPreserved]
     cleanup_enabled: bool = True
+    default_policy: bool = True
 
     @property
     def total_estimated_bytes(self) -> int:
@@ -258,6 +259,26 @@ class WorkspaceGCPlan:
     def preserved_count(self) -> int:
         return len(self.preserved)
 
+    @property
+    def policy_eligible_statuses(self) -> tuple[str, ...]:
+        if self.default_policy:
+            if WorkspaceStatus.completed.value in self.include_statuses:
+                return (WorkspaceStatus.completed.value,)
+            return ()
+        eligible_statuses = set(self.include_statuses)
+        eligible_statuses &= set(TERMINAL_WORKSPACE_GC_STATUSES)
+        eligible_statuses -= set(PROTECTED_WORKSPACE_GC_STATUSES)
+        eligible_statuses -= set(self.exclude_statuses)
+        return tuple(sorted(eligible_statuses))
+
+    @property
+    def requires_pr_metadata(self) -> bool:
+        return self.default_policy and WorkspaceStatus.completed.value in self.include_statuses
+
+    @property
+    def preserves_failed_workspaces(self) -> bool:
+        return self.default_policy and WorkspaceStatus.failed.value in self.include_statuses
+
     def to_dict(self) -> dict[str, object]:
         return {
             "work_dir": str(self.work_dir),
@@ -266,9 +287,9 @@ class WorkspaceGCPlan:
             "policy": {
                 "cleanup_enabled": self.cleanup_enabled,
                 "retention_hours": self.min_age_hours,
-                "eligible_statuses": [WorkspaceStatus.completed.value],
-                "requires_pr_metadata": True,
-                "preserves_failed_workspaces": True,
+                "eligible_statuses": list(self.policy_eligible_statuses),
+                "requires_pr_metadata": self.requires_pr_metadata,
+                "preserves_failed_workspaces": self.preserves_failed_workspaces,
             },
             "include_statuses": list(self.include_statuses),
             "exclude_statuses": list(self.exclude_statuses),
@@ -385,6 +406,7 @@ async def plan_terminal_workspace_gc(
             candidates=[],
             preserved=[],
             cleanup_enabled=cleanup_enabled,
+            default_policy=default_policy,
         )
 
     row_limit = None if limit is None else max(limit, 0)
@@ -467,6 +489,7 @@ async def plan_terminal_workspace_gc(
         candidates=candidates,
         preserved=preserved,
         cleanup_enabled=cleanup_enabled,
+        default_policy=default_policy,
     )
 
 
@@ -640,6 +663,7 @@ async def run_workspace_filesystem_gc(
         candidates=candidates,
         preserved=preserved,
         cleanup_enabled=cleanup_enabled,
+        default_policy=True,
     )
     if not execute:
         return _gc_result(

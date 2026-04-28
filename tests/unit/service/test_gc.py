@@ -639,6 +639,13 @@ async def test_explicit_status_filter_can_select_old_terminal_non_pr_workspace(
     assert plan.candidates[0].reason_code == "TERMINAL_WORKSPACE_RETENTION_EXPIRED"
     assert plan.preserved[0].workspace_id == recent_failed
     assert plan.preserved[0].reason_code == WORKSPACE_WITHIN_RETENTION
+    assert plan.to_dict()["policy"] == {
+        "cleanup_enabled": True,
+        "retention_hours": 24,
+        "eligible_statuses": [WorkspaceStatus.failed.value],
+        "requires_pr_metadata": False,
+        "preserves_failed_workspaces": False,
+    }
 
 
 @pytest.mark.unit
