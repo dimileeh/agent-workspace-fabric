@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -61,6 +62,38 @@ def test_min_free_disk_threshold_flows_from_settings_to_service_settings() -> No
     settings = resolve_service_settings(base, environ={"AWF_MIN_FREE_DISK_BYTES": "123456"})
 
     assert settings.min_free_disk_bytes == 123456
+
+
+@pytest.mark.unit
+def test_workspace_cleanup_policy_defaults_are_documented_in_payload() -> None:
+    settings = resolve_service_settings(Settings(_env_file=None), environ={})
+    payload = service_config_payload(settings)
+
+    assert settings.completed_workspace_retention_hours == 168
+    assert settings.workspace_cleanup_enabled is True
+    assert settings.workspace_cleanup_scan_interval_seconds == 3600
+    assert settings.workspace_cleanup_batch_limit == 50
+    assert payload["completed_workspace_retention_hours"] == 168
+    assert payload["workspace_cleanup_enabled"] is True
+    assert payload["workspace_cleanup_scan_interval_seconds"] == 3600
+    assert payload["workspace_cleanup_batch_limit"] == 50
+
+
+@pytest.mark.unit
+def test_workspace_cleanup_policy_flows_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWF_COMPLETED_WORKSPACE_RETENTION_HOURS", "12")
+    monkeypatch.setenv("AWF_WORKSPACE_CLEANUP_ENABLED", "false")
+    monkeypatch.setenv("AWF_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS", "300")
+    monkeypatch.setenv("AWF_WORKSPACE_CLEANUP_BATCH_LIMIT", "7")
+
+    settings = resolve_service_settings(Settings(_env_file=None), environ=os.environ)
+
+    assert settings.completed_workspace_retention_hours == 12
+    assert settings.workspace_cleanup_enabled is False
+    assert settings.workspace_cleanup_scan_interval_seconds == 300
+    assert settings.workspace_cleanup_batch_limit == 7
 
 
 @pytest.mark.unit

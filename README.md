@@ -294,7 +294,7 @@ What each stage means:
 | `validating` | AWF is running profile/request validation. |
 | `pushing` | AWF is pushing the task branch and creating a PR. |
 | `monitoring_pr` | AWF owns the PR until it merges, closes, or fails. |
-| `completed` | The PR merged or was observed as merged. Successful stack cleanup ran. |
+| `completed` | The PR merged or was observed as merged. Compose teardown ran best-effort; filesystem pressure-dir cleanup is retention-based. |
 | `failed` | A terminal failure occurred. The workspace is preserved for inspection. |
 | `cancelled` | Operator or orchestrator cancelled the workspace. |
 | `destroying` | Cleanup requested. |
@@ -520,8 +520,8 @@ uv run --python 3.12 --extra dev awf service status
 uv run --python 3.12 --extra dev awf service status --format pretty
 ```
 
-`awf service status` reports an `orphan_workspaces` check alongside the
-existing API / DB / Docker / image / disk checks. It reads
+`awf service status` reports `orphan_workspaces` and `workspace_cleanup` checks
+alongside the existing API / DB / Docker / image / disk checks. It reads
 Docker Compose labels for containers, networks, and volumes, and scans
 `<work_dir>/git/worktrees/ws_*` for managed worktrees. Resources for active
 workspaces are expected; completed workspaces still inside the service GC
@@ -567,12 +567,15 @@ uv run --python 3.12 --extra dev awf service gc --format pretty
 uv run --python 3.12 --extra dev awf service gc --min-age-hours 336 --limit 20
 ```
 
-`awf service gc` defaults to a dry-run JSON plan. It only considers terminal
-workspaces in `completed`, `failed`, `cancelled`, or `destroyed`, and it never
-selects active workspaces such as `requested`, `provisioning`, `ready`,
-`running`, `validating`, `pushing`, or `monitoring_pr`. Each candidate reports
-the worktree, compose, and auth paths plus estimated bytes; missing paths are
-reported as zero bytes.
+`awf service gc` defaults to a dry-run JSON plan. Without `--status` filters it
+selects only completed PR workspaces whose retention window has expired
+(`AWF_COMPLETED_WORKSPACE_RETENTION_HOURS`, default `168`). Recent completed PR
+workspaces and failed workspaces are reported in the `preserved` section with
+reason codes such as `WORKSPACE_WITHIN_RETENTION` and
+`FAILED_WORKSPACE_TRIAGE_PRESERVED`. Use `--retention-hours` or the compatible
+`--min-age-hours` flag to override the retention window for one run. Each
+candidate reports the worktree, compose, and auth paths plus estimated bytes;
+missing paths are reported as zero bytes.
 
 Execute the same filesystem-only cleanup with:
 
@@ -583,8 +586,11 @@ uv run --python 3.12 --extra dev awf service gc --execute
 Execution deletes only `<work_dir>/git/worktrees/<workspace>`,
 `<work_dir>/compose/<workspace>` or the stored compose-file parent, and
 `<work_dir>/auth/<workspace>`. It does not delete control-plane database rows,
-workspace events, or log streams; durable logs remain available for audit and
-postmortem inspection.
+workspace events, log streams, or files under `<work_dir>/logs` and
+`<work_dir>/artifacts`; durable logs and artifacts remain available for audit
+and postmortem inspection. Repeated runs are idempotent: missing pressure
+directories are reported as `already_removed`, and partial failures return a
+structured `partial` result with reason codes instead of deleting unsafe paths.
 
 Create a workspace:
 
@@ -952,6 +958,10 @@ GEMINI_API_KEY=<optional Gemini env auth>
 AWF_OPENCODE_OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
 AWF_AGENT_WALL_TIMEOUT_SECONDS=7200
 AWF_AGENT_IDLE_TIMEOUT_SECONDS=900
+AWF_COMPLETED_WORKSPACE_RETENTION_HOURS=168
+AWF_WORKSPACE_CLEANUP_ENABLED=true
+AWF_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS=3600
+AWF_WORKSPACE_CLEANUP_BATCH_LIMIT=50
 ```
 
 Agent watchdogs are conservative by default: AWF terminates a coding CLI after

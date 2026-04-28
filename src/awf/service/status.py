@@ -8,15 +8,16 @@ import os
 import subprocess
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Literal, Protocol, cast
 
 import httpx
 from sqlalchemy import select, text
 
 from awf.db.models import Workspace
-from awf.db.session import make_engine
+from awf.db.session import make_engine, make_session_factory
 from awf.service.config import ServiceSettings
-from awf.service.disk import DiskUsage, check_disk_space
+from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
+from awf.service.gc import plan_terminal_workspace_gc
 from awf.service.orphans import (
     ACTIVE_WORKSPACE_STATUSES,
     KNOWN_WORKSPACE_STATUSES,
@@ -112,7 +113,6 @@ async def collect_service_status(
             http_get=provider_http_get,
         )
     )
-
     try:
         (
             api_check,
@@ -135,12 +135,19 @@ async def collect_service_status(
             provider_task,
         )
         workspace_view = await workspace_lookup_task
+        workspace_cleanup_check = await collect_workspace_cleanup_status(settings)
     finally:
         for pending in (workspace_lookup_task, provider_task):
             if not pending.done():
                 pending.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await pending
+    api_check = cast(CheckPayload, api_check)
+    db_check = cast(CheckPayload, db_check)
+    docker_check = cast(CheckPayload, docker_check)
+    image_check = cast(CheckPayload, image_check)
+    disk_check = cast(DiskCheck, disk_check)
+    agent_readiness = cast(dict[str, Any], agent_readiness)
     orphan_summary = await asyncio.to_thread(
         detect_orphan_resources,
         work_dir=settings.work_dir,
@@ -158,6 +165,7 @@ async def collect_service_status(
         "disk": disk_check.to_dict(),
         "orphan_resources": orphan_resources_check,
         "orphan_workspaces": orphan_workspaces_check,
+        "workspace_cleanup": workspace_cleanup_check,
     }
     overall_ok = (
         all(bool(check["ok"]) for check in checks.values())
@@ -168,6 +176,76 @@ async def collect_service_status(
         "status": "ok" if overall_ok else "fail",
         "checks": checks,
         "agent_readiness": agent_readiness,
+    }
+
+
+async def collect_workspace_cleanup_status(settings: ServiceSettings) -> CheckPayload:
+    """Report retention-cleanup readiness without making candidates unhealthy."""
+
+    if not settings.workspace_cleanup_enabled:
+        return {
+            "ok": True,
+            "status": "disabled",
+            "reason": "WORKSPACE_CLEANUP_DISABLED",
+            "retention_hours": settings.completed_workspace_retention_hours,
+            "candidate_count": 0,
+            "preserved_count": 0,
+            "examples": [],
+        }
+
+    engine = None
+    try:
+        engine = make_engine(settings.database_url)
+        plan = await plan_terminal_workspace_gc(
+            make_session_factory(engine),
+            work_dir=Path(settings.work_dir).expanduser(),
+            min_age_hours=settings.completed_workspace_retention_hours,
+            limit=settings.workspace_cleanup_batch_limit,
+        )
+    except Exception as exc:
+        return {
+            "ok": True,
+            "status": "unavailable",
+            "reason": "CLEANUP_PLAN_UNAVAILABLE",
+            "detail": _truncate(f"{type(exc).__name__}: {exc}"),
+            "retention_hours": settings.completed_workspace_retention_hours,
+            "candidate_count": 0,
+            "preserved_count": 0,
+            "examples": [],
+        }
+    finally:
+        if engine is not None:
+            await engine.dispose()
+
+    candidate_examples = [
+        {
+            "workspace_id": candidate.workspace_id,
+            "status": candidate.status,
+            "reason_code": candidate.reason_code,
+            "age_hours": candidate.age_hours,
+            "estimated_bytes": candidate.total_estimated_bytes,
+        }
+        for candidate in plan.candidates[:5]
+    ]
+    preserved_examples = [
+        {
+            "workspace_id": preserved.workspace_id,
+            "status": preserved.status,
+            "reason_code": preserved.reason_code,
+            "age_hours": preserved.age_hours,
+        }
+        for preserved in plan.preserved[:5]
+    ]
+    candidate_count = len(plan.candidates)
+    return {
+        "ok": True,
+        "status": "ready" if candidate_count else "ok",
+        "reason": "CLEANUP_CANDIDATES_READY" if candidate_count else "NO_CLEANUP_CANDIDATES",
+        "retention_hours": settings.completed_workspace_retention_hours,
+        "candidate_count": candidate_count,
+        "preserved_count": plan.preserved_count,
+        "total_estimated_bytes": plan.total_estimated_bytes,
+        "examples": [*candidate_examples, *preserved_examples][:10],
     }
 
 
