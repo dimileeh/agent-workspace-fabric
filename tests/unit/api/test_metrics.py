@@ -12,35 +12,8 @@ from starlette.requests import Request
 
 from awf.common.config import get_settings
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-
-
-async def _workspace(
-    engine: AsyncEngine,
-    *,
-    status: WorkspaceStatus,
-    updated_at: datetime,
-    failure_reason: FailureReason | None = None,
-) -> None:
-    factory = make_session_factory(engine)
-    async with factory() as session:
-        workspace = await WorkspaceRepository(session).create(
-            repo_url="git@github.com:example/metrics-api.git",
-            branch_base="main",
-            task_title=f"{status.value} workspace",
-            task_prompt="Collect workspace reliability metrics.",
-            agent="codex",
-            test_commands=[],
-        )
-        workspace.status = status.value
-        workspace.updated_at = updated_at
-        workspace.failure_reason = failure_reason.value if failure_reason is not None else None
-        await session.commit()
-
-
-def _zero_status_counts() -> dict[str, int]:
-    return {status.value: 0 for status in WorkspaceStatus}
+from tests.unit.helpers import create_workspace, zero_status_counts
 
 
 @pytest.mark.unit
@@ -55,7 +28,7 @@ async def test_workspace_summary_returns_zero_counts_for_empty_db(
     window_start = datetime.fromisoformat(body["window_start"])
     assert window_start == generated_at - timedelta(hours=24)
     assert body["since_hours"] == 24
-    assert body["status_counts"] == _zero_status_counts()
+    assert body["status_counts"] == zero_status_counts()
     assert body["failure_reason_counts"] == {}
     assert body["active_count"] == 0
     assert body["destroying_count"] == 0
@@ -84,14 +57,14 @@ async def test_workspace_summary_rolls_up_mixed_statuses_and_failure_reasons(
         WorkspaceStatus.cancelled,
         WorkspaceStatus.destroyed,
     ):
-        await _workspace(engine, status=status, updated_at=now - timedelta(minutes=5))
-    await _workspace(
+        await create_workspace(engine, status=status, updated_at=now - timedelta(minutes=5))
+    await create_workspace(
         engine,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=5),
         failure_reason=FailureReason.agent_failure,
     )
-    await _workspace(
+    await create_workspace(
         engine,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=5),
@@ -102,7 +75,7 @@ async def test_workspace_summary_rolls_up_mixed_statuses_and_failure_reasons(
 
     assert response.status_code == 200
     body = response.json()
-    expected_status_counts = _zero_status_counts()
+    expected_status_counts = zero_status_counts()
     expected_status_counts.update(
         {
             WorkspaceStatus.requested.value: 1,
@@ -138,12 +111,12 @@ async def test_workspace_summary_filters_by_since_hours(
     engine: AsyncEngine,
 ) -> None:
     now = datetime.now(UTC)
-    await _workspace(
+    await create_workspace(
         engine,
         status=WorkspaceStatus.completed,
         updated_at=now - timedelta(hours=3),
     )
-    await _workspace(
+    await create_workspace(
         engine,
         status=WorkspaceStatus.failed,
         updated_at=now - timedelta(minutes=30),
@@ -154,7 +127,7 @@ async def test_workspace_summary_filters_by_since_hours(
 
     assert response.status_code == 200
     body = response.json()
-    expected_status_counts = _zero_status_counts()
+    expected_status_counts = zero_status_counts()
     expected_status_counts[WorkspaceStatus.failed.value] = 1
     assert body["since_hours"] == 1
     assert body["status_counts"] == expected_status_counts
@@ -202,6 +175,7 @@ async def test_metrics_route_functions_return_response_models_directly(
     from awf.api.routes.metrics import (
         get_failure_analysis_summary,
         get_resource_saturation_summary,
+        get_slo_metrics_summary,
         get_workspace_reliability_summary,
     )
     from awf.common.config import Settings
@@ -233,7 +207,104 @@ async def test_metrics_route_functions_return_response_models_directly(
             settings=settings,
             session=session,
         )
+        slo = await get_slo_metrics_summary(
+            settings=settings,
+            session=session,
+        )
 
     assert failure.total_failed_workspaces == 0
     assert reliability.active_count == 0
     assert saturation.disk.reason == "SUFFICIENT_DISK"
+    assert slo.creation_total == 0
+
+
+@pytest.mark.unit
+async def test_slo_endpoint_returns_zero_counts_for_empty_db(
+    client: AsyncClient,
+) -> None:
+    response = await client.get("/v1/metrics/slo")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["since_hours"] == 24
+    assert body["creation_total"] == 0
+    assert body["creation_succeeded"] == 0
+    assert body["creation_failed"] == 0
+    assert body["creation_cancelled"] == 0
+    assert body["cleanup_total"] == 0
+    assert body["cleanup_succeeded"] == 0
+    assert body["cleanup_failure_count"] == 0
+    assert body["stuck_running_count"] == 0
+    assert body["stuck_with_reason_count"] == 0
+    assert body["recovery_total"] == 0
+    assert body["recovery_succeeded"] == 0
+    assert body["recovery_failed_count"] == 0
+    assert body["monitor_completed_total"] == 0
+    assert body["completed_after_monitor_count"] == 0
+    assert body["monitor_stuck_count"] == 0
+    assert body["actionable_failure_count"] == 0
+    assert body["unactionable_failure_count"] == 0
+
+
+@pytest.mark.unit
+async def test_slo_endpoint_respects_since_hours_param(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    now = datetime.now(UTC)
+    await create_workspace(
+        engine,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(minutes=10),
+    )
+
+    response = await client.get("/v1/metrics/slo", params={"since_hours": 168})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["since_hours"] == 168
+    assert body["creation_total"] == 1
+
+
+@pytest.mark.unit
+async def test_slo_endpoint_rejects_invalid_since_hours(
+    client: AsyncClient,
+) -> None:
+    response = await client.get("/v1/metrics/slo", params={"since_hours": 0})
+
+    assert response.status_code == 422
+
+
+@pytest.mark.unit
+async def test_slo_endpoint_returns_expected_fields_after_seeding(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    now = datetime.now(UTC)
+    await create_workspace(
+        engine,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(minutes=10),
+        failure_reason=FailureReason.agent_failure,
+    )
+
+    response = await client.get("/v1/metrics/slo")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["creation_total"] >= 1
+    assert body["creation_failed"] >= 1
+    assert body["actionable_failure_count"] >= 1
+
+
+@pytest.mark.unit
+async def test_slo_endpoint_backward_compatible(
+    client: AsyncClient,
+) -> None:
+    response_ws = await client.get("/v1/metrics/workspaces/summary")
+    response_fail = await client.get("/v1/metrics/failures/summary")
+    response_sat = await client.get("/v1/metrics/resources/saturation")
+
+    assert response_ws.status_code == 200
+    assert response_fail.status_code == 200
+    assert response_sat.status_code == 200
