@@ -84,6 +84,11 @@ from awf.runtime.planning import (
 )
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
 from awf.runtime.validation import ValidationCoverageResult, ValidationResult, ValidationRunner
+from awf.runtime.validation_identity import (
+    environment_identity_digest,
+    environment_identity_inputs,
+    resolved_profile_digest,
+)
 
 
 class _MonitorRunnerProto(Protocol):
@@ -1336,6 +1341,7 @@ class WorkspaceExecutor:
                 await self._set_validation_run_target_head_sha(
                     validation_run_id=successful_validation_run_id,
                     target_head_sha=pr.head_sha,
+                    workspace_head_sha=pr.head_sha,
                 )
             except Exception:
                 _log.exception(
@@ -2009,8 +2015,15 @@ class WorkspaceExecutor:
                 tier=tier,
                 commands=command_records,
                 base_commit=base_commit,
+                base_sha=base_commit,
                 target_branch=target_branch,
                 target_head_sha=target_head_sha,
+                profile_name=profile.name,
+                profile_version=profile.version,
+                profile_source=profile.source,
+                resolved_profile_digest=resolved_profile_digest(profile),
+                environment_identity_digest=environment_identity_digest(profile),
+                environment_identity_inputs=environment_identity_inputs(profile),
                 log_stream_refs=_validation_run_log_stream_refs(command_records),
                 started_at=datetime.now(UTC),
             )
@@ -2379,11 +2392,13 @@ class WorkspaceExecutor:
         *,
         validation_run_id: str,
         target_head_sha: str,
+        workspace_head_sha: str | None = None,
     ) -> None:
         async with self._session_factory() as session:
             await ValidationRunRepository(session).update_target_head_sha(
                 validation_run_id,
                 target_head_sha=target_head_sha,
+                workspace_head_sha=workspace_head_sha,
             )
             await session.commit()
 

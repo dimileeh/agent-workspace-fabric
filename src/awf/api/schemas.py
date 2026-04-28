@@ -32,6 +32,7 @@ MergeCandidateStatus = Literal["open", "merged", "closed"]
 MergeQueueBlockerState = Literal["merge_eligible", "monitor_owned_recovery"]
 ValidationTier = Literal[1, 2, 3]
 ValidationProvenanceStatus = Literal["running", "succeeded", "failed", "unknown"]
+ValidationIdentitySource = Literal["persisted", "legacy_fallback"]
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 WorkspaceLifecycleStageStatus = Literal[
     "pending",
@@ -458,9 +459,18 @@ class ValidationRunSummaryResponse(BaseModel):
     tier: ValidationTier
     command_set_hash: str
     base_commit: str | None = None
+    base_sha: str | None = None
+    workspace_head_sha: str | None = None
     target_branch: str | None = None
     target_head_sha: str | None = None
     current_target_head_sha: str | None = None
+    profile_name: str | None = None
+    profile_version: int | None = None
+    profile_source: str | None = None
+    resolved_profile_digest: str | None = None
+    environment_identity_digest: str | None = None
+    environment_identity_inputs: dict[str, Any] = Field(default_factory=dict)
+    identity_source: ValidationIdentitySource = "legacy_fallback"
     status: ValidationProvenanceStatus
     reason_code: str | None = None
     started_at: datetime
@@ -657,10 +667,19 @@ class ValidationProvenanceItemResponse(BaseModel):
     status: ValidationProvenanceStatus
     reason_code: str | None = None
     base_commit: str | None
+    base_sha: str | None = None
+    workspace_head_sha: str | None = None
     branch_name: str | None
     target_branch: str | None = None
     target_head_sha: str | None = None
     current_target_head_sha: str | None = None
+    profile_name: str | None = None
+    profile_version: int | None = None
+    profile_source: str | None = None
+    resolved_profile_digest: str | None = None
+    environment_identity_digest: str | None = None
+    environment_identity_inputs: dict[str, Any] = Field(default_factory=dict)
+    identity_source: ValidationIdentitySource = "legacy_fallback"
     started_at: datetime | None = None
     finished_at: datetime | None = None
     log_stream_refs: dict[str, Any] = Field(default_factory=dict)

@@ -636,8 +636,16 @@ class TestHappyPath:
                             command_set_hash,
                             commands,
                             base_commit,
+                            base_sha,
+                            workspace_head_sha,
                             target_branch,
                             target_head_sha,
+                            profile_name,
+                            profile_version,
+                            profile_source,
+                            resolved_profile_digest,
+                            environment_identity_digest,
+                            environment_identity_inputs,
                             status,
                             reason_code,
                             started_at,
@@ -684,8 +692,19 @@ class TestHappyPath:
             },
         ]
         assert run["base_commit"] == "a" * 40
+        assert run["base_sha"] == "a" * 40
+        assert run["workspace_head_sha"] == "deadbeef01"
         assert run["target_branch"] == f"awf/{ws_id}"
         assert run["target_head_sha"] == "deadbeef01"
+        assert isinstance(run["profile_name"], str)
+        assert run["profile_name"]
+        assert isinstance(run["profile_version"], int)
+        assert isinstance(run["profile_source"], str)
+        assert len(run["resolved_profile_digest"]) == 64
+        assert len(run["environment_identity_digest"]) == 64
+        identity_inputs = json.loads(run["environment_identity_inputs"])
+        assert identity_inputs["schema_version"] == 1
+        assert "runtime" in identity_inputs
         assert run["status"] == "succeeded"
         assert run["reason_code"] == "VALIDATION_OK"
         assert run["started_at"] is not None

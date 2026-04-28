@@ -268,8 +268,16 @@ async def _insert_validation_run(
     command_set_hash: str = "0" * 64,
     commands: object | None = None,
     base_commit: str | None = "base-persisted",
+    base_sha: str | None = None,
+    workspace_head_sha: str | None = None,
     target_branch: str | None = "awf/persisted-validation",
     target_head_sha: str | None = "target-persisted",
+    profile_name: str | None = None,
+    profile_version: int | None = None,
+    profile_source: str | None = None,
+    resolved_profile_digest: str | None = None,
+    environment_identity_digest: str | None = None,
+    environment_identity_inputs: dict | None = None,
     status: str = "succeeded",
     reason_code: str | None = "VALIDATION_OK",
     started_at: datetime = datetime(2026, 4, 26, 13, 0, tzinfo=UTC),
@@ -290,8 +298,16 @@ async def _insert_validation_run(
                     command_set_hash,
                     commands,
                     base_commit,
+                    base_sha,
+                    workspace_head_sha,
                     target_branch,
                     target_head_sha,
+                    profile_name,
+                    profile_version,
+                    profile_source,
+                    resolved_profile_digest,
+                    environment_identity_digest,
+                    environment_identity_inputs,
                     status,
                     reason_code,
                     retry_count,
@@ -307,8 +323,16 @@ async def _insert_validation_run(
                     :command_set_hash,
                     :commands,
                     :base_commit,
+                    :base_sha,
+                    :workspace_head_sha,
                     :target_branch,
                     :target_head_sha,
+                    :profile_name,
+                    :profile_version,
+                    :profile_source,
+                    :resolved_profile_digest,
+                    :environment_identity_digest,
+                    :environment_identity_inputs,
                     :status,
                     :reason_code,
                     :retry_count,
@@ -326,8 +350,18 @@ async def _insert_validation_run(
                 "command_set_hash": command_set_hash,
                 "commands": json.dumps(commands or []),
                 "base_commit": base_commit,
+                "base_sha": base_sha,
+                "workspace_head_sha": workspace_head_sha,
                 "target_branch": target_branch,
                 "target_head_sha": target_head_sha,
+                "profile_name": profile_name,
+                "profile_version": profile_version,
+                "profile_source": profile_source,
+                "resolved_profile_digest": resolved_profile_digest,
+                "environment_identity_digest": environment_identity_digest,
+                "environment_identity_inputs": json.dumps(environment_identity_inputs)
+                if environment_identity_inputs is not None
+                else None,
                 "status": status,
                 "reason_code": reason_code,
                 "retry_count": retry_count,
@@ -498,6 +532,90 @@ async def test_validation_provenance_prefers_persisted_validation_runs(
             }
         ]
     }
+
+
+@pytest.mark.unit
+async def test_validation_provenance_exposes_persisted_identity_fields(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _attach_merge_candidate(
+        engine,
+        workspace_id,
+        head_sha=None,
+        updated_at=datetime(2026, 4, 26, 13, 0, tzinfo=UTC),
+    )
+    identity_inputs = {
+        "schema_version": 1,
+        "runtime": {
+            "agent_image": "ghcr.io/acme/agent:1",
+            "toolchain_image": "ghcr.io/acme/toolchain:1",
+        },
+    }
+    await _insert_validation_run(
+        engine,
+        run_id="vr_identity_fields_000001",
+        workspace_id=workspace_id,
+        base_commit="legacy-base",
+        base_sha="base-identity",
+        workspace_head_sha="workspace-head-identity",
+        target_branch="development",
+        target_head_sha="workspace-head-identity",
+        profile_name="python",
+        profile_version=12,
+        profile_source="repo:.awf/workspace.yml",
+        resolved_profile_digest="1" * 64,
+        environment_identity_digest="2" * 64,
+        environment_identity_inputs=identity_inputs,
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["base_commit"] == "legacy-base"
+    assert item["base_sha"] == "base-identity"
+    assert item["workspace_head_sha"] == "workspace-head-identity"
+    assert item["profile_name"] == "python"
+    assert item["profile_version"] == 12
+    assert item["profile_source"] == "repo:.awf/workspace.yml"
+    assert item["resolved_profile_digest"] == "1" * 64
+    assert item["environment_identity_digest"] == "2" * 64
+    assert item["environment_identity_inputs"] == identity_inputs
+    assert item["identity_source"] == "persisted"
+    assert item["current_target_head_sha"] is None
+    assert item["fresh_for_target"] is None
+
+
+@pytest.mark.unit
+async def test_validation_provenance_legacy_row_uses_safe_identity_fallbacks(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _insert_validation_run(
+        engine,
+        run_id="vr_legacy_identity_000001",
+        workspace_id=workspace_id,
+        base_commit="legacy-base-only",
+        target_head_sha="legacy-target-head",
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["base_commit"] == "legacy-base-only"
+    assert item["base_sha"] == "legacy-base-only"
+    assert item["workspace_head_sha"] == "legacy-target-head"
+    assert item["profile_name"] is None
+    assert item["profile_version"] is None
+    assert item["profile_source"] is None
+    assert item["resolved_profile_digest"] is None
+    assert item["environment_identity_digest"] is None
+    assert item["environment_identity_inputs"] == {}
+    assert item["identity_source"] == "legacy_fallback"
 
 
 @pytest.mark.unit

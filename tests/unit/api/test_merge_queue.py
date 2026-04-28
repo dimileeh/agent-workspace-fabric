@@ -289,6 +289,14 @@ async def _insert_validation_run(
     workspace_id: str,
     attempt_id: str,
     target_head_sha: str,
+    base_sha: str | None = None,
+    workspace_head_sha: str | None = None,
+    profile_name: str | None = None,
+    profile_version: int | None = None,
+    profile_source: str | None = None,
+    resolved_profile_digest: str | None = None,
+    environment_identity_digest: str | None = None,
+    environment_identity_inputs: dict[str, object] | None = None,
     tier: int = 1,
     status: str = "succeeded",
     started_at: datetime = datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
@@ -319,8 +327,16 @@ async def _insert_validation_run(
                     command_set_hash,
                     commands,
                     base_commit,
+                    base_sha,
+                    workspace_head_sha,
                     target_branch,
                     target_head_sha,
+                    profile_name,
+                    profile_version,
+                    profile_source,
+                    resolved_profile_digest,
+                    environment_identity_digest,
+                    environment_identity_inputs,
                     status,
                     reason_code,
                     started_at,
@@ -335,8 +351,16 @@ async def _insert_validation_run(
                     :command_set_hash,
                     :commands,
                     'base123',
+                    :base_sha,
+                    :workspace_head_sha,
                     'codex/merge-queue',
                     :target_head_sha,
+                    :profile_name,
+                    :profile_version,
+                    :profile_source,
+                    :resolved_profile_digest,
+                    :environment_identity_digest,
+                    :environment_identity_inputs,
                     :status,
                     'VALIDATION_OK',
                     :started_at,
@@ -350,6 +374,16 @@ async def _insert_validation_run(
                 "workspace_id": workspace_id,
                 "attempt_id": attempt_id,
                 "target_head_sha": target_head_sha,
+                "base_sha": base_sha,
+                "workspace_head_sha": workspace_head_sha,
+                "profile_name": profile_name,
+                "profile_version": profile_version,
+                "profile_source": profile_source,
+                "resolved_profile_digest": resolved_profile_digest,
+                "environment_identity_digest": environment_identity_digest,
+                "environment_identity_inputs": json.dumps(environment_identity_inputs)
+                if environment_identity_inputs is not None
+                else None,
                 "tier": tier,
                 "status": status,
                 "command_set_hash": "b" * 64,
@@ -1231,6 +1265,14 @@ class TestMergeQueueList:
             workspace_id=workspace_id,
             attempt_id=attempt_id,
             target_head_sha="old-head",
+            base_sha="base-identity",
+            workspace_head_sha="workspace-head",
+            profile_name="python",
+            profile_version=4,
+            profile_source="repo:.awf/workspace.yml",
+            resolved_profile_digest="1" * 64,
+            environment_identity_digest="2" * 64,
+            environment_identity_inputs={"schema_version": 1},
         )
 
         response = await client.get("/v1/merge-queue")
@@ -1245,9 +1287,18 @@ class TestMergeQueueList:
             "tier": 1,
             "command_set_hash": "b" * 64,
             "base_commit": "base123",
+            "base_sha": "base-identity",
+            "workspace_head_sha": "workspace-head",
             "target_branch": "codex/merge-queue",
             "target_head_sha": "old-head",
             "current_target_head_sha": "head123",
+            "profile_name": "python",
+            "profile_version": 4,
+            "profile_source": "repo:.awf/workspace.yml",
+            "resolved_profile_digest": "1" * 64,
+            "environment_identity_digest": "2" * 64,
+            "environment_identity_inputs": {"schema_version": 1},
+            "identity_source": "persisted",
             "status": "succeeded",
             "reason_code": "VALIDATION_OK",
             "started_at": "2026-04-26T12:00:00Z",
@@ -1268,6 +1319,43 @@ class TestMergeQueueList:
             "coverage_reason_code": None,
             "coverage_gaps": [],
         }
+        assert item["required_validation_tier"] == 1
+        assert item["latest_satisfied_validation_tier"] == 1
+
+    @pytest.mark.unit
+    async def test_exposes_legacy_validation_identity_fallbacks(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Legacy validation provenance",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/26",
+            branch_name="codex/merge-queue",
+            updated_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        )
+        attempt_id = await _attempt_id_for_workspace(engine, workspace_id)
+        await _insert_validation_run(
+            engine,
+            run_id="vr_legacy_queue_identity001",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha="old-head",
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["latest_validation"]["base_commit"] == "base123"
+        assert item["latest_validation"]["base_sha"] == "base123"
+        assert item["latest_validation"]["workspace_head_sha"] == "old-head"
+        assert item["latest_validation"]["environment_identity_inputs"] == {}
+        assert item["latest_validation"]["identity_source"] == "legacy_fallback"
         assert item["required_validation_tier"] == 1
         assert item["latest_satisfied_validation_tier"] == 1
 

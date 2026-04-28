@@ -775,6 +775,14 @@ class ValidationRunRepository:
         target_branch: str | None,
         target_head_sha: str | None,
         log_stream_refs: dict[str, Any],
+        base_sha: str | None = None,
+        workspace_head_sha: str | None = None,
+        profile_name: str | None = None,
+        profile_version: int | None = None,
+        profile_source: str | None = None,
+        resolved_profile_digest: str | None = None,
+        environment_identity_digest: str | None = None,
+        environment_identity_inputs: dict[str, Any] | None = None,
         started_at: datetime | None = None,
     ) -> ValidationRun:
         now = started_at or datetime.now(UTC)
@@ -786,8 +794,16 @@ class ValidationRunRepository:
             command_set_hash=validation_command_set_hash(commands),
             commands=commands,
             base_commit=base_commit,
+            base_sha=base_sha,
+            workspace_head_sha=workspace_head_sha,
             target_branch=target_branch,
             target_head_sha=target_head_sha,
+            profile_name=profile_name,
+            profile_version=profile_version,
+            profile_source=profile_source,
+            resolved_profile_digest=resolved_profile_digest,
+            environment_identity_digest=environment_identity_digest,
+            environment_identity_inputs=environment_identity_inputs,
             status="running",
             reason_code=None,
             started_at=now,
@@ -837,11 +853,14 @@ class ValidationRunRepository:
         validation_run_id: str,
         *,
         target_head_sha: str | None,
+        workspace_head_sha: str | None = None,
     ) -> ValidationRun | None:
         run = await self.get(validation_run_id)
         if run is None:
             return None
         run.target_head_sha = target_head_sha
+        if workspace_head_sha is not None:
+            run.workspace_head_sha = workspace_head_sha
         await self._session.flush()
         return run
 

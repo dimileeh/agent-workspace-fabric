@@ -20,12 +20,14 @@ def validation_run_summary(
     current_target_head_sha: str | None,
 ) -> ValidationRunSummaryResponse:
     status = _validation_status(run.status)
+    identity_fields = validation_identity_fields(run)
     return ValidationRunSummaryResponse(
         validation_run_id=run.id,
         attempt_id=run.attempt_id,
         tier=_validation_tier(run.tier),
         command_set_hash=run.command_set_hash,
         base_commit=run.base_commit,
+        **identity_fields,
         target_branch=run.target_branch,
         target_head_sha=run.target_head_sha,
         current_target_head_sha=current_target_head_sha,
@@ -81,6 +83,33 @@ def _json_dict(value: object) -> dict[str, Any]:
     if isinstance(value, Mapping):
         return {str(k): v for k, v in value.items()}
     return {}
+
+
+def validation_identity_fields(run: ValidationRun) -> dict[str, Any]:
+    environment_inputs = _json_dict(run.environment_identity_inputs)
+    has_persisted_identity = any(
+        value is not None
+        for value in (
+            run.base_sha,
+            run.workspace_head_sha,
+            run.profile_name,
+            run.profile_version,
+            run.profile_source,
+            run.resolved_profile_digest,
+            run.environment_identity_digest,
+        )
+    ) or bool(environment_inputs)
+    return {
+        "base_sha": run.base_sha or run.base_commit,
+        "workspace_head_sha": run.workspace_head_sha or run.target_head_sha,
+        "profile_name": run.profile_name,
+        "profile_version": run.profile_version,
+        "profile_source": run.profile_source,
+        "resolved_profile_digest": run.resolved_profile_digest,
+        "environment_identity_digest": run.environment_identity_digest,
+        "environment_identity_inputs": environment_inputs,
+        "identity_source": "persisted" if has_persisted_identity else "legacy_fallback",
+    }
 
 
 def validation_coverage_fields(run: ValidationRun) -> dict[str, Any]:
