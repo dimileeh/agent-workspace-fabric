@@ -83,6 +83,13 @@ from awf.runtime.planning import (
     render_workspace_path,
 )
 from awf.runtime.pr_creator import PullRequestCreator, PullRequestError
+from awf.runtime.pr_monitor_operations import (
+    MonitorOperationHandle,
+    build_monitor_operation_payload,
+    create_or_start_monitor_operation,
+    finish_monitor_operation,
+    monitor_operation_idempotency_key,
+)
 from awf.runtime.validation import ValidationCoverageResult, ValidationResult, ValidationRunner
 
 
@@ -146,6 +153,14 @@ def _is_validate_only_recovery_payload(payload: object) -> bool:
         payload.get("source") in _VALIDATE_ONLY_RECOVERY_SOURCES
         and payload.get("recovery_mode") in _VALIDATE_ONLY_RECOVERY_MODES
     )
+
+
+def _str_or_none(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _int_or_none(value: object) -> int | None:
+    return value if isinstance(value, int) else None
 
 
 @dataclass(frozen=True)
@@ -739,6 +754,7 @@ class WorkspaceExecutor:
                         branch_name=expected_branch,
                         remote_branch=ws.remote_push_branch or expected_branch,
                         reason=str(recovery.get("reason") or "stale"),
+                        recovery_payload=recovery,
                     )
                     base_commit = rebase_recovery_result.base_sha
                 except _MonitorRebaseRecoveryError as exc:
@@ -2017,6 +2033,78 @@ class WorkspaceExecutor:
             await session.commit()
             return run.id
 
+    async def _begin_rebase_recovery_operation(
+        self,
+        *,
+        workspace_id: str,
+        base_branch: str,
+        remote_branch: str,
+        reason: str,
+        reason_code: str,
+        source_base_sha: str | None,
+        source_head_sha: str | None,
+        recovery_payload: Mapping[str, Any],
+    ) -> MonitorOperationHandle | None:
+        async with self._session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None:  # pragma: no cover - destroyed mid-recovery
+                return None
+            pr_number = _int_or_none(recovery_payload.get("pr_number")) or workspace.pr_number
+            if pr_number is None:
+                pr_number = 0
+            payload = build_monitor_operation_payload(
+                workspace=workspace,
+                action="rebase_only",
+                requested_action="rebase",
+                reason=reason,
+                reason_code=reason_code,
+                pr_number=pr_number,
+                source_head_sha=source_head_sha or workspace.monitor_last_commit_sha,
+                source_base_sha=source_base_sha or workspace.base_commit,
+                target_branch=base_branch,
+                remote_branch=remote_branch,
+                recovery_mode="rebase_only",
+            )
+            handle = await create_or_start_monitor_operation(
+                session,
+                workspace_id=workspace_id,
+                operation_type=OperationType.rebase,
+                payload=payload,
+                idempotency_key=monitor_operation_idempotency_key(
+                    workspace_id=workspace_id,
+                    action="rebase_only",
+                    pr_number=pr_number,
+                    reason_code=reason_code,
+                    source_head_sha=source_head_sha or workspace.monitor_last_commit_sha,
+                    source_base_sha=source_base_sha or workspace.base_commit,
+                ),
+                status=OperationStatus.running,
+            )
+            await session.commit()
+            return handle
+
+    async def _finish_rebase_recovery_operation(
+        self,
+        operation: MonitorOperationHandle | None,
+        *,
+        status: OperationStatus,
+        result: Mapping[str, Any],
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if operation is None or not operation.should_finish:
+            return
+        async with self._session_factory() as session:
+            await finish_monitor_operation(
+                session,
+                operation_id=operation.operation_id,
+                status=status,
+                result=result,
+                error_code=error_code,
+                error_message=error_message,
+            )
+            await session.commit()
+
     async def _run_monitor_rebase_recovery(
         self,
         *,
@@ -2026,6 +2114,7 @@ class WorkspaceExecutor:
         branch_name: str,
         remote_branch: str,
         reason: str,
+        recovery_payload: Mapping[str, Any],
     ) -> _RebaseRecoveryResult:
         """Rebase an already-open PR branch onto the latest target branch.
 
@@ -2050,47 +2139,83 @@ class WorkspaceExecutor:
                 ]
             )
 
-        fetch = await git(["fetch", "origin", base_branch])
-        if not fetch.ok:
-            raise _MonitorRebaseRecoveryError(
-                f"rebase recovery: git fetch origin {base_branch} failed: {fetch.stderr}"
-            )
+        source_base_sha = _str_or_none(recovery_payload.get("source_base_sha"))
+        source_head_sha = _str_or_none(recovery_payload.get("source_head_sha"))
+        operation = await self._begin_rebase_recovery_operation(
+            workspace_id=workspace_id,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            reason=reason,
+            reason_code=_str_or_none(recovery_payload.get("reason_code"))
+            or "MONITOR_REBASE_RECOVERY",
+            source_base_sha=source_base_sha,
+            source_head_sha=source_head_sha,
+            recovery_payload=recovery_payload,
+        )
+        try:
+            fetch = await git(["fetch", "origin", base_branch])
+            if not fetch.ok:
+                raise _MonitorRebaseRecoveryError(
+                    f"rebase recovery: git fetch origin {base_branch} failed: {fetch.stderr}"
+                )
 
-        switch = await git(["switch", branch_name])
-        if not switch.ok:
-            raise _MonitorRebaseRecoveryError(
-                f"rebase recovery: git switch {branch_name} failed: {switch.stderr}"
-            )
+            switch = await git(["switch", branch_name])
+            if not switch.ok:
+                raise _MonitorRebaseRecoveryError(
+                    f"rebase recovery: git switch {branch_name} failed: {switch.stderr}"
+                )
 
-        target_ref = f"origin/{base_branch}"
-        already_contains_target = await git(["merge-base", "--is-ancestor", target_ref, "HEAD"])
-        if already_contains_target.ok:
+            target_ref = f"origin/{base_branch}"
+            already_contains_target = await git(["merge-base", "--is-ancestor", target_ref, "HEAD"])
+            if already_contains_target.ok:
+                return await self._record_current_rebase_recovery_head(
+                    git=git,
+                    workspace_id=workspace_id,
+                    target_ref=target_ref,
+                    operation=operation,
+                    source_base_sha=source_base_sha,
+                    source_head_sha=source_head_sha,
+                    rebased=False,
+                    pushed=False,
+                )
+            if already_contains_target.returncode not in {1}:
+                raise _MonitorRebaseRecoveryError(
+                    "rebase recovery: git merge-base --is-ancestor "
+                    f"{target_ref} HEAD failed: {already_contains_target.stderr}"
+                )
+
+            rebase = await git(["rebase", target_ref])
+            if not rebase.ok:
+                await git(["rebase", "--abort"])
+                raise _MonitorRebaseRecoveryError(
+                    f"rebase recovery: git rebase {target_ref} failed: {rebase.stderr}"
+                )
+
             return await self._record_current_rebase_recovery_head(
                 git=git,
                 workspace_id=workspace_id,
                 target_ref=target_ref,
-                reason=reason,
+                remote_branch=remote_branch,
+                operation=operation,
+                source_base_sha=source_base_sha,
+                source_head_sha=source_head_sha,
+                rebased=True,
+                pushed=True,
             )
-        if already_contains_target.returncode not in {1}:
-            raise _MonitorRebaseRecoveryError(
-                "rebase recovery: git merge-base --is-ancestor "
-                f"{target_ref} HEAD failed: {already_contains_target.stderr}"
+        except Exception as exc:
+            await self._finish_rebase_recovery_operation(
+                operation,
+                status=OperationStatus.failed,
+                result={
+                    "status": "failed",
+                    "reason_code": "MONITOR_RECOVERY_REBASE_FAILED",
+                    "source_base_sha": source_base_sha,
+                    "source_head_sha": source_head_sha,
+                },
+                error_code="MONITOR_RECOVERY_REBASE_FAILED",
+                error_message=str(exc),
             )
-
-        rebase = await git(["rebase", target_ref])
-        if not rebase.ok:
-            await git(["rebase", "--abort"])
-            raise _MonitorRebaseRecoveryError(
-                f"rebase recovery: git rebase {target_ref} failed: {rebase.stderr}"
-            )
-
-        return await self._record_current_rebase_recovery_head(
-            git=git,
-            workspace_id=workspace_id,
-            target_ref=target_ref,
-            reason=reason,
-            remote_branch=remote_branch,
-        )
+            raise
 
     async def _record_current_rebase_recovery_head(
         self,
@@ -2098,8 +2223,12 @@ class WorkspaceExecutor:
         git: Callable[[list[str]], Awaitable[CommandResult]],
         workspace_id: str,
         target_ref: str,
-        reason: str,
         remote_branch: str | None = None,
+        operation: MonitorOperationHandle | None,
+        source_base_sha: str | None,
+        source_head_sha: str | None,
+        rebased: bool,
+        pushed: bool,
     ) -> _RebaseRecoveryResult:
         """Record the current branch head after rebase-style recovery.
 
@@ -2135,9 +2264,13 @@ class WorkspaceExecutor:
 
         await self._record_rebase_recovery_success(
             workspace_id=workspace_id,
-            reason=reason,
             base_sha=base_sha,
             head_sha=head_sha,
+            source_base_sha=source_base_sha,
+            source_head_sha=source_head_sha,
+            operation=operation,
+            pushed=pushed,
+            rebased=rebased,
         )
         return _RebaseRecoveryResult(base_sha=base_sha, head_sha=head_sha)
 
@@ -2145,9 +2278,13 @@ class WorkspaceExecutor:
         self,
         *,
         workspace_id: str,
-        reason: str,
         base_sha: str,
         head_sha: str,
+        source_base_sha: str | None,
+        source_head_sha: str | None,
+        operation: MonitorOperationHandle | None,
+        pushed: bool,
+        rebased: bool,
     ) -> None:
         async with self._session_factory() as session:
             workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -2171,27 +2308,22 @@ class WorkspaceExecutor:
                     sync_validation_staleness=False,
                 )
 
-            operation = await OperationRepository(session).create(
-                workspace_id=workspace_id,
-                operation_type=OperationType.rebase,
-                payload={
-                    "source": "pr_monitor",
-                    "reason": reason,
-                    "base_sha": base_sha,
-                    "head_sha": head_sha,
-                },
-            )
-            operation.status = OperationStatus.running.value
-            operation.started_at = datetime.now(UTC)
-            await OperationRepository(session).finish(
-                operation,
-                status=OperationStatus.succeeded,
-                result={
-                    "reason_code": "REBASE_OK",
-                    "base_sha": base_sha,
-                    "head_sha": head_sha,
-                },
-            )
+            if operation is not None and operation.should_finish:
+                await finish_monitor_operation(
+                    session,
+                    operation_id=operation.operation_id,
+                    status=OperationStatus.succeeded,
+                    result={
+                        "status": "succeeded",
+                        "reason_code": "REBASE_OK",
+                        "source_base_sha": source_base_sha,
+                        "source_head_sha": source_head_sha,
+                        "target_base_sha": base_sha,
+                        "target_head_sha": head_sha,
+                        "pushed": pushed,
+                        "rebased": rebased,
+                    },
+                )
             await session.commit()
 
     async def _clear_rebase_recovery_staleness(

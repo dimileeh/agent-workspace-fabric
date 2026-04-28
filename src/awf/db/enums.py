@@ -67,6 +67,10 @@ class OperationType(StrEnum):
     cancel = "cancel"
     stop = "stop"
     remonitor = "remonitor"
+    sync_base = "sync_base"
+    comment_repair = "comment_repair"
+    ci_repair = "ci_repair"
+    human_wait = "human_wait"
     destroy = "destroy"
 
 

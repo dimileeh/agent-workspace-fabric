@@ -391,10 +391,12 @@ class WorkspaceControlService:
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
+        workspace_for_payload = await self._require_workspace(repo, workspace_id)
         payload = _operator_operation_payload(
             reason=reason,
             reason_code=_OPERATOR_REMONITOR_REASON_CODE,
             requested_action=OperationType.remonitor.value,
+            extra=_workspace_pr_operation_context(workspace_for_payload),
         )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
         workspace, replay = await self._prepare_operation(
@@ -467,6 +469,7 @@ class WorkspaceControlService:
         result: dict[str, object | None] = {
             "status": workspace.status,
             "claims_reset": claims_reset,
+            **_workspace_pr_operation_context(workspace),
         }
         if state_reset is not None:
             result["state_reset"] = state_reset
@@ -972,6 +975,19 @@ def _operation_payload(
     if expected_version is not None:
         operation_payload["expected_version"] = expected_version
     return operation_payload
+
+
+def _workspace_pr_operation_context(workspace: Workspace) -> dict[str, object | None]:
+    return {
+        key: value
+        for key, value in {
+            "pr_number": workspace.pr_number,
+            "pr_url": workspace.pr_url,
+            "source_head_sha": workspace.monitor_last_commit_sha,
+            "source_base_sha": workspace.base_commit,
+        }.items()
+        if value is not None
+    }
 
 
 def _event_payload(

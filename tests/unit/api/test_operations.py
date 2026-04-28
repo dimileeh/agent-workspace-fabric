@@ -6,6 +6,9 @@ session = _operations_listing.session
 sample_data = _operations_listing.sample_data
 
 test_get_operation_not_found = _operations_listing.test_get_operation_not_found
+test_operation_response_derives_pr_monitor_recovery_fields = (
+    _operations_listing.test_operation_response_derives_pr_monitor_recovery_fields
+)
 test_list_operations_empty = _operations_listing.test_list_operations_empty
 test_list_operations_global = _operations_listing.test_list_operations_global
 test_list_operations_limit_validation = _operations_listing.test_list_operations_limit_validation
