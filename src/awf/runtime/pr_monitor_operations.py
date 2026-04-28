@@ -106,7 +106,7 @@ async def create_or_start_monitor_operation(
     *,
     workspace_id: str,
     operation_type: OperationType | str,
-    payload: Mapping[str, Any],
+    payload: dict[str, Any],
     idempotency_key: str,
     status: OperationStatus,
 ) -> MonitorOperationHandle:
@@ -115,7 +115,7 @@ async def create_or_start_monitor_operation(
         workspace_id=workspace_id,
         operation_type=operation_type,
         status=status,
-        payload=redact_monitor_operation_value(dict(payload)),
+        payload=payload,
         idempotency_key=idempotency_key,
     )
     if (
