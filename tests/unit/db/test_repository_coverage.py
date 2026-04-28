@@ -1368,3 +1368,32 @@ async def test_operation_active_matching_payload_skips_non_dict_payloads(
     assert found is not None
     assert found.id == matching.id
     assert missing is None
+
+
+@pytest.mark.unit
+async def test_operation_active_matching_payload_requires_present_null_keys(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, title="operation payload explicit null identity")
+    repo = OperationRepository(session)
+    await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        status=OperationStatus.pending,
+        payload={"source": "operator_api"},
+    )
+    matching = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        status=OperationStatus.pending,
+        payload={"source": "operator_api", "reason": None},
+    )
+
+    found = await repo.find_active_matching_payload(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        payload_identity={"source": "operator_api", "reason": None},
+    )
+
+    assert found is not None
+    assert found.id == matching.id

@@ -2207,7 +2207,10 @@ class OperationRepository:
             payload = operation.payload
             if not isinstance(payload, dict):
                 continue
-            if all(payload.get(key) == value for key, value in payload_identity.items()):
+            if all(
+                key in payload and payload[key] == value
+                for key, value in payload_identity.items()
+            ):
                 return operation
         return None
 
