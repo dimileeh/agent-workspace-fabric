@@ -1,4 +1,4 @@
-import type { WorkspaceLifecycleStage, WorkspaceStatus } from "@/lib/types";
+import type { LlmUsageSummary, WorkspaceLifecycleStage, WorkspaceStatus } from "@/lib/types";
 
 export const lifecycleStages: WorkspaceStatus[] = [
   "requested",
@@ -40,6 +40,22 @@ export function fallbackLifecycleStages(
       status: stageStatus,
     };
   });
+}
+
+export function fallbackLlmUsage(
+  usage?: Partial<LlmUsageSummary> | null,
+): LlmUsageSummary {
+  const hasReason = usage !== undefined && usage !== null && "reason" in usage;
+  return {
+    input_tokens: usage?.input_tokens ?? null,
+    output_tokens: usage?.output_tokens ?? null,
+    total_tokens: usage?.total_tokens ?? null,
+    cost_estimate: usage?.cost_estimate ?? null,
+    currency: usage?.currency ?? null,
+    status: usage?.status === "available" ? "available" : "unavailable",
+    source: usage?.source ?? "none",
+    reason: hasReason ? usage.reason ?? null : "usage_not_reported",
+  };
 }
 
 export function compactId(value: string | null | undefined, head = 8): string {

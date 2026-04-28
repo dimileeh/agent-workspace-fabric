@@ -1171,7 +1171,7 @@ class WorkspaceExecutor:
             return
 
         pr_title = ws.task_title
-        pr_body = _build_pr_body(ws)
+        pr_body = _build_pr_body(ws, defaults=defaults)
 
         try:
             pr = await self._pr_creator.push_and_open(
@@ -2190,17 +2190,37 @@ def _call_pr_monitor_factory(
     raise bind_errors[0]
 
 
-def _build_pr_body(ws: Workspace) -> str:
+def _build_pr_body(ws: Workspace, *, defaults: AgentDefaults | None = None) -> str:
     """Standard PR description generated from the workspace's task metadata."""
     external_id = f"\n**External task ID**: {ws.task_external_id}" if ws.task_external_id else ""
     return (
         f"Automatically opened by AWF workspace `{ws.id}` "
-        f"(agent: `{ws.agent}`).\n"
+        f"({_agent_pr_identity(ws, defaults=defaults)}).\n"
         f"{external_id}\n\n"
         f"### Task\n{ws.task_prompt}\n\n"
         f"---\nValidation: "
         f"{_validation_command_count(ws)} profile command(s) passed inside the workspace container.\n"
     )
+
+
+def _agent_pr_identity(ws: Workspace, *, defaults: AgentDefaults | None = None) -> str:
+    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    model = _nonblank_policy_string(policy, "agent_model") or (defaults.model if defaults else None)
+    effort = _nonblank_policy_string(policy, "agent_effort") or (defaults.effort if defaults else None)
+
+    parts = [f"agent: `{ws.agent}`"]
+    if model is not None:
+        parts.append(f"model: `{model}`")
+    if effort is not None:
+        parts.append(f"effort: `{effort}`")
+    return ", ".join(parts)
+
+
+def _nonblank_policy_string(policy: Mapping[str, Any], key: str) -> str | None:
+    value = policy.get(key)
+    if isinstance(value, str) and value.strip():
+        return value.strip()
+    return None
 
 
 def _profile_for_workspace(ws: Workspace, *, worktree_path: Path) -> WorkspaceProfile:
@@ -2219,9 +2239,9 @@ def _agent_model_for_workspace(
     defaults: AgentDefaults | None,
 ) -> str | None:
     policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
-    model = policy.get("agent_model")
-    if isinstance(model, str) and model.strip():
-        return model.strip()
+    model = _nonblank_policy_string(policy, "agent_model")
+    if model is not None:
+        return model
     return defaults.model if defaults else None
 
 
