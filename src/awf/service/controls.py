@@ -25,7 +25,12 @@ CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
 _REMONITOR_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _VALIDATE_REPLAY_STATUSES = frozenset(
-    {WorkspaceStatus.monitoring_pr, WorkspaceStatus.ready}
+    {
+        WorkspaceStatus.monitoring_pr,
+        WorkspaceStatus.ready,
+        WorkspaceStatus.running,
+        WorkspaceStatus.validating,
+    }
 )
 _DESTROYING_OR_DESTROYED_STATUSES = frozenset(
     {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}

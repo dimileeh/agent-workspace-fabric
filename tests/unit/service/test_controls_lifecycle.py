@@ -513,6 +513,40 @@ async def test_validate_monitoring_pr_creates_validate_only_operation_and_coales
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "transient_status",
+    [WorkspaceStatus.running, WorkspaceStatus.validating],
+)
+async def test_validate_replay_coalesces_during_executor_transient_states(
+    session: AsyncSession,
+    transient_status: WorkspaceStatus,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/47"
+    workspace.pr_number = 47
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_validate_workspace(
+        workspace.id,
+        reason="rerun required validation",
+        requested_tier=2,
+    )
+    operation.status = OperationStatus.running.value
+    workspace.status = transient_status.value
+    await session.flush()
+
+    replay = await service.request_validate_workspace(
+        workspace.id,
+        reason="rerun required validation",
+        requested_tier=2,
+    )
+
+    assert replay.id == operation.id
+    assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
+
+
+@pytest.mark.unit
 async def test_validate_without_requested_tier_omits_tier_from_payload(
     session: AsyncSession,
 ) -> None:
