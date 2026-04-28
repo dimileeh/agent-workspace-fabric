@@ -19,6 +19,8 @@ from awf.db.models import MergeCandidate
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    StaleReasonCreate,
+    StaleReasonRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -238,6 +240,30 @@ async def _seed_merge_candidate(
         )
 
 
+async def _seed_active_target_advanced_reason(
+    factory: async_sessionmaker[AsyncSession],
+    seed: CandidateSeed,
+) -> None:
+    async with factory() as session:
+        candidate = await session.get(MergeCandidate, seed.candidate_id)
+        assert candidate is not None
+        await StaleReasonRepository(session).replace_active_findings(
+            workspace_id=seed.workspace_id,
+            candidate_id=seed.candidate_id,
+            attempt_id=seed.attempt_id,
+            task_id=candidate.task_id,
+            findings=[
+                StaleReasonCreate(
+                    reason_code="STALE_TARGET_ADVANCED",
+                    trigger_type="target_advanced",
+                    trigger_ref="b" * 40,
+                    explanation="Target branch advanced past this candidate.",
+                )
+            ],
+        )
+        await session.commit()
+
+
 async def _execute_merge(
     *,
     factory: async_sessionmaker[AsyncSession],
@@ -350,6 +376,52 @@ async def test_auto_merge_blocks_persisted_stale_candidate(
         )
 
     assert terminal is True
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    assert [(op.type, op.payload) for op in operations] == [
+        (
+            OperationType.validate.value,
+            {
+                "source": "pr_monitor",
+                "reason": "STALE_TARGET_ADVANCED",
+                "recovery_mode": "rebase_only",
+            },
+        )
+    ]
+
+
+@pytest.mark.unit
+async def test_auto_merge_materializes_active_stale_reason(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    seed = await _seed_merge_candidate(factory, pr_number=510)
+    await _seed_active_target_advanced_reason(factory, seed)
+
+    terminal = await _execute_merge(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        tmp_path=tmp_path,
+        seed=seed,
+    )
+
+    async with factory() as session:
+        candidate = await session.get(MergeCandidate, seed.candidate_id)
+        workspace = await WorkspaceRepository(session).get(seed.workspace_id)
+        operations = await OperationRepository(session).list_all(
+            workspace_id=seed.workspace_id,
+        )
+
+    assert terminal is True
+    assert candidate is not None
+    assert candidate.stale is True
+    assert candidate.stale_reason == "STALE_TARGET_ADVANCED"
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
