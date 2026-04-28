@@ -11,8 +11,9 @@ from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
-from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
+    OperationRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
@@ -1176,3 +1177,458 @@ async def test_existing_failure_groups_unaffected(
     assert len(summary.failure_groups) == 1
     assert summary.failure_groups[0].failure_reason == FailureReason.agent_failure.value
     assert len(summary.latest_examples) == 1
+
+
+async def _operation(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    operation_type: OperationType,
+    status: OperationStatus,
+    created_at: datetime | None = None,
+    finished_at: datetime | None = None,
+) -> None:
+    async with session_factory() as session:
+        repo = OperationRepository(session)
+        op = await repo.create(
+            workspace_id=workspace_id,
+            operation_type=operation_type,
+            status=OperationStatus.running if status != OperationStatus.pending else status,
+        )
+        if created_at is not None:
+            op.created_at = created_at
+        if status in (OperationStatus.succeeded, OperationStatus.failed, OperationStatus.cancelled):
+            await repo.finish(op, status=status)
+            if finished_at is not None:
+                op.finished_at = finished_at
+        await session.commit()
+
+
+@pytest.mark.unit
+async def test_slo_summary_returns_zero_counts_for_empty_db(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            now=now,
+        )
+
+    assert summary.generated_at == now
+    assert summary.window_start == now - timedelta(hours=24)
+    assert summary.since_hours == 24
+    assert summary.creation_total == 0
+    assert summary.creation_succeeded == 0
+    assert summary.creation_failed == 0
+    assert summary.creation_cancelled == 0
+    assert summary.cleanup_total == 0
+    assert summary.cleanup_succeeded == 0
+    assert summary.cleanup_failure_count == 0
+    assert summary.stuck_running_count == 0
+    assert summary.stuck_with_reason_count == 0
+    assert summary.recovery_total == 0
+    assert summary.recovery_succeeded == 0
+    assert summary.recovery_failed_count == 0
+    assert summary.monitor_completed_total == 0
+    assert summary.completed_after_monitor_count == 0
+    assert summary.monitor_stuck_count == 0
+    assert summary.actionable_failure_count == 0
+    assert summary.unactionable_failure_count == 0
+
+
+@pytest.mark.unit
+async def test_creation_metrics_windowed_by_created_at(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        created_at=now - timedelta(hours=2),
+        updated_at=now - timedelta(hours=1),
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        failure_reason=FailureReason.agent_failure,
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.cancelled,
+        created_at=now - timedelta(hours=4),
+        updated_at=now - timedelta(hours=3),
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        created_at=now - timedelta(hours=30),
+        updated_at=now - timedelta(hours=29),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.creation_total == 3
+    assert summary.creation_succeeded == 1
+    assert summary.creation_failed == 1
+    assert summary.creation_cancelled == 1
+
+
+@pytest.mark.unit
+async def test_cleanup_metrics_from_destroy_operations(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    ws_id_1 = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.destroyed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+    )
+    ws_id_2 = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.destroyed,
+        created_at=now - timedelta(hours=6),
+        updated_at=now - timedelta(hours=1),
+    )
+    ws_id_3 = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.destroyed,
+        created_at=now - timedelta(hours=30),
+        updated_at=now - timedelta(hours=29),
+    )
+    await _operation(
+        session_factory,
+        ws_id_1,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.succeeded,
+        finished_at=now - timedelta(hours=1),
+    )
+    await _operation(
+        session_factory,
+        ws_id_2,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.failed,
+        finished_at=now - timedelta(hours=1),
+    )
+    await _operation(
+        session_factory,
+        ws_id_3,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.succeeded,
+        finished_at=now - timedelta(hours=29),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.cleanup_total == 2
+    assert summary.cleanup_succeeded == 1
+    assert summary.cleanup_failure_count == 1
+
+
+@pytest.mark.unit
+async def test_stuck_state_splits_by_reason_code_presence(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    settings = Settings(_env_file=None, agent_wall_timeout_seconds=3600)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        failure_reason="network_hiccup",
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        created_at=now - timedelta(minutes=30),
+        updated_at=now - timedelta(minutes=20),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=settings,
+            now=now,
+        )
+
+    assert summary.stuck_running_count == 1
+    assert summary.stuck_with_reason_count == 1
+
+
+@pytest.mark.unit
+async def test_recovery_metrics_from_operations(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    ws_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.agent_failure,
+    )
+    await _operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.remonitor,
+        status=OperationStatus.succeeded,
+        created_at=now - timedelta(hours=1),
+        finished_at=now - timedelta(minutes=50),
+    )
+    await _operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.rebase,
+        status=OperationStatus.failed,
+        created_at=now - timedelta(hours=1),
+        finished_at=now - timedelta(minutes=40),
+    )
+    await _operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.retry,
+        status=OperationStatus.succeeded,
+        created_at=now - timedelta(hours=1),
+        finished_at=now - timedelta(minutes=30),
+    )
+    await _operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.remonitor,
+        status=OperationStatus.succeeded,
+        created_at=now - timedelta(hours=30),
+        finished_at=now - timedelta(hours=29),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.recovery_total == 3
+    assert summary.recovery_succeeded == 2
+    assert summary.recovery_failed_count == 1
+
+
+@pytest.mark.unit
+async def test_monitor_metrics_counts_completed_and_stuck(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    settings = Settings(_env_file=None, agent_wall_timeout_seconds=3600)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(hours=2),
+        pr_url="https://github.com/example/repo/pull/1",
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        created_at=now - timedelta(hours=10),
+        updated_at=now - timedelta(hours=1),
+        pr_url="https://github.com/example/repo/pull/2",
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=settings,
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.monitor_stuck_count == 1
+    assert summary.completed_after_monitor_count == 1
+    assert summary.monitor_completed_total == 2
+    assert summary.monitor_completed_total != summary.completed_after_monitor_count
+
+
+@pytest.mark.unit
+async def test_actionable_vs_unactionable_failure_counts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.agent_failure,
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+        failure_reason=FailureReason.validation_failure,
+    )
+    await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+        failure_reason="unknown_error_code",
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.actionable_failure_count == 2
+    assert summary.unactionable_failure_count == 1
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("since_hours", [0, 169])
+async def test_since_hours_validation_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+    since_hours: int,
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    async with session_factory() as session:
+        with pytest.raises(ValueError, match="since_hours must be between"):
+            await summarize_slo_metrics_for_session(
+                session,
+                settings=Settings(_env_file=None),
+                since_hours=since_hours,
+            )
+
+
+@pytest.mark.unit
+async def test_slo_summary_defaults_to_24_hour_window(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            now=now,
+        )
+
+    assert summary.since_hours == 24
+    assert summary.window_start == now - timedelta(hours=24)
+
+
+@pytest.mark.unit
+async def test_slo_summary_session_factory_wrapper(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    summary = await summarize_slo_metrics(
+        session_factory, settings=Settings(_env_file=None), now=now
+    )
+
+    assert summary.generated_at == now
+    assert summary.since_hours == 24
+    assert summary.creation_total == 0
+
+
+@pytest.mark.unit
+async def test_cleanup_and_recovery_include_cancelled_operations(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_slo_metrics_for_session
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    ws_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.destroyed,
+        created_at=now - timedelta(hours=5),
+        updated_at=now - timedelta(hours=1),
+    )
+    await _operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.succeeded,
+        finished_at=now - timedelta(hours=1),
+    )
+    await _operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.cancelled,
+        finished_at=now - timedelta(hours=1),
+    )
+    await _operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.remonitor,
+        status=OperationStatus.succeeded,
+        created_at=now - timedelta(hours=1),
+        finished_at=now - timedelta(minutes=50),
+    )
+    await _operation(
+        session_factory,
+        ws_id,
+        operation_type=OperationType.retry,
+        status=OperationStatus.cancelled,
+        created_at=now - timedelta(hours=1),
+    )
+
+    async with session_factory() as session:
+        summary = await summarize_slo_metrics_for_session(
+            session,
+            settings=Settings(_env_file=None),
+            since_hours=24,
+            now=now,
+        )
+
+    assert summary.cleanup_total == 2
+    assert summary.cleanup_succeeded == 1
+    assert summary.cleanup_failure_count == 0
+    assert summary.recovery_total == 2
+    assert summary.recovery_succeeded == 1
+    assert summary.recovery_failed_count == 0
