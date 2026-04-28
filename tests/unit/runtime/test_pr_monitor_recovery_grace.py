@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import time
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -18,7 +19,12 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    OperationRepository,
+    ValidationRunRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import (
     AbortReason,
@@ -73,6 +79,39 @@ async def _mark_refactor_task(
         assert ws is not None
         ws.task_class = TaskClass.refactor_task.value
         ws.auto_merge = auto_merge
+        await s.commit()
+
+
+async def _mark_candidate_target_advanced_stale(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> None:
+    async with factory() as s:
+        candidate = await MergeCandidateRepository(s).get_open_for_workspace_with_merge_inputs(
+            workspace_id
+        )
+        assert candidate is not None
+        ws = candidate.workspace
+        started_at = datetime.now(UTC)
+        validation_run = await ValidationRunRepository(s).start(
+            workspace_id=workspace_id,
+            attempt_id=candidate.attempt_id,
+            tier=2,
+            commands=[],
+            base_commit=ws.base_commit,
+            target_branch=ws.remote_push_branch,
+            target_head_sha=candidate.head_sha,
+            log_stream_refs={},
+            started_at=started_at,
+        )
+        await ValidationRunRepository(s).finish(
+            validation_run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+            finished_at=started_at + timedelta(seconds=1),
+        )
+        candidate.stale = True
+        candidate.stale_reason = "STALE_TARGET_ADVANCED"
         await s.commit()
 
 
@@ -287,19 +326,17 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """When `compute_stale_reason` returns `(_, "rebase")` and a prior
-    rebase op failed, the runner posts a NotifyHuman comment — grace
-    must NOT suppress that, since the workspace is unrecoverable
-    without operator help."""
-    import datetime
-
-    from sqlalchemy.exc import StatementError  # noqa: F401
+    """When target-advanced stale recovery needs rebase and a prior rebase
+    op failed, the runner posts a NotifyHuman comment — grace must NOT
+    suppress that, since the workspace is unrecoverable without operator
+    help."""
 
     cmd = FakeCommandRunner()
     sleep_fn = RecordedSleep()
     adapter = FakeAdapter()
     workspace_id = await seed_monitoring_workspace(factory)
     await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+    await _mark_candidate_target_advanced_stale(factory, workspace_id)
 
     # Seed a failed rebase operation so the rebase guard fires.
     async with factory() as s:
@@ -317,7 +354,7 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
         await s.execute(
             update(Operation)
             .where(Operation.workspace_id == workspace_id)
-            .values(status="failed", finished_at=datetime.datetime.now(datetime.UTC)),
+            .values(status="failed", finished_at=datetime.now(UTC)),
         )
         await s.commit()
 
@@ -332,42 +369,21 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
         initial_review_grace_period_seconds=900,
     )
 
-    # Force compute_stale_reason to claim the action is "rebase" —
-    # otherwise the default refactor path returns "validate".
-    import awf.runtime.pr_monitor_runner as pr_monitor_runner
-
-    original_compute = pr_monitor_runner.__dict__.get("compute_stale_reason")
-    monkeypatched: dict[str, object] = {}
-
-    def fake_compute_stale_reason(ws):  # type: ignore[no-untyped-def]
-        return ("validation_insufficient_tier", "rebase")
-
-    # Patch the imported reference inside the function; the runner
-    # imports compute_stale_reason inline so we patch via its module.
-    import awf.runtime.merge_eligibility as merge_eligibility
-
-    original_module_compute = merge_eligibility.compute_stale_reason
-    merge_eligibility.compute_stale_reason = fake_compute_stale_reason  # type: ignore[assignment]
-    try:
-        state = MonitorState(started_at=time.monotonic())
-        terminal = await runner._execute(
-            action=Merge(),
-            workspace_id=workspace_id,
-            repo_url="git@github.com:dimileeh/aira-web.git",
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            status=_green_pr_status(),
-            state=state,
-            base_branch="development",
-            remote_branch=f"awf/{workspace_id}",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            monitor_log=None,
-        )
-    finally:
-        merge_eligibility.compute_stale_reason = original_module_compute  # type: ignore[assignment]
-        del monkeypatched
-        del original_compute
+    state = MonitorState(started_at=time.monotonic())
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_pr_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
 
     assert terminal is False
     # NotifyHuman fired (gh pr comment).
@@ -404,6 +420,7 @@ async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
     adapter = FakeAdapter()
     workspace_id = await seed_monitoring_workspace(factory)
     await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+    await _mark_candidate_target_advanced_stale(factory, workspace_id)
 
     cmd.queue_result(returncode=0)  # any optional gh call
 
@@ -416,36 +433,26 @@ async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
         initial_review_grace_period_seconds=900,
     )
 
-    import awf.runtime.merge_eligibility as merge_eligibility
-
-    def fake_compute_stale_reason(ws):  # type: ignore[no-untyped-def]
-        return ("validation_insufficient_tier", "rebase")
-
-    original_module_compute = merge_eligibility.compute_stale_reason
-    merge_eligibility.compute_stale_reason = fake_compute_stale_reason  # type: ignore[assignment]
-    try:
-        # Pre-mark grace as elapsed so the dispatch block runs.
-        state = MonitorState(started_at=0.0)
-        state.mark_addressed(
-            _initial_review_grace_started_key(42),
-            f"{0.0:.6f}",
-        )
-        terminal = await runner._execute(
-            action=Merge(),
-            workspace_id=workspace_id,
-            repo_url="git@github.com:dimileeh/aira-web.git",
-            repo=RepoRef(owner="dimileeh", name="aira-web"),
-            pr_number=42,
-            status=_green_pr_status(),
-            state=state,
-            base_branch="development",
-            remote_branch=f"awf/{workspace_id}",
-            compose_project="proj",
-            compose_file=tmp_path / "compose.yml",
-            monitor_log=None,
-        )
-    finally:
-        merge_eligibility.compute_stale_reason = original_module_compute  # type: ignore[assignment]
+    # Pre-mark grace as elapsed so the dispatch block runs.
+    state = MonitorState(started_at=0.0)
+    state.mark_addressed(
+        _initial_review_grace_started_key(42),
+        f"{0.0:.6f}",
+    )
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_pr_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
 
     assert terminal is True
 
@@ -464,7 +471,7 @@ async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
     # discriminator the future rebase slice can read.
     assert operation.payload == {
         "source": "pr_monitor",
-        "reason": "validation_insufficient_tier",
+        "reason": "STALE_TARGET_ADVANCED",
         "recovery_mode": "rebase_only",
     }
 
