@@ -6,7 +6,7 @@ import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
@@ -1019,24 +1019,21 @@ async def _count_creation_metrics(
     window_start: datetime,
 ) -> dict[str, int]:
     stmt = (
-        select(Workspace.status, func.count())
+        select(
+            func.count().label("total"),
+            func.sum(case((Workspace.status == WorkspaceStatus.completed.value, 1), else_=0)).label("succeeded"),
+            func.sum(case((Workspace.status == WorkspaceStatus.failed.value, 1), else_=0)).label("failed"),
+            func.sum(case((Workspace.status == WorkspaceStatus.cancelled.value, 1), else_=0)).label("cancelled"),
+        )
         .where(Workspace.created_at >= window_start)
-        .group_by(Workspace.status)
     )
-    rows = await session.execute(stmt)
-    total = 0
-    succeeded = 0
-    failed = 0
-    cancelled = 0
-    for status, count in rows.all():
-        total += int(count)
-        if status == WorkspaceStatus.completed.value:
-            succeeded += int(count)
-        elif status == WorkspaceStatus.failed.value:
-            failed += int(count)
-        elif status == WorkspaceStatus.cancelled.value:
-            cancelled += int(count)
-    return {"total": total, "succeeded": succeeded, "failed": failed, "cancelled": cancelled}
+    row = (await session.execute(stmt)).one()
+    return {
+        "total": int(row.total or 0),
+        "succeeded": int(row.succeeded or 0),
+        "failed": int(row.failed or 0),
+        "cancelled": int(row.cancelled or 0),
+    }
 
 
 async def _count_cleanup_metrics(
@@ -1045,24 +1042,22 @@ async def _count_cleanup_metrics(
     window_start: datetime,
 ) -> dict[str, int]:
     stmt = (
-        select(Operation.status, func.count())
+        select(
+            func.count().label("total"),
+            func.sum(case((Operation.status == OperationStatus.succeeded.value, 1), else_=0)).label("succeeded"),
+            func.sum(case((Operation.status == OperationStatus.failed.value, 1), else_=0)).label("failed"),
+        )
         .where(
             Operation.type == OperationType.destroy.value,
             Operation.finished_at >= window_start,
         )
-        .group_by(Operation.status)
     )
-    rows = await session.execute(stmt)
-    total = 0
-    succeeded = 0
-    failed = 0
-    for status, count in rows.all():
-        total += int(count)
-        if status == OperationStatus.succeeded.value:
-            succeeded += int(count)
-        elif status == OperationStatus.failed.value:
-            failed += int(count)
-    return {"total": total, "succeeded": succeeded, "failed": failed}
+    row = (await session.execute(stmt)).one()
+    return {
+        "total": int(row.total or 0),
+        "succeeded": int(row.succeeded or 0),
+        "failed": int(row.failed or 0),
+    }
 
 
 async def _count_stuck_detailed(
