@@ -1617,6 +1617,19 @@ class WorkspaceExecutor:
             return f"planning profile is invalid: {exc}"
 
         before_plan = await self._changed_paths(worktree_path)
+        baseline_sha: str | None = None
+        rev_r = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "HEAD",
+            ]
+        )
+        if rev_r.ok and rev_r.stdout.strip():
+            baseline_sha = rev_r.stdout.strip()
         await adapter.run(
             compose_project=compose_project,
             compose_file=compose_file,
@@ -1627,7 +1640,13 @@ class WorkspaceExecutor:
             model=model,
             workspace_id=workspace.id,
         )
-        after_plan = await self._changed_paths(worktree_path)
+        dirty_paths = await self._changed_paths(worktree_path)
+        committed_paths = (
+            await self._committed_paths_since(worktree_path, baseline_sha)
+            if baseline_sha is not None
+            else set()
+        )
+        after_plan = dirty_paths | committed_paths
         if plan_path not in after_plan:
             return f"planning phase did not create or modify required plan file `{plan_path}`"
         if planning.enforce_plan_only_changes:
@@ -1719,6 +1738,22 @@ class WorkspaceExecutor:
                 f"git status failed while checking workspace changes: {result.stderr}"
             )
         return changed_paths_from_porcelain(result.stdout)
+
+    async def _committed_paths_since(self, worktree_path: Path, since: str) -> set[Path]:
+        result = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "diff",
+                "--name-only",
+                f"{since}..HEAD",
+            ]
+        )
+        if not result.ok:
+            return set()
+        return {Path(line.strip()) for line in result.stdout.splitlines() if line.strip()}
 
     async def _claim_ready(
         self,
