@@ -18,6 +18,49 @@ from awf.db.session import make_engine, make_session_factory
 from tests.unit.helpers import create_workspace
 
 
+@pytest.mark.unit
+def test_redact_monitor_operation_value_preserves_llm_token_usage_metadata() -> None:
+    value = {
+        "usage": {
+            "input_tokens": 100,
+            "output_tokens": 25,
+            "total_tokens": 125,
+            "provider_total_tokens": 125,
+            "token_count": 3,
+        },
+        "github_token": "ghp_should_not_persist",
+        "access_token": "access-secret",
+        "nested": [
+            {
+                "prompt_tokens": 70,
+                "completion_tokens": 55,
+                "token": "raw-token-secret",
+                "secret_total_tokens": 5,
+            }
+        ],
+    }
+
+    redacted = operations.redact_monitor_operation_value(value)
+
+    assert redacted["usage"] == {
+        "input_tokens": 100,
+        "output_tokens": 25,
+        "total_tokens": 125,
+        "provider_total_tokens": 125,
+        "token_count": 3,
+    }
+    assert redacted["github_token"] == "[redacted]"
+    assert redacted["access_token"] == "[redacted]"
+    assert redacted["nested"] == [
+        {
+            "prompt_tokens": 70,
+            "completion_tokens": 55,
+            "token": "[redacted]",
+            "secret_total_tokens": "[redacted]",
+        }
+    ]
+
+
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'monitor-operations.db'}")

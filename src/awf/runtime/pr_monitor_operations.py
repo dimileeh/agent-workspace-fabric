@@ -15,8 +15,15 @@ from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import OperationRepository
 
-_SENSITIVE_KEY_RE = re.compile(
-    r"(authorization|bearer|password|passwd|secret|token|api[_-]?key|access[_-]?key)",
+_SENSITIVE_NON_TOKEN_KEY_RE = re.compile(
+    r"(authorization|bearer|password|passwd|secret|api[_-]?key|access[_-]?key)",
+    re.IGNORECASE,
+)
+_SENSITIVE_TOKEN_KEY_RE = re.compile(r"token", re.IGNORECASE)
+_TOKEN_USAGE_METADATA_KEY_RE = re.compile(
+    r"(?:^|[_-])(?:input|output|total|prompt|completion|cached|reasoning)"
+    r"[_-]?tokens?(?:[_-](?:count|used|usage))?$"
+    r"|(?:^|[_-])tokens?[_-](?:count|used|usage)$",
     re.IGNORECASE,
 )
 _SECRET_VALUE_PATTERNS = (
@@ -205,7 +212,7 @@ def redact_monitor_operation_value(value: Any) -> Any:
         redacted: dict[str, Any] = {}
         for key, item in value.items():
             key_text = str(key)
-            if _SENSITIVE_KEY_RE.search(key_text):
+            if _is_sensitive_monitor_operation_key(key_text):
                 redacted[key_text] = "[redacted]"
             else:
                 redacted[key_text] = redact_monitor_operation_value(item)
@@ -217,6 +224,15 @@ def redact_monitor_operation_value(value: Any) -> Any:
     if isinstance(value, str):
         return _redact_string(value)
     return value
+
+
+def _is_sensitive_monitor_operation_key(key: str) -> bool:
+    if _SENSITIVE_NON_TOKEN_KEY_RE.search(key):
+        return True
+    return bool(
+        _SENSITIVE_TOKEN_KEY_RE.search(key)
+        and not _TOKEN_USAGE_METADATA_KEY_RE.search(key)
+    )
 
 
 def _redact_string(value: str) -> str:
