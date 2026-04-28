@@ -156,6 +156,48 @@ class TestMergeQueueExposesStaleReasons:
         }
 
     @pytest.mark.unit
+    async def test_merge_queue_item_uses_sensitive_stale_reason_for_rebase_action(
+        self,
+        client: AsyncClient,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id, _attempt_id, candidate_id = await _seed_candidate(
+            factory,
+            pr_url="https://github.com/example/svc/pull/177",
+            pr_number=177,
+            branch_name="awf/dependency-stale",
+            owned_paths=["src/awf/service/**"],
+            task_class="dependency_task",
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("uv.lock",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        response = await client.get("/v1/merge-queue")
+        assert response.status_code == 200
+        item = next(it for it in response.json()["items"] if it["workspace_id"] == workspace_id)
+
+        assert item["readiness"]["stale"] is True
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "rebase"
+        assert [r["reason_code"] for r in item["stale_reasons"]] == ["STALE_DEPENDENCY"]
+
+    @pytest.mark.unit
     async def test_docs_class_with_non_overlapping_change_keeps_mergeable(
         self,
         client: AsyncClient,
@@ -234,6 +276,62 @@ class TestWorkspaceStaleReasonsEndpoint:
         assert "items" in body
         assert any(r["status"] == "active" for r in body["items"])
         assert all(r["workspace_id"] == workspace_id for r in body["items"])
+
+    @pytest.mark.unit
+    async def test_workspace_stale_reasons_endpoint_includes_resolved_when_requested(
+        self,
+        client: AsyncClient,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id, _attempt_id, candidate_id = await _seed_candidate(
+            factory,
+            pr_url="https://github.com/example/svc/pull/179",
+            pr_number=179,
+            branch_name="awf/resolved-stale",
+            owned_paths=["src/awf/api/**"],
+            task_class="docs_task",
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("src/awf/api/routes/locks.py",),
+                    advanced_commits=1,
+                ),
+            )
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="a" * 40,
+                    changed_paths=(),
+                    advanced_commits=0,
+                ),
+            )
+            await session.commit()
+
+        active_response = await client.get(f"/v1/workspaces/{workspace_id}/stale-reasons")
+        assert active_response.status_code == 200
+        assert active_response.json()["items"] == []
+
+        resolved_response = await client.get(
+            f"/v1/workspaces/{workspace_id}/stale-reasons",
+            params={"include_resolved": "true"},
+        )
+        assert resolved_response.status_code == 200
+        items = resolved_response.json()["items"]
+        assert [item["reason_code"] for item in items] == ["STALE_OVERLAP"]
+        assert items[0]["status"] == "resolved"
+        assert items[0]["resolved_at"] is not None
 
     @pytest.mark.unit
     async def test_workspace_stale_reasons_endpoint_returns_empty_for_unknown_workspace(

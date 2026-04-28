@@ -26,13 +26,12 @@ Reason codes:
   target. Always sensitive: even a docs-class candidate cannot ignore
   changes to a path it claims to own.
 * ``STALE_SCHEMA``          — a schema / migration / model file changed
-  on target while the candidate is a ``migration_task``.
+  on target while policy marks the candidate's task class schema-sensitive.
 * ``STALE_DEPENDENCY``      — a dependency file (``pyproject.toml`` etc.)
-  changed while the candidate is a ``dependency_task`` (or migration_task,
-  since dep changes can break a migration).
+  changed while policy marks the candidate's task class dependency-sensitive.
 * ``STALE_BUILD_CONFIG``    — a build-config file (``Dockerfile``,
-  ``docker-compose``, ``alembic.ini``) changed while the candidate is a
-  ``build_config_task`` (or migration_task).
+  ``docker-compose``, CI workflows) changed while policy marks the candidate's
+  task class build-config-sensitive.
 """
 
 from __future__ import annotations
@@ -41,6 +40,7 @@ from abc import ABC, abstractmethod
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from fnmatch import fnmatchcase
 from typing import Final
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -113,6 +113,15 @@ class StalePolicy:
     lenient_task_classes: tuple[str, ...] = field(
         default_factory=lambda: ("docs_task", "test_task")
     )
+    schema_sensitive_task_classes: tuple[str, ...] = field(
+        default_factory=lambda: ("migration_task",)
+    )
+    dependency_sensitive_task_classes: tuple[str, ...] = field(
+        default_factory=lambda: ("dependency_task", "migration_task")
+    )
+    build_config_sensitive_task_classes: tuple[str, ...] = field(
+        default_factory=lambda: ("build_config_task", "migration_task")
+    )
 
 
 REASON_TARGET_ADVANCED: Final[str] = "STALE_TARGET_ADVANCED"
@@ -130,23 +139,48 @@ TRIGGER_BUILD_CONFIG_CHANGED: Final[str] = "build_config_changed"
 DEFAULT_STALE_POLICY: Final[StalePolicy] = StalePolicy(
     schema_paths=(
         "migrations/",
-        "src/awf/db/models.py",
-        "src/awf/db/repositories.py",
+        "migration/",
+        "schema/",
+        "schemas/",
+        "models/",
+        "model/",
+        "*/schema/**",
+        "*/schemas/**",
+        "*/models/**",
+        "*/model/**",
+        "*/models.py",
+        "*/model.py",
+        "db/schema.rb",
+        "prisma/schema.prisma",
         "alembic.ini",
     ),
     dependency_paths=(
         "pyproject.toml",
         "uv.lock",
         "requirements.txt",
+        "requirements-dev.txt",
+        "poetry.lock",
+        "Pipfile",
+        "Pipfile.lock",
         "package.json",
         "package-lock.json",
+        "pnpm-lock.yaml",
+        "yarn.lock",
     ),
     build_config_paths=(
         "Dockerfile",
+        "Dockerfile.*",
+        "*/Dockerfile",
+        "*/Dockerfile.*",
         "docker/",
         "docker-compose.yml",
         "docker-compose.yaml",
+        "compose.yml",
+        "compose.yaml",
         ".github/workflows/",
+        "Makefile",
+        "Taskfile.yml",
+        "taskfile.yml",
     ),
 )
 
@@ -176,7 +210,10 @@ def evaluate_staleness(
     build_changes = _matched(target.changed_paths, policy.build_config_paths)
     overlap = _matched(target.changed_paths, candidate.owned_paths)
 
-    if candidate.task_class == "migration_task":
+    if _is_sensitive_task_class(
+        candidate.task_class,
+        policy.schema_sensitive_task_classes,
+    ):
         for path in schema_changes:
             findings.append(
                 StalenessFinding(
@@ -191,7 +228,10 @@ def evaluate_staleness(
             )
             break
 
-    if candidate.task_class in {"dependency_task", "migration_task"}:
+    if _is_sensitive_task_class(
+        candidate.task_class,
+        policy.dependency_sensitive_task_classes,
+    ):
         for path in dep_changes:
             findings.append(
                 StalenessFinding(
@@ -205,7 +245,10 @@ def evaluate_staleness(
             )
             break
 
-    if candidate.task_class in {"build_config_task", "migration_task"}:
+    if _is_sensitive_task_class(
+        candidate.task_class,
+        policy.build_config_sensitive_task_classes,
+    ):
         for path in build_changes:
             findings.append(
                 StalenessFinding(
@@ -252,13 +295,21 @@ def evaluate_staleness(
     return findings
 
 
+def _is_sensitive_task_class(
+    task_class: str | None,
+    sensitive_task_classes: Sequence[str],
+) -> bool:
+    return task_class is not None and task_class in sensitive_task_classes
+
+
 def _matched(changed_paths: Sequence[str], patterns: Sequence[str]) -> list[str]:
     """Return changed paths that match any pattern via prefix / glob-prefix.
 
     The matcher is intentionally simple: literal equality, ``foo/`` prefix
-    match (anything under ``foo/``), and ``foo/**`` glob-prefix. Matches the
-    workspace owned-path overlap policy in spirit; we don't need full
-    fnmatch semantics yet.
+    match (anything under ``foo/``), ``foo/**`` glob-prefix, and bounded
+    ``fnmatch`` patterns for policy defaults such as ``*/models/**``. Matches
+    the workspace owned-path overlap policy in spirit without requiring callers
+    to normalize paths first.
     """
     matches: list[str] = []
     for path in changed_paths:
@@ -274,23 +325,21 @@ def _path_matches(path: str, pattern: str) -> bool:
         return False
     if path == pattern:
         return True
-    if pattern.endswith("/**"):
+    if pattern.endswith("/**") and not _has_wildcard(pattern[: -len("/**")]):
         prefix = pattern[: -len("**")]
         return path.startswith(prefix) or path == prefix.rstrip("/")
-    if pattern.endswith("/*"):
+    if pattern.endswith("/*") and not _has_wildcard(pattern[: -len("/*")]):
         prefix = pattern[: -len("*")]
         return path.startswith(prefix) and "/" not in path[len(prefix) :]
     if pattern.endswith("/"):
         return path.startswith(pattern)
-    if "*" in pattern or "?" in pattern or "[" in pattern:
-        wildcard_idx = min(
-            i for i in (pattern.find("*"), pattern.find("?"), pattern.find("[")) if i >= 0
-        )
-        prefix = pattern[:wildcard_idx]
-        if not prefix:
-            return True
-        return path.startswith(prefix)
+    if _has_wildcard(pattern):
+        return fnmatchcase(path, pattern)
     return path.startswith(pattern + "/")
+
+
+def _has_wildcard(pattern: str) -> bool:
+    return "*" in pattern or "?" in pattern or "[" in pattern
 
 
 # ── Service layer ──────────────────────────────────────────────────────────

@@ -186,6 +186,18 @@ async def _attempt_id_for_workspace(engine: AsyncEngine, workspace_id: str) -> s
         return attempt_id
 
 
+async def _candidate_id_for_workspace(engine: AsyncEngine, workspace_id: str) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        result = await session.execute(
+            text("SELECT id FROM merge_candidates WHERE workspace_id = :workspace_id"),
+            {"workspace_id": workspace_id},
+        )
+        candidate_id = result.scalar_one()
+        assert isinstance(candidate_id, str)
+        return candidate_id
+
+
 async def _add_monitor_recovery_operation(engine: AsyncEngine, workspace_id: str) -> None:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -387,6 +399,77 @@ class TestMergeQueueList:
         }
         assert item["latest_validation"] is None
         assert newer_id not in {row["workspace_id"] for row in body["items"]}
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("task_class", "owned_paths", "changed_path", "reason_code"),
+        [
+            (
+                "dependency_task",
+                ["src/awf/service/**"],
+                "uv.lock",
+                "STALE_DEPENDENCY",
+            ),
+            (
+                "build_config_task",
+                ["src/awf/service/**"],
+                "Dockerfile",
+                "STALE_BUILD_CONFIG",
+            ),
+            (
+                "migration_task",
+                ["src/awf/service/**"],
+                "migrations/versions/20260428_add_table.py",
+                "STALE_SCHEMA",
+            ),
+        ],
+    )
+    async def test_sensitive_stale_reasons_block_with_rebase_action(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+        task_class: str,
+        owned_paths: list[str],
+        changed_path: str,
+        reason_code: str,
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title=f"Sensitive {reason_code}",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/20",
+            task_class=task_class,
+            owned_paths=owned_paths,
+        )
+        candidate_id = await _candidate_id_for_workspace(engine, workspace_id)
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="main",
+                    head_sha="b" * 40,
+                    changed_paths=(changed_path,),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(row for row in response.json()["items"] if row["workspace_id"] == workspace_id)
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "rebase"
+        assert item["readiness"]["stale"] is True
+        assert [reason["reason_code"] for reason in item["stale_reasons"]] == [reason_code]
 
     @pytest.mark.unit
     async def test_filters_by_repo_base_status_and_limit(
@@ -1118,6 +1201,7 @@ class TestMergeQueueHelpers:
 
         assert merge_queue_route._merge_blocker_reason(
             candidate,
+            stale_reasons=[],
             policy_findings=[],
             queue_blockers=[],
         ) == (expected_reason, expected_action)

@@ -355,6 +355,150 @@ class TestEvaluateStaleness:
         assert "STALE_BUILD_CONFIG" in codes
 
     @pytest.mark.unit
+    def test_migration_task_model_path_change_emits_stale_schema(self) -> None:
+        from awf.service.staleness import (
+            DEFAULT_STALE_POLICY,
+            CandidateSnapshot,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        candidate = CandidateSnapshot(
+            owned_paths=("migrations/**",),
+            task_class="migration_task",
+            base_sha="a" * 40,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=("src/app/models/user.py",),
+            advanced_commits=1,
+        )
+
+        findings = evaluate_staleness(
+            candidate=candidate,
+            target=target,
+            policy=DEFAULT_STALE_POLICY,
+        )
+
+        schema = next((f for f in findings if f.reason_code == "STALE_SCHEMA"), None)
+        assert schema is not None
+        assert schema.trigger_type == "schema_changed"
+        assert schema.trigger_ref == "src/app/models/user.py"
+        assert "src/app/models/user.py" in schema.explanation
+        assert "development" in schema.explanation
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        (
+            "reason_code",
+            "trigger_type",
+            "changed_path",
+            "dependency_sensitive",
+            "build_config_sensitive",
+        ),
+        [
+            (
+                "STALE_DEPENDENCY",
+                "dependency_changed",
+                "uv.lock",
+                ("docs_task",),
+                (),
+            ),
+            (
+                "STALE_BUILD_CONFIG",
+                "build_config_changed",
+                ".github/workflows/ci.yml",
+                (),
+                ("docs_task",),
+            ),
+        ],
+    )
+    def test_dependency_and_build_config_sensitivity_is_policy_driven(
+        self,
+        reason_code: str,
+        trigger_type: str,
+        changed_path: str,
+        dependency_sensitive: tuple[str, ...],
+        build_config_sensitive: tuple[str, ...],
+    ) -> None:
+        from awf.service.staleness import (
+            CandidateSnapshot,
+            StalePolicy,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        policy = StalePolicy(
+            schema_paths=("migrations/",),
+            dependency_paths=("uv.lock",),
+            build_config_paths=(".github/workflows/",),
+            lenient_task_classes=("docs_task", "test_task"),
+            dependency_sensitive_task_classes=dependency_sensitive,
+            build_config_sensitive_task_classes=build_config_sensitive,
+        )
+        candidate = CandidateSnapshot(
+            owned_paths=("docs/README.md",),
+            task_class="docs_task",
+            base_sha="a" * 40,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=(changed_path,),
+            advanced_commits=1,
+        )
+
+        findings = evaluate_staleness(candidate=candidate, target=target, policy=policy)
+
+        assert [(f.reason_code, f.trigger_type, f.trigger_ref) for f in findings] == [
+            (reason_code, trigger_type, changed_path)
+        ]
+
+    @pytest.mark.unit
+    def test_docs_and_test_changes_remain_fresh_when_policy_permits(self) -> None:
+        from awf.service.staleness import (
+            DEFAULT_STALE_POLICY,
+            CandidateSnapshot,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        docs_candidate = CandidateSnapshot(
+            owned_paths=("docs/getting-started.md",),
+            task_class="docs_task",
+            base_sha="a" * 40,
+        )
+        test_candidate = CandidateSnapshot(
+            owned_paths=("tests/unit/api/test_health.py",),
+            task_class="test_task",
+            base_sha="a" * 40,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=("docs/reference.md", "tests/unit/service/test_locks.py"),
+            advanced_commits=1,
+        )
+
+        assert (
+            evaluate_staleness(
+                candidate=docs_candidate,
+                target=target,
+                policy=DEFAULT_STALE_POLICY,
+            )
+            == []
+        )
+        assert (
+            evaluate_staleness(
+                candidate=test_candidate,
+                target=target,
+                policy=DEFAULT_STALE_POLICY,
+            )
+            == []
+        )
+
+    @pytest.mark.unit
     def test_no_findings_when_candidate_has_no_base_sha(self) -> None:
         from awf.service.staleness import (
             DEFAULT_STALE_POLICY,
@@ -792,6 +936,144 @@ class TestStalenessRefreshService:
         assert {r.reason_code for r in reasons} >= {"STALE_OVERLAP"}
         assert result.stale is True
         assert {f.reason_code for f in result.findings} >= {"STALE_OVERLAP"}
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        (
+            "reason_code",
+            "trigger_type",
+            "changed_path",
+            "schema_sensitive",
+            "dependency_sensitive",
+            "build_config_sensitive",
+        ),
+        [
+            (
+                "STALE_SCHEMA",
+                "schema_changed",
+                "src/app/models/user.py",
+                ("docs_task",),
+                (),
+                (),
+            ),
+            (
+                "STALE_DEPENDENCY",
+                "dependency_changed",
+                "uv.lock",
+                (),
+                ("docs_task",),
+                (),
+            ),
+            (
+                "STALE_BUILD_CONFIG",
+                "build_config_changed",
+                "Dockerfile",
+                (),
+                (),
+                ("docs_task",),
+            ),
+        ],
+    )
+    async def test_sensitive_reason_refresh_is_idempotent_and_resolves(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        reason_code: str,
+        trigger_type: str,
+        changed_path: str,
+        schema_sensitive: tuple[str, ...],
+        dependency_sensitive: tuple[str, ...],
+        build_config_sensitive: tuple[str, ...],
+    ) -> None:
+        from awf.db.repositories import StaleReasonRepository
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            StalePolicy,
+            TargetBranchState,
+        )
+
+        _workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["docs/README.md"],
+            task_class="docs_task",
+        )
+        policy = StalePolicy(
+            schema_paths=("src/app/models/",),
+            dependency_paths=("uv.lock",),
+            build_config_paths=("Dockerfile",),
+            lenient_task_classes=("docs_task", "test_task"),
+            schema_sensitive_task_classes=schema_sensitive,
+            dependency_sensitive_task_classes=dependency_sensitive,
+            build_config_sensitive_task_classes=build_config_sensitive,
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session, policy=policy)
+            first = await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=(changed_path,),
+                    advanced_commits=1,
+                ),
+            )
+            repeated = await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=(changed_path,),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        assert [r.reason_code for r in first.newly_added] == [reason_code]
+        assert repeated.newly_added == []
+        assert repeated.newly_resolved == []
+
+        async with factory() as session:
+            repo = StaleReasonRepository(session)
+            active = await repo.list_active_for_candidate(candidate_id)
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+
+        assert candidate is not None
+        assert candidate.stale is True
+        assert [(r.reason_code, r.trigger_type, r.trigger_ref) for r in active] == [
+            (reason_code, trigger_type, changed_path)
+        ]
+
+        async with factory() as session:
+            service = StalenessRefreshService(session, policy=policy)
+            resolved = await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="a" * 40,
+                    changed_paths=(),
+                    advanced_commits=0,
+                ),
+            )
+            await session.commit()
+
+        assert [r.reason_code for r in resolved.newly_resolved] == [reason_code]
+
+        async with factory() as session:
+            repo = StaleReasonRepository(session)
+            active = await repo.list_active_for_candidate(candidate_id)
+            full = await repo.list_for_candidate(candidate_id)
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+
+        assert candidate is not None
+        assert candidate.stale is False
+        assert active == []
+        historical = next(r for r in full if r.reason_code == reason_code)
+        assert historical.status == "resolved"
+        assert historical.resolved_at is not None
 
 
 class TestStalenessRefreshServiceErrorPaths:
