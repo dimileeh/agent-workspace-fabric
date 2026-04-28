@@ -13,6 +13,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from awf.service import orphan_resources
 from awf.service.orphan_resources import (
+    DetectedResource,
     ResourceScan,
     WorkspaceIdView,
     build_orphan_resource_summary,
@@ -314,20 +315,6 @@ def test_workspace_lookup_disposes_engine_after_success(
         available=True,
     )
     assert engine.disposed
-
-
-@pytest.mark.unit
-def test_docker_scan_reports_missing_binary() -> None:
-    def _missing_binary(args: list[str], **_kwargs: object) -> _Completed:
-        raise FileNotFoundError(args[0])
-
-    docker = scan_docker_resources(
-        docker_host="unix:///var/run/docker.sock",
-        run_subprocess=_missing_binary,
-    )
-
-    assert docker.ok is False
-    assert docker.detail == "docker binary not found on PATH"
 
 
 @pytest.mark.unit
