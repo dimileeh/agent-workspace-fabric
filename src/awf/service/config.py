@@ -8,7 +8,13 @@ from dataclasses import asdict, dataclass
 
 from sqlalchemy.engine import make_url
 
-from awf.common.config import DEFAULT_MIN_FREE_DISK_BYTES, Settings
+from awf.common.config import (
+    DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS,
+    DEFAULT_MIN_FREE_DISK_BYTES,
+    DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT,
+    DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS,
+    Settings,
+)
 
 DEFAULT_LOCAL_SERVICE_DATABASE_URL = "postgresql+asyncpg://awf:awf_dev@localhost:5433/awf"
 DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID = "local"
@@ -36,6 +42,12 @@ class ServiceSettings:
     node_id: str | None = None
     branch_prefix: str = "awf"
     min_free_disk_bytes: int = DEFAULT_MIN_FREE_DISK_BYTES
+    completed_workspace_retention_hours: float = DEFAULT_COMPLETED_WORKSPACE_RETENTION_HOURS
+    workspace_cleanup_enabled: bool = True
+    workspace_cleanup_scan_interval_seconds: float = (
+        DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS
+    )
+    workspace_cleanup_batch_limit: int = DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT
 
 
 def resolve_service_settings(
@@ -82,6 +94,10 @@ def resolve_service_settings(
         agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
         node_id=_empty_to_none(settings.worker_node_id) or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
         branch_prefix=settings.worker_branch_prefix,
+        completed_workspace_retention_hours=settings.completed_workspace_retention_hours,
+        workspace_cleanup_enabled=settings.workspace_cleanup_enabled,
+        workspace_cleanup_scan_interval_seconds=settings.workspace_cleanup_scan_interval_seconds,
+        workspace_cleanup_batch_limit=settings.workspace_cleanup_batch_limit,
     )
 
 

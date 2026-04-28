@@ -85,6 +85,7 @@ def test_parse_term_missing_handles_truncated_output(tmp_path: Path) -> None:
 def test_parse_term_missing_handles_malformed_lines(tmp_path: Path) -> None:
     coverage_output = tmp_path / "coverage.txt"
     coverage_output.write_text(
+        "coverage preamble before the table\n"
         "Name                                      Stmts   Miss  Cover   Missing\n"
         "---------------------------------------------------------------------\n"
         "not enough columns here\n"
@@ -171,6 +172,11 @@ def test_parse_term_missing_sorts_by_line_count_not_tokens(
     assert len(gaps) == 2
     assert gaps[0]["file"] == "src/awf/big_range.py"
     assert gaps[1]["file"] == "src/awf/small_tokens.py"
+
+
+@pytest.mark.unit
+def test_missing_line_count_treats_malformed_tokens_as_single_lines() -> None:
+    assert _missing_line_count([None, "  7  ", "10-12", "bad-range", "x"]) == 6
 
 
 @pytest.mark.unit

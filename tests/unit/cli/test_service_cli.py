@@ -6,7 +6,7 @@ import asyncio
 import json
 import subprocess
 import threading
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -49,6 +49,8 @@ def _create_gc_cli_workspace(
     db_url: str,
     status: str,
     updated_at: datetime,
+    pr: bool = False,
+    compose_file_path: str | None = None,
 ) -> str:
     async def _setup() -> str:
         from awf.db.base import Base
@@ -70,6 +72,11 @@ def _create_gc_cli_workspace(
             )
             workspace.status = status
             workspace.updated_at = updated_at
+            workspace.compose_file_path = compose_file_path
+            if pr:
+                workspace.pr_url = "https://github.com/example/repo/pull/321"
+                workspace.pr_number = 321
+                workspace.pr_merge_sha = "d" * 40
             await session.commit()
             workspace_id = workspace.id
         await engine.dispose()
@@ -323,8 +330,9 @@ def test_service_gc_cli_defaults_to_json_dry_run(
     work_dir = tmp_path / "service"
     workspace_id = _create_gc_cli_workspace(
         db_url=db_url,
-        status="failed",
+        status="completed",
         updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        pr=True,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     _write_gc_file(worktree / "repo.txt", "repo")
@@ -336,10 +344,15 @@ def test_service_gc_cli_defaults_to_json_dry_run(
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
     assert payload["dry_run"] is True
+    assert payload["status"] == "dry_run"
+    assert payload["policy"]["retention_hours"] == 1
     assert payload["candidate_count"] == 1
+    assert payload["preserved_count"] == 0
+    assert payload["reason_code"] == "CLEANUP_DRY_RUN"
     assert payload["deleted_paths"] == []
     assert payload["candidates"][0]["workspace_id"] == workspace_id
-    assert payload["candidates"][0]["status"] == "failed"
+    assert payload["candidates"][0]["status"] == "completed"
+    assert payload["candidates"][0]["reason_code"] == "COMPLETED_PR_RETENTION_EXPIRED"
     assert payload["candidates"][0]["paths"]["worktree"]["path"] == str(worktree)
     assert worktree.exists()
 
@@ -353,8 +366,9 @@ def test_service_gc_cli_execute_deletes_and_supports_pretty_output(
     work_dir = tmp_path / "service"
     workspace_id = _create_gc_cli_workspace(
         db_url=db_url,
-        status="destroyed",
+        status="completed",
         updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        pr=True,
     )
     worktree = work_dir / "git" / "worktrees" / workspace_id
     compose = work_dir / "compose" / workspace_id
@@ -380,12 +394,76 @@ def test_service_gc_cli_execute_deletes_and_supports_pretty_output(
 
     assert result.exit_code == 0, result.output
     assert "dry_run: False" in result.stdout
+    assert "reason_code: CLEANUP_EXECUTION_SUCCEEDED" in result.stdout
     assert "candidate_count: 1" in result.stdout
     assert workspace_id in result.stdout
     assert "deleted_paths" in result.stdout
     assert not worktree.exists()
     assert not compose.exists()
     assert not auth.exists()
+
+
+@pytest.mark.unit
+def test_service_gc_cli_uses_configured_retention_when_omitted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
+    work_dir = tmp_path / "service"
+    workspace_id = _create_gc_cli_workspace(
+        db_url=db_url,
+        status="completed",
+        updated_at=datetime.now(UTC) - timedelta(hours=2),
+        pr=True,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    _write_gc_file(worktree / "repo.txt", "repo")
+    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+    monkeypatch.setenv("AWF_COMPLETED_WORKSPACE_RETENTION_HOURS", "24")
+
+    result = _runner.invoke(app, ["service", "gc"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["policy"]["retention_hours"] == 24
+    assert payload["candidate_count"] == 0
+    assert payload["preserved_count"] == 1
+    assert payload["preserved"][0]["workspace_id"] == workspace_id
+    assert payload["preserved"][0]["reason_code"] == "WORKSPACE_WITHIN_RETENTION"
+    assert worktree.exists()
+
+
+@pytest.mark.unit
+def test_service_gc_cli_execute_failures_exit_nonzero_with_reason_payload(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
+    work_dir = tmp_path / "service"
+    workspace_id = _create_gc_cli_workspace(
+        db_url=db_url,
+        status="completed",
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        pr=True,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    worktree.parent.mkdir(parents=True, exist_ok=True)
+    worktree.write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+
+    result = _runner.invoke(
+        app,
+        ["service", "gc", "--execute", "--min-age-hours", "1"],
+    )
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "partial"
+    assert payload["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+    assert payload["delete_errors"][0]["reason_code"] == "PATH_DELETE_FAILED"
+    assert payload["candidates"][0]["paths"]["worktree"]["status"] == "failed"
 
 
 @pytest.mark.unit

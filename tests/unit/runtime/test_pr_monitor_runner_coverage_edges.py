@@ -2344,6 +2344,7 @@ def test_non_check_reviewer_settle_state_converts_wall_legacy_and_invalid_values
             legacy_key: "500.0",
             invalid_key: "not-a-number",
             other_key: "untouched",
+            "review:1": "addressed",
         },
         pr_number=42,
         now_monotonic=1_100,
@@ -2353,6 +2354,7 @@ def test_non_check_reviewer_settle_state_converts_wall_legacy_and_invalid_values
     assert runtime_state[legacy_key] == "1100.000000"
     assert runtime_state[invalid_key] == "not-a-number"
     assert runtime_state[other_key] == "untouched"
+    assert runtime_state["review:1"] == "addressed"
 
     persisted_state = _non_check_reviewer_settle_state_for_persistence(
         runtime_state,
@@ -2364,6 +2366,16 @@ def test_non_check_reviewer_settle_state_converts_wall_legacy_and_invalid_values
     assert persisted_state[legacy_key] == f"{wall_started + 75:.6f}"
     assert persisted_state[invalid_key] == "not-a-number"
     assert persisted_state[other_key] == "untouched"
+    assert persisted_state["review:1"] == "addressed"
+
+    invalid_marker = object()
+    runtime_invalid_object = _non_check_reviewer_settle_state_for_runtime(
+        {started_key: invalid_marker},  # type: ignore[dict-item]
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started,
+    )
+    assert runtime_invalid_object[started_key] is invalid_marker
 
     persisted_wall = _non_check_reviewer_settle_state_for_persistence(
         {started_key: f"{wall_started:.6f}"},
@@ -2373,6 +2385,14 @@ def test_non_check_reviewer_settle_state_converts_wall_legacy_and_invalid_values
     )
     assert persisted_wall[started_key] == f"{wall_started:.6f}"
 
+    persisted_legacy = _non_check_reviewer_settle_state_for_persistence(
+        {started_key: "1040.000000"},
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started + 60,
+    )
+    assert persisted_legacy[started_key] == f"{wall_started:.6f}"
+
     persisted_invalid = _non_check_reviewer_settle_state_for_persistence(
         {started_key: "not-a-number"},
         pr_number=42,
@@ -2380,6 +2400,15 @@ def test_non_check_reviewer_settle_state_converts_wall_legacy_and_invalid_values
         now_wall_seconds=wall_started,
     )
     assert persisted_invalid[started_key] == "not-a-number"
+
+    persisted_invalid_marker = object()
+    persisted_invalid_object = _non_check_reviewer_settle_state_for_persistence(
+        {started_key: persisted_invalid_marker},  # type: ignore[dict-item]
+        pr_number=42,
+        now_monotonic=1_100,
+        now_wall_seconds=wall_started,
+    )
+    assert persisted_invalid_object[started_key] is persisted_invalid_marker
 
 
 @pytest.mark.unit

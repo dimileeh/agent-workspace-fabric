@@ -522,6 +522,38 @@ def test_build_worker_runtime_uses_local_service_node_id_instead_of_container_ho
 
 
 @pytest.mark.unit
+async def test_run_worker_forever_disposes_engine_on_exit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    calls: list[str] = []
+
+    class _Worker:
+        async def run_forever(self) -> None:
+            calls.append("run_forever")
+
+        async def run_once(self) -> None:
+            raise AssertionError("run_once should not be used")
+
+        async def wait_for_execution_tasks(self) -> None:
+            raise AssertionError("wait_for_execution_tasks should not be used")
+
+    class _Engine:
+        async def dispose(self) -> None:
+            calls.append("dispose")
+
+    monkeypatch.setattr(
+        worker_mod,
+        "build_worker_runtime",
+        lambda _settings: SimpleNamespace(worker=_Worker(), engine=_Engine()),
+    )
+
+    await worker_mod.run_worker(_settings(tmp_path), once=False)
+
+    assert calls == ["run_forever", "dispose"]
+
+
+@pytest.mark.unit
 def test_is_postgres_database_url_warns_on_parse_failure() -> None:
     with structlog.testing.capture_logs() as captured:
         assert worker_mod._is_postgres_database_url("not a url") is False
