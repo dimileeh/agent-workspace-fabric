@@ -260,6 +260,89 @@ class TestEvaluateStaleness:
         overlap = next(f for f in findings if f.reason_code == "STALE_OVERLAP")
         assert overlap.trigger_type == "path_overlap"
         assert overlap.trigger_ref == "src/awf/api/routes/health.py"
+        assert overlap.blocks_merge is True
+        assert overlap.severity == "blocking"
+
+    @pytest.mark.unit
+    def test_plan_artifact_only_overlap_is_advisory_without_target_advanced(self) -> None:
+        from awf.service.staleness import (
+            DEFAULT_STALE_POLICY,
+            CandidateSnapshot,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        candidate = CandidateSnapshot(
+            owned_paths=("docs/awf-plans/**",),
+            task_class="refactor_task",
+            base_sha="a" * 40,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=("docs/awf-plans/ws_other.conformance.json",),
+            advanced_commits=1,
+        )
+
+        findings = evaluate_staleness(
+            candidate=candidate,
+            target=target,
+            policy=DEFAULT_STALE_POLICY,
+        )
+
+        assert [(f.reason_code, f.blocks_merge, f.severity) for f in findings] == [
+            ("ADVISORY_PLAN_ARTIFACT_OVERLAP", False, "advisory")
+        ]
+        assert findings[0].trigger_type == "plan_artifact_overlap"
+        assert findings[0].trigger_ref == "docs/awf-plans/ws_other.conformance.json"
+
+    @pytest.mark.unit
+    def test_mixed_plan_artifact_and_source_overlap_blocks_on_source(self) -> None:
+        from awf.service.staleness import (
+            DEFAULT_STALE_POLICY,
+            CandidateSnapshot,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        candidate = CandidateSnapshot(
+            owned_paths=("docs/awf-plans/**", "src/awf/service/**"),
+            task_class="refactor_task",
+            base_sha="a" * 40,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=(
+                "docs/awf-plans/ws_other.md",
+                "src/awf/service/staleness.py",
+            ),
+            advanced_commits=1,
+        )
+
+        findings = evaluate_staleness(
+            candidate=candidate,
+            target=target,
+            policy=DEFAULT_STALE_POLICY,
+        )
+
+        assert {
+            (f.reason_code, f.trigger_ref, f.blocks_merge, f.severity)
+            for f in findings
+        } == {
+            (
+                "ADVISORY_PLAN_ARTIFACT_OVERLAP",
+                "docs/awf-plans/ws_other.md",
+                False,
+                "advisory",
+            ),
+            (
+                "STALE_OVERLAP",
+                "src/awf/service/staleness.py",
+                True,
+                "blocking",
+            ),
+        }
 
     @pytest.mark.unit
     def test_migration_task_schema_change_emits_stale_schema(self) -> None:
@@ -680,6 +763,58 @@ class TestStalenessRefreshService:
         assert first.status == "active"
         assert first.detected_at is not None
         assert first.resolved_at is None
+        assert first.blocks_merge is True
+        assert first.severity == "blocking"
+
+    @pytest.mark.unit
+    async def test_plan_artifact_only_refresh_records_advisory_without_stale_candidate(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        _workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["docs/awf-plans/**"],
+            task_class="test_task",
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            result = await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("docs/awf-plans/ws_other.md",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            from awf.db.repositories import StaleReasonRepository
+
+            active = await StaleReasonRepository(session).list_active_for_candidate(
+                candidate_id,
+            )
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+
+        assert result.stale is False
+        assert [(f.reason_code, f.blocks_merge, f.severity) for f in result.findings] == [
+            ("ADVISORY_PLAN_ARTIFACT_OVERLAP", False, "advisory")
+        ]
+        assert candidate is not None
+        assert candidate.stale is False
+        assert candidate.stale_reason is None
+        assert [(r.reason_code, r.blocks_merge, r.severity) for r in active] == [
+            ("ADVISORY_PLAN_ARTIFACT_OVERLAP", False, "advisory")
+        ]
 
     @pytest.mark.unit
     async def test_fetch_target_requires_provider_and_candidate_base_sha(
@@ -1216,6 +1351,8 @@ _PAYLOAD_SHAPE_KEYS = {
     "status",
     "detected_at",
     "resolved_at",
+    "severity",
+    "blocks_merge",
 }
 
 
@@ -1275,3 +1412,5 @@ class TestStaleReasonResponseShape:
         dumped: dict[str, Any] = response.model_dump()
         assert set(dumped.keys()) >= _PAYLOAD_SHAPE_KEYS
         assert isinstance(dumped["detected_at"], (datetime, str))
+        assert dumped["severity"] == "blocking"
+        assert dumped["blocks_merge"] is True

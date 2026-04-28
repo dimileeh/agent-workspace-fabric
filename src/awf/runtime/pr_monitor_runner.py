@@ -1285,6 +1285,8 @@ class PullRequestMonitorRunner:
         from awf.runtime.merge_eligibility import (
             VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
             compute_stale_reason_for_attempt,
+            stale_reason_blocks_merge,
+            stale_reason_required_action,
         )
 
         async with self._deps.session_factory() as s:
@@ -1316,20 +1318,27 @@ class PullRequestMonitorRunner:
                 attempt_id=candidate.attempt_id,
             )
 
-            persisted_stale_reason = candidate.stale_reason if candidate.stale else None
+            persisted_stale_reason = (
+                candidate.stale_reason or "stale" if candidate.stale else None
+            )
+            if not stale_reason_blocks_merge(persisted_stale_reason):
+                persisted_stale_reason = None
             if (
                 validation_reason is None
                 and persisted_stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
             ):
                 persisted_stale_reason = None
+            blocking_stale_reasons = [
+                reason for reason in active_stale_reasons if reason.blocks_merge
+            ]
             active_stale_reason = (
-                active_stale_reasons[0].reason_code if active_stale_reasons else None
+                blocking_stale_reasons[0].reason_code if blocking_stale_reasons else None
             )
             stale_reason = validation_reason or active_stale_reason or persisted_stale_reason
             req_action = (
                 validation_action
                 if validation_reason is not None
-                else _candidate_stale_required_action(stale_reason)
+                else stale_reason_required_action(stale_reason)
             )
             notify_message: str | None = None
 
@@ -1354,7 +1363,10 @@ class PullRequestMonitorRunner:
             elif active_stale_reason is not None:
                 candidate.stale = True
                 candidate.stale_reason = active_stale_reason
-            elif candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON:
+            elif candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON or (
+                candidate.stale_reason is not None
+                and not stale_reason_blocks_merge(candidate.stale_reason)
+            ):
                 candidate.stale = False
                 candidate.stale_reason = None
 
@@ -3204,11 +3216,9 @@ def _merge_gate_blocks(gate: _MergeGateResult) -> bool:
 
 
 def _candidate_stale_required_action(reason: str | None) -> str | None:
-    if reason is None:
-        return None
-    if reason == "validation_insufficient_tier":
-        return "validate"
-    return "rebase"
+    from awf.runtime.merge_eligibility import stale_reason_required_action
+
+    return stale_reason_required_action(reason)
 
 
 _PR_MONITOR_STALE_REASON_MESSAGES = {

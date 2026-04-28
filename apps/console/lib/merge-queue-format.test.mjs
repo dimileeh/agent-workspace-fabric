@@ -66,6 +66,8 @@ function staleReason(overrides = {}) {
     reason_code: "STALE_TARGET_ADVANCED",
     explanation: "Target branch advanced.",
     status: "active",
+    severity: "blocking",
+    blocks_merge: true,
     detected_at: "2026-04-26T12:02:00Z",
     resolved_at: null,
     ...overrides,
@@ -110,11 +112,44 @@ test("stale summary uses active reasons and maps rebase action", () => {
   assert.equal(formatRequiredNextAction(item.required_next_action, item.merge_blocker_reason), "rebase");
   assert.deepEqual(summarizeStaleReasons(item), {
     count: 2,
+    blockingCount: 2,
+    advisoryCount: 0,
     label: "STALE_TARGET_ADVANCED @ main@abc123, STALE_OVERLAP @ src/awf/api/**",
     detail: "STALE_TARGET_ADVANCED / target_advanced @ main@abc123; STALE_OVERLAP / path_overlap @ src/awf/api/**",
     overflowCount: 0,
     activeReasons: activeStaleReasons(item),
   });
+});
+
+test("stale summary shows advisory plan overlaps without a recovery-looking label", () => {
+  const item = mergeQueueItem({
+    stale_reasons: [
+      staleReason({
+        id: "sr_plan",
+        trigger_type: "plan_artifact_overlap",
+        trigger_ref: "docs/awf-plans/ws_other.md",
+        reason_code: "ADVISORY_PLAN_ARTIFACT_OVERLAP",
+        explanation: "AWF plan artifact changed.",
+        severity: "advisory",
+        blocks_merge: false,
+      }),
+    ],
+  });
+
+  const stale = summarizeStaleReasons(item);
+  const recovery = summarizeRecovery(item);
+
+  assert.equal(stale.count, 1);
+  assert.equal(stale.blockingCount, 0);
+  assert.equal(stale.advisoryCount, 1);
+  assert.equal(stale.label, "1 advisory overlap");
+  assert.equal(
+    stale.detail,
+    "advisory ADVISORY_PLAN_ARTIFACT_OVERLAP / plan_artifact_overlap @ docs/awf-plans/ws_other.md",
+  );
+  assert.equal(recovery.staleReasonBlockingCount, 0);
+  assert.equal(recovery.staleReasonAdvisoryCount, 1);
+  assert.equal(recovery.recommendedActionLabel, "none");
 });
 
 test("queue blocker summary includes older candidate context and wait action", () => {
@@ -483,6 +518,8 @@ test("recovery summary maps stale reasons and queue blockers into compact detail
   const recovery = summarizeRecovery(item);
 
   assert.equal(recovery.staleReasonCount, 3);
+  assert.equal(recovery.staleReasonBlockingCount, 3);
+  assert.equal(recovery.staleReasonAdvisoryCount, 0);
   assert.equal(recovery.staleReasonLabel, "STALE_TARGET_ADVANCED @ main@abc123, STALE_OVERLAP @ src/awf/api/** +1");
   assert.equal(recovery.queueBlockerCount, 2);
   assert.equal(
