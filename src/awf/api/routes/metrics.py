@@ -151,10 +151,10 @@ class SloMetricsSummaryResponse(BaseModel):
     recovery_failed_count: int = Field(description="Recovery operations that failed.")
 
     monitor_completed_total: int = Field(
-        description="Completed workspaces updated in the window that previously entered monitoring (pr_url set).",
+        description="Workspaces with a PR URL updated in the window (includes all statuses, not only completed).",
     )
     completed_after_monitor_count: int = Field(
-        description="Completed workspaces updated in the window that previously entered monitoring (pr_url set).",
+        description="Workspaces in completed status updated in the window that previously entered monitoring (pr_url set).",
     )
     monitor_stuck_count: int = Field(
         description="Workspaces currently in monitoring_pr status beyond 2x SLA.",
