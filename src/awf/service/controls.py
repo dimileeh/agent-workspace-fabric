@@ -419,10 +419,10 @@ class WorkspaceControlService:
             expected_version=expected_version,
             active_payload_identity=payload,
         )
-        if WorkspaceStatus(workspace.status) in _DESTROYING_OR_DESTROYED_STATUSES:
-            raise WorkspaceRefreshStateError(workspace)
         if replay is not None:
             return replay
+        if WorkspaceStatus(workspace.status) in _DESTROYING_OR_DESTROYED_STATUSES:
+            raise WorkspaceRefreshStateError(workspace)
 
         operation = await operations.create(
             workspace_id=workspace_id,

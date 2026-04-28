@@ -424,6 +424,32 @@ async def test_refresh_active_workspace_creates_pending_operation_and_coalesces_
 
 
 @pytest.mark.unit
+async def test_refresh_replays_same_idempotency_key_after_destroying_state(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_refresh_workspace(
+        workspace.id,
+        reason="stale merge queue",
+        idempotency_key="refresh-before-destroy",
+    )
+    workspace.status = WorkspaceStatus.destroying.value
+    await session.flush()
+
+    replay = await service.request_refresh_workspace(
+        workspace.id,
+        reason="stale merge queue",
+        idempotency_key="refresh-before-destroy",
+    )
+    operations = await _operations(session, workspace.id)
+
+    assert replay.id == operation.id
+    assert [row.id for row in operations] == [operation.id]
+
+
+@pytest.mark.unit
 async def test_validate_monitoring_pr_creates_validate_only_operation_and_coalesces(
     session: AsyncSession,
 ) -> None:
