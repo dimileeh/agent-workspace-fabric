@@ -164,6 +164,50 @@ async def test_completed_pr_monitor_marks_candidate_merged(
 
 
 @pytest.mark.unit
+async def test_completed_pr_monitor_sets_merge_sha_before_transition_hooks(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    original_transition = WorkspaceRepository.transition
+    completed_transition_merge_shas: list[str | None] = []
+
+    async def transition_spy(self, workspace, *, to, reason_code, payload=None):
+        if to == WorkspaceStatus.completed:
+            completed_transition_merge_shas.append(workspace.pr_merge_sha)
+        return await original_transition(
+            self,
+            workspace,
+            to=to,
+            reason_code=reason_code,
+            payload=payload,
+        )
+
+    monkeypatch.setattr(WorkspaceRepository, "transition", transition_spy)
+    workspace_id, _attempt_id = await _seed_monitoring_candidate_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    await runner._terminate_completed(workspace_id, pr_merge_sha="MERGESHA")
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+
+    assert completed_transition_merge_shas == ["MERGESHA"]
+    assert workspace is not None
+    assert workspace.pr_merge_sha == "MERGESHA"
+
+
+@pytest.mark.unit
 async def test_manual_merge_candidate_stays_open_until_external_merge_is_observed(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,

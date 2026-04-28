@@ -1579,6 +1579,7 @@ class WorkspaceRepository:
         *,
         to: WorkspaceStatus,
         reason_code: str,
+        payload: dict[str, Any] | None = None,
     ) -> Workspace:
         """Move a workspace to the given status, recording an event.
 
@@ -1612,6 +1613,7 @@ class WorkspaceRepository:
                 old_state=old_state,
                 new_state=to.value,
                 reason_code=reason_code,
+                payload=payload,
             )
         )
         return workspace
