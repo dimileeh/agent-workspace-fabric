@@ -6,12 +6,14 @@ from pathlib import Path
 
 import pytest
 
+import awf.common.compose_exec as compose_exec
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import (
     ComposeExecCleanupError,
     build_cleanup_compose_exec,
     build_tracked_compose_exec,
     cleanup_compose_exec_invocation,
+    cleanup_compose_exec_invocation_after_cancellation,
     cleanup_failure_message,
 )
 
@@ -139,6 +141,42 @@ async def test_cleanup_success_accepts_killed_result() -> None:
 
     assert result.ok
     assert runner.calls[0].args[-2:] == ["awf-cleanup", "awf_done"]
+
+
+async def test_cleanup_after_cancellation_returns_completed_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="awf cleanup: absent\n")
+    invocation = build_tracked_compose_exec(
+        compose_project="awf_ws_123",
+        compose_file=Path("/tmp/ws/compose.yml"),
+        cli_args=["codex"],
+        source="agent",
+        label="codex",
+        invocation_id="awf_cancel_done",
+    )
+    original_shield = compose_exec.asyncio.shield
+    calls = 0
+
+    async def shield_once(task: object) -> object:
+        nonlocal calls
+        calls += 1
+        result = await original_shield(task)
+        if calls == 1:
+            raise compose_exec.asyncio.CancelledError
+        return result
+
+    monkeypatch.setattr(compose_exec.asyncio, "shield", shield_once)
+
+    result = await cleanup_compose_exec_invocation_after_cancellation(
+        runner,
+        invocation,
+        workspace_id="ws_123",
+    )
+
+    assert result.ok
+    assert calls == 1
 
 
 def test_cleanup_failure_message_is_bounded() -> None:

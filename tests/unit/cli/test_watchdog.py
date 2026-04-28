@@ -450,6 +450,9 @@ class TestWatchdogRealSeams:
         with pytest.raises(RuntimeError, match="could not locate pyproject.toml"):
             watchdog._project_root()
 
+    def test_project_root_finds_checkout_pyproject(self) -> None:
+        assert (watchdog._project_root() / "pyproject.toml").is_file()
+
 
 class TestWatchdogLoopAndCli:
     def test_shutdown_flag_handle_sets_stop(self) -> None:
@@ -486,6 +489,35 @@ class TestWatchdogLoopAndCli:
         assert scans == ["scan"]
         assert signal.SIGINT in handlers
         assert signal.SIGTERM in handlers
+
+    def test_run_loop_sleep_slice_observes_shutdown_signal(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        handlers: dict[int, object] = {}
+        sleeps: list[float] = []
+
+        def fake_signal(signum: int, handler: object) -> None:
+            handlers[signum] = handler
+
+        def sleep(seconds: float) -> None:
+            sleeps.append(seconds)
+            handler = handlers[signal.SIGTERM]
+            assert callable(handler)
+            handler(signal.SIGTERM, None)
+
+        monkeypatch.setattr(watchdog.signal, "signal", fake_signal)
+
+        watchdog._run_loop(
+            config=WatchdogConfig(work_dir=tmp_path, repos=["dimileeh/aira-web"], poll_seconds=2),
+            gh_lister=lambda _repo: "[]",
+            process_lister=lambda: "",
+            spawn_attach=lambda **_kwargs: 0,
+            sleep=sleep,
+        )
+
+        assert sleeps == [1.0]
 
     def test_start_command_wires_options_into_run_loop(
         self,
