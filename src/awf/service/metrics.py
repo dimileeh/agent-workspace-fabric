@@ -1121,23 +1121,30 @@ async def _count_monitor_completions(
         Workspace.updated_at >= window_start,
         Workspace.pr_url.is_not(None),
     )
-    monitor_completed_total = int(await session.scalar(monitor_completed_total_stmt) or 0)
 
     completed_after_monitor_stmt = select(func.count()).select_from(Workspace).where(
         Workspace.status == WorkspaceStatus.completed.value,
         Workspace.updated_at >= window_start,
         Workspace.pr_url.is_not(None),
     )
-    completed_after_monitor = int(await session.scalar(completed_after_monitor_stmt) or 0)
 
     cutoff = now - timedelta(seconds=2 * sla_seconds)
     monitor_stuck_stmt = select(func.count()).select_from(Workspace).where(
         Workspace.status == WorkspaceStatus.monitoring_pr.value,
         Workspace.created_at < cutoff,
     )
-    monitor_stuck = int(await session.scalar(monitor_stuck_stmt) or 0)
 
-    return monitor_completed_total, completed_after_monitor, monitor_stuck
+    monitor_completed_total, completed_after_monitor, monitor_stuck = await asyncio.gather(
+        session.scalar(monitor_completed_total_stmt),
+        session.scalar(completed_after_monitor_stmt),
+        session.scalar(monitor_stuck_stmt),
+    )
+
+    return (
+        int(monitor_completed_total or 0),
+        int(completed_after_monitor or 0),
+        int(monitor_stuck or 0),
+    )
 
 
 async def _count_slo_reason_code_coverage(
