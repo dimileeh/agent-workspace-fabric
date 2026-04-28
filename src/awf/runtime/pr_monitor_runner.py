@@ -96,7 +96,9 @@ Verdict = str  # "fix_committed" | "false_positive" | "defer" | "agent_failed"
 class PostMergeTargetReconciler(Protocol):
     """Best-effort target-branch repair hook invoked after a PR is merged."""
 
-    async def __call__(self, *, repo_url: str, branch: str) -> object: ...
+    async def __call__(
+        self, *, repo_url: str, branch: str, workspace_id: str
+    ) -> object: ...
 
 
 @dataclass(frozen=True)
@@ -1923,7 +1925,9 @@ class PullRequestMonitorRunner:
         if reconciler is None:
             return
         try:
-            result = await reconciler(repo_url=repo_url, branch=base_branch)
+            result = await reconciler(
+                repo_url=repo_url, branch=base_branch, workspace_id=workspace_id
+            )
         except Exception as exc:
             _log.warning(
                 "monitor.target_branch_reconcile_failed",

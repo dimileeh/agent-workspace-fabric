@@ -69,8 +69,8 @@ def test_feature_monitor_has_auto_merge_enabled(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 def test_feature_monitor_accepts_post_merge_target_reconciler(tmp_path: Path) -> None:
-    async def _reconcile(*, repo_url: str, branch: str) -> object:
-        return {"repo_url": repo_url, "branch": branch}
+    async def _reconcile(*, repo_url: str, branch: str, workspace_id: str) -> object:
+        return {"repo_url": repo_url, "branch": branch, "workspace_id": workspace_id}
 
     cmd = FakeCommandRunner()
     runner = build_feature_pr_monitor(

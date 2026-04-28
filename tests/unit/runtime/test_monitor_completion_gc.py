@@ -114,7 +114,7 @@ async def test_completed_monitor_invokes_target_branch_reconciler(
     ws_id = await seed_monitoring_workspace(factory)
     calls: list[tuple[str, str]] = []
 
-    async def _reconcile(*, repo_url: str, branch: str) -> object:
+    async def _reconcile(*, repo_url: str, branch: str, workspace_id: str) -> object:
         calls.append((repo_url, branch))
         return {"status": "clean"}
 
