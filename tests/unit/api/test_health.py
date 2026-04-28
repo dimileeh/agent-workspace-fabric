@@ -236,6 +236,62 @@ async def test_readyz_reuses_validated_provider_names(
 
 
 @pytest.mark.unit
+async def test_readyz_starts_orphan_scan_before_slow_peer_checks_finish(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+
+    class _OverlappingRunner:
+        def __init__(self) -> None:
+            self.orphan_scan_started = asyncio.Event()
+            self.peer_check_saw_orphan_scan = False
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+        ) -> CommandResult:
+            del input_bytes, cwd
+            if args == ["docker", "--version"]:
+                return CommandResult(returncode=0, stdout="Docker version 27.0.3\n", stderr="")
+            if args[:2] == ["docker", "info"]:
+                return CommandResult(returncode=0, stdout="27.0.3\n", stderr="")
+            if args[:3] == ["docker", "compose", "version"] or args[:3] == [
+                "docker",
+                "image",
+                "inspect",
+            ]:
+                try:
+                    await asyncio.wait_for(self.orphan_scan_started.wait(), timeout=0.05)
+                    self.peer_check_saw_orphan_scan = True
+                except TimeoutError:
+                    pass
+                if args[:3] == ["docker", "compose", "version"]:
+                    stdout = "v2.29.2\n"
+                else:
+                    stdout = "sha256:deadbeef\n"
+                return CommandResult(returncode=0, stdout=stdout, stderr="")
+            if args[:3] in (
+                ["docker", "ps", "-a"],
+                ["docker", "network", "ls"],
+                ["docker", "volume", "ls"],
+            ):
+                self.orphan_scan_started.set()
+                return CommandResult(returncode=0, stdout="", stderr="")
+            raise AssertionError(f"unexpected docker call: {args}")
+
+    runner = _OverlappingRunner()
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz")
+
+    assert response.status_code == 200
+    assert runner.peer_check_saw_orphan_scan is True
+
+
+@pytest.mark.unit
 async def test_readyz_invalid_provider_returns_422(
     ready_app_and_client: tuple[Any, AsyncClient],
 ) -> None:

@@ -359,10 +359,17 @@ async def scan_docker_resources_async(
 
     resources: list[DetectedResource] = []
     failures: list[str] = []
-    for command in docker_resource_commands():
+
+    async def _run_command(command: DockerResourceCommand) -> AsyncCommandResultLike | Exception:
         try:
-            result = await asyncio.wait_for(runner.run(command.args), timeout=timeout)
-        except FileNotFoundError:
+            return await asyncio.wait_for(runner.run(command.args), timeout=timeout)
+        except Exception as exc:
+            return exc
+
+    commands = docker_resource_commands()
+    results = await asyncio.gather(*(_run_command(command) for command in commands))
+    for command, outcome in zip(commands, results, strict=True):
+        if isinstance(outcome, FileNotFoundError):
             return ResourceScan(
                 ok=False,
                 status="unavailable",
@@ -370,13 +377,16 @@ async def scan_docker_resources_async(
                 detail="docker binary not found on PATH",
                 resources=tuple(resources),
             )
-        except TimeoutError:
+        if isinstance(outcome, TimeoutError):
             failures.append(f"{command.kind}: docker resource scan exceeded {timeout:g}s")
             continue
-        except Exception as exc:
-            failures.append(f"{command.kind}: {_truncate(f'{type(exc).__name__}: {exc}')}")
+        if isinstance(outcome, Exception):
+            failures.append(
+                f"{command.kind}: {_truncate(f'{type(outcome).__name__}: {outcome}')}"
+            )
             continue
 
+        result = outcome
         if result.returncode != 0:
             detail = _truncate(result.stderr or result.stdout) or "docker list exited non-zero"
             failures.append(f"{command.kind}: {detail}")

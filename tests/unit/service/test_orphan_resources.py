@@ -316,6 +316,37 @@ def test_async_docker_scan_collects_timeout_exception_and_nonzero_failures() -> 
 
 
 @pytest.mark.unit
+def test_async_docker_scan_runs_resource_commands_concurrently() -> None:
+    class _SlowRunner:
+        def __init__(self) -> None:
+            self.active = 0
+            self.max_active = 0
+
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+        ) -> Any:
+            del args, input_bytes, cwd
+            self.active += 1
+            self.max_active = max(self.max_active, self.active)
+            try:
+                await asyncio.sleep(0.01)
+                return _Completed(stdout="")
+            finally:
+                self.active -= 1
+
+    runner = _SlowRunner()
+
+    docker = asyncio.run(scan_docker_resources_async(runner=runner, timeout=0.1))
+
+    assert docker.ok is True
+    assert runner.max_active == len(docker_resource_commands())
+
+
+@pytest.mark.unit
 def test_worktree_scanner_ignores_non_workspace_entries(tmp_path: Path) -> None:
     root = tmp_path / "git" / "worktrees"
     (root / "ws_real").mkdir(parents=True)
