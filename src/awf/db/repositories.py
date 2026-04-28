@@ -13,7 +13,7 @@ from __future__ import annotations
 import builtins
 import hashlib
 import json
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -2176,6 +2176,40 @@ class OperationRepository:
             .limit(1)
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def find_active_matching_payload(
+        self,
+        *,
+        workspace_id: str,
+        operation_type: OperationType | str,
+        payload_identity: Mapping[str, Any],
+        limit: int = 100,
+    ) -> Operation | None:
+        operation_type_value = (
+            operation_type.value if isinstance(operation_type, OperationType) else operation_type
+        )
+        stmt = (
+            select(Operation)
+            .where(
+                Operation.workspace_id == workspace_id,
+                Operation.type == operation_type_value,
+                Operation.status.in_(
+                    (
+                        OperationStatus.pending.value,
+                        OperationStatus.running.value,
+                    )
+                ),
+            )
+            .order_by(Operation.created_at.asc(), Operation.id.asc())
+            .limit(limit)
+        )
+        for operation in (await self._session.execute(stmt)).scalars():
+            payload = operation.payload
+            if not isinstance(payload, dict):
+                continue
+            if all(payload.get(key) == value for key, value in payload_identity.items()):
+                return operation
+        return None
 
     async def list_all(
         self,

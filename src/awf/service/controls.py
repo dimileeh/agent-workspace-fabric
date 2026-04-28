@@ -23,6 +23,16 @@ from awf.node.git_manager import GitManager
 ProjectStopper = Callable[[str | None], Awaitable[None]]
 CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
 _REMONITOR_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
+_VALIDATE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
+_VALIDATE_REPLAY_STATUSES = frozenset(
+    {WorkspaceStatus.monitoring_pr, WorkspaceStatus.ready}
+)
+_DESTROYING_OR_DESTROYED_STATUSES = frozenset(
+    {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}
+)
+_OPERATOR_API_SOURCE = "operator_api"
+_OPERATOR_REFRESH_REASON_CODE = "OPERATOR_REFRESH"
+_OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 
 
 class WorkspaceCleanerProtocol(Protocol):
@@ -131,6 +141,38 @@ class WorkspaceRemonitorStateError(WorkspaceControlError):
                     status.value for status in _REMONITOR_ELIGIBLE_STATUSES
                 ],
             },
+        )
+
+
+class WorkspaceRefreshStateError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_STATE_NOT_REFRESHABLE",
+            message="Workspace is not in a state eligible for refresh recovery.",
+            detail={"status": workspace.status},
+        )
+
+
+class WorkspaceValidateStateError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_STATE_NOT_VALIDATABLE",
+            message="Workspace is not in a state eligible for validate recovery.",
+            detail={
+                "status": workspace.status,
+                "eligible_statuses": [
+                    status.value for status in _VALIDATE_ELIGIBLE_STATUSES
+                ],
+            },
+        )
+
+
+class WorkspaceValidateMissingPrUrlError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_PR_URL_REQUIRED",
+            message="Workspace validate requires an existing PR URL.",
+            detail={"status": workspace.status},
         )
 
 
@@ -350,6 +392,126 @@ class WorkspaceControlService:
             message="workspace PR monitor recovery requested",
         )
 
+    async def request_refresh_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        repo = WorkspaceRepository(self._session)
+        operations = OperationRepository(self._session)
+        payload: dict[str, object | None] = {
+            "source": _OPERATOR_API_SOURCE,
+            "reason": reason,
+            "reason_code": _OPERATOR_REFRESH_REASON_CODE,
+            "requested_action": OperationType.refresh.value,
+        }
+        operation_payload = _operation_payload(payload, expected_version=expected_version)
+        workspace, replay = await self._prepare_operation(
+            repo,
+            operations,
+            workspace_id=workspace_id,
+            operation_type=OperationType.refresh,
+            payload=operation_payload,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+            active_payload_identity=payload,
+        )
+        if WorkspaceStatus(workspace.status) in _DESTROYING_OR_DESTROYED_STATUSES:
+            raise WorkspaceRefreshStateError(workspace)
+        if replay is not None:
+            return replay
+
+        operation = await operations.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.refresh,
+            status=OperationStatus.pending,
+            payload=operation_payload,
+            idempotency_key=idempotency_key,
+        )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.refresh_requested",
+            reason_code=_OPERATOR_REFRESH_REASON_CODE,
+            payload={
+                "source": _OPERATOR_API_SOURCE,
+                "reason": reason,
+                "operation_id": operation.id,
+            },
+        )
+        return operation
+
+    async def request_validate_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        requested_tier: int | None = None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        repo = WorkspaceRepository(self._session)
+        operations = OperationRepository(self._session)
+        payload: dict[str, object | None] = {
+            "source": _OPERATOR_API_SOURCE,
+            "reason": reason,
+            "reason_code": _OPERATOR_VALIDATE_REASON_CODE,
+            "requested_action": OperationType.validate.value,
+            "recovery_mode": "validate_only",
+        }
+        if requested_tier is not None:
+            payload["requested_tier"] = requested_tier
+        operation_payload = _operation_payload(payload, expected_version=expected_version)
+        workspace, replay = await self._prepare_operation(
+            repo,
+            operations,
+            workspace_id=workspace_id,
+            operation_type=OperationType.validate,
+            payload=operation_payload,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+            active_payload_identity=payload,
+        )
+        current = WorkspaceStatus(workspace.status)
+        if replay is not None:
+            if current not in _VALIDATE_REPLAY_STATUSES:
+                raise WorkspaceValidateStateError(workspace)
+            return replay
+        if current not in _VALIDATE_ELIGIBLE_STATUSES:
+            raise WorkspaceValidateStateError(workspace)
+        if not workspace.pr_url:
+            raise WorkspaceValidateMissingPrUrlError(workspace)
+
+        operation = await operations.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.validate,
+            status=OperationStatus.pending,
+            payload=operation_payload,
+            idempotency_key=idempotency_key,
+        )
+        validate_event_payload: dict[str, object | None] = {
+            "source": _OPERATOR_API_SOURCE,
+            "reason": reason,
+            "operation_id": operation.id,
+            "recovery_mode": "validate_only",
+        }
+        if requested_tier is not None:
+            validate_event_payload["requested_tier"] = requested_tier
+        await repo.add_event(
+            workspace,
+            event_type="workspace.validate_requested",
+            reason_code=_OPERATOR_VALIDATE_REASON_CODE,
+            payload=validate_event_payload,
+        )
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.ready,
+            reason_code=_OPERATOR_VALIDATE_REASON_CODE,
+        )
+        return operation
+
     async def destroy_workspace(
         self,
         workspace_id: str,
@@ -502,6 +664,7 @@ class WorkspaceControlService:
         payload: dict[str, object | None],
         idempotency_key: str | None,
         expected_version: int | None,
+        active_payload_identity: dict[str, object | None] | None = None,
     ) -> tuple[Workspace, Operation | None]:
         if idempotency_key is not None:
             await operations.acquire_idempotency_key_lock(idempotency_key)
@@ -517,6 +680,14 @@ class WorkspaceControlService:
                 return workspace, existing
 
         workspace = await self._require_workspace_for_update(repo, workspace_id)
+        if active_payload_identity is not None:
+            active = await operations.find_active_matching_payload(
+                workspace_id=workspace_id,
+                operation_type=operation_type,
+                payload_identity=active_payload_identity,
+            )
+            if active is not None:
+                return workspace, active
         if expected_version is not None and workspace.version != expected_version:
             raise VersionConflictError(
                 expected_version=expected_version,

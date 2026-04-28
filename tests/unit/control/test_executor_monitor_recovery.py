@@ -97,6 +97,7 @@ async def _seed_ready_workspace_with_recovery(
     pr_number: int = 1,
     create_worktree: bool = True,
     recovery_mode: str = "validate_only",
+    source: str = "pr_monitor",
 ) -> str:
     """Insert a workspace already in ``ready`` with a pending `pr_monitor`
     validate operation — the shape the monitor's RECOVERY_DISPATCH path
@@ -132,7 +133,7 @@ async def _seed_ready_workspace_with_recovery(
             workspace_id=ws.id,
             operation_type=OperationType.validate,
             payload={
-                "source": "pr_monitor",
+                "source": source,
                 "reason": "validation_insufficient_tier",
                 "recovery_mode": recovery_mode,
             },
@@ -198,10 +199,16 @@ def test_pending_monitor_recovery_predicate_returns_payload_when_pending() -> No
     pr_monitor operation exists, and return ``None`` otherwise."""
 
     class _FakeOperation:
-        def __init__(self, *, status: str, payload: dict[str, object] | None) -> None:
+        def __init__(
+            self,
+            *,
+            status: str,
+            payload: object,
+            operation_type: str = OperationType.validate.value,
+        ) -> None:
             self.status = status
             self.payload = payload
-            self.type = OperationType.validate.value
+            self.type = operation_type
 
     class _FakeWorkspace:
         def __init__(self, ops: list[_FakeOperation]) -> None:
@@ -219,15 +226,31 @@ def test_pending_monitor_recovery_predicate_returns_payload_when_pending() -> No
         status=OperationStatus.succeeded.value,
         payload={"source": "pr_monitor", "recovery_mode": "validate_only"},
     )
+    operator_api = _FakeOperation(
+        status=OperationStatus.pending.value,
+        payload={"source": "operator_api", "recovery_mode": "validate_only"},
+    )
     operator = _FakeOperation(
         status=OperationStatus.pending.value,
-        payload={"source": "operator"},
+        payload={"source": "operator_api"},
+    )
+    wrong_type = _FakeOperation(
+        status=OperationStatus.pending.value,
+        payload={"source": "operator_api", "recovery_mode": "validate_only"},
+        operation_type=OperationType.refresh.value,
+    )
+    invalid_payload = _FakeOperation(
+        status=OperationStatus.pending.value,
+        payload="operator_api",
     )
 
     assert _pending_monitor_recovery(_FakeWorkspace([pending])) == pending.payload
     assert _pending_monitor_recovery(_FakeWorkspace([running])) == running.payload
+    assert _pending_monitor_recovery(_FakeWorkspace([operator_api])) == operator_api.payload
     assert _pending_monitor_recovery(_FakeWorkspace([succeeded])) is None
     assert _pending_monitor_recovery(_FakeWorkspace([operator])) is None
+    assert _pending_monitor_recovery(_FakeWorkspace([wrong_type])) is None
+    assert _pending_monitor_recovery(_FakeWorkspace([invalid_payload])) is None
     assert _pending_monitor_recovery(_FakeWorkspace([])) is None
 
 
@@ -331,6 +354,37 @@ async def test_executor_recovery_marks_validate_operation_succeeded_on_clean_pas
     assert op.started_at is not None
     assert op.finished_at is not None
     assert op.started_at < op.finished_at
+
+
+@pytest.mark.unit
+async def test_operator_api_validate_only_recovery_skips_full_agent_path(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        source="operator_api",
+    )
+
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert _all_adapter_args(fake) == []
+    assert _all_push_and_pr_create_calls(fake) == []
+    async with factory() as s:
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    operator_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "operator_api"
+    ]
+    assert len(operator_ops) == 1
+    assert operator_ops[0].status == OperationStatus.succeeded.value
+    assert isinstance(operator_ops[0].result, dict)
+    assert "validation_run_id" in operator_ops[0].result
 
 
 @pytest.mark.unit

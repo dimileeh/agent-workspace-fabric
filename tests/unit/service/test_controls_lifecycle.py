@@ -11,7 +11,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.base import Base
-from awf.db.enums import AgentRuntime, OperationType, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import OperationRepository, WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
@@ -21,8 +21,11 @@ from awf.service.controls import (
     VersionConflictError,
     WorkspaceControlService,
     WorkspaceNotFoundError,
+    WorkspaceRefreshStateError,
     WorkspaceRemonitorMissingPrUrlError,
     WorkspaceRemonitorStateError,
+    WorkspaceValidateMissingPrUrlError,
+    WorkspaceValidateStateError,
     _json_datetime,
     default_cleaner,
     stop_project_containers,
@@ -373,6 +376,280 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
         "operation_id": operations[0].id,
         "claims_reset": expected_snapshot,
     }
+
+
+@pytest.mark.unit
+async def test_refresh_active_workspace_creates_pending_operation_and_coalesces_by_reason(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_refresh_workspace(
+        workspace.id,
+        reason="stale merge queue",
+        idempotency_key="refresh-first",
+        expected_version=workspace.version,
+    )
+    replay = await service.request_refresh_workspace(
+        workspace.id,
+        reason="stale merge queue",
+        idempotency_key="refresh-fresh-key",
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    refresh_event = next(
+        event for event in events if event.event_type == "workspace.refresh_requested"
+    )
+
+    assert replay.id == operation.id
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert [row.id for row in operations] == [operation.id]
+    assert operation.type == OperationType.refresh.value
+    assert operation.status == OperationStatus.pending.value
+    assert operation.idempotency_key == "refresh-first"
+    assert operation.payload == {
+        "source": "operator_api",
+        "reason": "stale merge queue",
+        "reason_code": "OPERATOR_REFRESH",
+        "requested_action": "refresh",
+        "expected_version": 1,
+    }
+    assert refresh_event.reason_code == "OPERATOR_REFRESH"
+    assert refresh_event.payload == {
+        "source": "operator_api",
+        "reason": "stale merge queue",
+        "operation_id": operation.id,
+    }
+
+
+@pytest.mark.unit
+async def test_validate_monitoring_pr_creates_validate_only_operation_and_coalesces(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/44"
+    workspace.pr_number = 44
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_validate_workspace(
+        workspace.id,
+        reason="rerun required validation",
+        requested_tier=2,
+        idempotency_key="validate-first",
+        expected_version=workspace.version,
+    )
+    replay = await service.request_validate_workspace(
+        workspace.id,
+        reason="rerun required validation",
+        requested_tier=2,
+        idempotency_key="validate-fresh-key",
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    validate_event = next(
+        event for event in events if event.event_type == "workspace.validate_requested"
+    )
+    state_event = next(
+        event
+        for event in events
+        if event.event_type == "workspace.state_changed"
+        and event.reason_code == "OPERATOR_VALIDATE"
+    )
+
+    assert replay.id == operation.id
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert workspace.version == 2
+    assert [row.id for row in operations] == [operation.id]
+    assert operation.type == OperationType.validate.value
+    assert operation.status == OperationStatus.pending.value
+    assert operation.idempotency_key == "validate-first"
+    assert operation.payload == {
+        "source": "operator_api",
+        "reason": "rerun required validation",
+        "reason_code": "OPERATOR_VALIDATE",
+        "requested_action": "validate",
+        "recovery_mode": "validate_only",
+        "requested_tier": 2,
+        "expected_version": 1,
+    }
+    assert validate_event.reason_code == "OPERATOR_VALIDATE"
+    assert validate_event.payload == {
+        "source": "operator_api",
+        "reason": "rerun required validation",
+        "operation_id": operation.id,
+        "recovery_mode": "validate_only",
+        "requested_tier": 2,
+    }
+    assert state_event.old_state == WorkspaceStatus.monitoring_pr.value
+    assert state_event.new_state == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_validate_without_requested_tier_omits_tier_from_payload(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/46"
+    workspace.pr_number = 46
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_validate_workspace(
+        workspace.id,
+        reason="rerun default validation",
+    )
+    events = await _events(session, workspace.id)
+    validate_event = next(
+        event for event in events if event.event_type == "workspace.validate_requested"
+    )
+
+    assert operation.payload is not None
+    assert "requested_tier" not in operation.payload
+    assert validate_event.payload is not None
+    assert "requested_tier" not in validate_event.payload
+
+
+@pytest.mark.unit
+async def test_validate_same_key_with_different_requested_tier_conflicts(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/45"
+    workspace.pr_number = 45
+    await session.flush()
+    service, _stopper, _cleaner = _service(session)
+
+    await service.request_validate_workspace(
+        workspace.id,
+        reason="rerun required validation",
+        requested_tier=2,
+        idempotency_key="validate-tier-conflict",
+    )
+
+    with pytest.raises(IdempotencyConflictError):
+        await service.request_validate_workspace(
+            workspace.id,
+            reason="rerun required validation",
+            requested_tier=3,
+            idempotency_key="validate-tier-conflict",
+        )
+
+
+@pytest.mark.unit
+async def test_validate_rejects_missing_pr_url_before_creating_operation(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.monitoring_pr)
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceValidateMissingPrUrlError) as exc_info:
+        await service.request_validate_workspace(
+            workspace.id,
+            reason="rerun without pr",
+        )
+
+    assert exc_info.value.error_code == "WORKSPACE_PR_URL_REQUIRED"
+    assert exc_info.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}
+    assert await _operations(session, workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_validate_replay_rejects_workspace_that_left_replay_states(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.completed)
+    payload = {
+        "source": "operator_api",
+        "reason": "rerun after completion",
+        "reason_code": "OPERATOR_VALIDATE",
+        "requested_action": OperationType.validate.value,
+        "recovery_mode": "validate_only",
+    }
+    operation = await OperationRepository(session).create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.pending,
+        payload=payload,
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceValidateStateError) as exc_info:
+        await service.request_validate_workspace(
+            workspace.id,
+            reason="rerun after completion",
+        )
+
+    assert exc_info.value.detail == {
+        "status": WorkspaceStatus.completed.value,
+        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+    }
+    assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
+
+
+@pytest.mark.unit
+async def test_refresh_rejects_destroying_or_destroyed_without_creating_operation(
+    session: AsyncSession,
+) -> None:
+    destroying = await _workspace(
+        session,
+        status=WorkspaceStatus.destroying,
+        title="refresh destroying",
+    )
+    destroyed = await _workspace(
+        session,
+        status=WorkspaceStatus.destroyed,
+        title="refresh destroyed",
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceRefreshStateError) as destroying_error:
+        await service.request_refresh_workspace(destroying.id, reason="refresh")
+    with pytest.raises(WorkspaceRefreshStateError) as destroyed_error:
+        await service.request_refresh_workspace(destroyed.id, reason="refresh")
+
+    assert destroying_error.value.error_code == "WORKSPACE_STATE_NOT_REFRESHABLE"
+    assert destroying_error.value.detail == {"status": WorkspaceStatus.destroying.value}
+    assert destroyed_error.value.detail == {"status": WorkspaceStatus.destroyed.value}
+    assert await _operations(session, destroying.id) == []
+    assert await _operations(session, destroyed.id) == []
+
+
+@pytest.mark.unit
+async def test_validate_rejects_ineligible_state_before_creating_operation(
+    session: AsyncSession,
+) -> None:
+    completed = await _workspace(session, status=WorkspaceStatus.completed)
+    destroying = await _workspace(
+        session,
+        status=WorkspaceStatus.destroying,
+        title="validate destroying",
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceValidateStateError) as completed_error:
+        await service.request_validate_workspace(
+            completed.id,
+            reason="rerun after merge",
+        )
+    with pytest.raises(WorkspaceValidateStateError) as destroying_error:
+        await service.request_validate_workspace(
+            destroying.id,
+            reason="rerun while deleting",
+        )
+
+    assert completed_error.value.error_code == "WORKSPACE_STATE_NOT_VALIDATABLE"
+    assert completed_error.value.detail == {
+        "status": WorkspaceStatus.completed.value,
+        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+    }
+    assert destroying_error.value.detail == {
+        "status": WorkspaceStatus.destroying.value,
+        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+    }
+    assert await _operations(session, completed.id) == []
+    assert await _operations(session, destroying.id) == []
 
 
 @pytest.mark.unit

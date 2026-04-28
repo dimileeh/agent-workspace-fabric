@@ -21,7 +21,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -102,27 +102,37 @@ _MONITOR_RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
     OperationStatus.running.value,
 }
+_VALIDATE_ONLY_RECOVERY_SOURCES = {"pr_monitor", "operator_api"}
+_VALIDATE_ONLY_RECOVERY_MODES = {"validate_only", "rebase_only"}
 
 
 def _pending_monitor_recovery(workspace: Any) -> dict[str, Any] | None:
-    """Return the active pr_monitor recovery payload (or ``None``).
+    """Return the active validate-only recovery payload (or ``None``).
 
-    The PR monitor's RECOVERY_DISPATCH path creates an Operation row
-    with ``payload["source"] == "pr_monitor"``; the executor uses this
-    as the discriminator that separates monitor-driven recovery from
-    a fresh feature-execution pass.
+    Recovery operations use a pending/running ``validate`` operation with
+    ``recovery_mode`` set. The executor uses that as the discriminator that
+    separates recovery from a fresh feature-execution pass.
     """
     operations = getattr(workspace, "operations", None) or []
     for operation in operations:
         if operation.status not in _MONITOR_RECOVERY_ACTIVE_OPERATION_STATUSES:
             continue
+        if getattr(operation, "type", None) != OperationType.validate.value:
+            continue
         payload = operation.payload
-        if not isinstance(payload, dict):
+        if not _is_validate_only_recovery_payload(payload):
             continue
-        if payload.get("source") != "pr_monitor":
-            continue
-        return payload
+        return cast(dict[str, Any], payload)
     return None
+
+
+def _is_validate_only_recovery_payload(payload: object) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    return (
+        payload.get("source") in _VALIDATE_ONLY_RECOVERY_SOURCES
+        and payload.get("recovery_mode") in _VALIDATE_ONLY_RECOVERY_MODES
+    )
 
 
 @dataclass(frozen=True)
@@ -326,8 +336,9 @@ class WorkspaceExecutor:
                     workspace_id=workspace_id,
                 )
                 _log.info(
-                    "executor.monitor_recovery_started",
+                    "executor.validate_only_recovery_started",
                     workspace_id=workspace_id,
+                    source=recovery.get("source"),
                     recovery_mode=recovery.get("recovery_mode"),
                     reason=recovery.get("reason"),
                 )
@@ -1952,11 +1963,11 @@ class WorkspaceExecutor:
         *,
         workspace_id: str,
     ) -> None:
-        """Flush pending pr_monitor recovery operations to ``running``.
+        """Flush pending validate-only recovery operations to ``running``.
 
-        The monitor's RECOVERY_DISPATCH path creates the validate
-        Operation in ``pending``; without an explicit transition the row
-        would jump straight to ``succeeded``/``failed`` with
+        Recovery dispatch creates the validate Operation in ``pending``;
+        without an explicit transition the row would jump straight to
+        ``succeeded``/``failed`` with
         ``started_at == finished_at``, which loses the recovery
         lifecycle for observability tooling.
         """
@@ -1969,8 +1980,7 @@ class WorkspaceExecutor:
             )
             now = datetime.now(UTC)
             for operation in pending:
-                payload = operation.payload
-                if not isinstance(payload, dict) or payload.get("source") != "pr_monitor":
+                if not _is_validate_only_recovery_payload(operation.payload):
                     continue
                 operation.status = OperationStatus.running.value
                 if operation.started_at is None:
@@ -1999,8 +2009,7 @@ class WorkspaceExecutor:
             )
             result = {"reason_code": reason_code}
             for operation in [*pending, *running]:
-                payload = operation.payload
-                if not isinstance(payload, dict) or payload.get("source") != "pr_monitor":
+                if not _is_validate_only_recovery_payload(operation.payload):
                     continue
                 await repo.finish(
                     operation,
