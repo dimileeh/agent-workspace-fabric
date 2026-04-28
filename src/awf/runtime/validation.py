@@ -46,6 +46,10 @@ _COVERAGE_TOTAL_RE = re.compile(r"(?im)^\s*TOTAL\b.*?(?P<percent>\d+(?:\.\d+)?)%
 _COVERAGE_SUMMARY_RE = re.compile(
     r"(?i)\b(?:total\s+coverage|coverage)\D+(?P<percent>\d+(?:\.\d+)?)%"
 )
+_COVERAGE_FILE_LINE_RE = re.compile(
+    r"^(?P<file>\S.*?)\s+(?P<stmts>\d+)\s+(?P<miss>\d+)\s+(?P<cover>\d+)%\s*(?P<missing>.*?)\s*$"
+)
+_COVERAGE_HEADER_RE = re.compile(r"(?i)Name\s+Stmts\s+Miss\s+Cover")
 
 
 @dataclass(frozen=True)
@@ -79,6 +83,7 @@ class ValidationCoverageResult:
     status: str
     reason_code: str
     command_result: ValidationCommandResult | None = None
+    gaps: list[dict[str, object]] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -94,6 +99,8 @@ class ValidationCoverageResult:
         }
         if self.percent is not None:
             metadata["percent"] = float(self.percent)
+        if self.gaps:
+            metadata["gaps"] = self.gaps
         return metadata
 
 
@@ -606,6 +613,37 @@ def _coverage_reason_code(
     if command_result is not None and command_result.returncode != 0:
         return "COVERAGE_COMMAND_FAILED"
     return "COVERAGE_OK"
+
+
+def _parse_term_missing_gaps(paths: list[Path]) -> list[dict[str, object]]:
+    gaps: list[dict[str, object]] = []
+    for path in paths:
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as stream:
+                lines = stream.readlines()
+        except FileNotFoundError:
+            continue
+
+        in_trailer = False
+        for line in lines:
+            stripped = line.rstrip("\n")
+            if _COVERAGE_HEADER_RE.search(stripped):
+                in_trailer = True
+                continue
+            if not in_trailer:
+                continue
+            match = _COVERAGE_FILE_LINE_RE.match(stripped)
+            if match is None:
+                continue
+            file_name = match.group("file").strip()
+            if file_name.lower() == "total":
+                continue
+            missing_str = match.group("missing").strip()
+            missing_lines = [m.strip() for m in missing_str.split(",")] if missing_str else []
+            gaps.append({"file": file_name, "missing_lines": missing_lines})
+
+    gaps.sort(key=lambda g: len(g.get("missing_lines", [])), reverse=True)  # type: ignore[arg-type]
+    return gaps[:10]
 
 
 def _coverage_status(*, reason_code: str, enforce: bool) -> str:

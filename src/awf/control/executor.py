@@ -2423,6 +2423,20 @@ def _validation_run_coverage_metadata(
     return metadata
 
 
+def _format_coverage_gaps(gaps: list[dict[str, object]]) -> str:
+    if not gaps:
+        return ""
+    top = gaps[:5]
+    lines = ["top uncovered areas:"]
+    for g in top:
+        file_name = g.get("file", "")
+        missing = g.get("missing_lines", [])
+        missing_cast = missing if isinstance(missing, list) else []
+        missing_str = ", ".join(str(m) for m in missing_cast) if missing_cast else "(no missing lines)"
+        lines.append(f"  {file_name}: {missing_str}")
+    return "\n".join(lines)
+
+
 def _validation_failure_message(
     result: ValidationResult,
     *,
@@ -2442,10 +2456,13 @@ def _validation_failure_message(
             else ""
         )
         if coverage.reason_code == "COVERAGE_BELOW_THRESHOLD" and coverage.percent is not None:
+            gap_lines = _format_coverage_gaps(coverage.gaps if coverage.gaps else [])
+            gap_text = f"\n{gap_lines}" if gap_lines else ""
             return (
                 "validation failed: coverage "
                 f"{coverage.percent:.1f}% is below required {coverage.minimum_percent:.1f}%"
                 f"{baseline_suffix}; add meaningful tests and do not lower coverage thresholds"
+                f"{gap_text}"
             )
         if coverage.reason_code == "COVERAGE_NOT_FOUND":
             return "validation failed: coverage output was not found"
