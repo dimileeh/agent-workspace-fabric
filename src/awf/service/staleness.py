@@ -144,6 +144,8 @@ DEFAULT_STALE_POLICY: Final[StalePolicy] = StalePolicy(
         "schemas/",
         "models/",
         "model/",
+        "*/migrations/**",
+        "*/migration/**",
         "*/schema/**",
         "*/schemas/**",
         "*/models/**",

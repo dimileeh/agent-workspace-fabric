@@ -390,6 +390,48 @@ class TestEvaluateStaleness:
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
+        "changed_path",
+        (
+            "src/app/migrations/versions/20260428_add_user.py",
+            "src/app/migration/20260428_add_user.sql",
+        ),
+    )
+    def test_migration_task_nested_migration_path_emits_stale_schema(
+        self,
+        changed_path: str,
+    ) -> None:
+        from awf.service.staleness import (
+            DEFAULT_STALE_POLICY,
+            CandidateSnapshot,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        candidate = CandidateSnapshot(
+            owned_paths=("src/app/**",),
+            task_class="migration_task",
+            base_sha="a" * 40,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=(changed_path,),
+            advanced_commits=1,
+        )
+
+        findings = evaluate_staleness(
+            candidate=candidate,
+            target=target,
+            policy=DEFAULT_STALE_POLICY,
+        )
+
+        schema = next((f for f in findings if f.reason_code == "STALE_SCHEMA"), None)
+        assert schema is not None
+        assert schema.trigger_type == "schema_changed"
+        assert schema.trigger_ref == changed_path
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
         (
             "reason_code",
             "trigger_type",
