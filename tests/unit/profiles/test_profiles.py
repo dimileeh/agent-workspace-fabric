@@ -34,6 +34,8 @@ def test_profile_schema_accepts_minimal_valid_profile() -> None:
     )
     assert profile.name == "go-explicit"
     assert profile.monitor.initial_review_grace_period_seconds == 900
+    assert profile.monitor.non_check_reviewer_settle_seconds == 180
+    assert profile.monitor.non_check_reviewer_logins == ["greptile-apps"]
     assert profile.phases.setup[0].command == "go mod download"
     assert profile.phases.validate_commands[0].command == "go test ./..."
 
@@ -47,6 +49,48 @@ def test_profile_schema_accepts_monitor_initial_review_grace() -> None:
         }
     )
     assert profile.monitor.initial_review_grace_period_seconds == 120
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_non_check_reviewer_monitor_policy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "python-explicit",
+            "monitor": {
+                "non_check_reviewer_settle_seconds": 45,
+                "non_check_reviewer_logins": [
+                    " Greptile-Apps ",
+                    "greptile-apps[bot]",
+                    "Reviewer.Bot",
+                    "reviewer bot [bot]",
+                    "custom-reviewer",
+                ],
+            },
+        }
+    )
+
+    assert profile.monitor.non_check_reviewer_settle_seconds == 45
+    assert profile.monitor.non_check_reviewer_logins == [
+        "greptile-apps",
+        "reviewer-bot",
+        "custom-reviewer",
+    ]
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_disabled_or_empty_non_check_reviewer_policy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "python-explicit",
+            "monitor": {
+                "non_check_reviewer_settle_seconds": 0,
+                "non_check_reviewer_logins": [],
+            },
+        }
+    )
+
+    assert profile.monitor.non_check_reviewer_settle_seconds == 0
+    assert profile.monitor.non_check_reviewer_logins == []
 
 
 @pytest.mark.unit

@@ -149,6 +149,10 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             "worktrees_root": work_dir / "git" / "worktrees",
             "artifacts_root": work_dir / "artifacts",
             "initial_review_grace_period_seconds": grace_seconds,
+            "non_check_reviewer_settle_seconds": (
+                profile.monitor.non_check_reviewer_settle_seconds
+            ),
+            "non_check_reviewer_logins": profile.monitor.non_check_reviewer_logins,
             "log_store": log_store,
             "merge_coordinator": merge_coordinator,
             "post_merge_target_reconciler": _post_merge_reconciler,

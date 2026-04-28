@@ -266,6 +266,7 @@ def _make_runner(
             settle_interval_seconds=30,
             initial_review_grace_period_seconds=initial_review_grace_period_seconds,
             pre_merge_settle_seconds=0,
+            non_check_reviewer_settle_seconds=0,
         ),
         runner_config=MonitorRunnerConfig(
             max_outer_iterations=max_outer_iterations, max_fix_cycle_passes=3
