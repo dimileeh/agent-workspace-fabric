@@ -340,11 +340,18 @@ async def test_auto_merge_blocks_when_required_validation_is_only_on_other_attem
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
+                "action": "validate_only",
+                "requested_action": "validate",
                 "reason": "Required validation tier has not passed for this merge candidate.",
                 "reason_code": "VALIDATION_INSUFFICIENT_TIER",
                 "stale_reason": "validation_insufficient_tier",
-                "requested_action": "validate",
                 "recovery_mode": "validate_only",
+                "pr_number": seed.pr_number,
+                "pr_url": f"https://github.com/dimileeh/aira-web/pull/{seed.pr_number}",
+                "source_head_sha": "abc123",
+                "source_base_sha": "a" * 40,
+                "target_branch": "development",
+                "remote_branch": f"awf/{seed.workspace_id}",
             },
         )
     ]
@@ -389,11 +396,18 @@ async def test_auto_merge_blocks_persisted_stale_candidate(
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
+                "action": "rebase_only",
+                "requested_action": "rebase",
                 "reason": "Target branch advanced after this merge candidate was validated.",
                 "reason_code": "STALE_TARGET_ADVANCED",
                 "stale_reason": "STALE_TARGET_ADVANCED",
-                "requested_action": "rebase",
                 "recovery_mode": "rebase_only",
+                "pr_number": seed.pr_number,
+                "pr_url": f"https://github.com/dimileeh/aira-web/pull/{seed.pr_number}",
+                "source_head_sha": "abc123",
+                "source_base_sha": "a" * 40,
+                "target_branch": "development",
+                "remote_branch": f"awf/{seed.workspace_id}",
             },
         )
     ]
@@ -439,11 +453,18 @@ async def test_auto_merge_materializes_active_stale_reason(
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
+                "action": "rebase_only",
+                "requested_action": "rebase",
                 "reason": "Target branch advanced after this merge candidate was validated.",
                 "reason_code": "STALE_TARGET_ADVANCED",
                 "stale_reason": "STALE_TARGET_ADVANCED",
-                "requested_action": "rebase",
                 "recovery_mode": "rebase_only",
+                "pr_number": seed.pr_number,
+                "pr_url": f"https://github.com/dimileeh/aira-web/pull/{seed.pr_number}",
+                "source_head_sha": "abc123",
+                "source_base_sha": "a" * 40,
+                "target_branch": "development",
+                "remote_branch": f"awf/{seed.workspace_id}",
             },
         )
     ]
@@ -523,11 +544,18 @@ async def test_auto_merge_rechecks_candidate_gate_inside_merge_lock(
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
+                "action": "rebase_only",
+                "requested_action": "rebase",
                 "reason": "Target branch advanced after this merge candidate was validated.",
                 "reason_code": "STALE_TARGET_ADVANCED",
                 "stale_reason": "STALE_TARGET_ADVANCED",
-                "requested_action": "rebase",
                 "recovery_mode": "rebase_only",
+                "pr_number": seed.pr_number,
+                "pr_url": f"https://github.com/dimileeh/aira-web/pull/{seed.pr_number}",
+                "source_head_sha": "abc123",
+                "source_base_sha": "a" * 40,
+                "target_branch": "development",
+                "remote_branch": f"awf/{seed.workspace_id}",
             },
         )
     ]

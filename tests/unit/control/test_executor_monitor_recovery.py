@@ -117,6 +117,7 @@ async def _seed_ready_workspace_with_recovery(
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
         ws.branch_name = f"awf/{ws.id}"
         ws.base_commit = "a" * 40
+        ws.monitor_last_commit_sha = "d" * 40
         ws.compose_project_name = f"awf_{ws.id}"
         ws.pr_url = pr_url
         ws.pr_number = pr_number
@@ -133,10 +134,21 @@ async def _seed_ready_workspace_with_recovery(
             workspace_id=ws.id,
             operation_type=OperationType.validate,
             payload={
+                "owner": source,
                 "source": source,
+                "action": recovery_mode,
+                "requested_action": "rebase" if recovery_mode == "rebase_only" else "validate",
                 "reason": "validation_insufficient_tier",
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
                 "recovery_mode": recovery_mode,
+                "pr_number": pr_number,
+                "pr_url": pr_url,
+                "source_head_sha": ws.monitor_last_commit_sha,
+                "source_base_sha": ws.base_commit,
+                "target_branch": ws.branch_base,
+                "remote_branch": ws.remote_push_branch,
             },
+            idempotency_key=f"{source}:{recovery_mode}:{ws.id}",
         )
         await s.commit()
         if create_worktree:
@@ -512,7 +524,37 @@ async def test_executor_recovery_closes_operation_row_for_rebase_only_mode(
     assert op.started_at < op.finished_at
     rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
     assert len(rebase_ops) == 1
-    assert rebase_ops[0].status == OperationStatus.succeeded.value
+    rebase_op = rebase_ops[0]
+    assert rebase_op.status == OperationStatus.succeeded.value
+    assert rebase_op.idempotency_key is not None
+    assert rebase_op.idempotency_key.startswith("pr_monitor:rebase_only:")
+    assert rebase_op.started_at is not None
+    assert rebase_op.finished_at is not None
+    assert rebase_op.payload == {
+        "owner": "pr_monitor",
+        "source": "pr_monitor",
+        "action": "rebase_only",
+        "requested_action": "rebase",
+        "reason": "validation_insufficient_tier",
+        "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+        "recovery_mode": "rebase_only",
+        "pr_number": 1,
+        "pr_url": "https://github.com/x/y/pull/1",
+        "source_head_sha": "d" * 40,
+        "source_base_sha": "a" * 40,
+        "target_branch": "development",
+        "remote_branch": f"awf/{ws_id}",
+    }
+    assert rebase_op.result == {
+        "status": "succeeded",
+        "reason_code": "REBASE_OK",
+        "source_base_sha": "a" * 40,
+        "source_head_sha": "d" * 40,
+        "target_base_sha": "b" * 40,
+        "target_head_sha": "c" * 40,
+        "pushed": True,
+        "rebased": True,
+    }
 
 
 @pytest.mark.unit
@@ -804,9 +846,14 @@ async def test_rebase_only_recovery_skips_rebase_when_target_already_merged(
     assert len(rebase_ops) == 1
     assert rebase_ops[0].status == OperationStatus.succeeded.value
     assert rebase_ops[0].result == {
+        "status": "succeeded",
         "reason_code": "REBASE_OK",
-        "base_sha": "b" * 40,
-        "head_sha": "c" * 40,
+        "source_base_sha": "a" * 40,
+        "source_head_sha": "d" * 40,
+        "target_base_sha": "b" * 40,
+        "target_head_sha": "c" * 40,
+        "pushed": False,
+        "rebased": False,
     }
 
 

@@ -317,7 +317,7 @@ def test_workspace_lookup_disposes_engine_after_success(
 
 
 @pytest.mark.unit
-def test_docker_scan_reports_missing_binary() -> None:
+def test_docker_scan_reports_missing_binary_with_structured_reason() -> None:
     def _missing_binary(args: list[str], **_kwargs: object) -> _Completed:
         raise FileNotFoundError(args[0])
 

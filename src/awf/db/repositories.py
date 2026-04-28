@@ -2194,6 +2194,30 @@ class OperationRepository:
         await self._session.flush()
         return operation
 
+    async def create_idempotent(
+        self,
+        *,
+        workspace_id: str,
+        operation_type: OperationType | str,
+        status: OperationStatus | str = OperationStatus.pending,
+        payload: dict[str, Any] | None = None,
+        idempotency_key: str,
+    ) -> tuple[Operation, bool]:
+        await self.acquire_idempotency_key_lock(idempotency_key)
+        existing = await self.get_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            return existing, False
+        return (
+            await self.create(
+                workspace_id=workspace_id,
+                operation_type=operation_type,
+                status=status,
+                payload=payload,
+                idempotency_key=idempotency_key,
+            ),
+            True,
+        )
+
     async def get(self, operation_id: str) -> Operation | None:
         return await self._session.get(Operation, operation_id)
 

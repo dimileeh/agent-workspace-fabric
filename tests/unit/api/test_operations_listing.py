@@ -195,6 +195,58 @@ async def test_operation_response_serializes_stable_audit_fields(
 
 
 @pytest.mark.unit
+async def test_operation_response_derives_pr_monitor_recovery_fields(
+    client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    ws_repo = WorkspaceRepository(session)
+    op_repo = OperationRepository(session)
+    ws = await ws_repo.create(
+        repo_url="https://github.com/org/repo_monitor",
+        branch_base="main",
+        task_title="monitor recovery operation",
+        task_prompt="prompt",
+        agent="claude-3-sonnet",
+        test_commands=[],
+    )
+    operation = await op_repo.create(
+        workspace_id=ws.id,
+        operation_type=OperationType.validate,
+        status=OperationStatus.pending,
+        payload={
+            "owner": "pr_monitor",
+            "source": "pr_monitor",
+            "action": "validate_only",
+            "requested_action": "validate",
+            "reason": "Required validation tier has not passed.",
+            "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+            "pr_number": 42,
+            "pr_url": "https://github.com/org/repo_monitor/pull/42",
+            "source_head_sha": "c" * 40,
+            "source_base_sha": "b" * 40,
+        },
+        idempotency_key="pr_monitor:validate_only:test",
+    )
+    await session.commit()
+
+    detail_response = await client.get(f"/v1/operations/{operation.id}")
+    list_response = await client.get(f"/v1/workspaces/{ws.id}/operations")
+
+    assert detail_response.status_code == 200
+    assert list_response.status_code == 200
+    for item in (detail_response.json(), list_response.json()["items"][0]):
+        assert item["action"] == "validate_only"
+        assert item["pr_number"] == 42
+        assert item["pr_url"] == "https://github.com/org/repo_monitor/pull/42"
+        assert item["source_head_sha"] == "c" * 40
+        assert item["source_base_sha"] == "b" * 40
+        assert item["owner"] == "pr_monitor"
+        assert item["source"] == "pr_monitor"
+        assert item["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
+        assert item["payload"] == operation.payload
+
+
+@pytest.mark.unit
 async def test_operation_response_derives_failure_fields_from_error_columns(
     client: AsyncClient,
     session: AsyncSession,

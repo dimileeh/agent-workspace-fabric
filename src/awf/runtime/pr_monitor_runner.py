@@ -28,11 +28,11 @@ import json
 import os
 import re
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -78,6 +78,13 @@ from awf.runtime.pr_monitor import (
     WaitForCI,
     _is_bot_author,
     decide,
+)
+from awf.runtime.pr_monitor_operations import (
+    MonitorOperationHandle,
+    build_monitor_operation_payload,
+    create_or_start_monitor_operation,
+    finish_monitor_operation,
+    monitor_operation_idempotency_key,
 )
 from awf.service.gc import run_workspace_filesystem_gc
 from awf.service.merge_queue import (
@@ -242,6 +249,89 @@ class PullRequestMonitorRunner:
         # ``<work_dir>/artifacts`` directory; since ``worktrees_root`` there
         # is ``<work_dir>/git/worktrees``, go up two levels.
         self._artifacts_root = artifacts_root or (worktrees_root.parents[1] / "artifacts")
+
+    async def _begin_monitor_operation(
+        self,
+        *,
+        workspace_id: str,
+        operation_type: OperationType | str,
+        action: str,
+        requested_action: str,
+        reason: str | None,
+        reason_code: str,
+        pr_number: int,
+        status: PRStatus,
+        base_branch: str,
+        remote_branch: str,
+        operation_status: OperationStatus = OperationStatus.running,
+        recovery_mode: str | None = None,
+        stale_reason: str | None = None,
+        monitor_log: WorkspaceLogSink | None = None,
+        extra_payload: Mapping[str, Any] | None = None,
+        extra_identity: Sequence[object] = (),
+    ) -> MonitorOperationHandle | None:
+        log_refs = {"monitor": monitor_log.stream_id} if monitor_log is not None else None
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None:  # pragma: no cover - defensive invariant
+                return None
+            payload = build_monitor_operation_payload(
+                workspace=workspace,
+                action=action,
+                requested_action=requested_action,
+                reason=reason,
+                reason_code=reason_code,
+                pr_number=pr_number,
+                source_head_sha=status.head_sha,
+                source_base_sha=workspace.base_commit,
+                target_branch=base_branch,
+                remote_branch=remote_branch,
+                recovery_mode=recovery_mode,
+                stale_reason=stale_reason,
+                log_stream_refs=log_refs,
+                extra=extra_payload,
+            )
+            idempotency_key = monitor_operation_idempotency_key(
+                workspace_id=workspace_id,
+                action=action,
+                pr_number=pr_number,
+                reason_code=reason_code,
+                source_head_sha=status.head_sha,
+                source_base_sha=workspace.base_commit,
+                extra=extra_identity,
+            )
+            handle = await create_or_start_monitor_operation(
+                session,
+                workspace_id=workspace_id,
+                operation_type=operation_type,
+                payload=payload,
+                idempotency_key=idempotency_key,
+                status=operation_status,
+            )
+            await session.commit()
+            return handle
+
+    async def _finish_monitor_operation(
+        self,
+        handle: MonitorOperationHandle | None,
+        *,
+        status: OperationStatus,
+        result: Mapping[str, Any] | None = None,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if handle is None or not handle.should_finish:
+            return
+        async with self._deps.session_factory() as session:
+            await finish_monitor_operation(
+                session,
+                operation_id=handle.operation_id,
+                status=status,
+                result=result,
+                error_code=error_code,
+                error_message=error_message,
+            )
+            await session.commit()
 
     async def _open_monitor_log(self, workspace_id: str) -> WorkspaceLogSink | None:
         if self._deps.log_store is None:
@@ -602,6 +692,20 @@ class PullRequestMonitorRunner:
             return False
 
         if isinstance(action, SyncBase):
+            operation = await self._begin_monitor_operation(
+                workspace_id=workspace_id,
+                operation_type=OperationType.sync_base,
+                action="sync_base",
+                requested_action="sync_base",
+                reason="PR branch is behind the target branch.",
+                reason_code="SYNC_BASE",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                monitor_log=monitor_log,
+                extra_identity=(state.iter_count,),
+            )
             try:
                 await self._run_sync_base(
                     workspace_id=workspace_id,
@@ -613,16 +717,58 @@ class PullRequestMonitorRunner:
                     compose_file=compose_file,
                 )
             except ComposeExecCleanupError as exc:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "reason_code": EXEC_PROCESS_CLEANUP_FAILED,
+                    },
+                    error_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    error_message=cleanup_failure_message(exc),
+                )
                 await self._terminate_failed(
                     workspace_id,
                     message=cleanup_failure_message(exc),
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 )
                 return True
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "status": "succeeded",
+                    "outcome": "base_synced",
+                    "pushed": True,
+                },
+            )
             state.iter_count += 1
             return False
 
         if isinstance(action, ReportCiFailure):
+            operation = await self._begin_monitor_operation(
+                workspace_id=workspace_id,
+                operation_type=OperationType.ci_repair,
+                action="ci_repair",
+                requested_action="fix_ci",
+                reason="CI checks failed and recovery was dispatched.",
+                reason_code="CI_REPAIR",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                monitor_log=monitor_log,
+                extra_payload={
+                    "failures": [
+                        {
+                            "name": failure.name,
+                            "conclusion": failure.conclusion,
+                        }
+                        for failure in action.failures
+                    ]
+                },
+                extra_identity=tuple(failure.name for failure in action.failures),
+            )
             try:
                 await self._run_ci_fix(
                     repo=repo,
@@ -634,16 +780,61 @@ class PullRequestMonitorRunner:
                     remote_branch=remote_branch,
                 )
             except ComposeExecCleanupError as exc:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "reason_code": EXEC_PROCESS_CLEANUP_FAILED,
+                    },
+                    error_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    error_message=cleanup_failure_message(exc),
+                )
                 await self._terminate_failed(
                     workspace_id,
                     message=cleanup_failure_message(exc),
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 )
                 return True
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "status": "succeeded",
+                    "outcome": "ci_repair_pushed",
+                    "failure_count": len(action.failures),
+                    "pushed": True,
+                },
+            )
             state.iter_count += 1
             return False
 
         if isinstance(action, AddressComments):
+            operation = await self._begin_monitor_operation(
+                workspace_id=workspace_id,
+                operation_type=OperationType.comment_repair,
+                action="comment_repair",
+                requested_action="address_comments",
+                reason="Unresolved PR review comments required repair.",
+                reason_code="COMMENT_REPAIR",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                monitor_log=monitor_log,
+                extra_payload={
+                    "thread_count": len(action.threads),
+                    "review_comment_count": len(action.review_comments),
+                    "thread_ids": [thread.thread_id for thread in action.threads],
+                    "review_comment_ids": [
+                        comment.comment_id for comment in action.review_comments
+                    ],
+                },
+                extra_identity=(
+                    *(thread.thread_id for thread in action.threads),
+                    *(comment.comment_id for comment in action.review_comments),
+                ),
+            )
             try:
                 await self._run_fix_cycle(
                     workspace_id=workspace_id,
@@ -658,12 +849,33 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                 )
             except ComposeExecCleanupError as exc:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "reason_code": EXEC_PROCESS_CLEANUP_FAILED,
+                    },
+                    error_code=EXEC_PROCESS_CLEANUP_FAILED,
+                    error_message=cleanup_failure_message(exc),
+                )
                 await self._terminate_failed(
                     workspace_id,
                     message=cleanup_failure_message(exc),
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 )
                 return True
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "status": "succeeded",
+                    "outcome": "comments_addressed",
+                    "thread_count": len(action.threads),
+                    "review_comment_count": len(action.review_comments),
+                    "pushed": True,
+                },
+            )
             state.iter_count += 1
             return False
 
@@ -970,6 +1182,20 @@ class PullRequestMonitorRunner:
             return True
 
         if isinstance(action, NotifyHuman):
+            operation = await self._begin_monitor_operation(
+                workspace_id=workspace_id,
+                operation_type=OperationType.human_wait,
+                action="human_wait",
+                requested_action="notify_human",
+                reason=action.message or _notify_human_reason(status, state),
+                reason_code="HUMAN_WAIT",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                monitor_log=monitor_log,
+                extra_identity=(action.message or "", state.iter_count),
+            )
             try:
                 await self._post_human_notification_once(
                     repo=repo,
@@ -986,9 +1212,40 @@ class PullRequestMonitorRunner:
                     context="post_human_notification",
                     monitor_log=monitor_log,
                 ):
+                    await self._finish_monitor_operation(
+                        operation,
+                        status=OperationStatus.failed,
+                        result={
+                            "status": "failed",
+                            "outcome": "transient_github_error",
+                            "reason_code": "GITHUB_TRANSIENT_ERROR",
+                        },
+                        error_code="GITHUB_TRANSIENT_ERROR",
+                        error_message=str(exc),
+                    )
                     return False
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "github_error",
+                        "reason_code": "GITHUB_ERROR",
+                    },
+                    error_code="GITHUB_ERROR",
+                    error_message=str(exc),
+                )
                 raise
             await self._deps.sleep(self._config.poll_interval_seconds)
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.succeeded,
+                result={
+                    "status": "succeeded",
+                    "outcome": "human_notification_posted",
+                    "slept_seconds": self._config.poll_interval_seconds,
+                },
+            )
             return False
 
         # If we got here the MonitorAction union gained a variant without
@@ -1256,17 +1513,6 @@ class PullRequestMonitorRunner:
             requested_action = req_action or "validate"
             recovery_reason = _pr_monitor_recovery_reason(stale_reason)
             recovery_reason_code = _pr_monitor_recovery_reason_code(stale_reason)
-            operation_payload: dict[str, object] = {
-                "owner": "pr_monitor",
-                "source": "pr_monitor",
-                "reason": recovery_reason,
-                "reason_code": recovery_reason_code,
-                "stale_reason": stale_reason,
-                "requested_action": requested_action,
-                "recovery_mode": recovery_mode,
-            }
-            if monitor_log is not None:
-                operation_payload["log_stream_refs"] = {"monitor": monitor_log.stream_id}
             async with self._deps.session_factory() as s:
                 from awf.db.repositories import OperationRepository, WorkspaceRepository
 
@@ -1285,10 +1531,37 @@ class PullRequestMonitorRunner:
                 )
                 if active_recovery:
                     return True
-                await OperationRepository(s).create(
+                operation_payload = build_monitor_operation_payload(
+                    workspace=_ws,
+                    action=recovery_mode,
+                    requested_action=requested_action,
+                    reason=recovery_reason,
+                    reason_code=recovery_reason_code,
+                    pr_number=pr_number,
+                    source_head_sha=status.head_sha,
+                    source_base_sha=_ws.base_commit,
+                    target_branch=base_branch,
+                    remote_branch=remote_branch,
+                    recovery_mode=recovery_mode,
+                    stale_reason=stale_reason,
+                    log_stream_refs=(
+                        {"monitor": monitor_log.stream_id}
+                        if monitor_log is not None
+                        else None
+                    ),
+                )
+                await OperationRepository(s).create_idempotent(
                     workspace_id=workspace_id,
                     operation_type="validate",
                     payload=operation_payload,
+                    idempotency_key=monitor_operation_idempotency_key(
+                        workspace_id=workspace_id,
+                        action=recovery_mode,
+                        pr_number=pr_number,
+                        reason_code=recovery_reason_code,
+                        source_head_sha=status.head_sha,
+                        source_base_sha=_ws.base_commit,
+                    ),
                 )
                 await WorkspaceRepository(s).transition(
                     _ws,
