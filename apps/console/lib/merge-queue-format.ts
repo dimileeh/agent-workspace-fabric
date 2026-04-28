@@ -1,5 +1,5 @@
 import type { MergeBlockerReason, MergeQueueBlocker, MergeQueueItem, StaleReason } from "@/lib/types";
-import { compactId } from "@/lib/format";
+import { compactId } from "./format.ts";
 
 export interface StaleReasonSummary {
   count: number;
