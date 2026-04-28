@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   activeStaleReasons,
   formatRequiredNextAction,
+  requiredNextActionTone,
   summarizeQueueBlockers,
   summarizeReadiness,
   summarizeStaleReasons,
@@ -155,6 +156,23 @@ test("queue blocker summary includes older candidate context and wait action", (
     first: item.queue_blockers[0],
     overflowCount: 1,
   });
+});
+
+test("required next action tone maps raw action codes and blocker fallbacks", () => {
+  assert.equal(requiredNextActionTone("resolve_policy_findings", "ready_to_merge_or_waiting_for_github"), "bad");
+  assert.equal(requiredNextActionTone("resolve_task_scope", "stale"), "bad");
+  assert.equal(requiredNextActionTone("wait_for_queue", "ready_to_merge_or_waiting_for_github"), "warn");
+  assert.equal(requiredNextActionTone("validate", "stale"), "warn");
+  assert.equal(requiredNextActionTone("rebase", "stale"), "warn");
+  assert.equal(requiredNextActionTone("future_action", "policy_blocked"), "neutral");
+
+  assert.equal(requiredNextActionTone(null, "policy_blocked"), "bad");
+  assert.equal(requiredNextActionTone(null, "manual_merge_required"), "warn");
+  assert.equal(requiredNextActionTone(null, "waiting_for_monitor"), "warn");
+  assert.equal(requiredNextActionTone(null, "waiting_for_older_candidate"), "warn");
+  assert.equal(requiredNextActionTone(null, "stale"), "warn");
+  assert.equal(requiredNextActionTone(null, "workspace_not_terminal"), "neutral");
+  assert.equal(requiredNextActionTone(null, "completed"), "good");
 });
 
 test("readiness summary distinguishes canonical, superseded, stale, and legacy rows", () => {

@@ -46,6 +46,7 @@ import {
   formatMergeBlockerReason,
   formatRequiredNextAction,
   mergeQueueMergedAt,
+  requiredNextActionTone,
   summarizeQueueBlockers,
   summarizeReadiness,
   summarizeStaleReasons,
@@ -1445,7 +1446,11 @@ function MergeQueueRow({
         </div>
       </div>
       <div className="grid gap-1 sm:grid-cols-2 2xl:grid-cols-4">
-        <QueueChip label="Action" value={actionLabel} tone={actionTone(actionLabel)} />
+        <QueueChip
+          label="Action"
+          value={actionLabel}
+          tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
+        />
         <QueueChip
           label="Blocker"
           value={blockerLabel}
@@ -1491,7 +1496,11 @@ function MergeQueueRow({
               tone={item.canonical ? statusTone("completed") : statusTone("failed")}
             />
             <QueueDatum label="Candidate status" value={item.candidate_status ?? "unknown"} mono />
-            <QueueDatum label="Action" value={actionLabel} tone={actionTone(actionLabel)} />
+            <QueueDatum
+              label="Action"
+              value={actionLabel}
+              tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
+            />
             <QueueDatum label="Readiness" value={readiness.detail} mono tone={readinessTone(readiness.label)} />
             <QueueDatum label="Mode" value={item.auto_merge ? "auto-merge" : "manual"} />
             <QueueDatum label="Created" value={formatDateTime(item.created_at)} />
@@ -1656,22 +1665,6 @@ function mergeBlockerTone(reason: MergeQueueItem["merge_blocker_reason"]): Retur
     default:
       return "info";
   }
-}
-
-function actionTone(actionLabel: string): ReturnType<typeof statusTone> {
-  if (actionLabel === "none") {
-    return "good";
-  }
-  if (actionLabel === "resolve policy" || actionLabel === "resolve task scope") {
-    return "bad";
-  }
-  if (actionLabel === "wait for monitor" || actionLabel === "wait for queue" || actionLabel === "manual merge") {
-    return "warn";
-  }
-  if (actionLabel === "validate" || actionLabel === "rebase") {
-    return "warn";
-  }
-  return "neutral";
 }
 
 function readinessTone(label: string): ReturnType<typeof statusTone> {

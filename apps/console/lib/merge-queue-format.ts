@@ -32,6 +32,8 @@ export interface ValidationSummary {
   coverageLabel: string;
 }
 
+export type QueueTone = "neutral" | "info" | "good" | "warn" | "bad";
+
 export function activeStaleReasons(item: Pick<MergeQueueItem, "stale_reasons">): StaleReason[] {
   return (item.stale_reasons ?? []).filter((reason) => reason.status === "active");
 }
@@ -59,6 +61,40 @@ export function formatRequiredNextAction(
       return "rebase";
     default:
       return "none";
+  }
+}
+
+export function requiredNextActionTone(
+  action: string | null | undefined,
+  blockerReason: MergeBlockerReason,
+): QueueTone {
+  switch (action) {
+    case "resolve_policy_findings":
+    case "resolve_task_scope":
+      return "bad";
+    case "wait_for_queue":
+    case "validate":
+    case "rebase":
+      return "warn";
+    case null:
+    case undefined:
+      break;
+    default:
+      return "neutral";
+  }
+
+  switch (blockerReason) {
+    case "policy_blocked":
+      return "bad";
+    case "manual_merge_required":
+    case "waiting_for_monitor":
+    case "waiting_for_older_candidate":
+    case "stale":
+      return "warn";
+    case "workspace_not_terminal":
+      return "neutral";
+    default:
+      return "good";
   }
 }
 
