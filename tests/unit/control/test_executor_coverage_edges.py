@@ -271,6 +271,8 @@ async def test_baseline_coverage_preflight_returns_logged_policy_result(
 async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: Path) -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0, stdout="sha1\n")
+    runner.queue_result(returncode=0, stdout="")
     runner.queue_result(returncode=0, stdout="")
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter("plan written elsewhere")
@@ -329,11 +331,13 @@ async def test_planning_required_reports_invalid_rendered_paths(tmp_path: Path) 
 @pytest.mark.unit
 async def test_planning_required_rejects_extra_plan_phase_changes(tmp_path: Path) -> None:
     runner = FakeCommandRunner()
-    runner.queue_result(returncode=0, stdout="")
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD
     runner.queue_result(
         returncode=0,
         stdout="?? docs/awf-plans/ws_plan_extra.md\n?? src/changed.py\n",
-    )
+    )  # dirty_paths
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter("plan plus code")
     profile = WorkspaceProfile.model_validate(
@@ -366,9 +370,11 @@ async def test_planning_required_rejects_extra_plan_phase_changes(tmp_path: Path
 @pytest.mark.unit
 async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Path) -> None:
     runner = FakeCommandRunner()
-    runner.queue_result(returncode=0, stdout="")
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")
+    runner.queue_result(returncode=0, stdout="")  # before_plan (1)
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD (2)
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")  # dirty after plan (3)
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty) (4)
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")  # before_compare (5)
     runner.queue_result(
         returncode=0,
         stdout=(
@@ -376,7 +382,7 @@ async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Pa
             "?? docs/awf-plans/ws_compare.json\n"
             "?? src/side_effect.py\n"
         ),
-    )
+    )  # after_compare (6)
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan",
@@ -416,13 +422,16 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
     tmp_path: Path,
 ) -> None:
     runner = FakeCommandRunner()
-    runner.queue_result(returncode=0, stdout="")
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")  # dirty after plan
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")  # before_compare
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")  # after_compare (first)
     runner.queue_result(
         returncode=0,
         stdout="?? docs/awf-plans/ws_unsat.md\n?? docs/awf-plans/ws_unsat.json\n",
-    )
+    )  # after_compare (second)
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan",
@@ -462,6 +471,16 @@ async def test_changed_paths_raises_when_git_status_fails(tmp_path: Path) -> Non
 
     with pytest.raises(RuntimeError, match="git status failed"):
         await executor._changed_paths(tmp_path / "worktree")
+
+
+@pytest.mark.unit
+async def test_committed_paths_since_raises_when_git_diff_fails(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=128, stderr="bad object")
+    executor = _executor_with_runner(runner, tmp_path)
+
+    with pytest.raises(RuntimeError, match="git diff --name-only failed"):
+        await executor._committed_paths_since(tmp_path / "worktree", "baseline-sha")
 
 
 @pytest.mark.unit
@@ -764,6 +783,224 @@ def test_call_pr_monitor_factory_surfaces_bind_error() -> None:
             profile=profile,
             workspace=object(),  # type: ignore[arg-type]
         )
+
+
+@pytest.mark.unit
+async def test_planning_required_accepts_committed_plan_file(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    # before_plan (clean)
+    runner.queue_result(returncode=0, stdout="")
+    # rev-parse HEAD -> baseline sha
+    runner.queue_result(returncode=0, stdout="abc1234\n")
+    # dirty after planning (still clean because agent committed)
+    runner.queue_result(returncode=0, stdout="")
+    # git diff --name-only <base>..HEAD -> plan file
+    runner.queue_result(returncode=0, stdout="docs/awf-plans/ws_plan_commit.md\n")
+    # before_compare
+    runner.queue_result(returncode=0, stdout="")
+    # after_compare
+    runner.queue_result(returncode=0, stdout="")
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan committed",
+        "implemented",
+        '{"status":"satisfied","summary":"ok","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-committed",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_commit", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 3
+
+
+@pytest.mark.unit
+async def test_planning_required_rejects_committed_code_as_outside_plan(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="base5678\n")  # rev-parse HEAD
+    runner.queue_result(returncode=0, stdout="")  # dirty after planning (clean)
+    runner.queue_result(
+        returncode=0,
+        stdout=(
+            "docs/awf-plans/ws_plan_code.md\n"
+            "src/awf/executor.py\n"
+        ),
+    )  # committed paths since baseline
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("plan plus code")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-code-committed",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "enforce_plan_only_changes": True,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_code", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message == (
+        "planning phase changed files outside `docs/awf-plans/ws_plan_code.md`: "
+        "src/awf/executor.py"
+    )
+
+
+@pytest.mark.unit
+async def test_planning_required_falls_back_to_porcelain_when_no_baseline_sha(
+    tmp_path: Path,
+) -> None:
+    # Fresh repo or detached state where rev-parse HEAD fails.
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=128, stderr="fatal: not a git repository")  # rev-parse HEAD fails
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_plan_fallback.md\n")  # dirty after planning
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan fallback",
+        "implemented",
+        '{"status":"satisfied","summary":"ok","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-fallback",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_fallback", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
+    # No git diff --name-only call should have been issued because rev-parse failed.
+    diff_calls = [call for call in runner.calls if "diff" in call.args and "--name-only" in call.args]
+    assert not diff_calls
+
+
+@pytest.mark.unit
+async def test_planning_required_dirty_plan_still_accepted(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="old_sha\n")  # rev-parse HEAD
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_plan_dirty.md\n")  # dirty after planning
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+    runner.queue_result(returncode=0, stdout="")  # before_compare
+    runner.queue_result(returncode=0, stdout="")  # after_compare
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "dirty plan",
+        "implemented",
+        '{"status":"satisfied","summary":"ok","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-dirty",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_dirty", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
+    # Because no new commits, the diff call should return empty; porcelain still carries the plan.
+    diff_calls = [call for call in runner.calls if "diff" in call.args and "--name-only" in call.args]
+    assert diff_calls
+
+
+@pytest.mark.unit
+async def test_planning_required_dirty_extra_file_still_rejected(tmp_path: Path) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="base_sha\n")  # rev-parse HEAD
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_plan_extra_dirty.md\n?? src/extra.py\n",
+    )  # after_plan
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter("dirty extra")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-extra-dirty",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "enforce_plan_only_changes": True,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_extra_dirty", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message == (
+        "planning phase changed files outside `docs/awf-plans/ws_plan_extra_dirty.md`: "
+        "src/extra.py"
+    )
 
 
 @pytest.mark.unit

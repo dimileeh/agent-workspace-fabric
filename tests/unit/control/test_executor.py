@@ -352,11 +352,13 @@ class TestHappyPath:
         )
 
         fake.queue_result(returncode=0, stdout="")  # changed paths before planning
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
         fake.queue_result(  # changed paths after planning
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.md\n",
         )
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
         fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
         fake.queue_result(  # changed paths before compare
             returncode=0,
@@ -422,8 +424,10 @@ class TestHappyPath:
         )
 
         fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan written")  # planning
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
         fake.queue_result(  # compare says not done
@@ -475,11 +479,13 @@ class TestHappyPath:
         )
 
         fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
         fake.queue_result(returncode=0, stdout="plan plus code")  # planning
         fake.queue_result(  # after planning
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/oops.py\n",
         )
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
 
         await executor.execute(ws_id)
 
