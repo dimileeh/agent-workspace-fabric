@@ -220,7 +220,10 @@ class WorkspaceControlService:
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        event_payload: dict[str, object | None] = {"reason": reason, "stop_stack": stop_stack}
+        event_payload = _event_payload(
+            {"reason": reason, "stop_stack": stop_stack},
+            expected_version=expected_version,
+        )
         payload = _operator_operation_payload(
             reason=reason,
             reason_code=_OPERATOR_CANCEL_REASON_CODE,
@@ -271,7 +274,10 @@ class WorkspaceControlService:
             )
         ):
             await repo.transition(
-                workspace, to=WorkspaceStatus.cancelled, reason_code=_OPERATOR_CANCEL_REASON_CODE
+                workspace,
+                to=WorkspaceStatus.cancelled,
+                reason_code=_OPERATOR_CANCEL_REASON_CODE,
+                payload=event_payload,
             )
         else:
             await repo.add_event(
@@ -302,7 +308,10 @@ class WorkspaceControlService:
     ) -> WorkspaceControlResponse:
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
-        event_payload: dict[str, object | None] = {"reason": reason}
+        event_payload = _event_payload(
+            {"reason": reason},
+            expected_version=expected_version,
+        )
         payload = _operator_operation_payload(
             reason=reason,
             reason_code=_OPERATOR_STOP_REASON_CODE,
@@ -348,7 +357,10 @@ class WorkspaceControlService:
             WorkspaceStatus.cancelled,
         ):
             await repo.transition(
-                workspace, to=WorkspaceStatus.cancelled, reason_code=_OPERATOR_STOP_REASON_CODE
+                workspace,
+                to=WorkspaceStatus.cancelled,
+                reason_code=_OPERATOR_STOP_REASON_CODE,
+                payload=event_payload,
             )
         else:
             await repo.add_event(
@@ -430,6 +442,7 @@ class WorkspaceControlService:
             "operation_id": operation.id,
             "claims_reset": claims_reset,
         }
+        event_payload = _event_payload(event_payload, expected_version=expected_version)
         if state_reset is not None:
             event_payload["state_reset"] = state_reset
             workspace.events.append(
@@ -511,11 +524,14 @@ class WorkspaceControlService:
             workspace,
             event_type="workspace.refresh_requested",
             reason_code=_OPERATOR_REFRESH_REASON_CODE,
-            payload={
-                "source": _OPERATOR_API_SOURCE,
-                "reason": reason,
-                "operation_id": operation.id,
-            },
+            payload=_event_payload(
+                {
+                    "source": _OPERATOR_API_SOURCE,
+                    "reason": reason,
+                    "operation_id": operation.id,
+                },
+                expected_version=expected_version,
+            ),
         )
         return operation
 
@@ -574,6 +590,10 @@ class WorkspaceControlService:
         }
         if requested_tier is not None:
             validate_event_payload["requested_tier"] = requested_tier
+        validate_event_payload = _event_payload(
+            validate_event_payload,
+            expected_version=expected_version,
+        )
         await repo.add_event(
             workspace,
             event_type="workspace.validate_requested",
@@ -584,6 +604,7 @@ class WorkspaceControlService:
             workspace,
             to=WorkspaceStatus.ready,
             reason_code=_OPERATOR_VALIDATE_REASON_CODE,
+            payload=validate_event_payload,
         )
         return operation
 
@@ -610,6 +631,14 @@ class WorkspaceControlService:
             },
         )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
+        event_payload = _event_payload(
+            {
+                "force": force,
+                "remove_volumes": remove_volumes,
+                "remove_worktree": remove_worktree,
+            },
+            expected_version=expected_version,
+        )
         workspace, replay = await self._prepare_operation(
             repo,
             operations,
@@ -655,12 +684,18 @@ class WorkspaceControlService:
             current, WorkspaceStatus.cancelled
         ):
             await repo.transition(
-                workspace, to=WorkspaceStatus.cancelled, reason_code=_OPERATOR_DESTROY_REASON_CODE
+                workspace,
+                to=WorkspaceStatus.cancelled,
+                reason_code=_OPERATOR_DESTROY_REASON_CODE,
+                payload=event_payload,
             )
             current = WorkspaceStatus.cancelled
         if WorkspaceStateMachine.can_transition(current, WorkspaceStatus.destroying):
             await repo.transition(
-                workspace, to=WorkspaceStatus.destroying, reason_code=_OPERATOR_DESTROY_REASON_CODE
+                workspace,
+                to=WorkspaceStatus.destroying,
+                reason_code=_OPERATOR_DESTROY_REASON_CODE,
+                payload=event_payload,
             )
 
         await self._session.flush()
@@ -683,7 +718,10 @@ class WorkspaceControlService:
                 WorkspaceStatus(workspace.status), WorkspaceStatus.failed
             ):
                 await repo.transition(
-                    workspace, to=WorkspaceStatus.failed, reason_code="CLEANUP_FAILED"
+                    workspace,
+                    to=WorkspaceStatus.failed,
+                    reason_code="CLEANUP_FAILED",
+                    payload=event_payload,
                 )
             await operations.finish(
                 operation,
@@ -698,7 +736,10 @@ class WorkspaceControlService:
                 WorkspaceStatus(workspace.status), WorkspaceStatus.destroyed
             ):
                 await repo.transition(
-                    workspace, to=WorkspaceStatus.destroyed, reason_code="DESTROYED"
+                    workspace,
+                    to=WorkspaceStatus.destroyed,
+                    reason_code="DESTROYED",
+                    payload=event_payload,
                 )
             await operations.finish(
                 operation,
@@ -760,6 +801,11 @@ class WorkspaceControlService:
                 return workspace, existing
 
         workspace = await self._require_workspace_for_update(repo, workspace_id)
+        if expected_version is not None and workspace.version != expected_version:
+            raise VersionConflictError(
+                expected_version=expected_version,
+                actual_version=workspace.version,
+            )
         if active_payload_identity is not None:
             active = await operations.find_active_matching_payload(
                 workspace_id=workspace_id,
@@ -768,11 +814,6 @@ class WorkspaceControlService:
             )
             if active is not None:
                 return workspace, active
-        if expected_version is not None and workspace.version != expected_version:
-            raise VersionConflictError(
-                expected_version=expected_version,
-                actual_version=workspace.version,
-            )
         return workspace, None
 
 
@@ -931,6 +972,17 @@ def _operation_payload(
     if expected_version is not None:
         operation_payload["expected_version"] = expected_version
     return operation_payload
+
+
+def _event_payload(
+    payload: dict[str, object | None],
+    *,
+    expected_version: int | None,
+) -> dict[str, object | None]:
+    event_payload = dict(payload)
+    if expected_version is not None:
+        event_payload["expected_version"] = expected_version
+    return event_payload
 
 
 async def _finish_stack_stop_failed_operation(
