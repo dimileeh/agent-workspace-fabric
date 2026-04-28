@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
@@ -54,7 +55,7 @@ def _write(path: Path, content: str) -> None:
 
 
 @pytest.mark.unit
-async def test_completed_monitor_deletes_workspace_pressure_dirs(
+async def test_completed_monitor_defers_recent_workspace_pressure_dir_cleanup(
     factory: async_sessionmaker[AsyncSession],
     cmd: FakeCommandRunner,
     adapter: FakeAdapter,
@@ -85,16 +86,22 @@ async def test_completed_monitor_deletes_workspace_pressure_dirs(
         sleep_fn=sleep_fn,
         worktrees_root=worktrees_root,
     )
-    await runner.run(
-        workspace_id=ws_id,
-        compose_project="proj",
-        compose_file=compose_dir / "compose.yml",
-    )
+    with structlog.testing.capture_logs() as captured:
+        await runner.run(
+            workspace_id=ws_id,
+            compose_project="proj",
+            compose_file=compose_dir / "compose.yml",
+        )
 
-    assert not worktree.exists()
-    assert not compose_dir.exists()
-    assert not auth.exists()
+    assert worktree.exists()
+    assert compose_dir.exists()
+    assert auth.exists()
     assert log_file.exists()
+    assert any(
+        record.get("event") == "monitor.filesystem_gc_deferred"
+        and record.get("reason_code") == "WORKSPACE_WITHIN_RETENTION"
+        for record in captured
+    )
     async with factory() as session:
         ws = await WorkspaceRepository(session).get(ws_id)
         assert ws is not None

@@ -7,7 +7,8 @@ import json
 import os
 import subprocess
 import sys
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -35,15 +36,22 @@ from awf.service.status import (
     _workspace_id_from_project,
     check_database,
     collect_service_status,
+    collect_workspace_cleanup_status,
 )
 
 
-def _settings(tmp_path: Path, *, min_free_disk_bytes: int = 200) -> ServiceSettings:
+def _settings(
+    tmp_path: Path,
+    *,
+    min_free_disk_bytes: int = 200,
+    database_url: str = "sqlite+aiosqlite:///:memory:",
+    completed_workspace_retention_hours: float = 168,
+) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
         env="local",
         api_base_url="http://localhost:8000",
-        database_url="sqlite+aiosqlite:///:memory:",
+        database_url=database_url,
         docker_host=f"unix://{tmp_path / 'docker.sock'}",
         agent_runtime_image="awf-agent-runtime:latest",
         work_dir=str(tmp_path / "work"),
@@ -53,6 +61,7 @@ def _settings(tmp_path: Path, *, min_free_disk_bytes: int = 200) -> ServiceSetti
         worker_max_concurrent_provisions=1,
         host_home=str(tmp_path / "home"),
         min_free_disk_bytes=min_free_disk_bytes,
+        completed_workspace_retention_hours=completed_workspace_retention_hours,
     )
 
 
@@ -194,6 +203,37 @@ async def _empty_workspace_view(_database_url: str) -> WorkspaceIdView:
     )
 
 
+async def _seed_cleanup_status_workspace(
+    database_url: str,
+    *,
+    status: WorkspaceStatus,
+    updated_at: datetime,
+    title: str,
+    pr: bool = False,
+) -> str:
+    engine = make_engine(database_url)
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/repo.git",
+            branch_base="development",
+            task_title=title,
+            task_prompt="p",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = status.value
+        workspace.updated_at = updated_at
+        if pr:
+            workspace.pr_url = "https://github.com/example/repo/pull/42"
+            workspace.pr_number = 42
+            workspace.pr_merge_sha = "e" * 40
+        await session.commit()
+        workspace_id = workspace.id
+    await engine.dispose()
+    return workspace_id
+
+
 @pytest.mark.unit
 def test_service_status_includes_ok_disk_check_from_mocked_usage(tmp_path: Path) -> None:
     status = asyncio.run(
@@ -219,6 +259,94 @@ def test_service_status_includes_ok_disk_check_from_mocked_usage(tmp_path: Path)
     assert disk["free_bytes"] == 300
     assert disk["percent_free"] == 30.0
     assert disk["threshold_bytes"] == 200
+
+
+@pytest.mark.unit
+def test_service_status_exposes_workspace_cleanup_readiness(tmp_path: Path) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
+    engine = make_engine(database_url)
+    async def _setup() -> tuple[str, str, str]:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        now = datetime.now(UTC)
+        old_completed = await _seed_cleanup_status_workspace(
+            database_url,
+            status=WorkspaceStatus.completed,
+            updated_at=now - timedelta(hours=200),
+            title="old completed",
+            pr=True,
+        )
+        recent_completed = await _seed_cleanup_status_workspace(
+            database_url,
+            status=WorkspaceStatus.completed,
+            updated_at=now - timedelta(hours=2),
+            title="recent completed",
+            pr=True,
+        )
+        failed = await _seed_cleanup_status_workspace(
+            database_url,
+            status=WorkspaceStatus.failed,
+            updated_at=now - timedelta(hours=200),
+            title="failed",
+        )
+        await engine.dispose()
+        return old_completed, recent_completed, failed
+
+    old_completed, recent_completed, failed = asyncio.run(_setup())
+    settings = _settings(
+        tmp_path,
+        database_url=database_url,
+        completed_workspace_retention_hours=24,
+    )
+
+    status = asyncio.run(
+        collect_service_status(
+            settings,
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            provider_environ={},
+        )
+    )
+
+    assert status["status"] == "ok"
+    cleanup = status["checks"]["workspace_cleanup"]
+    assert cleanup["ok"] is True
+    assert cleanup["status"] == "ready"
+    assert cleanup["reason"] == "CLEANUP_CANDIDATES_READY"
+    assert cleanup["retention_hours"] == 24
+    assert cleanup["candidate_count"] == 1
+    assert cleanup["preserved_count"] == 2
+    examples = cleanup["examples"]
+    assert {example["workspace_id"] for example in examples} == {
+        old_completed,
+        recent_completed,
+        failed,
+    }
+    assert {example["reason_code"] for example in examples} == {
+        "COMPLETED_PR_RETENTION_EXPIRED",
+        "WORKSPACE_WITHIN_RETENTION",
+        "FAILED_WORKSPACE_TRIAGE_PRESERVED",
+    }
+
+
+@pytest.mark.unit
+def test_workspace_cleanup_status_reports_disabled_policy(tmp_path: Path) -> None:
+    settings = replace(_settings(tmp_path), workspace_cleanup_enabled=False)
+
+    cleanup = asyncio.run(collect_workspace_cleanup_status(settings))
+
+    assert cleanup == {
+        "ok": True,
+        "status": "disabled",
+        "reason": "WORKSPACE_CLEANUP_DISABLED",
+        "retention_hours": 168,
+        "candidate_count": 0,
+        "preserved_count": 0,
+        "examples": [],
+    }
 
 
 @pytest.mark.unit

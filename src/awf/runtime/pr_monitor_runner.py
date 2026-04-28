@@ -2375,6 +2375,16 @@ class PullRequestMonitorRunner:
                 error=repr(exc)[:400],
             )
             return
+        if not result.plan.candidates and result.plan.preserved:
+            preserved = result.plan.preserved[0]
+            _log.info(
+                "monitor.filesystem_gc_deferred",
+                workspace_id=workspace_id,
+                reason_code=preserved.reason_code,
+                age_hours=preserved.age_hours,
+                retention_hours=result.plan.min_age_hours,
+            )
+            return
         if result.delete_errors:
             _log.warning(
                 "monitor.filesystem_gc_failed",

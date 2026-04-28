@@ -295,13 +295,17 @@ async def test_manual_merge_external_merge_completes_with_monitor_done_and_clean
     assert _call_index(cmd, _is_docker_down) > _call_index(cmd, _is_pr_comment)
     docker_down = _calls(cmd, _is_docker_down)[0]
     assert docker_down[-3:] == ["down", "--remove-orphans", "--volumes"]
-    assert not worktree.exists()
-    assert not compose_dir.exists()
-    assert not auth_dir.exists()
+    assert worktree.exists()
+    assert compose_dir.exists()
+    assert auth_dir.exists()
     assert log_file.exists()
     assert not _has_call(cmd, _is_pr_merge)
     assert any(record.get("event") == "monitor.compose_teardown_ok" for record in captured)
-    assert any(record.get("event") == "monitor.filesystem_gc_ok" for record in captured)
+    assert any(
+        record.get("event") == "monitor.filesystem_gc_deferred"
+        and record.get("reason_code") == "WORKSPACE_WITHIN_RETENTION"
+        for record in captured
+    )
 
 
 @pytest.mark.unit
