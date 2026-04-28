@@ -1459,6 +1459,13 @@ async def test_count_monitor_completions_uses_single_aggregate_execute(
     assert counts == (3, 1, 1)
     assert len(statements) == 1
     assert statements[0].startswith("select")
+    assert " from workspaces where " in statements[0]
+    where_clause = statements[0].split(" from workspaces where ", 1)[1]
+    assert "workspaces.updated_at >= " in where_clause
+    assert "workspaces.pr_url is not null" in where_clause
+    assert " or " in where_clause
+    assert "workspaces.status = " in where_clause
+    assert "workspaces.created_at < " in where_clause
 
 
 @pytest.mark.unit

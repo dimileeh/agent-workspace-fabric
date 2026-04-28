@@ -1127,13 +1127,17 @@ async def _count_monitor_completions(
         (Workspace.status == WorkspaceStatus.monitoring_pr.value) & (Workspace.created_at < cutoff)
     )
 
-    stmt = select(
-        func.sum(case((recent_pr_workspace, 1), else_=0)).label("monitor_completed_total"),
-        func.sum(case((completed_recent_pr_workspace, 1), else_=0)).label(
-            "completed_after_monitor"
-        ),
-        func.sum(case((stuck_monitor_workspace, 1), else_=0)).label("monitor_stuck"),
-    ).select_from(Workspace)
+    stmt = (
+        select(
+            func.sum(case((recent_pr_workspace, 1), else_=0)).label("monitor_completed_total"),
+            func.sum(case((completed_recent_pr_workspace, 1), else_=0)).label(
+                "completed_after_monitor"
+            ),
+            func.sum(case((stuck_monitor_workspace, 1), else_=0)).label("monitor_stuck"),
+        )
+        .select_from(Workspace)
+        .where(recent_pr_workspace | stuck_monitor_workspace)
+    )
 
     row = (await session.execute(stmt)).one()
 
