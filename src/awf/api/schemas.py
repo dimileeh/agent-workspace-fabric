@@ -719,8 +719,10 @@ class OperationResponse(BaseModel):
             or _first_str(result, payload, key="error_message")
             or self.error_message
         )
-        refs = dict(self.log_stream_refs)
-        refs.update(_operation_log_stream_refs(payload, result))
+        refs = _merge_log_stream_refs(
+            self.log_stream_refs,
+            _operation_log_stream_refs(payload, result),
+        )
         self.log_stream_refs = refs
         self.log_stream_ids = _log_stream_ids(self.log_stream_refs)
         return self
@@ -741,8 +743,35 @@ def _operation_log_stream_refs(
     for source in sources:
         value = source.get("log_stream_refs")
         if isinstance(value, dict):
-            refs.update(value)
+            refs = _merge_log_stream_refs(refs, value)
     return refs
+
+
+def _merge_log_stream_refs(
+    existing: dict[str, Any],
+    incoming: dict[str, Any],
+) -> dict[str, Any]:
+    refs = dict(existing)
+    for key, value in incoming.items():
+        if key in refs:
+            refs[key] = _merge_log_stream_ref_value(refs[key], value)
+        else:
+            refs[key] = value
+    return refs
+
+
+def _merge_log_stream_ref_value(existing: Any, incoming: Any) -> Any:
+    if existing == incoming:
+        return existing
+    if isinstance(existing, dict) and isinstance(incoming, dict):
+        return _merge_log_stream_refs(existing, incoming)
+
+    values = list(existing) if isinstance(existing, list) else [existing]
+    incoming_values = incoming if isinstance(incoming, list) else [incoming]
+    for value in incoming_values:
+        if value not in values:
+            values.append(value)
+    return values
 
 
 def _log_stream_ids(value: Any) -> list[str]:
