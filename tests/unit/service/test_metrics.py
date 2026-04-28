@@ -1381,6 +1381,87 @@ async def test_recovery_metrics_from_operations(
 
 
 @pytest.mark.unit
+async def test_count_monitor_completions_uses_single_aggregate_execute(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service.metrics import _count_monitor_completions
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    sla_seconds = 3600
+    window_start = now - timedelta(hours=24)
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        created_at=now - timedelta(minutes=30),
+        updated_at=now - timedelta(minutes=10),
+        pr_url="https://github.com/example/repo/pull/1",
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        created_at=now - timedelta(hours=10),
+        updated_at=now - timedelta(hours=1),
+        pr_url="https://github.com/example/repo/pull/2",
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        created_at=now - timedelta(hours=1),
+        updated_at=now - timedelta(minutes=30),
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        created_at=now - timedelta(hours=30),
+        updated_at=now - timedelta(hours=25),
+        pr_url="https://github.com/example/repo/pull/3",
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.monitoring_pr,
+        created_at=now - timedelta(hours=3),
+        updated_at=now - timedelta(minutes=5),
+        pr_url="https://github.com/example/repo/pull/4",
+    )
+
+    statements: list[str] = []
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    async def fail_scalar(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("_count_monitor_completions must not call session.scalar")
+
+    async with session_factory() as session:
+        monkeypatch.setattr(session, "scalar", fail_scalar)
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            counts = await _count_monitor_completions(
+                session,
+                window_start=window_start,
+                sla_seconds=sla_seconds,
+                now=now,
+            )
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+
+    assert counts == (3, 1, 1)
+    assert len(statements) == 1
+    assert statements[0].startswith("select")
+
+
+@pytest.mark.unit
 async def test_monitor_metrics_counts_completed_and_stuck(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

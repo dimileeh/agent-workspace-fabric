@@ -1117,33 +1117,30 @@ async def _count_monitor_completions(
     sla_seconds: float,
     now: datetime,
 ) -> tuple[int, int, int]:
-    monitor_completed_total_stmt = select(func.count()).select_from(Workspace).where(
-        Workspace.updated_at >= window_start,
-        Workspace.pr_url.is_not(None),
-    )
-
-    completed_after_monitor_stmt = select(func.count()).select_from(Workspace).where(
-        Workspace.status == WorkspaceStatus.completed.value,
-        Workspace.updated_at >= window_start,
-        Workspace.pr_url.is_not(None),
-    )
-
     cutoff = now - timedelta(seconds=2 * sla_seconds)
-    monitor_stuck_stmt = select(func.count()).select_from(Workspace).where(
-        Workspace.status == WorkspaceStatus.monitoring_pr.value,
-        Workspace.created_at < cutoff,
+
+    recent_pr_workspace = (Workspace.updated_at >= window_start) & Workspace.pr_url.is_not(None)
+    completed_recent_pr_workspace = (
+        (Workspace.status == WorkspaceStatus.completed.value) & recent_pr_workspace
+    )
+    stuck_monitor_workspace = (
+        (Workspace.status == WorkspaceStatus.monitoring_pr.value) & (Workspace.created_at < cutoff)
     )
 
-    monitor_completed_total, completed_after_monitor, monitor_stuck = await asyncio.gather(
-        session.scalar(monitor_completed_total_stmt),
-        session.scalar(completed_after_monitor_stmt),
-        session.scalar(monitor_stuck_stmt),
-    )
+    stmt = select(
+        func.sum(case((recent_pr_workspace, 1), else_=0)).label("monitor_completed_total"),
+        func.sum(case((completed_recent_pr_workspace, 1), else_=0)).label(
+            "completed_after_monitor"
+        ),
+        func.sum(case((stuck_monitor_workspace, 1), else_=0)).label("monitor_stuck"),
+    ).select_from(Workspace)
+
+    row = (await session.execute(stmt)).one()
 
     return (
-        int(monitor_completed_total or 0),
-        int(completed_after_monitor or 0),
-        int(monitor_stuck or 0),
+        int(row.monitor_completed_total or 0),
+        int(row.completed_after_monitor or 0),
+        int(row.monitor_stuck or 0),
     )
 
 
