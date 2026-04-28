@@ -510,6 +510,8 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
     execution_expiry = monitor_expiry + timedelta(minutes=10)
     workspace.pr_url = "https://github.com/example/control-lifecycle/pull/42"
     workspace.pr_number = 42
+    workspace.base_commit = "b" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
     workspace.monitor_claimed_by = "monitor-worker"
     workspace.monitor_claim_expires_at = monitor_expiry
     workspace.execution_claimed_by = "execution-worker"
@@ -550,6 +552,10 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
     assert operations[0].result == {
         "status": WorkspaceStatus.monitoring_pr.value,
         "claims_reset": expected_snapshot,
+        "pr_number": 42,
+        "pr_url": "https://github.com/example/control-lifecycle/pull/42",
+        "source_head_sha": "h" * 40,
+        "source_base_sha": "b" * 40,
     }
     assert events[0].event_type == "workspace.remonitor_requested"
     assert events[0].payload == {
@@ -570,6 +576,8 @@ async def test_cancel_stop_destroy_remonitor_payloads_include_operator_audit(
     remonitor = await _workspace(session, status=WorkspaceStatus.monitoring_pr, title="remonitor audit")
     remonitor.pr_url = "https://github.com/example/control-lifecycle/pull/45"
     remonitor.pr_number = 45
+    remonitor.base_commit = "b" * 40
+    remonitor.monitor_last_commit_sha = "h" * 40
     await session.flush()
     service, _stopper, _cleaner = _service(session)
 
@@ -618,6 +626,10 @@ async def test_cancel_stop_destroy_remonitor_payloads_include_operator_audit(
         "reason": "rerun monitor",
         "reason_code": "OPERATOR_REMONITOR",
         "requested_action": "remonitor",
+        "pr_number": 45,
+        "pr_url": "https://github.com/example/control-lifecycle/pull/45",
+        "source_head_sha": "h" * 40,
+        "source_base_sha": "b" * 40,
     }
 
 

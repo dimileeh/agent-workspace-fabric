@@ -591,11 +591,18 @@ async def test_stale_auto_merge_dispatches_validation_recovery(
             {
                 "owner": "pr_monitor",
                 "source": "pr_monitor",
+                "action": "validate_only",
+                "requested_action": "validate",
                 "reason": "Required validation tier has not passed for this merge candidate.",
                 "reason_code": "VALIDATION_INSUFFICIENT_TIER",
                 "stale_reason": "validation_insufficient_tier",
-                "requested_action": "validate",
                 "recovery_mode": "validate_only",
+                "pr_number": 42,
+                "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+                "source_head_sha": "abc1234567890def",
+                "source_base_sha": "a" * 40,
+                "target_branch": "development",
+                "remote_branch": f"awf/{workspace_id}",
             },
         )
     ]

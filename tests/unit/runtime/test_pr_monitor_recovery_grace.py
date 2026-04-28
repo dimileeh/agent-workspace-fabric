@@ -250,11 +250,18 @@ async def test_grace_elapsed_then_stale_recovery_dispatches_with_event(
     assert operation.payload == {
         "owner": "pr_monitor",
         "source": "pr_monitor",
+        "action": "validate_only",
+        "requested_action": "validate",
         "reason": "Required validation tier has not passed for this merge candidate.",
         "reason_code": "VALIDATION_INSUFFICIENT_TIER",
         "stale_reason": "validation_insufficient_tier",
-        "requested_action": "validate",
         "recovery_mode": "validate_only",
+        "pr_number": 42,
+        "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+        "source_head_sha": "abc1234567890def",
+        "source_base_sha": "a" * 40,
+        "target_branch": "development",
+        "remote_branch": f"awf/{workspace_id}",
     }
 
     async with factory() as s:
@@ -394,15 +401,17 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
     # NotifyHuman fired (gh pr comment).
     assert cmd.calls
     assert cmd.calls[0].args[:3] == ["gh", "pr", "comment"]
-    # No recovery operation was created (NotifyHuman short-circuits before
-    # the dispatch block).
+    # No validate recovery operation was created; NotifyHuman records the
+    # durable human-wait operation instead.
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.monitoring_pr.value
-        # Only the seeded rebase op exists.
         ops = await OperationRepository(s).list_all(workspace_id=workspace_id)
-        assert [op.type for op in ops] == [OperationType.rebase.value]
+        assert sorted(op.type for op in ops) == [
+            OperationType.human_wait.value,
+            OperationType.rebase.value,
+        ]
 
 
 @pytest.mark.unit
@@ -561,11 +570,18 @@ async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
     assert operation.payload == {
         "owner": "pr_monitor",
         "source": "pr_monitor",
+        "action": "rebase_only",
+        "requested_action": "rebase",
         "reason": "Target branch advanced after this merge candidate was validated.",
         "reason_code": "STALE_TARGET_ADVANCED",
         "stale_reason": "STALE_TARGET_ADVANCED",
-        "requested_action": "rebase",
         "recovery_mode": "rebase_only",
+        "pr_number": 42,
+        "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+        "source_head_sha": "abc1234567890def",
+        "source_base_sha": "a" * 40,
+        "target_branch": "development",
+        "remote_branch": f"awf/{workspace_id}",
     }
 
 
@@ -617,11 +633,18 @@ async def test_monitor_recovery_operation_includes_monitor_log_ref_when_availabl
     assert operations[0].payload == {
         "owner": "pr_monitor",
         "source": "pr_monitor",
+        "action": "validate_only",
+        "requested_action": "validate",
         "reason": "Required validation tier has not passed for this merge candidate.",
         "reason_code": "VALIDATION_INSUFFICIENT_TIER",
         "stale_reason": "validation_insufficient_tier",
-        "requested_action": "validate",
         "recovery_mode": "validate_only",
+        "pr_number": 42,
+        "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+        "source_head_sha": "abc1234567890def",
+        "source_base_sha": "a" * 40,
+        "target_branch": "development",
+        "remote_branch": f"awf/{workspace_id}",
         "log_stream_refs": {"monitor": "monitor.log"},
     }
 

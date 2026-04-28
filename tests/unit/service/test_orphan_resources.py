@@ -318,6 +318,20 @@ def test_workspace_lookup_disposes_engine_after_success(
 
 
 @pytest.mark.unit
+def test_docker_scan_reports_missing_binary_with_structured_reason() -> None:
+    def _missing_binary(args: list[str], **_kwargs: object) -> _Completed:
+        raise FileNotFoundError(args[0])
+
+    docker = scan_docker_resources(
+        docker_host="unix:///var/run/docker.sock",
+        run_subprocess=_missing_binary,
+    )
+
+    assert docker.ok is False
+    assert docker.detail == "docker binary not found on PATH"
+
+
+@pytest.mark.unit
 def test_parse_docker_resource_rows_ignores_malformed_non_dict_and_unmanaged_rows() -> None:
     resources = parse_docker_resource_rows(
         "container",

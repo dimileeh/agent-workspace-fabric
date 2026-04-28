@@ -472,10 +472,18 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
         "reason": "operator recovery",
         "reason_code": "OPERATOR_REMONITOR",
         "requested_action": "remonitor",
+        "pr_number": 42,
+        "pr_url": "https://github.com/example/remonitor/pull/42",
+        "source_head_sha": "b" * 40,
+        "source_base_sha": "a" * 40,
         "expected_version": 7,
     }
     assert operation.result == {
         "status": WorkspaceStatus.monitoring_pr.value,
+        "pr_number": 42,
+        "pr_url": "https://github.com/example/remonitor/pull/42",
+        "source_head_sha": "b" * 40,
+        "source_base_sha": "a" * 40,
         "claims_reset": {
             "monitor_claimed_by": "dead-monitor-worker",
             "monitor_claim_expires_at": _ACTIVE_CLAIM_EXPIRES_AT_JSON,

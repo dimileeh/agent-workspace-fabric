@@ -747,6 +747,11 @@ class OperationResponse(BaseModel):
     finished_at: datetime | None
     owner: str | None = None
     source: str | None = None
+    action: str | None = None
+    pr_number: int | None = None
+    pr_url: str | None = None
+    source_head_sha: str | None = None
+    source_base_sha: str | None = None
     reason: str | None = None
     reason_code: str | None = None
     failure_code: str | None = None
@@ -760,6 +765,15 @@ class OperationResponse(BaseModel):
         result = self.result if isinstance(self.result, dict) else {}
         self.owner = self.owner or _first_str(payload, result, key="owner")
         self.source = self.source or _first_str(payload, result, key="source")
+        self.action = self.action or _first_str(payload, result, key="action")
+        self.pr_number = self.pr_number or _first_int(payload, result, key="pr_number")
+        self.pr_url = self.pr_url or _first_str(payload, result, key="pr_url")
+        self.source_head_sha = self.source_head_sha or _first_str(
+            payload, result, key="source_head_sha"
+        )
+        self.source_base_sha = self.source_base_sha or _first_str(
+            payload, result, key="source_base_sha"
+        )
         self.reason = self.reason or _first_str(payload, result, key="reason")
         self.reason_code = self.reason_code or _first_str(payload, result, key="reason_code")
         self.failure_code = (
@@ -787,6 +801,14 @@ def _first_str(*sources: dict[str, Any], key: str) -> str | None:
     for source in sources:
         value = source.get(key)
         if isinstance(value, str):
+            return value
+    return None
+
+
+def _first_int(*sources: dict[str, Any], key: str) -> int | None:
+    for source in sources:
+        value = source.get(key)
+        if isinstance(value, int):
             return value
     return None
 
