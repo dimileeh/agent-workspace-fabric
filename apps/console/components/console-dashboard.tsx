@@ -1225,7 +1225,7 @@ function WorkspaceRecoveryBlock({ item }: { item: MergeQueueItem | null }) {
         <QueueChip
           label="Satisfied"
           value={recovery.latestSatisfiedTierLabel}
-          detail={item.latest_validation?.status ?? "no validation run"}
+          detail={recovery.latestSatisfiedTierDetail}
           tone={satisfiedTierTone(recovery.latestSatisfiedTierLabel)}
         />
         <QueueChip
@@ -1544,7 +1544,7 @@ function MergeQueueRow({
         <QueueChip
           label="Satisfied"
           value={recovery.latestSatisfiedTierLabel}
-          detail={validation.detail}
+          detail={recovery.latestSatisfiedTierDetail}
           tone={satisfiedTierTone(recovery.latestSatisfiedTierLabel)}
         />
         <QueueChip

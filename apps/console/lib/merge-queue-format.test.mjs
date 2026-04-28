@@ -355,7 +355,7 @@ test("validation recovery summary shows required tier, satisfied tier, freshness
       finished_at: "2026-04-26T12:05:00Z",
       log_stream_refs: {},
       fresh_for_target: false,
-      retry_count: 0,
+      retry_count: 2,
       coverage_percent: null,
       coverage_minimum_percent: null,
       coverage_status: null,
@@ -369,6 +369,7 @@ test("validation recovery summary shows required tier, satisfied tier, freshness
   assert.equal(recovery.recommendedActionLabel, "rebase");
   assert.equal(recovery.requiredTierLabel, "T2 required");
   assert.equal(recovery.latestSatisfiedTierLabel, "T2 satisfied");
+  assert.equal(recovery.latestSatisfiedTierDetail, "VALIDATION_OK / retries 2");
   assert.equal(recovery.freshnessLabel, "stale target");
   assert.equal(recovery.baseShaLabel, "base abcdef1");
   assert.equal(recovery.validatedTargetShaLabel, "validated target 1234567");

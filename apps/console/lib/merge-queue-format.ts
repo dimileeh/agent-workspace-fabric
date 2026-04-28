@@ -37,6 +37,7 @@ export interface RecoverySummary {
   recommendedActionLabel: string;
   requiredTierLabel: string;
   latestSatisfiedTierLabel: string;
+  latestSatisfiedTierDetail: string;
   freshnessLabel: string;
   baseShaLabel: string;
   validatedTargetShaLabel: string;
@@ -217,6 +218,7 @@ export function summarizeRecovery(item: MergeQueueItem): RecoverySummary {
     recommendedActionLabel: formatRequiredNextAction(item.required_next_action, item.merge_blocker_reason),
     requiredTierLabel: formatRequiredTierLabel(requiredValidationTier(item)),
     latestSatisfiedTierLabel: formatLatestSatisfiedTierLabel(latestSatisfiedValidationTier(item), item.latest_validation),
+    latestSatisfiedTierDetail: validation.detail,
     freshnessLabel: validation.freshLabel,
     baseShaLabel: `base ${compactSha(item.latest_validation?.base_commit)}`,
     validatedTargetShaLabel: `validated target ${compactSha(item.latest_validation?.target_head_sha)}`,
