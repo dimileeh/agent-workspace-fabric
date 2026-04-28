@@ -9,10 +9,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from sqlalchemy.exc import SQLAlchemyError
 
+from awf.service import orphan_resources
 from awf.service.orphan_resources import (
     WorkspaceIdView,
     build_orphan_resource_summary,
+    default_workspace_id_lookup,
     docker_resource_commands,
     empty_docker_scan,
     scan_docker_resources,
@@ -229,6 +232,37 @@ def test_db_unavailable_makes_classification_unknown(tmp_path: Path) -> None:
     assert summary["examples"][0]["classification"] == "unknown"
     assert summary["cleanup_readiness"]["ready"] is False
     assert summary["cleanup_readiness"]["dry_run_only"] is True
+
+
+@pytest.mark.unit
+def test_workspace_lookup_returns_unavailable_for_database_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_engine(_url: str) -> object:
+        raise SQLAlchemyError("database unavailable")
+
+    monkeypatch.setattr(orphan_resources, "make_engine", fail_engine)
+
+    view = asyncio.run(default_workspace_id_lookup("postgresql+asyncpg://awf@localhost/awf"))
+
+    assert view == WorkspaceIdView(
+        active_ids=frozenset(),
+        terminal_ids=frozenset(),
+        available=False,
+    )
+
+
+@pytest.mark.unit
+def test_workspace_lookup_does_not_swallow_programming_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fail_engine(_url: str) -> object:
+        raise RuntimeError("bug in caller")
+
+    monkeypatch.setattr(orphan_resources, "make_engine", fail_engine)
+
+    with pytest.raises(RuntimeError, match="bug in caller"):
+        asyncio.run(default_workspace_id_lookup("postgresql+asyncpg://awf@localhost/awf"))
 
 
 @pytest.mark.unit

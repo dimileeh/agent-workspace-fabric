@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Literal, Protocol
 
 from sqlalchemy import bindparam, select, text
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.enums import WorkspaceStatus
@@ -740,7 +741,7 @@ async def default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
             rows = (
                 await conn.execute(stmt, {"statuses": KNOWN_WORKSPACE_STATUSES})
             ).all()
-    except Exception:
+    except SQLAlchemyError:
         return unavailable_workspace_view()
     finally:
         if engine is not None:
