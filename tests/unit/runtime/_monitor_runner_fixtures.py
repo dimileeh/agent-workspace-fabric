@@ -200,6 +200,7 @@ async def seed_monitoring_workspace(
     *,
     pr_number: int = 42,
     head_sha: str = "abc1234567890def",
+    auto_merge: bool = True,
 ) -> str:
     async with factory() as s:
         repo = WorkspaceRepository(s)
@@ -211,6 +212,7 @@ async def seed_monitoring_workspace(
             agent="claude_code",
             test_commands=["pytest -q"],
             requires_database=False,
+            auto_merge=auto_merge,
         )
         for target in (
             WorkspaceStatus.provisioning,
