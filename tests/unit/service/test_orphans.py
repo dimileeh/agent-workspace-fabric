@@ -13,6 +13,8 @@ import pytest
 from awf.db.enums import WorkspaceStatus
 from awf.service.gc import DEFAULT_MIN_AGE_HOURS
 from awf.service.orphans import (
+    ACTIVE_WORKSPACE_STATUSES,
+    TERMINAL_WORKSPACE_STATUSES,
     WorkspaceIdView,
     WorkspaceLifecycleSnapshot,
     detect_orphan_resources,
@@ -74,28 +76,12 @@ def _view(
     active_ids = frozenset(
         snapshot.workspace_id
         for snapshot in snapshots
-        if snapshot.status
-        in {
-            WorkspaceStatus.requested.value,
-            WorkspaceStatus.provisioning.value,
-            WorkspaceStatus.ready.value,
-            WorkspaceStatus.running.value,
-            WorkspaceStatus.validating.value,
-            WorkspaceStatus.pushing.value,
-            WorkspaceStatus.monitoring_pr.value,
-            WorkspaceStatus.destroying.value,
-        }
+        if snapshot.status in ACTIVE_WORKSPACE_STATUSES
     )
     terminal_ids = frozenset(
         snapshot.workspace_id
         for snapshot in snapshots
-        if snapshot.status
-        in {
-            WorkspaceStatus.completed.value,
-            WorkspaceStatus.failed.value,
-            WorkspaceStatus.cancelled.value,
-            WorkspaceStatus.destroyed.value,
-        }
+        if snapshot.status in TERMINAL_WORKSPACE_STATUSES
     )
     return WorkspaceIdView(
         active_ids=active_ids,
