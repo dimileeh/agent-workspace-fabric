@@ -82,7 +82,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     )
 
     async def _post_merge_reconciler(
-        *, repo_url: str, branch: str
+        *, repo_url: str, branch: str, workspace_id: str
     ) -> object:
         checkout_path = target_branch_reconciler.checkout_path(
             repo_url=repo_url, branch=branch,
@@ -106,6 +106,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
             branch=branch,
             session_factory=session_factory,
             target_state_for_base_sha=_target_state_for_base_sha,
+            exclude_workspace_ids={workspace_id},
         )
     auth_mount_resolver = ServiceAuthMountResolver(
         host_home=host_home,

@@ -921,7 +921,7 @@ async def test_target_branch_reconcile_failure_appends_workspace_event(
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
 
-    async def failing_reconciler(*, repo_url: str, branch: str) -> object:
+    async def failing_reconciler(*, repo_url: str, branch: str, workspace_id: str) -> object:
         assert repo_url == "git@github.com:dimileeh/aira-web.git"
         assert branch == "development"
         raise RuntimeError("target branch locked")
@@ -956,11 +956,12 @@ async def test_target_branch_reconcile_success_appends_payload_event(
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
 
-    async def reconciler(*, repo_url: str, branch: str) -> object:
+    async def reconciler(*, repo_url: str, branch: str, workspace_id: str) -> object:
         return {
             "status": "TARGET_BRANCH_FAST_FORWARDED",
             "repo_url": repo_url,
             "branch": branch,
+            "workspace_id": workspace_id,
         }
 
     runner = make_runner(

@@ -261,6 +261,103 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
 
 
 @pytest.mark.unit
+def test_post_merge_reconciler_passes_workspace_id_to_exclude_open_candidate(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Regression for PRRT_kwDOSJAM6s59-ihh.
+
+    The PostMergeTargetReconciler Protocol now accepts workspace_id, and the
+    worker closure must pass it through to reconcile_and_refresh_stale_candidates
+    as exclude_workspace_ids so the just-merged candidate is not re-evaluated.
+    """
+    from collections.abc import Awaitable, Callable
+
+    called_with: dict[str, object] = {}
+    created: dict[str, Any] = {}
+
+    class _FakeReconciler:
+        def __init__(self, *, runner: object, work_dir: object) -> None:
+            pass
+
+        def checkout_path(self, *, repo_url: str, branch: str) -> Path:
+            return tmp_path / "checkout"
+
+        async def reconcile(
+            self, *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> dict[str, object]:
+            return {"status": "clean"}
+
+    async def _fake_reconcile_and_refresh(
+        *,
+        reconcile_fn: Callable[..., Awaitable[object]],
+        repo_url: str,
+        branch: str,
+        session_factory: object,
+        target_state_for_base_sha: Callable[[str], Awaitable[object]],
+        exclude_workspace_ids: set[str] | None = None,
+        dry_run: bool = False,
+    ) -> object:
+        called_with["exclude_workspace_ids"] = exclude_workspace_ids
+        return {"status": "clean"}
+
+    class _FakeFeatureMonitor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created["reconciler"] = kwargs.get("post_merge_target_reconciler")
+
+    class _FakeWorkspaceExecutor:
+        def __init__(self, *args: object, **kwargs: object) -> None:
+            created["pr_monitor_factory"] = kwargs["pr_monitor_factory"]
+
+    monkeypatch.setattr(
+        worker_mod, "reconcile_and_refresh_stale_candidates", _fake_reconcile_and_refresh
+    )
+    monkeypatch.setattr(worker_mod, "TargetBranchReconcileMonitor", _FakeReconciler)
+    monkeypatch.setattr(worker_mod, "build_feature_pr_monitor", _FakeFeatureMonitor)
+    monkeypatch.setattr(worker_mod, "build_release_pr_monitor", _FakeFeatureMonitor)
+    monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _FakeWorkspaceExecutor)
+    # silence other heavy constructors
+    monkeypatch.setattr(worker_mod, "make_engine", lambda _url: object())
+    monkeypatch.setattr(worker_mod, "make_session_factory", lambda _engine: object())
+    monkeypatch.setattr(worker_mod, "AsyncioSubprocessRunner", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "LogStore", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "ValidationRunner", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "PullRequestCreator", type("_AnyInit", (), {"__init__": lambda _s, _r: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "GitHubClient", type("_AnyInit", (), {"__init__": lambda _s, _r: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "GitManager", type("_AnyInit", (), {"__init__": lambda _s, _p, **_kw: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "ComposeManager", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "ComposeStackLauncher", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "ServiceAuthMountResolver", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "Provisioner", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "ControlWorker", type("_AnyInit", (), {"__init__": lambda _s, **_kw: None}))  # type: ignore[type-var]
+    monkeypatch.setattr(worker_mod, "InProcessMergeCoordinator", type("_AnyInit", (), {"__init__": lambda _s: None}))  # type: ignore[type-var]
+    monkeypatch.delenv("SSH_AUTH_SOCK", raising=False)
+    monkeypatch.setattr(worker_mod, "_apply_service_git_environment", lambda _env: None)
+
+    settings = _settings(tmp_path)
+    runtime = worker_mod.build_worker_runtime(settings)
+
+    import asyncio
+
+    created["pr_monitor_factory"](
+        object(),
+        WorkspaceProfile(name="default"),
+        SimpleNamespace(auto_merge=True, initial_review_grace_period_seconds=None),
+    )
+    reconciler = created["reconciler"]
+    _ = asyncio.run(
+        reconciler(
+            repo_url="https://github.com/org/repo.git",
+            branch="main",
+            workspace_id="ws-123",
+        )
+    )
+    assert called_with.get("exclude_workspace_ids") == {"ws-123"}
+
+    del runtime
+
+
+@pytest.mark.unit
 def test_build_worker_runtime_eagerly_uses_postgres_advisory_merge_coordinator_for_postgres(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
