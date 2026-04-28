@@ -158,6 +158,7 @@ def test_active_workspace_resources_are_expected(tmp_path: Path) -> None:
     assert summary["reason"] == "NO_ORPHANS"
     assert summary["resource_count"] == 2
     assert summary["expected_count"] == 2
+    assert "active_count" not in summary
     assert summary["orphan_count"] == 0
     assert summary["cleanup_readiness"]["ready"] is True
 

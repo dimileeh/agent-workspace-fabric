@@ -219,7 +219,6 @@ class OrphanResourceSummary:
             "reason": self.reason,
             "resource_count": self.resource_count,
             "expected_count": self.expected_count,
-            "active_count": self.expected_count,
             "orphan_count": self.orphan_count,
             "unknown_count": self.unknown_count,
             "counts_by_kind": self.counts_by_kind,
