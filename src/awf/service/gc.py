@@ -707,7 +707,8 @@ async def _delete_gc_plan_paths(
                     )
                 continue
         for target in candidate.paths():
-            outcome = _delete_gc_path_outcome(
+            outcome = await asyncio.to_thread(
+                _delete_gc_path_outcome,
                 candidate,
                 target,
                 work_dir=plan.work_dir,

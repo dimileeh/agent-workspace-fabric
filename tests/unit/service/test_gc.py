@@ -690,6 +690,58 @@ async def test_single_workspace_gc_deletes_only_requested_completed_workspace_af
 
 
 @pytest.mark.unit
+async def test_execute_gc_deletes_workspace_paths_in_threads(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+    )
+    _write(work_dir / "git" / "worktrees" / workspace_id / "repo.txt", "repo")
+    _write(work_dir / "compose" / workspace_id / "compose.yml", "compose")
+    _write(work_dir / "auth" / workspace_id / "codex" / "auth.json", "auth")
+    to_thread_calls: list[str] = []
+
+    async def _record_to_thread(
+        func: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        to_thread_calls.append(func.__name__)
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(gc.asyncio, "to_thread", _record_to_thread)
+
+    result = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+    )
+
+    assert result.status == "succeeded"
+    assert [outcome.kind for outcome in result.path_outcomes] == [
+        "worktree",
+        "compose",
+        "auth",
+    ]
+    assert to_thread_calls == [
+        "_classify_workspace_for_gc",
+        "_delete_gc_path_outcome",
+        "_delete_gc_path_outcome",
+        "_delete_gc_path_outcome",
+    ]
+
+
+@pytest.mark.unit
 async def test_cleanup_is_idempotent_after_partial_compose_failure(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
