@@ -132,9 +132,11 @@ def _is_run_list(args: list[str]) -> bool:
 async def _workspace(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
-) -> Workspace | None:
+) -> Workspace:
     async with factory() as session:
-        return await WorkspaceRepository(session).get(workspace_id)
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        return workspace
 
 
 async def _candidate(
