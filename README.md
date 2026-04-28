@@ -522,13 +522,14 @@ uv run --python 3.12 --extra dev awf service status --format pretty
 
 `awf service status` reports an `orphan_workspaces` check alongside the
 existing API / DB / Docker / image / disk checks. It reads
-`docker ps -a --filter label=com.docker.compose.project` to find
-compose stacks named `awf_ws_*` or `awf-ws_*` and compares them with
-the workspaces table; containers belonging to terminal/destroyed
-workspaces or to workspace ids missing from the DB are flagged as
-orphans with the suggested cleanup command. The check returns a
-structured `unavailable`/`unknown` payload (rather than raising) when
-Docker or the database is offline.
+Docker Compose labels for containers, networks, and volumes, and scans
+`<work_dir>/git/worktrees/ws_*` for managed worktrees. Resources for active
+workspaces are expected; completed workspaces still inside the service GC
+retention window are reported as retained instead of unsafe. Resources tied to
+missing workspace rows or terminal rows past retention are reported with
+structured counts, examples, reason codes, and suggested follow-up actions.
+The check returns structured `unavailable`/`unknown` warnings (rather than
+raising) when Docker or the database is offline.
 
 Inspect the local service Compose logs without writing Docker commands:
 
