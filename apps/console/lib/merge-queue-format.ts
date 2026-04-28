@@ -44,59 +44,19 @@ export function formatRequiredNextAction(
   blockerReason?: MergeBlockerReason | null,
 ): string {
   if (action) {
-    return actionLabels[action] ?? humanizeCode(action);
+    return requiredNextActions[action]?.label ?? humanizeCode(action);
   }
-
-  switch (blockerReason) {
-    case "manual_merge_required":
-      return "manual merge";
-    case "waiting_for_monitor":
-      return "wait for monitor";
-    case "waiting_for_older_candidate":
-      return "wait for queue";
-    case "workspace_not_terminal":
-      return "wait for workspace";
-    case "policy_blocked":
-      return "resolve policy";
-    case "stale":
-      return "rebase";
-    default:
-      return "none";
-  }
+  return (blockerReason && requiredNextActionFallbacks[blockerReason]?.label) || "none";
 }
 
 export function requiredNextActionTone(
   action: string | null | undefined,
   blockerReason: MergeBlockerReason,
 ): QueueTone {
-  switch (action) {
-    case "resolve_policy_findings":
-    case "resolve_task_scope":
-      return "bad";
-    case "wait_for_queue":
-    case "validate":
-    case "rebase":
-      return "warn";
-    case null:
-    case undefined:
-      break;
-    default:
-      return "neutral";
+  if (action !== null && action !== undefined) {
+    return requiredNextActions[action]?.tone ?? "neutral";
   }
-
-  switch (blockerReason) {
-    case "policy_blocked":
-      return "bad";
-    case "manual_merge_required":
-    case "waiting_for_monitor":
-    case "waiting_for_older_candidate":
-    case "stale":
-      return "warn";
-    case "workspace_not_terminal":
-      return "neutral";
-    default:
-      return "good";
-  }
+  return requiredNextActionFallbacks[blockerReason]?.tone ?? "good";
 }
 
 export function formatMergeBlockerReason(reason: MergeBlockerReason): string {
@@ -226,12 +186,26 @@ export function mergeQueueMergedAt(item: Pick<MergeQueueItem, "merged_at" | "sta
   return item.merged_at ?? (item.status === "completed" ? item.updated_at : null);
 }
 
-const actionLabels: Record<string, string> = {
-  rebase: "rebase",
-  validate: "validate",
-  resolve_task_scope: "resolve task scope",
-  resolve_policy_findings: "resolve policy",
-  wait_for_queue: "wait for queue",
+interface RequiredNextActionDefinition {
+  label: string;
+  tone: QueueTone;
+}
+
+const requiredNextActions: Partial<Record<string, RequiredNextActionDefinition>> = {
+  rebase: { label: "rebase", tone: "warn" },
+  validate: { label: "validate", tone: "warn" },
+  resolve_task_scope: { label: "resolve task scope", tone: "bad" },
+  resolve_policy_findings: { label: "resolve policy", tone: "bad" },
+  wait_for_queue: { label: "wait for queue", tone: "warn" },
+};
+
+const requiredNextActionFallbacks: Partial<Record<MergeBlockerReason, RequiredNextActionDefinition>> = {
+  manual_merge_required: { label: "manual merge", tone: "warn" },
+  waiting_for_monitor: { label: "wait for monitor", tone: "warn" },
+  waiting_for_older_candidate: { label: "wait for queue", tone: "warn" },
+  workspace_not_terminal: { label: "wait for workspace", tone: "neutral" },
+  policy_blocked: { label: "resolve policy", tone: "bad" },
+  stale: { label: "rebase", tone: "warn" },
 };
 
 const blockerReasonLabels: Record<MergeBlockerReason, string> = {
