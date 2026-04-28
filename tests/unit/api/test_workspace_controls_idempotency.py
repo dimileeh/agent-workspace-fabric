@@ -7,11 +7,13 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from fastapi import HTTPException
 from httpx import AsyncClient, Response
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 import awf.api.routes.controls as controls_route
+from awf.api.schemas import WorkspaceOperationRequest
 from awf.common.config import get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent
@@ -70,6 +72,30 @@ async def _seed_monitoring_workspace(
         workspace.compose_project_name = f"awf_{workspace.id}"
         workspace.compose_file_path = f"/tmp/awf/{workspace.id}/compose.yml"
         await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+        if final_status == WorkspaceStatus.ready:
+            await session.commit()
+            return workspace.id
+        if final_status == WorkspaceStatus.destroying:
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.destroying,
+                reason_code="SEED",
+            )
+            await session.commit()
+            return workspace.id
+        if final_status == WorkspaceStatus.destroyed:
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.destroying,
+                reason_code="SEED",
+            )
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.destroyed,
+                reason_code="SEED",
+            )
+            await session.commit()
+            return workspace.id
         await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
         await repo.transition(workspace, to=WorkspaceStatus.validating, reason_code="SEED")
         await repo.transition(workspace, to=WorkspaceStatus.pushing, reason_code="SEED")
@@ -611,6 +637,345 @@ async def test_remonitor_rejects_incompatible_state_before_missing_pr_url(
     }
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["refresh", "validate"])
+async def test_recovery_operations_require_authorization(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    final_status = (
+        WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
+    )
+    workspace_id = await _seed_monitoring_workspace(engine, final_status=final_status)
+    monkeypatch.setenv("AWF_API_TOKEN", "secret")
+    get_settings.cache_clear()
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json={"reason": "operator recovery"},
+        headers={"Idempotency-Key": f"{action}-auth"},
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["refresh", "validate"])
+async def test_recovery_operations_require_idempotency_key(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    final_status = (
+        WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
+    )
+    workspace_id = await _seed_monitoring_workspace(engine, final_status=final_status)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json={"reason": "operator recovery"},
+        headers=_auth(monkeypatch),
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "error_code": "INVALID_REQUEST",
+        "message": "Idempotency-Key header is required for this endpoint.",
+    }
+
+
+@pytest.mark.unit
+async def test_refresh_endpoint_returns_operation_response_and_coalesces_active_request(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=WorkspaceStatus.ready,
+    )
+    headers = {**_auth(monkeypatch), "Idempotency-Key": "refresh-first"}
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/refresh",
+        json={"reason": "stale policy"},
+        headers={**headers, "If-Match": "3"},
+    )
+    replay = await client.post(
+        f"/v1/workspaces/{workspace_id}/refresh",
+        json={"reason": "stale policy"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "refresh-second"},
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    payload = first.json()
+    assert replay.json()["id"] == payload["id"]
+    assert payload["workspace_id"] == workspace_id
+    assert payload["type"] == "refresh"
+    assert payload["status"] == "pending"
+    assert payload["idempotency_key"] == "refresh-first"
+    assert payload["payload"] == {
+        "source": "operator_api",
+        "reason": "stale policy",
+        "reason_code": "OPERATOR_REFRESH",
+        "requested_action": "refresh",
+        "expected_version": 3,
+    }
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        operations = (
+            await session.execute(
+                select(Operation).where(Operation.workspace_id == workspace_id)
+            )
+        ).scalars().all()
+        refresh_event = (
+            await session.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == workspace_id,
+                    WorkspaceEvent.event_type == "workspace.refresh_requested",
+                )
+            )
+        ).scalar_one()
+
+    assert [operation.id for operation in operations] == [payload["id"]]
+    assert refresh_event.reason_code == "OPERATOR_REFRESH"
+    assert refresh_event.payload == {
+        "source": "operator_api",
+        "reason": "stale policy",
+        "operation_id": payload["id"],
+    }
+
+
+@pytest.mark.unit
+async def test_validate_endpoint_returns_operation_response_and_coalesces_active_request(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine)
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/validate",
+        json={"reason": "rerun required validation", "requested_tier": 2},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": "validate-first",
+            "If-Match": "7",
+        },
+    )
+    replay = await client.post(
+        f"/v1/workspaces/{workspace_id}/validate",
+        json={"reason": "rerun required validation", "requested_tier": 2},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "validate-second"},
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    payload = first.json()
+    assert replay.json()["id"] == payload["id"]
+    assert payload["workspace_id"] == workspace_id
+    assert payload["type"] == "validate"
+    assert payload["status"] == "pending"
+    assert payload["payload"] == {
+        "source": "operator_api",
+        "reason": "rerun required validation",
+        "reason_code": "OPERATOR_VALIDATE",
+        "requested_action": "validate",
+        "recovery_mode": "validate_only",
+        "requested_tier": 2,
+        "expected_version": 7,
+    }
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        operations = (
+            await session.execute(
+                select(Operation).where(Operation.workspace_id == workspace_id)
+            )
+        ).scalars().all()
+        validate_event = (
+            await session.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == workspace_id,
+                    WorkspaceEvent.event_type == "workspace.validate_requested",
+                )
+            )
+        ).scalar_one()
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert workspace.version == 8
+    assert [operation.id for operation in operations] == [payload["id"]]
+    assert validate_event.reason_code == "OPERATOR_VALIDATE"
+    assert validate_event.payload == {
+        "source": "operator_api",
+        "reason": "rerun required validation",
+        "operation_id": payload["id"],
+        "recovery_mode": "validate_only",
+        "requested_tier": 2,
+    }
+
+
+@pytest.mark.unit
+async def test_validate_same_key_with_different_tier_returns_conflict(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(engine)
+    headers = {**_auth(monkeypatch), "Idempotency-Key": "validate-tier-conflict"}
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/validate",
+        json={"reason": "rerun required validation", "requested_tier": 2},
+        headers=headers,
+    )
+    conflict = await client.post(
+        f"/v1/workspaces/{workspace_id}/validate",
+        json={"reason": "rerun required validation", "requested_tier": 3},
+        headers=headers,
+    )
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["refresh", "validate"])
+async def test_recovery_operations_missing_workspace_return_not_found(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+) -> None:
+    response = await client.post(
+        f"/v1/workspaces/ws_missing/{action}",
+        json={"reason": "operator recovery"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": f"{action}-missing"},
+    )
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == {
+        "error_code": "NOT_FOUND",
+        "message": "No workspace with id ws_missing",
+    }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("action", "final_status", "error_code"),
+    [
+        ("refresh", WorkspaceStatus.destroying, "WORKSPACE_STATE_NOT_REFRESHABLE"),
+        ("refresh", WorkspaceStatus.destroyed, "WORKSPACE_STATE_NOT_REFRESHABLE"),
+        ("validate", WorkspaceStatus.completed, "WORKSPACE_STATE_NOT_VALIDATABLE"),
+        ("validate", WorkspaceStatus.destroying, "WORKSPACE_STATE_NOT_VALIDATABLE"),
+    ],
+)
+async def test_recovery_operations_reject_ineligible_states_without_operation(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    final_status: WorkspaceStatus,
+    error_code: str,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=final_status,
+    )
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json={"reason": "operator recovery"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": f"{action}-{final_status}"},
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == error_code
+    assert response.json()["detail"]["detail"]["status"] == final_status.value
+    assert after_counts == before_counts
+
+
+@pytest.mark.unit
+async def test_recovery_route_handlers_return_operation_response_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    refresh_operation = _operation_row("op_refresh_direct", "refresh")
+    validate_operation = _operation_row("op_validate_direct", "validate")
+
+    class _Service:
+        async def request_refresh_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
+            return refresh_operation
+
+        async def request_validate_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
+            return validate_operation
+
+    monkeypatch.setattr(controls_route, "_controls", lambda _session: _Service())
+
+    refresh = await controls_route.refresh_workspace(
+        "ws_direct",
+        WorkspaceOperationRequest(reason="refresh"),
+        idempotency_key="refresh-direct",
+        if_match=None,
+        session=None,  # type: ignore[arg-type]
+    )
+    validate = await controls_route.validate_workspace(
+        "ws_direct",
+        WorkspaceOperationRequest(reason="validate"),
+        idempotency_key="validate-direct",
+        if_match=None,
+        session=None,  # type: ignore[arg-type]
+    )
+
+    assert refresh.id == "op_refresh_direct"
+    assert refresh.type == "refresh"
+    assert validate.id == "op_validate_direct"
+    assert validate.type == "validate"
+
+
+@pytest.mark.unit
+async def test_recovery_route_handlers_map_control_errors_directly(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Service:
+        async def request_refresh_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
+            raise controls_route.WorkspaceNotFoundError("ws_direct")
+
+        async def request_validate_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
+            raise controls_route.WorkspaceNotFoundError("ws_direct")
+
+    monkeypatch.setattr(controls_route, "_controls", lambda _session: _Service())
+
+    with pytest.raises(HTTPException) as refresh_error:
+        await controls_route.refresh_workspace(
+            "ws_direct",
+            WorkspaceOperationRequest(reason="refresh"),
+            idempotency_key="refresh-direct",
+            if_match=None,
+            session=None,  # type: ignore[arg-type]
+        )
+    with pytest.raises(HTTPException) as validate_error:
+        await controls_route.validate_workspace(
+            "ws_direct",
+            WorkspaceOperationRequest(reason="validate"),
+            idempotency_key="validate-direct",
+            if_match=None,
+            session=None,  # type: ignore[arg-type]
+        )
+
+    assert refresh_error.value.status_code == 404
+    assert validate_error.value.status_code == 404
+
+
 async def _call_control(
     client: AsyncClient,
     workspace_id: str,
@@ -649,3 +1014,16 @@ async def _call_control(
 
 async def _noop_stop(compose_project_name: str | None) -> None:
     return None
+
+
+def _operation_row(operation_id: str, operation_type: str) -> Operation:
+    return Operation(
+        id=operation_id,
+        workspace_id="ws_direct",
+        type=operation_type,
+        status="pending",
+        payload={"source": "test"},
+        result=None,
+        idempotency_key=f"{operation_type}-direct",
+        created_at=datetime.now(UTC),
+    )

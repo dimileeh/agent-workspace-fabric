@@ -1333,3 +1333,67 @@ async def test_workspace_events_can_be_filtered_without_workspace_id(
     )
 
     assert [row.workspace_id for row in rows] == [first.id]
+
+
+@pytest.mark.unit
+async def test_operation_active_matching_payload_skips_non_dict_payloads(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, title="operation payload identity")
+    repo = OperationRepository(session)
+    await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        status=OperationStatus.pending,
+        payload=None,
+    )
+    matching = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        status=OperationStatus.running,
+        payload={"source": "operator_api", "reason": "refresh"},
+    )
+
+    found = await repo.find_active_matching_payload(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        payload_identity={"source": "operator_api", "reason": "refresh"},
+    )
+    missing = await repo.find_active_matching_payload(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        payload_identity={"source": "operator_api", "reason": "different"},
+    )
+
+    assert found is not None
+    assert found.id == matching.id
+    assert missing is None
+
+
+@pytest.mark.unit
+async def test_operation_active_matching_payload_requires_present_null_keys(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, title="operation payload explicit null identity")
+    repo = OperationRepository(session)
+    await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        status=OperationStatus.pending,
+        payload={"source": "operator_api"},
+    )
+    matching = await repo.create(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        status=OperationStatus.pending,
+        payload={"source": "operator_api", "reason": None},
+    )
+
+    found = await repo.find_active_matching_payload(
+        workspace_id=workspace.id,
+        operation_type=OperationType.refresh,
+        payload_identity={"source": "operator_api", "reason": None},
+    )
+
+    assert found is not None
+    assert found.id == matching.id
