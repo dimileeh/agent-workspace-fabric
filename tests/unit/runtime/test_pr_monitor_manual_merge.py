@@ -27,6 +27,7 @@ from awf.runtime.pr_monitor import (
     CheckState,
     MergeableState,
     MergeStateStatus,
+    MonitorConfig,
     MonitorState,
     NotifyHuman,
     PRStatus,
@@ -189,7 +190,20 @@ async def test_manual_merge_green_open_pr_notifies_and_stays_monitoring(
     )
     status = _green_status()
     state = MonitorState()
-    action = decide(status, state, runner._config)
+    action = decide(
+        status,
+        state,
+        MonitorConfig(
+            auto_merge=False,
+            poll_interval_seconds=60,
+            settle_interval_seconds=30,
+            initial_review_grace_period_seconds=0,
+            pre_merge_settle_seconds=0,
+            non_check_reviewer_settle_seconds=0,
+            non_check_reviewer_logins=("greptile-apps",),
+            stale_pending_check_warning_seconds=900,
+        ),
+    )
 
     cmd.queue_result(returncode=0)  # gh pr comment
     terminal = await runner._execute(
