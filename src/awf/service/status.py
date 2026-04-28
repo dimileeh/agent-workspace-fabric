@@ -153,7 +153,7 @@ async def collect_service_status(
         for pending in (resource_scan_task, workspace_lookup_task, provider_task):
             if not pending.done():
                 pending.cancel()
-            with contextlib.suppress(BaseException):
+            with contextlib.suppress(asyncio.CancelledError):
                 await pending
     orphan_summary = build_orphan_resource_summary(
         docker_scan=docker_resource_scan,
