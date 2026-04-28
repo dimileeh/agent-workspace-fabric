@@ -229,13 +229,27 @@ def test_resolved_profile_digest_is_canonical_and_covers_full_profile() -> None:
 
 @pytest.mark.unit
 def test_environment_identity_inputs_sanitize_environment_and_secret_values() -> None:
-    inputs = environment_identity_inputs(_identity_profile())
+    inputs = environment_identity_inputs(
+        _identity_profile(
+            ports={"database": "postgres://user:password@127.0.0.1:5432/app"}
+        )
+    )
     rendered = str(inputs)
 
     assert "sk-secret-value" not in rendered
     assert "postgres://secret" not in rendered
     assert "postgres-secret" not in rendered
     assert "secret/data/github/token" not in rendered
+    assert "postgres://user:password@127.0.0.1:5432/app" not in rendered
+    assert inputs["ports"] == [
+        {
+            "name": "database",
+            "value_sha256": (
+                "sha256:"
+                "30e7d9f55ac1fd625ddc82a1f36e9e1e827f18f3f90a4f32630ca8b4f1a7bc6e"
+            ),
+        }
+    ]
     runtime_env = inputs["runtime"]["environment"]
     assert runtime_env == [
         {

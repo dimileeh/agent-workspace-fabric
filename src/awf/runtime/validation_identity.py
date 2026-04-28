@@ -77,7 +77,10 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
             }
         },
         "secrets": [_secret_identity(secret) for secret in _sorted_secrets(profile.secrets)],
-        "ports": [{"name": key, "value": profile.ports[key]} for key in sorted(profile.ports)],
+        "ports": [
+            {"name": key, "value_sha256": _value_digest(profile.ports[key])}
+            for key in sorted(profile.ports)
+        ],
     }
 
 
