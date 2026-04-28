@@ -285,7 +285,7 @@ function compactToken(value: string, head: number): string {
   if (value.length <= head + 4) {
     return value;
   }
-  return `${value.slice(0, head)}...${value.slice(-4)}`;
+  return `${value.slice(0, head)}…${value.slice(-4)}`;
 }
 
 function humanizeCode(value: string): string {

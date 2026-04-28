@@ -196,8 +196,8 @@ test("readiness summary distinguishes canonical, superseded, stale, and legacy r
       label: "stale",
       detail: "validation_insufficient_tier",
       canonicalLabel: "canonical",
-      candidateLabel: "mc_1111111...1111",
-      attemptLabel: "att_111111...1111",
+      candidateLabel: "mc_1111111…1111",
+      attemptLabel: "att_111111…1111",
     },
   );
 
@@ -221,8 +221,8 @@ test("readiness summary distinguishes canonical, superseded, stale, and legacy r
       label: "not canonical",
       detail: "superseded attempt",
       canonicalLabel: "superseded",
-      candidateLabel: "mc_1111111...1111",
-      attemptLabel: "att_111111...1111",
+      candidateLabel: "mc_1111111…1111",
+      attemptLabel: "att_111111…1111",
     },
   );
 
