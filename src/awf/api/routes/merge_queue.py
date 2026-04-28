@@ -216,6 +216,7 @@ def _item_from_candidate(
         owned_paths=list(workspace.owned_paths),
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
+        merged_at=candidate.merged_at,
         last_event=(
             WorkspaceEventResponse.model_validate(latest_event)
             if latest_event is not None
@@ -264,6 +265,7 @@ def _item_from_legacy_workspace(
         owned_paths=list(workspace.owned_paths),
         created_at=workspace.created_at,
         updated_at=workspace.updated_at,
+        merged_at=_legacy_workspace_merged_at(workspace),
         last_event=(
             WorkspaceEventResponse.model_validate(latest_event)
             if latest_event is not None
@@ -291,6 +293,20 @@ def _row_workspace(row: MergeCandidate | Workspace) -> Workspace:
 
 def _latest_event(events: list[WorkspaceEvent]) -> WorkspaceEvent | None:
     return events[-1] if events else None
+
+
+def _legacy_workspace_merged_at(workspace: Workspace) -> datetime | None:
+    completed_events = [
+        event.occurred_at
+        for event in workspace.events
+        if event.event_type == "workspace.state_changed"
+        and event.new_state == WorkspaceStatus.completed.value
+    ]
+    if completed_events:
+        return max(completed_events)
+    if WorkspaceStatus(workspace.status) == WorkspaceStatus.completed:
+        return workspace.updated_at
+    return None
 
 
 def _queue_blocker_response(blocker: MergeQueueBlocker) -> MergeQueueBlockerResponse:

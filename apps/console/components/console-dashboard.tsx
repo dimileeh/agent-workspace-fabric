@@ -33,6 +33,7 @@ import {
   compactDuration,
   compactId,
   fallbackLifecycleStages,
+  fallbackLlmUsage,
   formatDateTime,
   lifecycleStages,
   relativeTime,
@@ -182,7 +183,13 @@ export function ConsoleDashboard() {
       return;
     }
     setError(null);
-    setOverview(result.data.items);
+    setOverview(
+      result.data.items.map((item) => ({
+        ...item,
+        lifecycle: item.lifecycle ?? [],
+        llm_usage: fallbackLlmUsage(item.llm_usage),
+      })),
+    );
     setLastRefresh(new Date());
     setSelectedId((current) =>
       current && result.data.items.some((item) => item.workspace_id === current)
@@ -257,7 +264,13 @@ export function ConsoleDashboard() {
     }
 
     setDetail({
-      workspace: workspace.ok ? workspace.data : null,
+      workspace: workspace.ok
+        ? {
+            ...workspace.data,
+            lifecycle: workspace.data.lifecycle ?? [],
+            llm_usage: fallbackLlmUsage(workspace.data.llm_usage),
+          }
+        : null,
       runtime: runtime.ok ? runtime.data : null,
       events: events.ok ? events.data.items : [],
       operations: operations.ok ? operations.data.items : [],
@@ -667,7 +680,7 @@ export function ConsoleDashboard() {
                 />
                 <LifecycleRail
                   status={selectedOverview.status}
-                  lifecycle={detail.workspace?.lifecycle ?? selectedOverview.lifecycle}
+                  lifecycle={detail.workspace?.lifecycle ?? selectedOverview.lifecycle ?? []}
                   terminalSourceStage={terminalLifecycleSourceStage(
                     selectedOverview.status,
                     detail.events,
@@ -1143,23 +1156,24 @@ function WorkspaceSummary({
   );
 }
 
-function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] }) {
+function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] | null | undefined }) {
+  const safeUsage = fallbackLlmUsage(usage);
   return (
     <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold text-slate-900">LLM usage</span>
-        <Badge value={usage.status} />
+        <Badge value={safeUsage.status} />
       </div>
       <div className="mt-2 grid gap-2 sm:grid-cols-4">
-        <UsageMetric label="Input" value={formatTokenCount(usage.input_tokens)} />
-        <UsageMetric label="Output" value={formatTokenCount(usage.output_tokens)} />
-        <UsageMetric label="Total" value={formatTokenCount(usage.total_tokens)} />
-        <UsageMetric label="Cost" value={formatCost(usage.cost_estimate, usage.currency)} />
+        <UsageMetric label="Input" value={formatTokenCount(safeUsage.input_tokens)} />
+        <UsageMetric label="Output" value={formatTokenCount(safeUsage.output_tokens)} />
+        <UsageMetric label="Total" value={formatTokenCount(safeUsage.total_tokens)} />
+        <UsageMetric label="Cost" value={formatCost(safeUsage.cost_estimate, safeUsage.currency)} />
       </div>
       <div className="mt-2 truncate text-[11px] text-slate-500">
-        {usage.status === "unavailable"
-          ? (usage.reason ?? "usage unavailable")
-          : `${usage.source}${usage.reason ? ` / ${usage.reason}` : ""}`}
+        {safeUsage.status === "unavailable"
+          ? (safeUsage.reason ?? "usage unavailable")
+          : `${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
       </div>
     </div>
   );
@@ -1284,6 +1298,7 @@ function MergeQueuePanel({
   status: MergeQueueStatus;
   error: string | null;
 }) {
+  const [expandedRows, setExpandedRows] = useState<Set<string>>(new Set());
   const hasSnapshot = items.length > 0;
   const isLoading = status === "loading";
   const isError = status === "error";
@@ -1323,9 +1338,29 @@ function MergeQueuePanel({
             </div>
           ) : null}
           <div className="grid max-h-[460px] gap-2 overflow-auto pr-1">
-            {items.map((item, index) => (
-              <MergeQueueRow key={item.candidate_id ?? item.workspace_id} item={item} position={index + 1} />
-            ))}
+            {items.map((item, index) => {
+              const rowKey = item.candidate_id ?? item.workspace_id;
+              const expanded = expandedRows.has(rowKey);
+              return (
+                <MergeQueueRow
+                  key={rowKey}
+                  item={item}
+                  position={index + 1}
+                  expanded={expanded}
+                  onToggle={() =>
+                    setExpandedRows((current) => {
+                      const next = new Set(current);
+                      if (next.has(rowKey)) {
+                        next.delete(rowKey);
+                      } else {
+                        next.add(rowKey);
+                      }
+                      return next;
+                    })
+                  }
+                />
+              );
+            })}
           </div>
         </div>
       )}
@@ -1333,7 +1368,18 @@ function MergeQueuePanel({
   );
 }
 
-function MergeQueueRow({ item, position }: { item: MergeQueueItem; position: number }) {
+function MergeQueueRow({
+  item,
+  position,
+  expanded,
+  onToggle,
+}: {
+  item: MergeQueueItem;
+  position: number;
+  expanded: boolean;
+  onToggle: () => void;
+}) {
+  const rowDetailsId = `merge-candidate-${item.candidate_id ?? item.workspace_id}`;
   return (
     <article className="grid gap-2 border-b border-slate-100 pb-2 text-xs last:border-b-0 last:pb-0">
       <div className="flex min-w-0 items-start justify-between gap-2">
@@ -1345,30 +1391,62 @@ function MergeQueueRow({ item, position }: { item: MergeQueueItem; position: num
             <h3 className="truncate text-sm font-semibold text-slate-950">{item.title}</h3>
           </div>
           <div className="mono mt-1 truncate text-[11px] text-slate-500">{item.workspace_id}</div>
+          <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[11px] text-slate-500">
+            <span className="truncate">created {formatDateTime(item.created_at)}</span>
+            <span className="truncate">merged {formatDateTime(mergeQueueMergedAt(item))}</span>
+          </div>
+          <div className="mt-1 flex min-w-0 flex-wrap gap-x-2 gap-y-1 text-[11px] text-slate-500">
+            <span className="truncate">
+              blocker <span className="mono text-slate-700">{item.merge_blocker_reason}</span>
+            </span>
+            <span className="truncate">
+              readiness <span className="mono text-slate-700">{readinessSummary(item)}</span>
+            </span>
+          </div>
         </div>
-        <div className="flex shrink-0 items-center gap-1">
+        <div className="flex shrink-0 flex-wrap items-center justify-end gap-1">
           <Badge value={item.status} />
           <SmallExternalAnchor href={item.pr_url} label="PR" />
+          <button
+            type="button"
+            onClick={onToggle}
+            aria-expanded={expanded}
+            aria-controls={rowDetailsId}
+            className="inline-flex h-7 items-center gap-1 rounded-md border border-slate-200 bg-white px-2 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
+          >
+            {expanded ? <ChevronUp size={13} aria-hidden /> : <ChevronDown size={13} aria-hidden />}
+            {expanded ? "Hide" : "Details"}
+          </button>
         </div>
       </div>
-      <div className="grid gap-1 sm:grid-cols-3">
-        <QueueDatum label="Candidate" value={item.candidate_id ? compactId(item.candidate_id, 10) : "legacy"} mono />
-        <QueueDatum label="Attempt" value={item.attempt_id ? compactId(item.attempt_id, 10) : "none"} mono />
-        <QueueDatum label="Canonical" value={item.canonical ? "canonical" : "superseded"} tone={item.canonical ? statusTone("completed") : statusTone("failed")} />
-        <QueueDatum label="Candidate status" value={item.candidate_status ?? "unknown"} mono />
-        <QueueDatum label="Readiness" value={readinessSummary(item)} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
-        <QueueDatum label="Mode" value={item.auto_merge ? "auto-merge" : "manual"} />
-        <QueueDatum label="Last event" value={lastEventReason(item.last_event)} mono />
-        <QueueDatum label="Blocker" value={item.merge_blocker_reason} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
-      </div>
-      <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
-        <span className="truncate">
-          base <span className="mono text-slate-700">{item.base_branch}</span>
-        </span>
-        <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
-      </div>
+      {expanded ? (
+        <div id={rowDetailsId} className="grid gap-2">
+          <div className="grid gap-1 sm:grid-cols-3">
+            <QueueDatum label="Candidate" value={item.candidate_id ? compactId(item.candidate_id, 10) : "legacy"} mono />
+            <QueueDatum label="Attempt" value={item.attempt_id ? compactId(item.attempt_id, 10) : "none"} mono />
+            <QueueDatum label="Canonical" value={item.canonical ? "canonical" : "superseded"} tone={item.canonical ? statusTone("completed") : statusTone("failed")} />
+            <QueueDatum label="Candidate status" value={item.candidate_status ?? "unknown"} mono />
+            <QueueDatum label="Readiness" value={readinessSummary(item)} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
+            <QueueDatum label="Mode" value={item.auto_merge ? "auto-merge" : "manual"} />
+            <QueueDatum label="Created" value={formatDateTime(item.created_at)} />
+            <QueueDatum label="Merged" value={formatDateTime(mergeQueueMergedAt(item))} />
+            <QueueDatum label="Last event" value={lastEventReason(item.last_event)} mono />
+            <QueueDatum label="Blocker" value={item.merge_blocker_reason} mono tone={mergeBlockerTone(item.merge_blocker_reason)} />
+          </div>
+          <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
+            <span className="truncate">
+              base <span className="mono text-slate-700">{item.base_branch}</span>
+            </span>
+            <span className="truncate">updated {formatDateTime(item.updated_at)}</span>
+          </div>
+        </div>
+      ) : null}
     </article>
   );
+}
+
+function mergeQueueMergedAt(item: MergeQueueItem): string | null {
+  return item.merged_at ?? (item.status === "completed" ? item.updated_at : null);
 }
 
 function QueueDatum({

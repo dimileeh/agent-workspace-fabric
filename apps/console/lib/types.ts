@@ -173,6 +173,7 @@ export interface MergeQueueItem {
   owned_paths: string[];
   created_at: string;
   updated_at: string;
+  merged_at: string | null;
   last_event: WorkspaceEvent | null;
   merge_blocker_reason: MergeBlockerReason;
   readiness: MergeCandidateReadiness | null;
