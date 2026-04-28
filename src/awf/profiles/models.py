@@ -168,6 +168,31 @@ class ProfileMonitor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     initial_review_grace_period_seconds: float = Field(default=900.0, ge=0, le=86400)
+    non_check_reviewer_settle_seconds: float = Field(default=180.0, ge=0, le=86400)
+    non_check_reviewer_logins: list[str] = Field(
+        default_factory=lambda: ["greptile-apps"],
+        max_length=64,
+    )
+
+    @field_validator("non_check_reviewer_logins")
+    @classmethod
+    def _normalize_non_check_reviewer_logins(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            login = _normalize_monitor_login(item)
+            if not login or login in seen:
+                continue
+            normalized.append(login)
+            seen.add(login)
+        return normalized
+
+
+def _normalize_monitor_login(value: str) -> str:
+    login = value.strip().lower()
+    if login.endswith("[bot]"):
+        login = login[: -len("[bot]")]
+    return login
 
 
 class ProfilePlanning(BaseModel):

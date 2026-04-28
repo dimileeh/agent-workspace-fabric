@@ -675,6 +675,7 @@ async def test_merge_queue_blocker_after_lock_defers_merge_without_calling_githu
             poll_interval_seconds=60,
             initial_review_grace_period_seconds=0,
             pre_merge_settle_seconds=0,
+            non_check_reviewer_settle_seconds=0,
         ),
         runner_config=MonitorRunnerConfig(max_outer_iterations=3, max_fix_cycle_passes=3),
         sleep=sleep_fn,

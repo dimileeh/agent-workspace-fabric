@@ -98,8 +98,12 @@ def test_factories_plumb_configured_knobs(tmp_path: Path) -> None:
         settle_interval_seconds=7,
         initial_review_grace_period_seconds=123,
         pre_merge_settle_seconds=11,
+        non_check_reviewer_settle_seconds=45,
+        non_check_reviewer_logins=["custom-reviewer"],
     )
     assert runner._config.poll_interval_seconds == 15
     assert runner._config.settle_interval_seconds == 7
     assert runner._config.initial_review_grace_period_seconds == 123
     assert runner._config.pre_merge_settle_seconds == 11
+    assert runner._config.non_check_reviewer_settle_seconds == 45
+    assert runner._config.non_check_reviewer_logins == ("custom-reviewer",)

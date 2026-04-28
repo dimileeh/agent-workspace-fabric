@@ -332,22 +332,18 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
         initial_review_grace_period_seconds=900,
     )
 
-    # Force compute_stale_reason to claim the action is "rebase" —
+    # Force compute_stale_reason_for_attempt to claim the action is "rebase" —
     # otherwise the default refactor path returns "validate".
-    import awf.runtime.pr_monitor_runner as pr_monitor_runner
-
-    original_compute = pr_monitor_runner.__dict__.get("compute_stale_reason")
-    monkeypatched: dict[str, object] = {}
-
-    def fake_compute_stale_reason(ws):  # type: ignore[no-untyped-def]
+    def fake_compute_stale_reason_for_attempt(ws, *, attempt_id):  # type: ignore[no-untyped-def]
+        del attempt_id
         return ("validation_insufficient_tier", "rebase")
 
     # Patch the imported reference inside the function; the runner
-    # imports compute_stale_reason inline so we patch via its module.
+    # imports compute_stale_reason_for_attempt inline so we patch via its module.
     import awf.runtime.merge_eligibility as merge_eligibility
 
-    original_module_compute = merge_eligibility.compute_stale_reason
-    merge_eligibility.compute_stale_reason = fake_compute_stale_reason  # type: ignore[assignment]
+    original_module_compute = merge_eligibility.compute_stale_reason_for_attempt
+    merge_eligibility.compute_stale_reason_for_attempt = fake_compute_stale_reason_for_attempt  # type: ignore[assignment]
     try:
         state = MonitorState(started_at=time.monotonic())
         terminal = await runner._execute(
@@ -365,9 +361,7 @@ async def test_failed_rebase_with_stale_notifies_human_under_grace(
             monitor_log=None,
         )
     finally:
-        merge_eligibility.compute_stale_reason = original_module_compute  # type: ignore[assignment]
-        del monkeypatched
-        del original_compute
+        merge_eligibility.compute_stale_reason_for_attempt = original_module_compute  # type: ignore[assignment]
 
     assert terminal is False
     # NotifyHuman fired (gh pr comment).
@@ -418,11 +412,12 @@ async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
 
     import awf.runtime.merge_eligibility as merge_eligibility
 
-    def fake_compute_stale_reason(ws):  # type: ignore[no-untyped-def]
+    def fake_compute_stale_reason_for_attempt(ws, *, attempt_id):  # type: ignore[no-untyped-def]
+        del attempt_id
         return ("validation_insufficient_tier", "rebase")
 
-    original_module_compute = merge_eligibility.compute_stale_reason
-    merge_eligibility.compute_stale_reason = fake_compute_stale_reason  # type: ignore[assignment]
+    original_module_compute = merge_eligibility.compute_stale_reason_for_attempt
+    merge_eligibility.compute_stale_reason_for_attempt = fake_compute_stale_reason_for_attempt  # type: ignore[assignment]
     try:
         # Pre-mark grace as elapsed so the dispatch block runs.
         state = MonitorState(started_at=0.0)
@@ -445,7 +440,7 @@ async def test_rebase_req_action_dispatches_validate_typed_recovery_op(
             monitor_log=None,
         )
     finally:
-        merge_eligibility.compute_stale_reason = original_module_compute  # type: ignore[assignment]
+        merge_eligibility.compute_stale_reason_for_attempt = original_module_compute  # type: ignore[assignment]
 
     assert terminal is True
 
