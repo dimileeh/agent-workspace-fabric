@@ -85,6 +85,25 @@ def test_unsafe_secret_mount_targets_return_structured_lint_errors(target: str) 
 
 
 @pytest.mark.unit
+def test_relative_secret_mount_target_returns_structured_lint_error() -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "github-token",
+            "kind": "mount",
+            "target": "relative/path",
+            "provider": "vault",
+            "ref": "kv/data/awf/github-token",
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert len(errors) == 1
+    assert errors[0].reason_code == "SECRET_TARGET_TOO_BROAD"
+    assert errors[0].path == "secrets[0].target"
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("target", "reason_code"),
     [
@@ -250,6 +269,50 @@ def test_profile_lint_private_path_and_raw_secret_edges() -> None:
     split = profile_lint._split_volume_target("/home/agent/.config/gh:rw,z")
     assert split.path == "/home/agent/.config/gh"
     assert split.mode == "rw"
+
+
+@pytest.mark.unit
+def test_blank_provider_ref_is_not_treated_as_raw_secret() -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "api-token",
+            "kind": "env",
+            "target": "API_TOKEN",
+            "provider": "inline",
+            "ref": "   ",
+        }
+    )
+
+    assert profile_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "raw_ref",
+    [
+        "-----BEGIN PRIVATE KEY-----\nsecret\n-----END PRIVATE KEY-----",
+        (
+            "aaaaaaaaaaaaaaaa."
+            "bbbbbbbbbbbbbbbb."
+            "cccccccccccccccc"
+        ),
+    ],
+)
+def test_pem_and_jwt_refs_are_rejected_without_exposing_value(raw_ref: str) -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "api-token",
+            "kind": "env",
+            "target": "API_TOKEN",
+            "provider": "inline",
+            "ref": raw_ref,
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert [finding.reason_code for finding in errors] == ["SECRET_REF_LOOKS_RAW"]
+    assert raw_ref not in json.dumps([finding.model_dump(mode="json") for finding in errors])
 
 
 @pytest.mark.unit
@@ -466,6 +529,24 @@ def test_relative_secret_mount_target_is_rejected_as_too_broad() -> None:
 
 
 @pytest.mark.unit
+def test_host_home_volume_with_relative_container_target_is_ignored() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "relative-volume-target",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("${AWF_HOST_HOME}/.config/gh", "relative-target")],
+                }
+            ],
+        }
+    )
+
+    assert lint_workspace_profile(profile) == ()
+
+
+@pytest.mark.unit
 def test_host_home_mount_with_relative_container_target_is_ignored() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -521,6 +602,31 @@ def test_host_home_mount_with_relative_mode_target_is_ignored() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/workspace/cache",
+        "/workspace/cache:",
+    ],
+)
+def test_specific_host_home_mount_to_non_auth_target_is_allowed(target: str) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "specific-host-home",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("~/project/cache", target)],
+                }
+            ],
+        }
+    )
+
+    assert lint_workspace_profile(profile) == ()
+
+
+@pytest.mark.unit
 def test_host_home_mount_to_non_auth_workspace_path_is_allowed() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -559,6 +665,35 @@ def test_tilde_prefixed_known_local_credential_mount_warns_under_compatibility_p
     assert len(findings) == 1
     assert findings[0].reason_code == "HOST_HOME_AUTH_MOUNT_COMPATIBILITY"
     assert findings[0].severity is ProfileLintSeverity.warning
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "target",
+    [
+        "/home/agent/cache",
+        "/workspace/.docker",
+    ],
+)
+def test_specific_host_home_mount_to_broad_or_auth_like_target_blocks(target: str) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "specific-host-home-risk",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("${AWF_HOST_HOME}/project", target)],
+                }
+            ],
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert len(errors) == 1
+    assert errors[0].reason_code == "HOST_HOME_AUTH_MOUNT_TOO_BROAD"
+    assert errors[0].severity is ProfileLintSeverity.error
 
 
 @pytest.mark.unit

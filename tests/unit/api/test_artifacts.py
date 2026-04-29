@@ -85,6 +85,24 @@ class TestWorkspaceArtifacts:
         assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
 
     @pytest.mark.unit
+    async def test_download_requires_local_bearer_token_when_configured(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        _configure_artifact_api(monkeypatch, tmp_path)
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts/download",
+            params={"path": "logs/stdout.txt"},
+        )
+
+        assert response.status_code == 401
+        assert response.json()["detail"]["error_code"] == "UNAUTHORIZED"
+
+    @pytest.mark.unit
     async def test_missing_workspace_returns_not_found(
         self,
         client: AsyncClient,
@@ -95,6 +113,24 @@ class TestWorkspaceArtifacts:
 
         response = await client.get(
             "/v1/workspaces/ws_missing/artifacts",
+            headers=headers,
+        )
+
+        assert response.status_code == 404
+        assert response.json()["detail"]["error_code"] == "NOT_FOUND"
+
+    @pytest.mark.unit
+    async def test_download_missing_workspace_returns_not_found(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        _, headers = _configure_artifact_api(monkeypatch, tmp_path)
+
+        response = await client.get(
+            "/v1/workspaces/ws_missing/artifacts/download",
+            params={"path": "logs/stdout.txt"},
             headers=headers,
         )
 
@@ -174,6 +210,122 @@ class TestWorkspaceArtifacts:
         assert stdout_item["kind"] == "txt"
         assert stdout_item["size_bytes"] == len("alpha\n")
         datetime.fromisoformat(stdout_item["modified_at"])
+
+    @pytest.mark.unit
+    async def test_download_artifact_serves_bytes_and_headers(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        work_dir, headers = _configure_artifact_api(monkeypatch, tmp_path)
+        artifact_dir = work_dir / "artifacts" / workspace_id / "logs"
+        artifact_dir.mkdir(parents=True)
+        stdout_path = artifact_dir / "stdout.txt"
+        payload = b"alpha\nbeta\n"
+        stdout_path.write_bytes(payload)
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts/download",
+            params={"path": "logs/stdout.txt"},
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        assert response.content == payload
+        assert response.headers["content-length"] == str(len(payload))
+        assert response.headers["content-type"].startswith("text/plain")
+        disposition = response.headers["content-disposition"]
+        assert disposition.startswith("attachment;")
+        assert 'filename="stdout.txt"' in disposition
+
+    @pytest.mark.unit
+    async def test_download_missing_artifact_returns_not_found_without_host_path(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        work_dir, headers = _configure_artifact_api(monkeypatch, tmp_path)
+        (work_dir / "artifacts" / workspace_id).mkdir(parents=True)
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts/download",
+            params={"path": "logs/missing.txt"},
+            headers=headers,
+        )
+
+        assert response.status_code == 404
+        body = response.json()["detail"]
+        assert body["error_code"] == "NOT_FOUND"
+        assert "logs/missing.txt" in body["message"]
+        assert str(work_dir) not in body["message"]
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "unsafe_path",
+        [
+            "",
+            "../secret.txt",
+            "/tmp/secret.txt",
+            "logs/../secret.txt",
+            r"..\secret.txt",
+            r"logs\..\secret.txt",
+            "logs/\x00/stdout.txt",
+        ],
+    )
+    async def test_download_rejects_unsafe_artifact_paths(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+        unsafe_path: str,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        _, headers = _configure_artifact_api(monkeypatch, tmp_path)
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts/download",
+            params={"path": unsafe_path},
+            headers=headers,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"]["error_code"] == "INVALID_ARTIFACT_PATH"
+
+    @pytest.mark.unit
+    async def test_download_rejects_symlink_file_and_intermediate_directory(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        work_dir, headers = _configure_artifact_api(monkeypatch, tmp_path)
+        artifact_dir = work_dir / "artifacts" / workspace_id
+        artifact_dir.mkdir(parents=True)
+        outside_file = tmp_path / "outside.txt"
+        outside_file.write_text("secret\n", encoding="utf-8")
+        (artifact_dir / "outside-link.txt").symlink_to(outside_file)
+        outside_dir = tmp_path / "outside-dir"
+        outside_dir.mkdir()
+        (outside_dir / "secret.txt").write_text("nested secret\n", encoding="utf-8")
+        (artifact_dir / "linked-dir").symlink_to(outside_dir, target_is_directory=True)
+
+        for unsafe_path in ("outside-link.txt", "linked-dir/secret.txt"):
+            response = await client.get(
+                f"/v1/workspaces/{workspace_id}/artifacts/download",
+                params={"path": unsafe_path},
+                headers=headers,
+            )
+
+            assert response.status_code == 404
+            body = response.json()["detail"]
+            assert body["error_code"] == "NOT_FOUND"
+            assert response.content not in {b"secret\n", b"nested secret\n"}
+            assert str(tmp_path) not in body["message"]
 
     @pytest.mark.unit
     def test_listing_skips_file_deleted_during_metadata_read(

@@ -580,6 +580,41 @@ async def test_readyz_workspace_view_handles_factory_and_session_failures(
 
 
 @pytest.mark.unit
+async def test_readyz_orphan_check_scans_docker_even_when_db_check_failed(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    for _ in range(3):
+        runner.queue_result(stdout="")
+
+    orphan_check = await health_route._check_orphan_resources(
+        runner=runner,
+        factory=None,
+        work_dir=str(tmp_path),
+        db_check=health_route.CheckResult(
+            ok=False,
+            status="fail",
+            reason="DB_CONNECTION_FAILED",
+        ),
+        docker_check=health_route.CheckResult(ok=True, status="ok"),
+    )
+
+    assert orphan_check.ok is True
+    assert orphan_check.status == "unknown"
+    assert orphan_check.reason == "DB_UNAVAILABLE"
+    assert len(runner.calls) == 3
+
+
+@pytest.mark.unit
+async def test_readyz_cancel_unneeded_task_cancels_pending_task() -> None:
+    task = asyncio.create_task(asyncio.sleep(60))
+
+    await health_route._cancel_unneeded_task(task)
+
+    assert task.cancelled()
+
+
+@pytest.mark.unit
 async def test_docker_check_maps_runner_timeout_to_configured_reason() -> None:
     class _SlowRunner:
         async def run(
