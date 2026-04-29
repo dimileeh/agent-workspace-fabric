@@ -448,6 +448,10 @@ def test_malformed_package_json_falls_back_to_generic(tmp_path: Path) -> None:
     malformed = preview_project_onboarding(tmp_path)
     assert malformed.draft.template == "generic"
 
+    (tmp_path / "package.json").write_bytes(b"\xff")
+    non_utf8 = preview_project_onboarding(tmp_path)
+    assert non_utf8.draft.template == "generic"
+
     (tmp_path / "package.json").write_text('["not", "an", "object"]', encoding="utf-8")
     non_object = preview_project_onboarding(tmp_path)
     assert non_object.draft.template == "generic"

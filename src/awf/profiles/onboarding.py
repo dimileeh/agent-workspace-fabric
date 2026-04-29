@@ -498,7 +498,7 @@ def _read_package_json(path: Path) -> Mapping[str, object]:
         return {}
     try:
         raw: object = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
     if isinstance(raw, Mapping):
         return {str(key): value for key, value in raw.items()}
