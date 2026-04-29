@@ -238,16 +238,11 @@ def _workspace_overlap_path_matches(
 ) -> _WorkspaceOverlapPathMatches:
     matches: list[WorkspaceOverlapPathMatch] = []
     total_count = 0
-    seen: set[tuple[str, str, str]] = set()
     for left_owned_path in sorted(dict.fromkeys(left.owned_paths)):
         for right_owned_path in sorted(dict.fromkeys(right.owned_paths)):
             overlap = owned_path_overlap_match(left_owned_path, right_owned_path)
             if overlap is None:
                 continue
-            key = (left_owned_path, right_owned_path, overlap.match_reason_code)
-            if key in seen:
-                continue
-            seen.add(key)
             total_count += 1
             if len(matches) < OVERLAP_GRAPH_PATH_MATCH_LIMIT:
                 matches.append(
