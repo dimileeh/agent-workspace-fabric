@@ -1423,6 +1423,57 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         assert body["warnings"][0]["warning_code"] == "OWNED_PATH_OVERLAP_RISK"
         assert body["warnings"][0]["workspace_ids"] == [existing_id]
 
+    @pytest.mark.unit
+    async def test_overlapping_owned_paths_remain_admitted_and_show_in_overlap_graph(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        existing_id = await _create_v2_workspace(
+            client,
+            title="existing migration",
+            task_class="migration_task",
+            owned_paths=["migrations/**"],
+        )
+
+        create = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(
+                title="new concrete migration",
+                task_class="migration_task",
+                owned_paths=["migrations/versions/202604290001_add_overlap_graph.py"],
+            ),
+        )
+
+        assert create.status_code == 202
+        create_body = create.json()
+        new_id = create_body["workspace_id"]
+        assert create_body["warnings"][0]["warning_code"] == "OWNED_PATH_OVERLAP_RISK"
+        assert create_body["warnings"][0]["workspace_ids"] == [existing_id]
+
+        detail = await client.get(f"/v1/workspaces/{new_id}")
+        assert detail.status_code == 200
+        decision = detail.json()["latest_queue_decision"]
+        assert decision["decision"] == "admitted"
+        assert decision["reason_code"] == "ADMITTED_LOCAL"
+        assert decision["overlap_risk_summary"]["warning_code"] == "OWNED_PATH_OVERLAP_RISK"
+
+        graph = await client.get(
+            "/v1/locks/overlap-graph",
+            params={
+                "repo_url": "git@github.com:example/app.git",
+                "base_branch": "development",
+                "task_class": "migration_task",
+            },
+        )
+
+        assert graph.status_code == 200
+        edges = graph.json()["edges"]
+        assert len(edges) == 1
+        assert edges[0]["severity"] == "advisory"
+        assert edges[0]["blocks_launch"] is False
+        assert edges[0]["reason_code"] == "OWNED_PATH_OVERLAP_RISK"
+        assert edges[0]["affected_workspace_ids"] == sorted([existing_id, new_id])
+
 
 class TestIdempotency:
     @pytest.mark.unit

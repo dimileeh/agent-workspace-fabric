@@ -69,6 +69,9 @@ ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
 ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES
 )
+OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
+OWNED_PATH_ANCESTOR_MATCH_REASON: Final = "OWNED_PATH_ANCESTOR_MATCH"
+OWNED_PATH_WILDCARD_MATCH_REASON: Final = "OWNED_PATH_WILDCARD_MATCH"
 
 
 @dataclass(frozen=True)
@@ -83,6 +86,16 @@ class OwnedPathConflict:
     workspace_id: str
     existing_path: str
     requested_path: str
+
+
+@dataclass(frozen=True)
+class OwnedPathOverlapMatch:
+    left_path: str
+    right_path: str
+    normalized_left_path: str
+    normalized_right_path: str
+    match_reason_code: str
+    explanation: str
 
 
 @dataclass(frozen=True)
@@ -2106,22 +2119,102 @@ def _schedulable_workspace_ids_stmt(
 
 
 def _owned_paths_overlap(left: str, right: str) -> bool:
+    return _owned_path_overlap_match(left, right) is not None
+
+
+def _owned_path_overlap_match(left: str, right: str) -> OwnedPathOverlapMatch | None:
     left_path = _normalize_owned_path(left)
     right_path = _normalize_owned_path(right)
     if left_path == "" or right_path == "":
-        return False
+        return None
+    if left_path == right_path:
+        return _owned_path_match(
+            left,
+            right,
+            normalized_left_path=left_path,
+            normalized_right_path=right_path,
+            match_reason_code=OWNED_PATH_EXACT_MATCH_REASON,
+            explanation=f"Owned paths normalize to the same path: {left_path}.",
+        )
     if _literal_paths_overlap(left_path, right_path):
-        return True
+        ancestor, descendant = (
+            (left_path, right_path)
+            if _is_descendant(left_path, right_path)
+            else (right_path, left_path)
+        )
+        return _owned_path_match(
+            left,
+            right,
+            normalized_left_path=left_path,
+            normalized_right_path=right_path,
+            match_reason_code=OWNED_PATH_ANCESTOR_MATCH_REASON,
+            explanation=f"One owned path contains the other: {ancestor} -> {descendant}.",
+        )
 
     left_prefix = _wildcard_prefix(left_path)
     right_prefix = _wildcard_prefix(right_path)
     if left_prefix is not None and _wildcard_prefix_overlaps(left_prefix, right_path):
-        return True
+        return _wildcard_owned_path_match(
+            left,
+            right,
+            normalized_left_path=left_path,
+            normalized_right_path=right_path,
+        )
     if right_prefix is not None and _wildcard_prefix_overlaps(right_prefix, left_path):
-        return True
-    if left_prefix is not None and right_prefix is not None:
-        return _wildcard_prefixes_overlap(left_prefix, right_prefix)
-    return False
+        return _wildcard_owned_path_match(
+            left,
+            right,
+            normalized_left_path=left_path,
+            normalized_right_path=right_path,
+        )
+    if (
+        left_prefix is not None
+        and right_prefix is not None
+        and _wildcard_prefixes_overlap(left_prefix, right_prefix)
+    ):
+        return _wildcard_owned_path_match(
+            left,
+            right,
+            normalized_left_path=left_path,
+            normalized_right_path=right_path,
+        )
+    return None
+
+
+def _owned_path_match(
+    left: str,
+    right: str,
+    *,
+    normalized_left_path: str,
+    normalized_right_path: str,
+    match_reason_code: str,
+    explanation: str,
+) -> OwnedPathOverlapMatch:
+    return OwnedPathOverlapMatch(
+        left_path=left,
+        right_path=right,
+        normalized_left_path=normalized_left_path,
+        normalized_right_path=normalized_right_path,
+        match_reason_code=match_reason_code,
+        explanation=explanation,
+    )
+
+
+def _wildcard_owned_path_match(
+    left: str,
+    right: str,
+    *,
+    normalized_left_path: str,
+    normalized_right_path: str,
+) -> OwnedPathOverlapMatch:
+    return _owned_path_match(
+        left,
+        right,
+        normalized_left_path=normalized_left_path,
+        normalized_right_path=normalized_right_path,
+        match_reason_code=OWNED_PATH_WILDCARD_MATCH_REASON,
+        explanation=f"Wildcard owned-path prefixes overlap: {left} <-> {right}.",
+    )
 
 
 def _owned_path_conflict_advisory_lock_key(*, repo_url: str, branch_base: str) -> int:
@@ -2144,6 +2237,10 @@ def _operation_idempotency_advisory_lock_key(key: str) -> int:
 
 def owned_paths_overlap(left: str, right: str) -> bool:
     return _owned_paths_overlap(left, right)
+
+
+def owned_path_overlap_match(left: str, right: str) -> OwnedPathOverlapMatch | None:
+    return _owned_path_overlap_match(left, right)
 
 
 def _normalize_owned_path(path: str) -> str:
