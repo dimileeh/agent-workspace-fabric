@@ -1140,12 +1140,22 @@ def test_agent_pr_identity_omits_missing_model_and_effort() -> None:
 async def test_monitor_rebase_recovery_reports_git_failures(
     queued: list[tuple[int, str, str]],
     message: str,
+    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     runner = FakeCommandRunner()
     for returncode, stdout, stderr in queued:
         runner.queue_result(returncode=returncode, stdout=stdout, stderr=stderr)
     executor = _executor_with_runner(runner, tmp_path)
+
+    async def _no_rebase_operation(**_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(
+        executor,
+        "_begin_rebase_recovery_operation",
+        _no_rebase_operation,
+    )
 
     with pytest.raises(_MonitorRebaseRecoveryError, match=message):
         await executor._run_monitor_rebase_recovery(
@@ -1155,4 +1165,5 @@ async def test_monitor_rebase_recovery_reports_git_failures(
             branch_name="awf/ws",
             remote_branch="awf/ws",
             reason="stale",
+            recovery_payload={},
         )

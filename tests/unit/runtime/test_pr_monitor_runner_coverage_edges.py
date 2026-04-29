@@ -59,7 +59,9 @@ from awf.runtime.pr_monitor_runner import (
     _target_reconcile_payload,
     _with_ci_failures,
 )
+from awf.service.alembic_resolver import AlembicResolveResult, AlembicResolveStatus
 from awf.service.merge_queue import MergeQueueBlocker
+from awf.service.target_branch_monitor import TargetBranchMonitorResult, TargetBranchMonitorStatus
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -1463,6 +1465,72 @@ async def test_target_branch_reconcile_success_appends_payload_event(
         assert ws.events[-1].event_type == "target_branch.reconciled"
         assert ws.events[-1].reason_code == "TARGET_BRANCH_FAST_FORWARDED"
         assert ws.events[-1].payload["branch"] == "development"
+
+
+@pytest.mark.unit
+async def test_target_branch_reconcile_event_preserves_resolver_operator_details(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+
+    async def reconciler(*, repo_url: str, branch: str, workspace_id: str) -> object:
+        checkout = tmp_path / "checkout"
+        generated = checkout / "migrations" / "versions" / "merge001_merge_alembic_heads.py"
+        return TargetBranchMonitorResult(
+            repo_url=repo_url,
+            branch=branch,
+            checkout_path=checkout,
+            status=TargetBranchMonitorStatus.committed,
+            resolver_results=(
+                AlembicResolveResult(
+                    status=AlembicResolveStatus.resolved,
+                    reason_code="ALEMBIC_HEADS_MERGED",
+                    heads=("left001", "right001"),
+                    generated_revision="merge001",
+                    generated_path=generated,
+                    generated_path_relative="migrations/versions/merge001_merge_alembic_heads.py",
+                    message="Generated Alembic merge revision for 2 heads.",
+                ),
+            ),
+            commit_sha="abc123",
+            pushed=True,
+            changed_paths=("migrations/versions/merge001_merge_alembic_heads.py",),
+        )
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        post_merge_target_reconciler=reconciler,
+    )
+
+    await runner._reconcile_target_branch_after_merge(
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        base_branch="development",
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        payload = ws.events[-1].payload
+        assert payload["status"] == "committed"
+        assert payload["commit_sha"] == "abc123"
+        assert payload["pushed"] is True
+        assert payload["branch"] == "development"
+        assert payload["changed_paths"] == [
+            "migrations/versions/merge001_merge_alembic_heads.py"
+        ]
+        resolver = payload["resolver_results"][0]
+        assert resolver["reason_code"] == "ALEMBIC_HEADS_MERGED"
+        assert resolver["heads"] == ["left001", "right001"]
+        assert resolver["generated_revision"] == "merge001"
+        assert resolver["generated_path_relative"] == (
+            "migrations/versions/merge001_merge_alembic_heads.py"
+        )
 
 
 @pytest.mark.unit

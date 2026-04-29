@@ -13,7 +13,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable, Sequence
+import warnings
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
@@ -21,12 +23,14 @@ from pathlib import Path
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from alembic.script.revision import ResolutionError, RevisionError
 
 
 class AlembicResolveStatus(StrEnum):
     """Alembic resolver outcome."""
 
     unsupported = "unsupported"
+    refused = "refused"
     not_needed = "not_needed"
     resolved = "resolved"
 
@@ -40,7 +44,9 @@ class AlembicResolveResult:
     heads: tuple[str, ...]
     generated_revision: str | None = None
     generated_path: Path | None = None
+    generated_path_relative: str | None = None
     message: str | None = None
+    details: Mapping[str, object] | None = None
 
     @property
     def changed(self) -> bool:
@@ -53,7 +59,9 @@ class AlembicResolveResult:
             "heads": list(self.heads),
             "generated_revision": self.generated_revision,
             "generated_path": str(self.generated_path) if self.generated_path is not None else None,
+            "generated_path_relative": self.generated_path_relative,
             "message": self.message,
+            "details": dict(self.details or {}),
         }
 
 
@@ -86,15 +94,10 @@ class AlembicMergeResolver:
             )
 
         script, version_dir = loaded
-        try:
-            heads = tuple(sorted(script.get_heads()))
-        except Exception as exc:
-            return AlembicResolveResult(
-                status=AlembicResolveStatus.unsupported,
-                reason_code="ALEMBIC_GRAPH_UNREADABLE",
-                heads=(),
-                message=str(exc),
-            )
+        graph_result = _safe_heads(script)
+        if isinstance(graph_result, AlembicResolveResult):
+            return graph_result
+        heads = graph_result
 
         if len(heads) <= 1:
             return AlembicResolveResult(
@@ -120,6 +123,7 @@ class AlembicMergeResolver:
             heads=heads,
             generated_revision=revision,
             generated_path=generated_path,
+            generated_path_relative=_relative_path(generated_path, repo_path),
             message=f"Generated Alembic merge revision for {len(heads)} heads.",
         )
 
@@ -145,6 +149,89 @@ def _load_script_directory(repo_path: Path) -> tuple[ScriptDirectory, Path] | No
         version_dir = script_path / version_dir
     version_dir.mkdir(parents=True, exist_ok=True)
     return script, version_dir
+
+
+def _safe_heads(script: ScriptDirectory) -> tuple[str, ...] | AlembicResolveResult:
+    try:
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            heads = tuple(sorted(script.get_heads()))
+            tuple(script.walk_revisions())
+    except SyntaxError as exc:
+        return _refused_graph_result(
+            reason_code="ALEMBIC_GRAPH_MALFORMED",
+            message="Alembic revision graph contains malformed Python.",
+            exc=exc,
+        )
+    except (KeyError, ResolutionError, RevisionError) as exc:
+        return _refused_graph_result(
+            reason_code="ALEMBIC_GRAPH_UNSAFE",
+            message="Alembic revision graph is unsafe to merge automatically.",
+            exc=exc,
+        )
+    except Exception as exc:
+        return _refused_graph_result(
+            reason_code="ALEMBIC_GRAPH_UNREADABLE",
+            message="Alembic revision graph could not be read safely.",
+            exc=exc,
+        )
+
+    duplicate_revisions = sorted(
+        revision for revision, count in Counter(heads).items() if count > 1
+    )
+    if duplicate_revisions:
+        return AlembicResolveResult(
+            status=AlembicResolveStatus.refused,
+            reason_code="ALEMBIC_GRAPH_UNSAFE",
+            heads=heads,
+            message="Alembic revision graph is unsafe to merge automatically.",
+            details={"duplicate_revisions": duplicate_revisions},
+        )
+
+    unsafe_warnings = [
+        str(warning.message)
+        for warning in caught
+        if _is_unsafe_alembic_warning(str(warning.message))
+    ]
+    if unsafe_warnings:
+        return AlembicResolveResult(
+            status=AlembicResolveStatus.refused,
+            reason_code="ALEMBIC_GRAPH_UNSAFE",
+            heads=heads,
+            message="Alembic revision graph is unsafe to merge automatically.",
+            details={"warnings": unsafe_warnings},
+        )
+
+    return heads
+
+
+def _refused_graph_result(
+    *,
+    reason_code: str,
+    message: str,
+    exc: Exception,
+) -> AlembicResolveResult:
+    return AlembicResolveResult(
+        status=AlembicResolveStatus.refused,
+        reason_code=reason_code,
+        heads=(),
+        message=message,
+        details={
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        },
+    )
+
+
+def _is_unsafe_alembic_warning(message: str) -> bool:
+    return "is present more than once" in message or "is not present" in message
+
+
+def _relative_path(path: Path, root: Path) -> str | None:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return None
 
 
 def _render_merge_revision(
@@ -173,9 +260,8 @@ def _render_merge_revision(
 
 
 def _default_revision_id(heads: Sequence[str]) -> str:
-    now = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
-    digest = hashlib.sha1(",".join(sorted(heads)).encode("utf-8")).hexdigest()[:8]
-    return _sanitize_revision_id(f"awf_{now}_{digest}")
+    digest = hashlib.sha1(",".join(sorted(heads)).encode("utf-8")).hexdigest()[:12]
+    return _sanitize_revision_id(f"awf_merge_{digest}")
 
 
 _REVISION_ID_RE = re.compile(r"[^a-zA-Z0-9_]+")
