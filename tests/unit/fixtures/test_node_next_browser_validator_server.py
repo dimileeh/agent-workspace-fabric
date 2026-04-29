@@ -7,21 +7,22 @@ import shutil
 import socket
 import subprocess
 import textwrap
+import threading
 import time
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
 
-_VALIDATOR_SERVER = (
+_FIXTURE_ROOT = (
     Path(__file__).resolve().parents[2]
     / "fixtures"
     / "workspace_services"
     / "node_next_browser_app"
-    / "browser"
-    / "validator-server.mjs"
 )
+_VALIDATOR_SERVER = _FIXTURE_ROOT / "browser" / "validator-server.mjs"
 
 pytestmark = pytest.mark.unit
 
@@ -112,6 +113,48 @@ def _write_playwright_stub(node_modules: Path) -> Path:
         encoding="utf-8",
     )
     return package_dir
+
+
+class _HangingHealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        time.sleep(30)
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
+class _HangingHealthServer(ThreadingHTTPServer):
+    daemon_threads = True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_healthcheck_fetch_times_out_when_service_hangs() -> None:
+    """A hung health endpoint should fail inside the script-level fetch timeout."""
+    server = _HangingHealthServer(("127.0.0.1", 0), _HangingHealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        port = server.server_address[1]
+        result = subprocess.run(
+            ["node", "scripts/healthcheck.mjs", "app"],
+            cwd=_FIXTURE_ROOT,
+            env={
+                **os.environ,
+                "APP_BASE_URL": f"http://127.0.0.1:{port}",
+                "AWF_HEALTHCHECK_FETCH_TIMEOUT_MS": "50",
+            },
+            capture_output=True,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.returncode != 0
+    assert "timed out fetching app health response after 50ms" in result.stderr
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
