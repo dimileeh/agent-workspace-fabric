@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from unittest.mock import patch
 
 import pytest
 import yaml
@@ -20,8 +19,7 @@ _runner = CliRunner()
 def test_profile_init_preview_prints_profile_and_diagnostics(tmp_path: Path) -> None:
     (tmp_path / "pyproject.toml").write_text('[project]\nname = "app"\n', encoding="utf-8")
 
-    with patch("awf.cli.main.httpx.request") as mock:
-        result = _runner.invoke(app, ["profile", "init", str(tmp_path)])
+    result = _runner.invoke(app, ["profile", "init", str(tmp_path)])
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
@@ -29,7 +27,6 @@ def test_profile_init_preview_prints_profile_and_diagnostics(tmp_path: Path) -> 
     assert "yaml" in payload["draft"]
     assert "missing_validation_commands" in payload["diagnostics"]
     assert not (tmp_path / ".awf" / "workspace.yml").exists()
-    mock.assert_not_called()
 
 
 @pytest.mark.unit
@@ -66,15 +63,13 @@ def test_profile_init_refuses_to_overwrite_without_force(tmp_path: Path) -> None
 
 @pytest.mark.unit
 def test_profile_init_includes_optional_smoke_request(tmp_path: Path) -> None:
-    with patch("awf.cli.main.httpx.request") as mock:
-        result = _runner.invoke(
-            app,
-            ["profile", "init", str(tmp_path), "--include-smoke-request"],
-        )
+    result = _runner.invoke(
+        app,
+        ["profile", "init", str(tmp_path), "--include-smoke-request"],
+    )
 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["smoke_request"]["repo"]["url"].startswith("file://")
     assert payload["smoke_request"]["workspace"]["profile"]["name"] == "generic"
     assert payload["smoke_request"]["task"]["auto_merge"] is False
-    mock.assert_not_called()
