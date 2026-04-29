@@ -178,12 +178,16 @@ def _disk_dimension(*, disk_check: DiskCheck | None, reserved_mb: int) -> Capaci
         reserved=reserved_mb,
         available=max(0, raw_available),
         available_after_next_default=max(0, raw_available),
-        reason_code=(
-            "DISK_RESERVATION_PRESSURE"
-            if raw_available <= 0 or not disk_check.ok
-            else None
-        ),
+        reason_code=_disk_reason_code(disk_check=disk_check, raw_available=raw_available),
     )
+
+
+def _disk_reason_code(*, disk_check: DiskCheck, raw_available: int) -> str | None:
+    if not disk_check.ok:
+        return disk_check.reason
+    if raw_available <= 0:
+        return "DISK_RESERVATION_PRESSURE"
+    return None
 
 
 def _clamp_available(value: Number) -> Number:
