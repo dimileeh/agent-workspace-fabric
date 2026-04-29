@@ -72,7 +72,26 @@ class LogBroadcaster:
         offset: int,
         data: str,
     ) -> None:
-        redacted_data = redact_secrets(data)
+        redacted_data = await asyncio.to_thread(redact_secrets, data)
+        self._publish_redacted(
+            workspace_id=workspace_id,
+            stream_id=stream_id,
+            source=source,
+            fd=fd,
+            offset=offset,
+            data=redacted_data,
+        )
+
+    def _publish_redacted(
+        self,
+        *,
+        workspace_id: str,
+        stream_id: str,
+        source: str,
+        fd: str,
+        offset: int,
+        data: str,
+    ) -> None:
         frame = LogFrame(
             seq=next(self._seq),
             workspace_id=workspace_id,
@@ -80,7 +99,7 @@ class LogBroadcaster:
             source=source,
             fd=fd,
             offset=offset,
-            data=redacted_data,
+            data=data,
             occurred_at=datetime.now(UTC),
         )
         for queue in tuple(self._subscribers.get(workspace_id, ())):
@@ -334,7 +353,7 @@ class WorkspaceLogSink:
         return raw_data
 
     async def _append_redacted_locked(self, raw_data: str) -> tuple[int, str]:
-        redacted_data = redact_secrets(raw_data)
+        redacted_data = await asyncio.to_thread(redact_secrets, raw_data)
         encoded = redacted_data.encode("utf-8")
         offset = await asyncio.to_thread(_append_log_bytes, self.path, encoded)
         if self.session_factory is not None:
@@ -351,7 +370,7 @@ class WorkspaceLogSink:
 
     async def _publish_frame(self, frame: tuple[int, str]) -> None:
         offset, redacted_data = frame
-        await self.broadcaster.publish(
+        self.broadcaster._publish_redacted(
             workspace_id=self.workspace_id,
             stream_id=self.stream_id,
             source=self.source,

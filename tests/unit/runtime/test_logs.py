@@ -11,6 +11,7 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.runtime.logs as logs_module
 from awf.adapters.codex import CodexAdapter
 from awf.common.commands import FakeCommandRunner
 from awf.common.redaction import REDACTION_MARKER
@@ -143,8 +144,7 @@ async def test_log_sink_write_uses_threaded_file_append(
         await sink.write("def\n")
         frame = queue.get_nowait()
 
-    assert len(to_thread_calls) == 1
-    assert to_thread_calls[0][0].__name__ == "_append_log_bytes"
+    assert [call[0].__name__ for call in to_thread_calls] == ["redact_secrets", "_append_log_bytes"]
     assert path.read_bytes() == b"abcdef\n"
     assert frame.offset == 3
     assert frame.data == "def\n"
@@ -375,6 +375,36 @@ async def test_log_broadcaster_redacts_direct_live_frames() -> None:
 
     assert frame.data == "Authorization: Bearer <redacted>\n"
     assert "directBearerToken123456" not in frame.data
+
+
+@pytest.mark.unit
+async def test_log_broadcaster_offloads_direct_live_frame_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    to_thread_calls: list[tuple[Callable[..., object], tuple[object, ...]]] = []
+
+    async def fake_to_thread(func: Callable[..., object], /, *args: object) -> object:
+        to_thread_calls.append((func, args))
+        return func(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    broadcaster = LogBroadcaster()
+
+    async with broadcaster.subscribe("ws_1") as queue:
+        await broadcaster.publish(
+            workspace_id="ws_1",
+            stream_id="agent.stdout",
+            source="agent",
+            fd="stdout",
+            offset=0,
+            data="Authorization: Bearer directBearerToken123456\n",
+        )
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    assert to_thread_calls == [
+        (logs_module.redact_secrets, ("Authorization: Bearer directBearerToken123456\n",)),
+    ]
+    assert frame.data == "Authorization: Bearer <redacted>\n"
 
 
 @pytest.mark.unit
