@@ -1,4 +1,4 @@
-import { NextResponse } from "next/server";
+import { NextResponse } from "next/server.js";
 import WebSocket from "ws";
 
 export const runtime = "nodejs";
@@ -23,6 +23,7 @@ type AwfProxyOptions = {
   method?: AwfProxyMethod;
   body?: string;
   contentType?: string | null;
+  headers?: Record<string, string | undefined>;
 };
 
 export async function proxyAwf(path: string, options: AwfProxyOptions = {}): Promise<NextResponse> {
@@ -32,6 +33,16 @@ export async function proxyAwf(path: string, options: AwfProxyOptions = {}): Pro
     const headers = awfHeaders();
     if (body !== undefined && contentType) {
       headers["content-type"] = contentType;
+    }
+    for (const [key, value] of Object.entries(options.headers ?? {})) {
+      if (!value) {
+        continue;
+      }
+      const normalized = key.toLowerCase();
+      if (normalized === "authorization" || normalized === "cookie") {
+        continue;
+      }
+      headers[key] = value;
     }
 
     const response = await fetch(`${awfBaseUrl()}${path}`, {
