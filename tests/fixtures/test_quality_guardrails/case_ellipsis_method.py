@@ -1,0 +1,3 @@
+class TestWidget:
+    def test_placeholder(self):
+        ...
