@@ -19,8 +19,11 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import insert as postgresql_insert
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from sqlalchemy.orm.attributes import set_committed_value
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
@@ -75,6 +78,12 @@ ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
 OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
 OWNED_PATH_ANCESTOR_MATCH_REASON: Final = "OWNED_PATH_ANCESTOR_MATCH"
 OWNED_PATH_WILDCARD_MATCH_REASON: Final = "OWNED_PATH_WILDCARD_MATCH"
+_SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
+    "workspace_id",
+    "secret_name",
+    "kind",
+    "target",
+)
 
 
 @dataclass(frozen=True)
@@ -108,6 +117,12 @@ class WorkspaceEventCreate:
     payload: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True)
+class _IssuedSecretLease:
+    lease: WorkspaceSecretLease
+    created: bool
+
+
 def validation_command_set_hash(commands: list[dict[str, Any]]) -> str:
     """Stable hash for the configured command metadata in a validation run."""
 
@@ -132,6 +147,22 @@ def _resolve_session_dialect_name(
     dialect = getattr(bind, "dialect", None)
     name = getattr(dialect, "name", None)
     return name if isinstance(name, str) else None
+
+
+def _secret_lease_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
+    if dialect_name == "postgresql":
+        return (
+            postgresql_insert(WorkspaceSecretLease)
+            .on_conflict_do_nothing(index_elements=_SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS)
+            .returning(WorkspaceSecretLease.id)
+        )
+    if dialect_name == "sqlite":
+        return (
+            sqlite_insert(WorkspaceSecretLease)
+            .on_conflict_do_nothing(index_elements=_SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS)
+            .returning(WorkspaceSecretLease.id)
+        )
+    return None
 
 
 class TaskRepository:
@@ -1323,8 +1354,9 @@ class SecretLeaseIssue:
 class SecretLeaseRepository:
     """CRUD helpers for local workspace secret lease metadata."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
     async def issue_declared_leases(
         self,
@@ -1336,36 +1368,14 @@ class SecretLeaseRepository:
         created: list[WorkspaceSecretLease] = []
         results: list[WorkspaceSecretLease] = []
         for issue in leases:
-            existing = await self._get_for_declaration(
-                workspace.id,
-                secret_name=issue.secret_name,
-                kind=issue.kind,
-                target=issue.target,
+            issued = await self._issue_declared_lease_if_absent(
+                workspace,
+                issue=issue,
+                now=now,
             )
-            if existing is not None:
-                results.append(existing)
-                continue
-            lease = WorkspaceSecretLease(
-                id=new_secret_lease_id(),
-                workspace_id=workspace.id,
-                attempt_id=issue.attempt_id,
-                secret_name=issue.secret_name,
-                kind=issue.kind,
-                target=issue.target,
-                mode=issue.mode,
-                required=issue.required,
-                provider=issue.provider,
-                ref_digest=issue.ref_digest,
-                status=SECRET_LEASE_STATUS_ISSUED,
-                issued_at=now,
-                expires_at=issue.expires_at,
-                issue_metadata=_sanitize_metadata(issue.issue_metadata),
-                mount_metadata={},
-            )
-            self._session.add(lease)
-            created.append(lease)
-            results.append(lease)
-        await self._session.flush()
+            results.append(issued.lease)
+            if issued.created:
+                created.append(issued.lease)
         if created:
             await self._add_lease_events(
                 workspace,
@@ -1375,6 +1385,67 @@ class SecretLeaseRepository:
                 now=now,
             )
         return results
+
+    async def _issue_declared_lease_if_absent(
+        self,
+        workspace: Workspace,
+        *,
+        issue: SecretLeaseIssue,
+        now: datetime,
+    ) -> _IssuedSecretLease:
+        values = {
+            "id": new_secret_lease_id(),
+            "workspace_id": workspace.id,
+            "attempt_id": issue.attempt_id,
+            "secret_name": issue.secret_name,
+            "kind": issue.kind,
+            "target": issue.target,
+            "mode": issue.mode,
+            "required": issue.required,
+            "provider": issue.provider,
+            "ref_digest": issue.ref_digest,
+            "status": SECRET_LEASE_STATUS_ISSUED,
+            "issued_at": now,
+            "expires_at": issue.expires_at,
+            "issue_metadata": _sanitize_metadata(issue.issue_metadata),
+            "mount_metadata": {},
+        }
+        conflict_guarded, inserted_id = await self._insert_declared_lease_if_absent(values)
+        if inserted_id is not None:
+            lease = await self._session.get(WorkspaceSecretLease, inserted_id)
+            if lease is None:
+                raise RuntimeError(f"inserted secret lease {inserted_id} was not visible")
+            set_committed_value(lease, "issued_at", now)
+            set_committed_value(lease, "expires_at", issue.expires_at)
+            return _IssuedSecretLease(lease=lease, created=True)
+
+        existing = await self._get_for_declaration(
+            workspace.id,
+            secret_name=issue.secret_name,
+            kind=issue.kind,
+            target=issue.target,
+        )
+        if existing is not None:
+            return _IssuedSecretLease(lease=existing, created=False)
+        if conflict_guarded:
+            raise RuntimeError(
+                "secret lease insert hit a declaration conflict but no existing row was visible"
+            )
+
+        lease = WorkspaceSecretLease(**values)
+        self._session.add(lease)
+        await self._session.flush()
+        return _IssuedSecretLease(lease=lease, created=True)
+
+    async def _insert_declared_lease_if_absent(
+        self,
+        values: Mapping[str, Any],
+    ) -> tuple[bool, str | None]:
+        stmt = _secret_lease_insert_if_absent_stmt(self._dialect_name)
+        if stmt is None:
+            return False, None
+        result = await self._session.execute(stmt.values(**values))
+        return True, result.scalar_one_or_none()
 
     async def mark_issued_mounted(
         self,

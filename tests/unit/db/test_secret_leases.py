@@ -8,12 +8,18 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent, WorkspaceSecretLease
-from awf.db.repositories import SecretLeaseIssue, SecretLeaseRepository, WorkspaceRepository
+from awf.db.repositories import (
+    SecretLeaseIssue,
+    SecretLeaseRepository,
+    WorkspaceRepository,
+    _secret_lease_insert_if_absent_stmt,
+)
 from awf.db.session import make_engine, make_session_factory
 
 
@@ -70,6 +76,26 @@ def _lease_issues(now: datetime) -> list[SecretLeaseIssue]:
             issue_metadata={"profile": "secure-local", "declaration_index": 1},
         ),
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("dialect_name", "dialect"),
+    [
+        ("postgresql", postgresql.dialect()),
+        ("sqlite", sqlite.dialect()),
+    ],
+)
+def test_secret_lease_issue_insert_has_conflict_guard(
+    dialect_name: str,
+    dialect: object,
+) -> None:
+    stmt = _secret_lease_insert_if_absent_stmt(dialect_name)
+
+    assert stmt is not None
+    sql = str(stmt.compile(dialect=dialect))
+    assert "ON CONFLICT (workspace_id, secret_name, kind, target) DO NOTHING" in sql
+    assert "RETURNING" in sql
 
 
 async def _events(session: AsyncSession, workspace_id: str) -> list[WorkspaceEvent]:
