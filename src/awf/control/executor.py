@@ -112,6 +112,7 @@ class _MonitorRunnerProto(Protocol):
 _log = get_logger(__name__)
 
 WORKTREE_MISSING_REASON_CODE = "WORKTREE_MISSING"
+PR_REEXECUTION_GUARD_REASON_CODE = "PR_REEXECUTION_GUARD"
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -133,6 +134,12 @@ _REBASE_RECOVERY_OPERATION_IDENTITY_KEYS = (
 class _RebaseRecoveryResult:
     base_sha: str
     head_sha: str
+
+
+@dataclass(frozen=True)
+class _PrReexecutionGuardResult:
+    blocked: bool
+    recovery: dict[str, Any] | None = None
 
 
 class _MonitorRebaseRecoveryError(RuntimeError):
@@ -321,6 +328,13 @@ class WorkspaceExecutor:
         # plan artifact and re-implement the feature mid-merge. Recovery
         # only re-runs validation against the already-pushed work.
         recovery = _get_active_recovery_payload(ws)
+        if recovery is None:
+            guard_result = await self._block_open_pr_reexecution_without_recovery(
+                workspace_id=workspace_id,
+            )
+            if guard_result.blocked:
+                return
+            recovery = guard_result.recovery
         rebase_recovery_result: _RebaseRecoveryResult | None = None
         baseline_coverage: ValidationCoverageResult | None = None
         try:
@@ -1642,6 +1656,61 @@ class WorkspaceExecutor:
             )
             await session.commit()
             return remote_push_branch
+
+    async def _block_open_pr_reexecution_without_recovery(
+        self,
+        *,
+        workspace_id: str,
+    ) -> _PrReexecutionGuardResult:
+        message = "open PR exists; monitor recovery required"
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            persisted = await repo.get_with_operations(workspace_id)
+            if persisted is None:  # pragma: no cover - row disappeared mid-flight
+                return _PrReexecutionGuardResult(blocked=True)
+            if persisted.status != WorkspaceStatus.running.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    persisted,
+                    action="pr_reexecution_guard",
+                    expected=WorkspaceStatus.running,
+                    reason_code="EXECUTOR_STALE_STATUS",
+                )
+                await session.commit()
+                return _PrReexecutionGuardResult(blocked=True)
+            recovery = _get_active_recovery_payload(persisted)
+            if recovery is not None:
+                return _PrReexecutionGuardResult(blocked=False, recovery=recovery)
+            if not persisted.pr_url or persisted.monitor_started_at is None:
+                return _PrReexecutionGuardResult(blocked=False)
+            await repo.add_event(
+                persisted,
+                event_type="workspace.pr_reexecution_blocked",
+                reason_code=PR_REEXECUTION_GUARD_REASON_CODE,
+                payload={
+                    "pr_number": persisted.pr_number,
+                    "pr_url": persisted.pr_url,
+                    "status": persisted.status,
+                },
+            )
+            persisted.failure_reason = FailureReason.infrastructure_failure.value
+            persisted.failure_message = message
+            await repo.transition(
+                persisted,
+                to=WorkspaceStatus.failed,
+                reason_code=PR_REEXECUTION_GUARD_REASON_CODE,
+            )
+            blocked_pr_number = persisted.pr_number
+            blocked_pr_url = persisted.pr_url
+            await session.commit()
+        _log.error(
+            "executor.pr_reexecution_blocked",
+            workspace_id=workspace_id,
+            pr_number=blocked_pr_number,
+            pr_url=blocked_pr_url,
+            reason_code=PR_REEXECUTION_GUARD_REASON_CODE,
+        )
+        return _PrReexecutionGuardResult(blocked=True)
 
     async def _ensure_worktree_available(
         self,

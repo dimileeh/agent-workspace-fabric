@@ -30,7 +30,12 @@ from awf.control.executor import (
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace as WorkspaceModel
-from awf.db.repositories import OperationRepository, ValidationRunRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    ValidationRunRepository,
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
@@ -156,6 +161,45 @@ async def _seed_ready_workspace_with_recovery(
             },
             idempotency_key=f"{source}:{recovery_mode}:{ws.id}",
         )
+        await s.commit()
+        if create_worktree:
+            (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
+        return ws.id
+
+
+async def _seed_open_pr_ready_workspace_without_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    create_worktree: bool = True,
+) -> str:
+    """Insert a post-PR workspace that was corrupted back to ``ready`` without
+    the monitor/operator recovery operation that makes that step-back safe."""
+    async with factory() as s:
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
+            repo_url="git@github.com:dimileeh/aira-agent.git",
+            branch_base="development",
+            task_title="corrupted post-pr ready row",
+            task_prompt=_FEATURE_TASK_PROMPT,
+            agent="codex",
+            test_commands=["pytest -q"],
+            requires_database=False,
+        )
+        await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="X")
+        ws.branch_name = f"awf/{ws.id}"
+        ws.base_commit = "a" * 40
+        ws.monitor_last_commit_sha = "d" * 40
+        ws.compose_project_name = f"awf_{ws.id}"
+        ws.pr_url = "https://github.com/x/y/pull/9"
+        ws.pr_number = 9
+        ws.remote_push_branch = ws.branch_name
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="X")
+        await repo.transition(ws, to=WorkspaceStatus.running, reason_code="X")
+        await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="X")
+        await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="X")
+        await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="PR_OPENED")
+        assert ws.monitor_started_at is not None
+        await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="LEGACY_READY_RESET")
         await s.commit()
         if create_worktree:
             (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
@@ -348,11 +392,16 @@ async def test_executor_skips_planning_and_agent_run_when_recovery_dispatched(
     # Workspace handed off to monitor (no monitor wired in this test ⇒ completed).
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
         assert ws is not None
-        assert ws.status in {
-            WorkspaceStatus.completed.value,
-            WorkspaceStatus.monitoring_pr.value,
-        }
+        assert ws.status == WorkspaceStatus.completed.value
+        assert any(
+            event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_VALIDATION_OK"
+            and event.old_state == WorkspaceStatus.validating.value
+            and event.new_state == WorkspaceStatus.completed.value
+            for event in events
+        )
         # The recovery operation is closed cleanly.
         ops = await OperationRepository(s).list_all(workspace_id=ws_id)
         recovery_ops = [
@@ -543,6 +592,7 @@ async def test_executor_recovery_closes_operation_row_for_rebase_only_mode(
     assert op.finished_at is not None
     assert op.started_at < op.finished_at
     assert len(runs) == 1
+    assert runs[0].tier >= 2
     assert runs[0].target_head_sha == "c" * 40
     assert runs[0].workspace_head_sha == "c" * 40
     rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
@@ -662,6 +712,113 @@ async def test_failed_recovery_operation_includes_reason_code(
 
 
 @pytest.mark.unit
+async def test_open_pr_ready_without_recovery_operation_is_blocked_before_feature_agent(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_open_pr_ready_workspace_without_recovery(factory)
+
+    await executor.execute(ws_id)
+
+    assert _all_adapter_args(fake) == []
+    assert _all_push_and_pr_create_calls(fake) == []
+    post_agent_git_calls = [
+        call.args
+        for call in fake.calls
+        if call.args
+        and call.args[0] == "git"
+        and any(token in call.args for token in {"add", "commit", "rev-list", "merge-base"})
+    ]
+    assert post_agent_git_calls == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    assert ws.failure_reason == "infrastructure_failure"
+    assert ws.failure_message == "open PR exists; monitor recovery required"
+    assert any(
+        event.event_type == "workspace.pr_reexecution_blocked"
+        and event.reason_code == "PR_REEXECUTION_GUARD"
+        and event.payload == {
+            "pr_number": 9,
+            "pr_url": "https://github.com/x/y/pull/9",
+            "status": WorkspaceStatus.running.value,
+        }
+        for event in events
+    )
+    assert any(
+        event.event_type == "workspace.state_changed"
+        and event.reason_code == "PR_REEXECUTION_GUARD"
+        and event.old_state == WorkspaceStatus.running.value
+        and event.new_state == WorkspaceStatus.failed.value
+        for event in events
+    )
+
+
+@pytest.mark.unit
+async def test_open_pr_guard_uses_fresh_recovery_operation_after_claim(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_open_pr_ready_workspace_without_recovery(factory)
+    original_claim_ready = executor._claim_ready
+
+    async def _claim_then_insert_recovery(
+        workspace_id: str,
+        **kwargs: Any,
+    ) -> WorkspaceModel | None:
+        ws = await original_claim_ready(workspace_id, **kwargs)
+        assert ws is not None
+        async with factory() as s:
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.validate,
+                payload={
+                    "source": "pr_monitor",
+                    "action": "validate_only",
+                    "requested_action": "validate",
+                    "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                    "recovery_mode": "validate_only",
+                    "pr_number": 9,
+                    "pr_url": "https://github.com/x/y/pull/9",
+                },
+                idempotency_key=f"pr_monitor:validate_only:{workspace_id}",
+            )
+            await s.commit()
+        return ws
+
+    executor._claim_ready = _claim_then_insert_recovery  # type: ignore[method-assign]
+    _queue_validation_head(fake)
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert _all_adapter_args(fake) == []
+    assert _all_push_and_pr_create_calls(fake) == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.completed.value
+    assert all(event.event_type != "workspace.pr_reexecution_blocked" for event in events)
+    recovery_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(recovery_ops) == 1
+    assert recovery_ops[0].status == OperationStatus.succeeded.value
+
+
+@pytest.mark.unit
 async def test_executor_normal_path_unchanged_when_no_recovery_op(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
@@ -733,11 +890,16 @@ async def test_recovery_skips_push_when_pr_already_exists(
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
         assert ws is not None
-        assert ws.status in {
-            WorkspaceStatus.completed.value,
-            WorkspaceStatus.monitoring_pr.value,
-        }
+        assert ws.status == WorkspaceStatus.completed.value
+        assert any(
+            event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_VALIDATION_OK"
+            and event.old_state == WorkspaceStatus.validating.value
+            and event.new_state == WorkspaceStatus.completed.value
+            for event in events
+        )
 
 
 @pytest.mark.unit
@@ -772,14 +934,23 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
 
     await executor.execute(ws_id)
 
+    assert _all_adapter_args(fake) == []
     assert _all_push_and_pr_create_calls(fake) == []
     assert len(monitor_calls) == 1
     assert monitor_calls[0]["workspace_id"] == ws_id
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert any(
+            event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_VALIDATION_OK"
+            and event.old_state == WorkspaceStatus.validating.value
+            and event.new_state == WorkspaceStatus.monitoring_pr.value
+            for event in events
+        )
 
 
 @pytest.mark.unit
@@ -827,6 +998,7 @@ async def test_rebase_only_recovery_rebases_pushes_and_skips_pr_recreate(
 
     await executor.execute(ws_id)
 
+    assert _all_adapter_args(fake) == []
     assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls)
     assert any(
         call.args[0] == "git" and "push" in call.args and "--force-with-lease" in call.args

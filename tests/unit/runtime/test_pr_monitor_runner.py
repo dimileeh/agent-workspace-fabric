@@ -373,10 +373,11 @@ async def test_auto_merge_dispatches_active_stale_recovery_before_merge(
             ],
         )
         await session.commit()
+    adapter = FakeAdapter()
     runner = make_runner(
         factory=factory,
         cmd=cmd,
-        adapter=FakeAdapter(),
+        adapter=adapter,
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
         initial_review_grace_period_seconds=0,
@@ -403,17 +404,43 @@ async def test_auto_merge_dispatches_active_stale_recovery_before_merge(
         ).get_open_for_workspace_with_merge_inputs(workspace_id)
         workspace = await WorkspaceRepository(session).get(workspace_id)
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+        assert workspace is not None
+        recovery_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "monitor.recovery_dispatched"
+        ]
+        state_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_DISPATCH"
+        ]
 
     assert terminal is True
     assert _gh_pr_merge_calls(cmd) == []
+    assert adapter.calls == []
     assert candidate is not None
     assert candidate.stale is True
     assert candidate.stale_reason == "STALE_TARGET_ADVANCED"
-    assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
     assert len(operations) == 1
     assert operations[0].payload["action"] == "rebase_only"
+    assert operations[0].payload["requested_action"] == "rebase"
+    assert operations[0].payload["recovery_mode"] == "rebase_only"
     assert operations[0].payload["reason_code"] == "STALE_TARGET_ADVANCED"
+    assert len(recovery_events) == 1
+    assert recovery_events[0].reason_code == "RECOVERY_DISPATCH"
+    assert recovery_events[0].payload == {
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "reason": "STALE_TARGET_ADVANCED",
+        "req_action": "rebase",
+        "recovery_mode": "rebase_only",
+    }
+    assert len(state_events) == 1
+    assert state_events[0].old_state == WorkspaceStatus.monitoring_pr.value
+    assert state_events[0].new_state == WorkspaceStatus.ready.value
 
 
 @pytest.mark.unit
@@ -1037,6 +1064,17 @@ async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_conte
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+        recovery_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "monitor.recovery_dispatched"
+        ]
+        state_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_DISPATCH"
+        ]
     assert workspace.status == WorkspaceStatus.ready.value
     assert len(operations) == 1
     operation = operations[0]
@@ -1061,6 +1099,18 @@ async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_conte
         "target_branch": "development",
         "remote_branch": f"awf/{workspace_id}",
     }
+    assert len(recovery_events) == 1
+    assert recovery_events[0].reason_code == "RECOVERY_DISPATCH"
+    assert recovery_events[0].payload == {
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "reason": "validation_insufficient_tier",
+        "req_action": "validate",
+        "recovery_mode": "validate_only",
+    }
+    assert len(state_events) == 1
+    assert state_events[0].old_state == WorkspaceStatus.monitoring_pr.value
+    assert state_events[0].new_state == WorkspaceStatus.ready.value
 
 
 @pytest.mark.unit

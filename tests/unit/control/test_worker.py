@@ -1275,6 +1275,7 @@ class TestRunOnceMonitorRecovery:
 
         assert await worker.run_once() == 1
         await worker.wait_for_execution_tasks()
+        assert executor.calls == []
         assert executor.resume_calls == [monitor_id]
 
     @pytest.mark.unit
