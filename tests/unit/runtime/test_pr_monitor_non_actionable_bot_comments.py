@@ -123,7 +123,6 @@ async def test_only_non_actionable_bot_review_body_does_not_trigger_human_wait(
     assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
     async with factory() as session:
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-    assert [operation.type for operation in operations] != [OperationType.human_wait.value]
     assert not any(operation.type == OperationType.human_wait.value for operation in operations)
 
 
