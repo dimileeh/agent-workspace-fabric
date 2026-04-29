@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -20,7 +21,11 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
-from awf.service.merge_queue import MergeQueueBlocker, list_merge_queue_blockers_for_candidate
+from awf.service.merge_queue import (
+    MergeQueueBlocker,
+    list_merge_queue_blockers_for_candidate,
+    list_merge_queue_blockers_for_workspace,
+)
 
 
 @pytest.fixture
@@ -213,6 +218,74 @@ async def test_non_monitor_recovery_operation_does_not_block_later_candidate(
         )
 
     assert blockers == []
+
+
+@pytest.mark.unit
+async def test_workspace_without_candidate_has_no_merge_queue_blockers(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@github.com:example/service.git",
+            branch_base="development",
+            task_title="No candidate",
+            task_prompt="No candidate yet.",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+        )
+        await session.commit()
+        workspace_id = workspace.id
+
+    async with factory() as session:
+        blockers = await list_merge_queue_blockers_for_workspace(
+            session,
+            workspace_id=workspace_id,
+        )
+
+    assert blockers == []
+
+
+@pytest.mark.unit
+def test_merge_queue_response_helpers_cover_legacy_and_advisory_edges() -> None:
+    now = datetime(2026, 4, 29, 16, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        events=[
+            SimpleNamespace(
+                event_type="workspace.state_changed",
+                new_state=WorkspaceStatus.completed.value,
+                occurred_at=now - timedelta(minutes=1),
+            ),
+            SimpleNamespace(
+                event_type="workspace.state_changed",
+                new_state=WorkspaceStatus.completed.value,
+                occurred_at=now,
+            ),
+        ],
+        status=WorkspaceStatus.completed.value,
+        updated_at=now + timedelta(minutes=1),
+    )
+    assert merge_queue._legacy_workspace_merged_at(workspace) == now
+
+    candidate = SimpleNamespace(
+        completed=False,
+        failed_or_cancelled=False,
+        not_canonical=False,
+        policy_blocked=False,
+        stale=True,
+        stale_reason="ADVISORY_PLAN_ARTIFACT_OVERLAP",
+        manual_merge_required=False,
+        waiting_for_monitor=False,
+        ready=False,
+    )
+    assert (
+        merge_queue._merge_blocker_reason(
+            candidate,
+            stale_reasons=[],
+            policy_findings=[],
+            queue_blockers=[],
+        )
+        == ("workspace_not_terminal", None)
+    )
 
 
 @pytest.mark.unit

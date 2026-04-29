@@ -3,51 +3,41 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime
-from pathlib import Path
 from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import FileResponse
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.api.deps import get_db_session, require_api_token
-from awf.common.config import get_settings
+from awf.api.schemas import WorkspaceArtifactListResponse, WorkspaceArtifactResponse
 from awf.db.repositories import WorkspaceRepository
 from awf.service.artifacts import (
-    ArtifactMetadata,
+    DEFAULT_ARTIFACT_LIST_LIMIT,
     ArtifactNotFoundError,
     ArtifactPathError,
-    artifact_id,
-    artifact_kind,
+    _artifact_id,
+    _artifact_kind,
+    _list_artifacts,
+    _workspace_artifact_dir,
     get_downloadable_artifact,
-    list_artifacts,
-    workspace_artifact_dir,
+    list_workspace_artifacts_metadata,
 )
 
 router = APIRouter(prefix="/v1/workspaces/{workspace_id}/artifacts", tags=["artifacts"])
 
-DEFAULT_ARTIFACT_LIST_LIMIT = 50
-
-
-class WorkspaceArtifactResponse(BaseModel):
-    artifact_id: str
-    workspace_id: str
-    name: str
-    relative_path: str
-    path: str
-    kind: str
-    size_bytes: int
-    modified_at: datetime
-
-
-class WorkspaceArtifactListResponse(BaseModel):
-    items: list[WorkspaceArtifactResponse]
-    next_cursor: str | None = None
-    has_more: bool = False
-    limit: int = DEFAULT_ARTIFACT_LIST_LIMIT
-    cursor: str | None = None
+__all__ = [
+    "DEFAULT_ARTIFACT_LIST_LIMIT",
+    "WorkspaceArtifactListResponse",
+    "WorkspaceArtifactResponse",
+    "_artifact_id",
+    "_artifact_kind",
+    "_list_artifacts",
+    "_require_workspace",
+    "_workspace_artifact_dir",
+    "download_workspace_artifact",
+    "list_workspace_artifacts",
+]
 
 
 @router.get(
@@ -59,14 +49,13 @@ async def list_workspace_artifacts(
     workspace_id: str,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceArtifactListResponse:
-    await _require_workspace(session, workspace_id)
-    artifact_dir = _workspace_artifact_dir(workspace_id)
-    items = await asyncio.to_thread(_list_artifacts, workspace_id, artifact_dir)
-    return WorkspaceArtifactListResponse(
-        items=items,
-        limit=DEFAULT_ARTIFACT_LIST_LIMIT,
-        cursor=None,
+    response = await list_workspace_artifacts_metadata(
+        session,
+        workspace_id=workspace_id,
     )
+    if response is None:
+        raise _workspace_not_found(workspace_id)
+    return response
 
 
 @router.get(
@@ -110,37 +99,14 @@ async def download_workspace_artifact(
 
 
 async def _require_workspace(session: AsyncSession, workspace_id: str) -> None:
+    """Backward-compatible 404 helper retained for direct importers."""
+
     if not await WorkspaceRepository(session).exists(workspace_id):
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
-        )
+        raise _workspace_not_found(workspace_id)
 
 
-def _workspace_artifact_dir(workspace_id: str) -> Path:
-    return workspace_artifact_dir(get_settings().work_dir, workspace_id)
-
-
-def _list_artifacts(workspace_id: str, artifact_dir: Path) -> list[WorkspaceArtifactResponse]:
-    return [_artifact_response(item) for item in list_artifacts(workspace_id, artifact_dir)]
-
-
-def _artifact_response(item: ArtifactMetadata) -> WorkspaceArtifactResponse:
-    return WorkspaceArtifactResponse(
-        artifact_id=item.artifact_id,
-        workspace_id=item.workspace_id,
-        name=item.name,
-        relative_path=item.relative_path,
-        path=str(item.path),
-        kind=item.kind,
-        size_bytes=item.size_bytes,
-        modified_at=item.modified_at,
+def _workspace_not_found(workspace_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
     )
-
-
-def _artifact_id(workspace_id: str, relative_path: str) -> str:
-    return artifact_id(workspace_id, relative_path)
-
-
-def _artifact_kind(path: Path) -> str:
-    return artifact_kind(path)

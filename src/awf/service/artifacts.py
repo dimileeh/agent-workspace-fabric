@@ -1,13 +1,22 @@
-"""Safe filesystem access for workspace artifacts."""
+"""Safe filesystem access and shared metadata builders for workspace artifacts."""
 
 from __future__ import annotations
 
+import asyncio
 import mimetypes
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
 from os import stat_result
 from pathlib import Path
+
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from awf.api.schemas import WorkspaceArtifactListResponse, WorkspaceArtifactResponse
+from awf.common.config import get_settings
+from awf.db.repositories import WorkspaceRepository
+
+DEFAULT_ARTIFACT_LIST_LIMIT = 50
 
 
 class ArtifactPathError(ValueError):
@@ -43,9 +52,37 @@ class DownloadableArtifact:
     stat_result: stat_result
 
 
+async def list_workspace_artifacts_metadata(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    work_dir: str | Path | None = None,
+) -> WorkspaceArtifactListResponse | None:
+    """Return safe artifact metadata for one workspace, or ``None`` if missing."""
+
+    if not await WorkspaceRepository(session).exists(workspace_id):
+        return None
+    artifact_dir = _workspace_artifact_dir(workspace_id, work_dir=work_dir)
+    items = await asyncio.to_thread(_list_artifacts, workspace_id, artifact_dir)
+    return WorkspaceArtifactListResponse(
+        items=items,
+        limit=DEFAULT_ARTIFACT_LIST_LIMIT,
+        cursor=None,
+    )
+
+
 def workspace_artifact_dir(work_dir: str | Path, workspace_id: str) -> Path:
     """Return the managed artifact root for a workspace."""
     return Path(work_dir) / "artifacts" / workspace_id
+
+
+def _workspace_artifact_dir(
+    workspace_id: str,
+    *,
+    work_dir: str | Path | None = None,
+) -> Path:
+    root = Path(work_dir) if work_dir is not None else Path(get_settings().work_dir)
+    return workspace_artifact_dir(root, workspace_id)
 
 
 def list_artifacts(workspace_id: str, artifact_dir: Path) -> list[ArtifactMetadata]:
@@ -83,6 +120,23 @@ def list_artifacts(workspace_id: str, artifact_dir: Path) -> list[ArtifactMetada
     return sorted(items, key=lambda item: item.relative_path)
 
 
+def _list_artifacts(workspace_id: str, artifact_dir: Path) -> list[WorkspaceArtifactResponse]:
+    return [_artifact_response(item) for item in list_artifacts(workspace_id, artifact_dir)]
+
+
+def _artifact_response(item: ArtifactMetadata) -> WorkspaceArtifactResponse:
+    return WorkspaceArtifactResponse(
+        artifact_id=item.artifact_id,
+        workspace_id=item.workspace_id,
+        name=item.name,
+        relative_path=item.relative_path,
+        path=str(item.path),
+        kind=item.kind,
+        size_bytes=item.size_bytes,
+        modified_at=item.modified_at,
+    )
+
+
 def get_downloadable_artifact(
     *,
     workspace_id: str,
@@ -118,9 +172,17 @@ def artifact_id(workspace_id: str, relative_path: str) -> str:
     return f"art_{digest}"
 
 
+def _artifact_id(workspace_id: str, relative_path: str) -> str:
+    return artifact_id(workspace_id, relative_path)
+
+
 def artifact_kind(path: Path) -> str:
     suffix = path.suffix.lower().lstrip(".")
     return suffix or "file"
+
+
+def _artifact_kind(path: Path) -> str:
+    return artifact_kind(path)
 
 
 def content_type_for(path: Path) -> str:
