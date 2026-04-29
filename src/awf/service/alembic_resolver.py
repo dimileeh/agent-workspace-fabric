@@ -13,17 +13,18 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-import warnings
 from collections import Counter
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from alembic.script.revision import ResolutionError, RevisionError
+from alembic.script.base import Script
+from alembic.script.revision import ResolutionError, RevisionError, RevisionMap
 
 
 class AlembicResolveStatus(StrEnum):
@@ -66,6 +67,7 @@ class AlembicResolveResult:
 
 
 RevisionIdFactory = Callable[[Sequence[str]], str]
+RevisionReferenceType = Literal["down_revision", "dependencies"]
 
 
 class AlembicMergeResolver:
@@ -153,10 +155,23 @@ def _load_script_directory(repo_path: Path) -> tuple[ScriptDirectory, Path] | No
 
 def _safe_heads(script: ScriptDirectory) -> tuple[str, ...] | AlembicResolveResult:
     try:
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            heads = tuple(sorted(script.get_heads()))
-            tuple(script.walk_revisions())
+        # Preflight the loaded scripts directly so duplicate/missing graph
+        # detection does not depend on Alembic warning message text.
+        revisions = tuple(script._load_revisions())
+        graph_result = _unsafe_loaded_revision_graph(revisions)
+        if graph_result is not None:
+            return graph_result
+
+        revision_map = RevisionMap(lambda: revisions)
+        heads = tuple(sorted(revision_map.heads))
+        tuple(
+            revision_map.iterate_revisions(
+                "heads",
+                "base",
+                inclusive=True,
+                assert_relative_length=False,
+            )
+        )
     except SyntaxError as exc:
         return _refused_graph_result(
             reason_code="ALEMBIC_GRAPH_MALFORMED",
@@ -176,33 +191,103 @@ def _safe_heads(script: ScriptDirectory) -> tuple[str, ...] | AlembicResolveResu
             exc=exc,
         )
 
-    duplicate_revisions = sorted(
-        revision for revision, count in Counter(heads).items() if count > 1
-    )
-    if duplicate_revisions:
-        return AlembicResolveResult(
-            status=AlembicResolveStatus.refused,
-            reason_code="ALEMBIC_GRAPH_UNSAFE",
-            heads=heads,
-            message="Alembic revision graph is unsafe to merge automatically.",
-            details={"duplicate_revisions": duplicate_revisions},
-        )
-
-    unsafe_warnings = [
-        str(warning.message)
-        for warning in caught
-        if _is_unsafe_alembic_warning(str(warning.message))
-    ]
-    if unsafe_warnings:
-        return AlembicResolveResult(
-            status=AlembicResolveStatus.refused,
-            reason_code="ALEMBIC_GRAPH_UNSAFE",
-            heads=heads,
-            message="Alembic revision graph is unsafe to merge automatically.",
-            details={"warnings": unsafe_warnings},
-        )
-
     return heads
+
+
+def _unsafe_loaded_revision_graph(
+    revisions: Sequence[Script],
+) -> AlembicResolveResult | None:
+    revision_ids = tuple(revision.revision for revision in revisions)
+    duplicate_revisions = sorted(
+        revision for revision, count in Counter(revision_ids).items() if count > 1
+    )
+    branch_labels = {
+        branch_label
+        for revision in revisions
+        for branch_label in revision.branch_labels
+    }
+    known_targets = set(revision_ids) | branch_labels
+    missing_down_revisions = _missing_revision_references(
+        revisions=revisions,
+        known_targets=known_targets,
+        reference_type="down_revision",
+    )
+    missing_dependencies = _missing_revision_references(
+        revisions=revisions,
+        known_targets=known_targets,
+        reference_type="dependencies",
+    )
+    details: dict[str, object] = {}
+    if duplicate_revisions:
+        details["duplicate_revisions"] = duplicate_revisions
+    if missing_down_revisions:
+        details["missing_down_revisions"] = missing_down_revisions
+    if missing_dependencies:
+        details["missing_dependencies"] = missing_dependencies
+
+    if details:
+        return AlembicResolveResult(
+            status=AlembicResolveStatus.refused,
+            reason_code="ALEMBIC_GRAPH_UNSAFE",
+            heads=_loaded_revision_heads(revisions),
+            message="Alembic revision graph is unsafe to merge automatically.",
+            details=details,
+        )
+
+    return None
+
+
+def _missing_revision_references(
+    *,
+    revisions: Sequence[Script],
+    known_targets: set[str],
+    reference_type: RevisionReferenceType,
+) -> list[str]:
+    missing = {
+        reference
+        for revision in revisions
+        for reference in _revision_references(revision, reference_type=reference_type)
+        if reference not in known_targets
+    }
+    return sorted(missing)
+
+
+def _loaded_revision_heads(revisions: Sequence[Script]) -> tuple[str, ...]:
+    branch_label_targets = {
+        branch_label: revision.revision
+        for revision in revisions
+        for branch_label in revision.branch_labels
+    }
+    referenced = {
+        branch_label_targets.get(reference, reference)
+        for revision in revisions
+        for reference in _revision_references(revision, reference_type="down_revision")
+    }
+    return tuple(
+        sorted(
+            revision.revision
+            for revision in revisions
+            if revision.revision not in referenced
+        )
+    )
+
+
+def _revision_references(
+    revision: Script,
+    *,
+    reference_type: RevisionReferenceType,
+) -> tuple[str, ...]:
+    if reference_type == "down_revision":
+        return _as_revision_tuple(revision.down_revision)
+    return _as_revision_tuple(revision.dependencies)
+
+
+def _as_revision_tuple(value: str | Sequence[str] | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(value)
 
 
 def _refused_graph_result(
@@ -221,10 +306,6 @@ def _refused_graph_result(
             "error": str(exc),
         },
     )
-
-
-def _is_unsafe_alembic_warning(message: str) -> bool:
-    return "is present more than once" in message or "is not present" in message
 
 
 def _relative_path(path: Path, root: Path) -> str | None:
