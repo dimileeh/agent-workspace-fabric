@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -30,7 +28,6 @@ __all__ = [
     "_list_artifacts",
     "_require_workspace",
     "_workspace_artifact_dir",
-    "asyncio",
     "list_workspace_artifacts",
 ]
 
