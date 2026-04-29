@@ -415,12 +415,12 @@ class ControlWorker:
         if finding is not None and finding.decision == "remonitor_workspace":
             await self._record_recoverable_runtime_stranding(candidate, snapshot, finding)
             return
+        if finding is not None and finding.decision == "defer_retry_policy":
+            await self._record_recoverable_runtime_stranding(candidate, snapshot, finding)
+            return
         if candidate.compose_project_name and snapshot.stack_state == "running":
             await self._record_stale_active_execution_detected(candidate, snapshot)
             return
-
-        if finding is not None and finding.decision == "defer_retry_policy":
-            await self._record_recoverable_runtime_stranding(candidate, snapshot, finding)
 
     async def _record_stale_active_execution_detected(
         self,
