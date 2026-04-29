@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from pathlib import Path
 
 from awf.node.compose_manager import ComposeService
 from awf.profiles.models import WorkspaceProfile
@@ -35,24 +36,51 @@ AGENT_AUTH_ENV_VARS = (
 )
 
 
-def profile_services(profile: WorkspaceProfile) -> tuple[ComposeService, ...]:
+def profile_services(
+    profile: WorkspaceProfile,
+    *,
+    base_path: Path | None = None,
+) -> tuple[ComposeService, ...]:
     return tuple(
         ComposeService(
             name=s.name,
             image=s.image,
-            build_context=s.build_context,
+            build_context=_resolve_repo_path(s.build_context, base_path=base_path),
             dockerfile=s.dockerfile,
-            env_file=s.env_file,
+            env_file=_resolve_repo_path(s.env_file, base_path=base_path),
             environment=tuple(s.environment.items()),
             depends_on=tuple(s.depends_on),
             healthcheck_cmd=s.healthcheck_cmd,
             ports=tuple(s.ports),
             command=s.command,
-            volumes=tuple(s.volumes),
+            volumes=tuple(
+                (_resolve_volume_source(source, base_path=base_path), target)
+                for source, target in s.volumes
+            ),
             privileged=s.privileged,
         )
         for s in profile.services
     )
+
+
+def _resolve_repo_path(value: str | None, *, base_path: Path | None) -> str | None:
+    if value is None or base_path is None:
+        return value
+    path = Path(value)
+    if path.is_absolute():
+        return value
+    return str((base_path / path).resolve())
+
+
+def _resolve_volume_source(source: str, *, base_path: Path | None) -> str:
+    if base_path is None:
+        return source
+    path = Path(source)
+    if path.is_absolute():
+        return source
+    if source.startswith(".") or "/" in source:
+        return str((base_path / path).resolve())
+    return source
 
 
 def profile_agent_environment(profile: WorkspaceProfile) -> tuple[tuple[str, str], ...]:

@@ -78,7 +78,7 @@ class ComposeStackLauncher:
                 profile_agent_environment(profile)
             ),
             docker_mode=profile.docker.mode.value,
-            services=profile_services(profile),
+            services=profile_services(profile, base_path=layout.worktree_path),
             auth_mounts=tuple(auth_mounts),
             git_name=DEFAULT_GIT_AUTHOR_NAME,
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
