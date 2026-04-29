@@ -1128,7 +1128,7 @@ async def test_validate_endpoint_returns_operation_response_and_coalesces_active
 
 
 @pytest.mark.unit
-async def test_rebase_endpoint_returns_operation_response_and_coalesces_active_request(
+async def test_rebase_endpoint_returns_operation_response_and_replays_exact_key(
     client: AsyncClient,
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
@@ -1150,6 +1150,15 @@ async def test_rebase_endpoint_returns_operation_response_and_coalesces_active_r
     replay = await client.post(
         f"/v1/workspaces/{workspace_id}/rebase",
         json={"reason": "base branch advanced"},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": "rebase-first",
+            "If-Match": "7",
+        },
+    )
+    fresh_key = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
         headers={**_auth(monkeypatch), "Idempotency-Key": "rebase-second"},
     )
 
@@ -1157,6 +1166,15 @@ async def test_rebase_endpoint_returns_operation_response_and_coalesces_active_r
     assert replay.status_code == 202
     payload = first.json()
     assert replay.json()["id"] == payload["id"]
+    assert fresh_key.status_code == 409
+    assert fresh_key.json()["detail"] == {
+        "error_code": "WORKSPACE_STATE_NOT_REBASEABLE",
+        "message": "Workspace is not in a state eligible for rebase recovery.",
+        "detail": {
+            "status": WorkspaceStatus.ready.value,
+            "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+        },
+    }
     assert payload["workspace_id"] == workspace_id
     assert payload["type"] == "rebase"
     assert payload["status"] == "pending"

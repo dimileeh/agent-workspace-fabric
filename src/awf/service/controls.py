@@ -732,7 +732,13 @@ class WorkspaceControlService:
         )
         workspace = prepared.workspace
         replay = prepared.replay
+        current = WorkspaceStatus(workspace.status)
         if replay is not None:
+            if (
+                prepared.kind != _PreparedOperationKind.exact_replay
+                and current not in _REBASE_ELIGIBLE_STATUSES
+            ):
+                raise WorkspaceRebaseStateError(workspace)
             return replay
 
         destructive_conflict = await _find_active_operation(
@@ -757,7 +763,6 @@ class WorkspaceControlService:
         if active_rebase is not None:
             raise WorkspaceRebaseActiveConflictError(active_rebase)
 
-        current = WorkspaceStatus(workspace.status)
         if current not in _REBASE_ELIGIBLE_STATUSES:
             raise WorkspaceRebaseStateError(workspace)
         if not workspace.pr_url:
