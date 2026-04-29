@@ -514,6 +514,21 @@ Events response shape:
 }
 ```
 
+List and download workspace artifacts through the protected observability API:
+
+```bash
+curl -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/artifacts"
+
+curl -OJ -H "Authorization: Bearer $AWF_API_TOKEN" \
+  "http://localhost:8000/v1/workspaces/ws_123/artifacts/download?path=logs/stdout.txt"
+```
+
+Artifact downloads are limited to regular files under
+`<AWF_WORK_DIR>/artifacts/<workspace_id>` using POSIX-style relative paths.
+Absolute paths, traversal segments, backslashes, symlinks, and missing files are
+rejected without reading arbitrary host paths.
+
 ## CLI Surface
 
 The CLI is intentionally thin and JSON-first.

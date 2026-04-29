@@ -113,6 +113,7 @@ All endpoints under `/v1`, all mutating endpoints accept `Idempotency-Key`.
 | `/v1/workspaces/{id}` | `DELETE` | Destroy (cleanup) → returns operation record |
 | `/v1/workspaces/{id}/logs` | `GET` | Log metadata + retrieval URLs |
 | `/v1/workspaces/{id}/artifacts` | `GET` | Artifact metadata + retrieval URLs |
+| `/v1/workspaces/{id}/artifacts/download?path={relative_path}` | `GET` | Token-protected artifact bytes from the workspace artifact root only |
 | `/v1/operations/{id}` | `GET` | Async operation status |
 | `/v1/events` | `GET` | Event stream with cursor + filters |
 
