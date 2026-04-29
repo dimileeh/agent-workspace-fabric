@@ -1147,6 +1147,15 @@ async def test_monitor_rebase_recovery_reports_git_failures(
         runner.queue_result(returncode=returncode, stdout=stdout, stderr=stderr)
     executor = _executor_with_runner(runner, tmp_path)
 
+    async def noop_begin_operation(**_: object) -> None:
+        return None
+
+    async def noop_finish_operation(*_: object, **__: object) -> None:
+        return None
+
+    executor._begin_rebase_recovery_operation = noop_begin_operation  # type: ignore[method-assign]
+    executor._finish_rebase_recovery_operation = noop_finish_operation  # type: ignore[method-assign]
+
     with pytest.raises(_MonitorRebaseRecoveryError, match=message):
         await executor._run_monitor_rebase_recovery(
             workspace_id="ws_rebase",
@@ -1155,4 +1164,5 @@ async def test_monitor_rebase_recovery_reports_git_failures(
             branch_name="awf/ws",
             remote_branch="awf/ws",
             reason="stale",
+            recovery_payload={},
         )

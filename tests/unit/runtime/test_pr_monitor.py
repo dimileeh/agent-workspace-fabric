@@ -90,6 +90,132 @@ def _status(
     )
 
 
+# ── Auto-merge gate matrix ────────────────────────────────────────────────
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("case", "status", "state", "expected_type", "expected_reason"),
+    [
+        (
+            "unresolved inline thread",
+            _status(inline=(_thread("T_inline"),)),
+            MonitorState(),
+            AddressComments,
+            None,
+        ),
+        (
+            "unresolved top-level review comment",
+            _status(reviews=(_review("C_review"),)),
+            MonitorState(),
+            AddressComments,
+            None,
+        ),
+        (
+            "blocking policy checklist comment",
+            _status(reviews=(_review("C_policy", blocks_merge=True),)),
+            MonitorState(),
+            NotifyHuman,
+            None,
+        ),
+        (
+            "pending ci",
+            _status(check_state=CheckState.PENDING),
+            MonitorState(),
+            WaitForCI,
+            "pending_checks",
+        ),
+        (
+            "failing ci",
+            _status(check_state=CheckState.FAILURE),
+            MonitorState(),
+            ReportCiFailure,
+            None,
+        ),
+        (
+            "unknown mergeability",
+            _status(mergeable=MergeableState.UNKNOWN),
+            MonitorState(),
+            WaitForCI,
+            "unknown_mergeable_state",
+        ),
+        (
+            "unknown merge-state status",
+            _status(merge_state_status=MergeStateStatus.UNKNOWN),
+            MonitorState(),
+            WaitForCI,
+            "unknown_mergeable_state",
+        ),
+        (
+            "base behind count",
+            _status(base_behind=1),
+            MonitorState(),
+            SyncBase,
+            None,
+        ),
+        (
+            "github behind status",
+            _status(merge_state_status=MergeStateStatus.BEHIND),
+            MonitorState(),
+            SyncBase,
+            None,
+        ),
+        (
+            "github dirty status",
+            _status(merge_state_status=MergeStateStatus.DIRTY),
+            MonitorState(),
+            SyncBase,
+            None,
+        ),
+        (
+            "legacy conflicting mergeability",
+            _status(mergeable=MergeableState.CONFLICTING),
+            MonitorState(),
+            SyncBase,
+            None,
+        ),
+        (
+            "branch protection blocked",
+            _status(merge_state_status=MergeStateStatus.BLOCKED),
+            MonitorState(),
+            NotifyHuman,
+            None,
+        ),
+        (
+            "branch protection hook pending",
+            _status(merge_state_status=MergeStateStatus.HAS_HOOKS),
+            MonitorState(),
+            NotifyHuman,
+            None,
+        ),
+        (
+            "unresolved human-deferred feedback",
+            _status(inline=(_thread("T_deferred", author="dimileeh"),)),
+            MonitorState(threads_addressed_ids={"T_deferred": "defer"}),
+            NotifyHuman,
+            None,
+        ),
+    ],
+    ids=lambda value: value if isinstance(value, str) else None,
+)
+def test_auto_merge_does_not_merge_when_any_snapshot_gate_is_open(
+    case: str,
+    status: PRStatus,
+    state: MonitorState,
+    expected_type: type,
+    expected_reason: str | None,
+) -> None:
+    del case
+
+    action = decide(status, state, MonitorConfig(auto_merge=True))
+
+    assert not isinstance(action, Merge)
+    assert isinstance(action, expected_type)
+    if expected_reason is not None:
+        assert isinstance(action, WaitForCI)
+        assert action.reason == expected_reason
+
+
 # ── Terminal upstream states ───────────────────────────────────────────────
 
 
