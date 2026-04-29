@@ -324,7 +324,12 @@ def build_mcp_server(
     ) -> dict[str, Any] | None:
         """Fetch compose/container runtime state for one workspace."""
         result = await service.get_runtime(workspace_id)
-        return result.model_dump(mode="json") if result is not None else None
+        if result is None:
+            return None
+        payload = result.model_dump(mode="json")
+        if payload.get("runtime_health") is None:
+            payload.pop("runtime_health", None)
+        return payload
 
     @mcp.tool(name="awf_list_workspace_operations")
     async def awf_list_workspace_operations(
