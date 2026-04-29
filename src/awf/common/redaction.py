@@ -15,7 +15,7 @@ _BEARER_RE = re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=-]{8,})", re.IGNORECASE)
 _TOKEN_ASSIGNMENT_RE = re.compile(
     r"\b(?P<key>"
     r"(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API_TOKEN|AUTH_TOKEN|GITHUB_TOKEN)"
-    r"|GH_TOKEN|GITHUB_TOKEN|AWF_GITHUB_TOKEN"
+    r"|GH_TOKEN"
     r")\b"
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<quote>[\"']?)"

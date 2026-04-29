@@ -49,6 +49,8 @@ def test_redact_secrets_preserves_context_while_removing_known_secret_bodies() -
     ("text", "expected"),
     [
         ("GH_TOKEN='gho_fakeGitHubOauthToken123456'", "GH_TOKEN='<redacted>'"),
+        ("GITHUB_TOKEN='ghp_fakeGitHubToken123456'", "GITHUB_TOKEN='<redacted>'"),
+        ("AWF_GITHUB_TOKEN='ghp_fakeAwfGitHubToken123456'", "AWF_GITHUB_TOKEN='<redacted>'"),
         ('AWF_AUTH_TOKEN="awf-auth-value-123456"', 'AWF_AUTH_TOKEN="<redacted>"'),
         ("CUSTOM_API_TOKEN: custom-api-token-123456", "CUSTOM_API_TOKEN: <redacted>"),
         ("curl -H 'Authorization: Bearer bearerToken123456'", "Authorization: Bearer <redacted>"),
