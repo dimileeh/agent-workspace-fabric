@@ -119,6 +119,16 @@ class _FailingLogSink:
         raise RuntimeError("log sink unavailable")
 
 
+class _RecordingLogSink:
+    stream_id = "monitor.log"
+
+    def __init__(self) -> None:
+        self.lines: list[str] = []
+
+    async def write(self, data: str) -> None:
+        self.lines.append(data)
+
+
 class _ExplodingRunner:
     async def run(self, args: list[str], **_kwargs: object) -> object:
         del args
@@ -1264,6 +1274,121 @@ async def test_transient_github_merge_error_retries_without_human_escalation(
 
 
 @pytest.mark.unit
+async def test_non_transient_github_merge_error_records_failed_audit_and_redacts(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    secret_stderr = (
+        "Resource not accessible by integration for "
+        "https://user:raw_secret_value@github.com/org/repo "
+        "Authorization: Bearer opaqueBearerToken123"
+    )
+    cmd.queue_result(returncode=1, stderr=secret_stderr)
+    cmd.queue_result(returncode=0)  # gh pr comment fallback
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+    monitor_log = _RecordingLogSink()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=monitor_log,  # type: ignore[arg-type]
+    )
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert [call.args[:3] for call in cmd.calls] == [
+        ["gh", "pr", "merge"],
+        ["gh", "pr", "comment"],
+    ]
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(
+            workspace_id=workspace_id,
+            limit=20,
+        )
+        attempt_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.merge_attempt",
+            limit=10,
+        )
+        result_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.merge_result",
+            limit=10,
+        )
+
+    merge_operation = next(
+        operation
+        for operation in operations
+        if operation.type == "monitor_state"
+        and isinstance(operation.payload, dict)
+        and operation.payload.get("action") == "merge"
+    )
+    assert merge_operation.status == OperationStatus.failed.value
+    assert merge_operation.error_code == "GITHUB_MERGE_FAILED"
+    assert merge_operation.error_message is not None
+    assert "raw_secret_value" not in merge_operation.error_message
+    assert "opaqueBearerToken123" not in merge_operation.error_message
+    assert "https://[redacted]@github.com/org/repo" in merge_operation.error_message
+
+    assert len(attempt_events) == 1
+    assert attempt_events[0].payload == {
+        "schema": "control_audit.v1",
+        "actor": "pr_monitor",
+        "source": "pr_monitor",
+        "action": "merge",
+        "outcome": "attempted",
+        "reason_code": "MERGE",
+        "operation_id": merge_operation.id,
+        "operation_type": "monitor_state",
+        "pr_number": 42,
+        "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+        "source_head_sha": "abc123",
+        "source_base_sha": "a" * 40,
+        "target_branch": "development",
+        "remote_branch": f"awf/{workspace_id}",
+        "branch_name": f"awf/{workspace_id}",
+        "evidence": {"log_stream_refs": {"monitor": "monitor.log"}},
+    }
+    assert len(result_events) == 1
+    assert result_events[0].reason_code == "GITHUB_MERGE_FAILED"
+    assert result_events[0].payload is not None
+    assert result_events[0].payload["outcome"] == "failed"
+    assert result_events[0].payload["operation_id"] == merge_operation.id
+    assert result_events[0].payload["pr_number"] == 42
+    assert result_events[0].payload["pr_url"] == (
+        "https://github.com/dimileeh/aira-web/pull/42"
+    )
+    assert result_events[0].payload["source_head_sha"] == "abc123"
+    assert result_events[0].payload["target_branch"] == "development"
+    assert result_events[0].payload["evidence"]["operation"] == "merge_pr"
+    assert result_events[0].payload["evidence"]["log_stream_refs"] == {
+        "monitor": "monitor.log"
+    }
+    assert "raw_secret_value" not in repr(result_events[0].payload)
+    assert "opaqueBearerToken123" not in repr(result_events[0].payload)
+    assert "https://[redacted]@github.com/org/repo" in repr(result_events[0].payload)
+
+
+@pytest.mark.unit
 async def test_transient_human_notification_comment_error_retries_without_crashing(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2067,6 +2192,74 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
 
 
 @pytest.mark.unit
+async def test_execute_report_ci_failure_push_failure_records_failed_audit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="partial CI fix")
+    workspace_id = await seed_monitoring_workspace(factory)
+    (tmp_path / "worktrees" / workspace_id).mkdir(parents=True)
+    cmd.queue_result(returncode=0, stdout="")
+    cmd.queue_result(
+        returncode=128,
+        stderr=(
+            "fatal: unable to access "
+            "https://user:ghp_should_not_persist@github.com/org/repo"
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=ReportCiFailure(
+            failures=(CheckFailure(name="pytest", conclusion="FAILURE", log_excerpt="traceback"),)
+        ),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert state.iter_count == 1
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+    ci_operation = next(operation for operation in operations if operation.type == "ci_repair")
+    assert ci_operation.status == OperationStatus.failed.value
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "GIT_PUSH_FAILED"
+    assert push_events[0].payload is not None
+    assert push_events[0].payload["action"] == "ci_repair_push"
+    assert push_events[0].payload["outcome"] == "failed"
+    assert push_events[0].payload["operation_id"] == ci_operation.id
+    assert push_events[0].payload["operation_type"] == "ci_repair"
+    assert push_events[0].payload["evidence"]["operation"] == "git push"
+    assert push_events[0].payload["evidence"]["returncode"] == 128
+    assert "ghp_should_not_persist" not in repr(push_events[0].payload)
+    assert "https://[redacted]@github.com/org/repo" in repr(push_events[0].payload)
+
+
+@pytest.mark.unit
 async def test_monitor_adapter_cleanup_failure_terminates_without_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2153,6 +2346,88 @@ async def test_monitor_comment_cleanup_failure_terminates_without_push(
         assert ws is not None
         assert ws.status == WorkspaceStatus.failed.value
         assert ws.events[-1].reason_code == "EXEC_PROCESS_CLEANUP_FAILED"
+
+
+@pytest.mark.unit
+async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requeues(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    adapter.queue(stdout="fixed locally")
+    workspace_id = await seed_monitoring_workspace(factory)
+    thread = ReviewThread(
+        thread_id="T_push",
+        path="src/app.py",
+        line=12,
+        body_excerpt="please fix",
+        author="reviewer",
+    )
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(
+        returncode=128,
+        stderr=(
+            "fatal: unable to access "
+            "https://user:ghp_should_not_persist@github.com/org/repo"
+        ),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=AddressComments(threads=(thread,), review_comments=()),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(threads=(thread,)),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert state.iter_count == 1
+    assert "T_push" not in state.threads_addressed_ids
+    assert sum(call.args[:3] == ["gh", "api", "graphql"] for call in cmd.calls) == 1
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+        resolution_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.comment_resolution",
+            limit=10,
+        )
+    comment_operation = next(
+        operation for operation in operations if operation.type == "comment_repair"
+    )
+    assert comment_operation.status == OperationStatus.failed.value
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "GIT_PUSH_FAILED"
+    assert push_events[0].payload is not None
+    assert push_events[0].payload["action"] == "comment_repair_push"
+    assert push_events[0].payload["outcome"] == "failed"
+    assert push_events[0].payload["operation_id"] == comment_operation.id
+    assert push_events[0].payload["operation_type"] == "comment_repair"
+    assert push_events[0].payload["evidence"]["operation"] == "git push"
+    assert push_events[0].payload["evidence"]["returncode"] == 128
+    assert "ghp_should_not_persist" not in repr(push_events[0].payload)
+    assert "https://[redacted]@github.com/org/repo" in repr(push_events[0].payload)
+    assert resolution_events == []
 
 
 @pytest.mark.unit
@@ -2266,6 +2541,67 @@ async def test_execute_sync_base_records_branch_push_audit(
         "remote_branch": f"awf/{workspace_id}",
         "branch_name": f"awf/{workspace_id}",
     }
+
+
+@pytest.mark.unit
+async def test_execute_sync_base_push_failure_records_failed_audit(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd.queue_result(returncode=0)  # merge --abort
+    cmd.queue_result(returncode=0)  # fetch
+    cmd.queue_result(returncode=0)  # merge
+    cmd.queue_result(
+        returncode=128,
+        stderr="remote: invalid token ghp_should_not_persist",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=SyncBase(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_status_for_helpers(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert state.iter_count == 1
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=20)
+        push_events = await WorkspaceEventRepository(s).list(
+            workspace_id=workspace_id,
+            event_type="workspace.audit.git_push",
+            limit=10,
+        )
+    sync_operation = next(operation for operation in operations if operation.type == "sync_base")
+    assert sync_operation.status == OperationStatus.failed.value
+    assert len(push_events) == 1
+    assert push_events[0].reason_code == "GIT_PUSH_FAILED"
+    assert push_events[0].payload is not None
+    assert push_events[0].payload["action"] == "sync_base_push"
+    assert push_events[0].payload["outcome"] == "failed"
+    assert push_events[0].payload["operation_id"] == sync_operation.id
+    assert push_events[0].payload["operation_type"] == "sync_base"
+    assert push_events[0].payload["evidence"]["operation"] == "git push"
+    assert push_events[0].payload["evidence"]["returncode"] == 128
+    assert "ghp_should_not_persist" not in repr(push_events[0].payload)
 
 
 @pytest.mark.unit

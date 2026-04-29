@@ -1129,6 +1129,8 @@ async def test_rebase_only_recovery_push_failure_records_redacted_audit(
 
     assert ws is not None
     assert ws.status == WorkspaceStatus.failed.value
+    assert "ghp_should_not_persist" not in (ws.failure_message or "")
+    assert "https://[redacted]@github.com/org/repo" in (ws.failure_message or "")
     assert len(push_events) == 1
     assert push_events[0].reason_code == "MONITOR_RECOVERY_REBASE_FAILED"
     assert push_events[0].payload is not None

@@ -37,6 +37,7 @@ from typing import Any, Protocol
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError
+from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
@@ -165,6 +166,7 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
 )
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
 _PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
+_GIT_PUSH_FAILED_REASON = "GIT_PUSH_FAILED"
 _AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
 _AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
 _AUDIT_MERGE_RESULT_EVENT = "workspace.audit.merge_result"
@@ -206,6 +208,32 @@ class _MergeGateResult:
     stale_reason: str | None = None
     req_action: str | None = None
     notify_message: str | None = None
+
+
+@dataclass(frozen=True)
+class _GitPushResult:
+    pushed: bool
+    failed: bool
+    returncode: int
+    stdout: str = ""
+    stderr: str = ""
+    recovered_by_resync: bool = False
+
+    @property
+    def error_message(self) -> str | None:
+        if not self.failed:
+            return None
+        return self.stderr.strip() or "<no output>"
+
+    def failure_evidence(self) -> dict[str, object]:
+        evidence: dict[str, object] = {
+            "operation": "git push",
+            "returncode": self.returncode,
+            "error_message": self.error_message or "<no output>",
+        }
+        if self.recovered_by_resync:
+            evidence["recovered_by_resync"] = True
+        return evidence
 
 
 @dataclass(frozen=True)
@@ -951,7 +979,7 @@ class PullRequestMonitorRunner:
                 extra_identity=(state.iter_count,),
             )
             try:
-                await self._run_sync_base(
+                push_result = await self._run_sync_base(
                     workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
@@ -977,13 +1005,43 @@ class PullRequestMonitorRunner:
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 )
                 return True
+            if push_result.failed:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "git_push_failed",
+                        "reason_code": _GIT_PUSH_FAILED_REASON,
+                        "pushed": False,
+                    },
+                    error_code=_GIT_PUSH_FAILED_REASON,
+                    error_message=push_result.error_message,
+                )
+                await self._record_pr_monitor_audit_event(
+                    workspace_id=workspace_id,
+                    event_type=_AUDIT_GIT_PUSH_EVENT,
+                    action="sync_base_push",
+                    outcome="failed",
+                    reason_code=_GIT_PUSH_FAILED_REASON,
+                    pr_number=pr_number,
+                    status=status,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    operation_id=operation.operation_id if operation is not None else None,
+                    operation_type=OperationType.sync_base.value,
+                    monitor_log=monitor_log,
+                    evidence=push_result.failure_evidence(),
+                )
+                state.iter_count += 1
+                return False
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.succeeded,
                 result={
                     "status": "succeeded",
                     "outcome": "base_synced",
-                    "pushed": True,
+                    "pushed": push_result.pushed,
                 },
             )
             await self._record_pr_monitor_audit_event(
@@ -1028,7 +1086,7 @@ class PullRequestMonitorRunner:
                 extra_identity=tuple(failure.name for failure in action.failures),
             )
             try:
-                await self._run_ci_fix(
+                push_result = await self._run_ci_fix(
                     repo=repo,
                     pr_number=pr_number,
                     failures=action.failures,
@@ -1054,6 +1112,37 @@ class PullRequestMonitorRunner:
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 )
                 return True
+            if push_result.failed:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "git_push_failed",
+                        "reason_code": _GIT_PUSH_FAILED_REASON,
+                        "failure_count": len(action.failures),
+                        "pushed": False,
+                    },
+                    error_code=_GIT_PUSH_FAILED_REASON,
+                    error_message=push_result.error_message,
+                )
+                await self._record_pr_monitor_audit_event(
+                    workspace_id=workspace_id,
+                    event_type=_AUDIT_GIT_PUSH_EVENT,
+                    action="ci_repair_push",
+                    outcome="failed",
+                    reason_code=_GIT_PUSH_FAILED_REASON,
+                    pr_number=pr_number,
+                    status=status,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    operation_id=operation.operation_id if operation is not None else None,
+                    operation_type=OperationType.ci_repair.value,
+                    monitor_log=monitor_log,
+                    evidence=push_result.failure_evidence(),
+                )
+                state.iter_count += 1
+                return False
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.succeeded,
@@ -1061,7 +1150,7 @@ class PullRequestMonitorRunner:
                     "status": "succeeded",
                     "outcome": "ci_repair_pushed",
                     "failure_count": len(action.failures),
-                    "pushed": True,
+                    "pushed": push_result.pushed,
                 },
             )
             await self._record_pr_monitor_audit_event(
@@ -1108,7 +1197,7 @@ class PullRequestMonitorRunner:
                 ),
             )
             try:
-                await self._run_fix_cycle(
+                push_result = await self._run_fix_cycle(
                     workspace_id=workspace_id,
                     repo=repo,
                     pr_number=pr_number,
@@ -1140,6 +1229,23 @@ class PullRequestMonitorRunner:
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                 )
                 return True
+            if push_result.failed:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "git_push_failed",
+                        "reason_code": _GIT_PUSH_FAILED_REASON,
+                        "thread_count": len(action.threads),
+                        "review_comment_count": len(action.review_comments),
+                        "pushed": False,
+                    },
+                    error_code=_GIT_PUSH_FAILED_REASON,
+                    error_message=push_result.error_message,
+                )
+                state.iter_count += 1
+                return False
             await self._finish_monitor_operation(
                 operation,
                 status=OperationStatus.succeeded,
@@ -1148,7 +1254,7 @@ class PullRequestMonitorRunner:
                     "outcome": "comments_addressed",
                     "thread_count": len(action.threads),
                     "review_comment_count": len(action.review_comments),
-                    "pushed": True,
+                    "pushed": push_result.pushed,
                 },
             )
             state.iter_count += 1
@@ -1555,7 +1661,7 @@ class PullRequestMonitorRunner:
                 _log.warning(
                     "monitor.merge_blocked_falling_back_to_notify",
                     workspace_id=workspace_id,
-                    stderr=merge_blocker.stderr,
+                    stderr=_redact_and_truncate_github_error(merge_blocker.stderr),
                 )
                 await self._post_human_notification_once(
                     repo=repo,
@@ -2306,7 +2412,7 @@ class PullRequestMonitorRunner:
         base_branch: str | None = None,
         operation_id: str | None = None,
         operation_type: str | None = None,
-    ) -> None:
+    ) -> _GitPushResult:
         """Implements the commit-then-push-on-settle behaviour from the plan.
 
         Invokes the coding CLI once per thread/review comment (locally
@@ -2316,6 +2422,7 @@ class PullRequestMonitorRunner:
         quiet, push everything and resolve the threads we addressed.
         """
         threads_to_resolve: list[str] = []
+        publish_dependent_ids: list[str] = []
         threads = list(initial_threads)
         reviews = list(initial_reviews)
 
@@ -2333,6 +2440,7 @@ class PullRequestMonitorRunner:
                 state.mark_addressed(t.thread_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     threads_to_resolve.append(t.thread_id)
+                    publish_dependent_ids.append(t.thread_id)
             for c in reviews:
                 verdict = await self._address_review_comment(
                     workspace_id=workspace_id,
@@ -2343,6 +2451,8 @@ class PullRequestMonitorRunner:
                     compose_file=compose_file,
                 )
                 state.mark_addressed(c.comment_id, verdict)
+                if verdict not in {"defer", "agent_failed"}:
+                    publish_dependent_ids.append(c.comment_id)
 
             # 2) Settle window — small sleep, then re-poll for new activity.
             await self._deps.sleep(self._config.settle_interval_seconds)
@@ -2380,9 +2490,31 @@ class PullRequestMonitorRunner:
 
         # 3) Push everything we committed.
         worktree_path = self._worktrees_root / workspace_id
-        pushed = await self._git_push(worktree_path=worktree_path, remote_branch=remote_branch)
+        push_result = await self._git_push_result(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+        )
         pushed_head_sha: str | None = None
-        if not pushed:
+        if push_result.failed:
+            for item_id in publish_dependent_ids:
+                state.threads_addressed_ids.pop(item_id, None)
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_GIT_PUSH_EVENT,
+                action="comment_repair_push",
+                outcome="failed",
+                reason_code=_GIT_PUSH_FAILED_REASON,
+                pr_number=pr_number,
+                status=None,
+                base_branch=base_branch or "",
+                remote_branch=remote_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                evidence=push_result.failure_evidence(),
+            )
+            return push_result
+        if not push_result.pushed:
             # No local commits — CLI returned "false_positive" for
             # everything or "defer" for everything. We still want to
             # resolve the non-defer threads on GitHub.
@@ -2391,7 +2523,7 @@ class PullRequestMonitorRunner:
         # Record the pushed HEAD before resolving review threads. The
         # pushed commit is local git state; a transient GraphQL resolve
         # failure should not affect the monitor's push bookkeeping.
-        if pushed:
+        if push_result.pushed:
             pushed_head_sha = await self._rev_parse_head(worktree_path)
             state.last_push_sha = pushed_head_sha
             await self._record_pr_monitor_audit_event(
@@ -2500,6 +2632,7 @@ class PullRequestMonitorRunner:
                         "resolved_thread_count": 1,
                     },
                 )
+        return push_result
 
     async def _address_thread(
         self,
@@ -2590,7 +2723,7 @@ class PullRequestMonitorRunner:
         remote_branch: str,
         compose_project: str,
         compose_file: Path,
-    ) -> None:
+    ) -> _GitPushResult:
         """``git fetch origin <base> && git merge origin/<base>``, push.
 
         On merge conflict, hand off to the coding CLI with a
@@ -2645,7 +2778,10 @@ class PullRequestMonitorRunner:
             )
 
         # Whether or not we hit conflicts, push what we have.
-        await self._git_push(worktree_path=worktree_path, remote_branch=remote_branch)
+        return await self._git_push_result(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+        )
 
     # ── CI failure ─────────────────────────────────────────────────────────
 
@@ -2659,7 +2795,7 @@ class PullRequestMonitorRunner:
         compose_file: Path,
         workspace_id: str,
         remote_branch: str,
-    ) -> None:
+    ) -> _GitPushResult:
         prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
         try:
             await self._deps.adapter.run(
@@ -2679,7 +2815,7 @@ class PullRequestMonitorRunner:
             workspace_id=workspace_id,
             message=f"fix: address PR #{pr_number} CI failure",
         )
-        await self._git_push(
+        return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
             remote_branch=remote_branch,
         )
@@ -2780,10 +2916,26 @@ class PullRequestMonitorRunner:
         return r.stdout.strip() if r.ok else ""
 
     async def _git_push(self, *, worktree_path: Path, remote_branch: str) -> bool:
+        refspec = f"HEAD:refs/heads/{remote_branch}"
+        result = await self._git_push_result(
+            worktree_path=worktree_path,
+            remote_branch=remote_branch,
+            refspec=refspec,
+        )
+        return result.pushed
+
+    async def _git_push_result(
+        self,
+        *,
+        worktree_path: Path,
+        remote_branch: str,
+        refspec: str | None = None,
+    ) -> _GitPushResult:
         """Push current HEAD to ``origin/<remote_branch>`` with an
         explicit refspec.
 
-        Returns True iff anything new was pushed.
+        Returns a structured result that distinguishes a real publication,
+        an already-up-to-date no-op, and a failed publication.
 
         **Why explicit refspec, not ``git push origin HEAD``**: On
         2026-04-23 the monitor pushed four feature-branch commits to
@@ -2814,13 +2966,20 @@ class PullRequestMonitorRunner:
         local merge commit, the next SyncBase piled another on top, and
         the head SHA on GitHub never moved.
         """
-        refspec = f"HEAD:refs/heads/{remote_branch}"
+        refspec = refspec or f"HEAD:refs/heads/{remote_branch}"
         r = await self._deps.runner.run(
             ["git", "-C", str(worktree_path), "push", "origin", refspec]
         )
         if r.ok:
             # git prints "Everything up-to-date" to stderr when the ref didn't move.
-            return "up-to-date" not in (r.stderr or "").lower()
+            pushed = "up-to-date" not in (r.stderr or "").lower()
+            return _GitPushResult(
+                pushed=pushed,
+                failed=False,
+                returncode=r.returncode,
+                stdout=r.stdout,
+                stderr=r.stderr,
+            )
 
         # Non-zero exit. Is it a divergence rejection?
         stderr_lower = (r.stderr or "").lower()
@@ -2836,7 +2995,13 @@ class PullRequestMonitorRunner:
                 "monitor.push_failed_non_divergence",
                 stderr=(r.stderr or "")[:400],
             )
-            return False
+            return _GitPushResult(
+                pushed=False,
+                failed=True,
+                returncode=r.returncode,
+                stdout=r.stdout,
+                stderr=r.stderr,
+            )
 
         _log.warning(
             "monitor.push_rejected_resyncing_local",
@@ -2857,7 +3022,14 @@ class PullRequestMonitorRunner:
                 f"origin/{remote_branch}",
             ]
         )
-        return False
+        return _GitPushResult(
+            pushed=False,
+            failed=True,
+            returncode=r.returncode,
+            stdout=r.stdout,
+            stderr=r.stderr,
+            recovered_by_resync=True,
+        )
 
     async def _fetch_status_for_decision(
         self,
@@ -3326,14 +3498,15 @@ class PullRequestMonitorRunner:
                 )
                 await s.commit()
                 return
+            safe_message = redact_audit_text(message, limit=2000)
             ws.failure_reason = FailureReason.infrastructure_failure.value
-            ws.failure_message = message
+            ws.failure_message = safe_message
             if rc == EXEC_PROCESS_CLEANUP_FAILED:
                 await repo.add_event(
                     ws,
                     event_type="workspace.exec_process_cleanup_failed",
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
-                    payload={"message": message[:1000]},
+                    payload={"message": safe_message[:1000]},
                 )
             await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=rc)
             await s.commit()
@@ -3546,7 +3719,7 @@ def _notify_human_reason(status: PRStatus, state: MonitorState) -> str | None:
 
 
 def _merge_rejection_reason(stderr: str) -> str:
-    detail = " ".join(stderr.split())[:240]
+    detail = " ".join(_redact_and_truncate_github_error(stderr).split())[:240]
     if detail:
         return f"GitHub rejected the merge attempt: {detail}"
     return "GitHub rejected the merge attempt"

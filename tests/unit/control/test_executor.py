@@ -1215,7 +1215,13 @@ class TestFailurePaths:
         _queue_validation_head(fake)
         fake.queue_result(returncode=0)  # validation ok
         _queue_pre_push_diagnostics(fake)
-        fake.queue_result(returncode=128, stderr="remote: perm denied")  # push fails
+        fake.queue_result(
+            returncode=128,
+            stderr=(
+                "remote: perm denied for "
+                "https://user:ghp_should_not_persist@github.com/org/repo"
+            ),
+        )  # push fails
 
         await executor.execute(ws_id)
 
@@ -1224,6 +1230,10 @@ class TestFailurePaths:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "infrastructure_failure"
+            assert "ghp_should_not_persist" not in (ws.failure_message or "")
+            assert "https://[redacted]@github.com/org/repo" in (
+                ws.failure_message or ""
+            )
             push_events = await WorkspaceEventRepository(s).list(
                 workspace_id=ws_id,
                 event_type="workspace.audit.git_push",
@@ -1240,7 +1250,10 @@ class TestFailurePaths:
             assert push_events[0].payload["evidence"] == {
                 "operation": "git push",
                 "returncode": 128,
-                "error_message": "remote: perm denied",
+                "error_message": (
+                    "remote: perm denied for "
+                    "https://[redacted]@github.com/org/repo"
+                ),
             }
 
     @pytest.mark.unit
@@ -1276,6 +1289,10 @@ class TestFailurePaths:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
+            assert "ghp_should_not_persist" not in (ws.failure_message or "")
+            assert "https://[redacted]@github.com/org/repo" in (
+                ws.failure_message or ""
+            )
             events = WorkspaceEventRepository(s)
             push_events = await events.list(
                 workspace_id=ws_id,

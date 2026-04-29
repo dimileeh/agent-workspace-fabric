@@ -34,6 +34,7 @@ from awf.adapters.base import (
     get_adapter,
 )
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS, defaults_with_model_overrides
+from awf.common.audit import redact_audit_text
 from awf.common.commands import AsyncCommandRunner, CommandResult
 from awf.common.compose_exec import (
     EXEC_PROCESS_CLEANUP_FAILED,
@@ -2366,14 +2367,15 @@ class WorkspaceExecutor:
                     )
                 await session.commit()
                 return
+            safe_message = redact_audit_text(message, limit=2000)
             ws.failure_reason = failure_reason.value
-            ws.failure_message = message
+            ws.failure_message = safe_message
             if reason_code == EXEC_PROCESS_CLEANUP_FAILED:
                 await repo.add_event(
                     ws,
                     event_type="workspace.exec_process_cleanup_failed",
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
-                    payload={"message": message[:1000]},
+                    payload={"message": safe_message[:1000]},
                 )
             await repo.transition(
                 ws,
@@ -2933,6 +2935,9 @@ class WorkspaceExecutor:
         result: dict[str, Any] = {"reason_code": reason_code}
         if result_extra is not None:
             result.update(result_extra)
+        safe_error_message = (
+            redact_audit_text(error_message) if error_message is not None else None
+        )
         for operation in [*pending, *running]:
             if not _is_validate_only_recovery_payload(operation.payload):
                 continue
@@ -2941,7 +2946,7 @@ class WorkspaceExecutor:
                 status=status,
                 result=result,
                 error_code=reason_code if status == OperationStatus.failed else None,
-                error_message=error_message,
+                error_message=safe_error_message,
             )
 
     async def _finish_ignored_stale_callback_operations_in_session(
@@ -3038,6 +3043,9 @@ class WorkspaceExecutor:
             result["log_stream_refs"] = dict(validation_run.log_stream_refs)
         if coverage is not None:
             result["coverage"] = coverage
+        safe_error_message = (
+            redact_audit_text(error_message) if error_message is not None else None
+        )
         for operation in [*pending, *running]:
             payload = dict(operation.payload or {})
             payload.setdefault("requested_tier", requested_tier)
@@ -3047,7 +3055,7 @@ class WorkspaceExecutor:
                 status=status,
                 result=result,
                 error_code=reason_code if status == OperationStatus.failed else None,
-                error_message=error_message,
+                error_message=safe_error_message,
             )
 
     async def _finish_validation_run(

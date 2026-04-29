@@ -29,8 +29,10 @@ _AUTHORIZATION_RE = re.compile(
 _BEARER_RE = re.compile(r"(\bBearer\s+)([A-Za-z0-9._~+/=\-]{8,})", re.IGNORECASE)
 _TOKEN_ASSIGNMENT_RE = re.compile(
     r"\b(?P<key>"
-    r"(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API_TOKEN|AUTH_TOKEN|GITHUB_TOKEN)"
-    r"|GH_TOKEN"
+    r"(?:[A-Za-z][A-Za-z0-9_]*_)?TOKEN"
+    r"|(?:[A-Za-z][A-Za-z0-9_]*_)?(?:API[_-]?KEY|ACCESS[_-]?KEY)"
+    r"|(?:AUTH|GITHUB|GH)[_-]?TOKEN"
+    r"|PASSWORD|PASSWD|SECRET"
     r")\b"
     r"(?P<separator>\s*[:=]\s*)"
     r"(?P<quote>[\"']?)"
@@ -117,6 +119,12 @@ def redact_audit_value(value: Any) -> Any:
     return value
 
 
+def redact_audit_text(value: str, *, limit: int = _MAX_STRING_LENGTH) -> str:
+    """Redact token-like content from a durable diagnostic string."""
+
+    return _redact_string(value, limit=limit)
+
+
 def _is_sensitive_key(key: str) -> bool:
     if _SENSITIVE_NON_TOKEN_KEY_RE.search(key):
         return True
@@ -126,14 +134,14 @@ def _is_sensitive_key(key: str) -> bool:
     )
 
 
-def _redact_string(value: str) -> str:
+def _redact_string(value: str, *, limit: int = _MAX_STRING_LENGTH) -> str:
     redacted = _URL_CREDENTIAL_RE.sub(r"\1" + REDACTION_MARKER + "@", value)
     redacted = _AUTHORIZATION_RE.sub(r"\1" + REDACTION_MARKER, redacted)
     redacted = _TOKEN_ASSIGNMENT_RE.sub(_redact_assignment, redacted)
     redacted = _BEARER_RE.sub(r"\1" + REDACTION_MARKER, redacted)
     redacted = _KNOWN_TOKEN_RE.sub(REDACTION_MARKER, redacted)
-    if len(redacted) > _MAX_STRING_LENGTH:
-        return f"{redacted[:_MAX_STRING_LENGTH]}...[truncated]"
+    if len(redacted) > limit:
+        return f"{redacted[:limit]}...[truncated]"
     return redacted
 
 
