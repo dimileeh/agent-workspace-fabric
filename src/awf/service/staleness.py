@@ -141,6 +141,14 @@ REASON_SCHEMA: Final[str] = "STALE_SCHEMA"
 REASON_DEPENDENCY: Final[str] = "STALE_DEPENDENCY"
 REASON_BUILD_CONFIG: Final[str] = "STALE_BUILD_CONFIG"
 REASON_PLAN_ARTIFACT_OVERLAP: Final[str] = ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON
+_BLOCKING_REASON_PRIORITY: Final[dict[str, int]] = {
+    REASON_OVERLAP: 0,
+    REASON_SCHEMA: 1,
+    REASON_DEPENDENCY: 2,
+    REASON_BUILD_CONFIG: 3,
+    REASON_TARGET_ADVANCED: 4,
+}
+_DEFAULT_BLOCKING_REASON_PRIORITY: Final[int] = len(_BLOCKING_REASON_PRIORITY)
 
 TRIGGER_TARGET_ADVANCED: Final[str] = "target_advanced"
 TRIGGER_PATH_OVERLAP: Final[str] = "path_overlap"
@@ -597,7 +605,22 @@ def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
 
 
 def _primary_blocking_reason(findings: Sequence[StalenessFinding]) -> str | None:
-    return next((finding.reason_code for finding in findings if finding.blocks_merge), None)
+    primary = min(
+        (
+            (index, finding)
+            for index, finding in enumerate(findings)
+            if finding.blocks_merge
+        ),
+        key=lambda item: (
+            _BLOCKING_REASON_PRIORITY.get(
+                item[1].reason_code,
+                _DEFAULT_BLOCKING_REASON_PRIORITY,
+            ),
+            item[0],
+        ),
+        default=None,
+    )
+    return primary[1].reason_code if primary is not None else None
 
 
 async def _load_candidate(session: AsyncSession, candidate_id: str) -> MergeCandidate | None:
