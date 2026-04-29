@@ -58,6 +58,8 @@ class TestListEvents:
         body = response.json()
         assert body["next_cursor"] is None
         assert body["has_more"] is False
+        assert body["limit"] == 50
+        assert body["cursor"] is None
         assert [item["workspace_id"] for item in body["items"]] == [second_id, first_id]
         assert set(body["items"][0]) == {
             "id",
@@ -97,6 +99,8 @@ class TestListEvents:
         assert [item["workspace_id"] for item in body["items"]] == [second_id]
         assert body["next_cursor"] is None
         assert body["has_more"] is False
+        assert body["limit"] == 1
+        assert body["cursor"] is None
 
     @pytest.mark.unit
     @pytest.mark.parametrize("limit", [0, 501])
@@ -110,7 +114,13 @@ class TestListEvents:
         response = await client.get("/v1/events", params={"workspace_id": "ws_missing"})
 
         assert response.status_code == 200
-        assert response.json() == {"items": [], "next_cursor": None, "has_more": False}
+        assert response.json() == {
+            "items": [],
+            "next_cursor": None,
+            "has_more": False,
+            "limit": 50,
+            "cursor": None,
+        }
 
 
 class TestListWorkspaceEvents:
@@ -131,6 +141,8 @@ class TestListWorkspaceEvents:
         body = response.json()
         assert body["next_cursor"] is None
         assert body["has_more"] is False
+        assert body["limit"] == 50
+        assert body["cursor"] is None
         assert [item["workspace_id"] for item in body["items"]] == [first_id, first_id]
         assert [item["event_type"] for item in body["items"]] == [
             "workspace.phase_started",
@@ -150,7 +162,13 @@ class TestListWorkspaceEvents:
         )
 
         assert response.status_code == 200
-        assert response.json() == {"items": [], "next_cursor": None, "has_more": False}
+        assert response.json() == {
+            "items": [],
+            "next_cursor": None,
+            "has_more": False,
+            "limit": 50,
+            "cursor": None,
+        }
 
     @pytest.mark.unit
     async def test_returns_404_for_unknown_workspace(self, client: AsyncClient) -> None:

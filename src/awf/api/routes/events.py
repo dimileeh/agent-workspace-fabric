@@ -23,5 +23,7 @@ async def list_events(
     repo = WorkspaceEventRepository(session)
     rows = await repo.list(workspace_id=workspace_id, limit=limit)
     return WorkspaceEventListResponse(
-        items=[WorkspaceEventResponse.model_validate(row) for row in rows]
+        items=[WorkspaceEventResponse.model_validate(row) for row in rows],
+        limit=limit,
+        cursor=None,
     )

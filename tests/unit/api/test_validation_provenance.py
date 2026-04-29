@@ -417,6 +417,8 @@ async def test_validation_provenance_groups_streams_and_resolves_profile_command
     body = response.json()
     assert body["next_cursor"] is None
     assert body["has_more"] is False
+    assert body["limit"] == 50
+    assert body["cursor"] is None
     assert [(item["phase"], item["command_index"], item["command"]) for item in body["items"]] == [
         ("setup", 1, "uv sync"),
         ("validate", 1, "pytest -q"),
@@ -1147,7 +1149,13 @@ async def test_validation_provenance_empty_when_workspace_has_no_validation_logs
     response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
 
     assert response.status_code == 200
-    assert response.json() == {"items": [], "next_cursor": None, "has_more": False}
+    assert response.json() == {
+        "items": [],
+        "next_cursor": None,
+        "has_more": False,
+        "limit": 50,
+        "cursor": None,
+    }
 
 
 @pytest.mark.unit
@@ -1201,6 +1209,10 @@ async def test_validation_route_function_returns_stream_derived_items(
     assert [(item.phase, item.command_index, item.command) for item in response.items] == [
         ("validate", 1, "pytest -q")
     ]
+    assert response.next_cursor is None
+    assert response.has_more is False
+    assert response.limit == 50
+    assert response.cursor is None
 
 
 @pytest.mark.unit

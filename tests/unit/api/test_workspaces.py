@@ -1580,6 +1580,10 @@ class TestWorkspaceDirectRoutes:
         assert item.title == "overview direct"
         assert item.active_operation is None
         assert item.last_event is not None
+        assert response.next_cursor is None
+        assert response.has_more is False
+        assert response.limit == 50
+        assert response.cursor is None
 
     @pytest.mark.unit
     async def test_overview_route_reuses_ordered_events_for_last_event(
@@ -1686,6 +1690,12 @@ class TestWorkspaceDirectRoutes:
 
         assert [event.event_type for event in events.items] == ["workspace.created"]
         assert stale.items == []
+        assert events.limit == 50
+        assert events.cursor is None
+        assert stale.next_cursor is None
+        assert stale.has_more is False
+        assert stale.limit == 50
+        assert stale.cursor is None
         assert [workspace.id for workspace in listed] == [workspace_id]
         assert detail.id == workspace_id
         assert isinstance(retry_error, JSONResponse)

@@ -83,10 +83,16 @@ async def list_validation_provenance(
                 workspace,
                 validation_runs,
                 streams,
-            )
+            ),
+            limit=50,
+            cursor=None,
         )
 
-    return ValidationProvenanceListResponse(items=_build_validation_items(workspace, streams))
+    return ValidationProvenanceListResponse(
+        items=_build_validation_items(workspace, streams),
+        limit=50,
+        cursor=None,
+    )
 
 
 @dataclass

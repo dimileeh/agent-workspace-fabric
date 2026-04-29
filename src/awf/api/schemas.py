@@ -434,6 +434,8 @@ class WorkspaceEventListResponse(BaseModel):
     items: list[WorkspaceEventResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class TaskResponse(BaseModel):
@@ -475,6 +477,8 @@ class TaskListResponse(BaseModel):
     items: list[TaskResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class TaskAttemptResponse(BaseModel):
@@ -503,6 +507,8 @@ class TaskAttemptListResponse(BaseModel):
     items: list[TaskAttemptResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class WorkspaceOverviewResponse(BaseModel):
@@ -540,6 +546,8 @@ class WorkspaceOverviewListResponse(BaseModel):
     items: list[WorkspaceOverviewResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 StaleReasonStatus = Literal["active", "resolved"]
@@ -585,6 +593,10 @@ class StaleReasonResponse(BaseModel):
 
 class StaleReasonListResponse(BaseModel):
     items: list[StaleReasonResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class MergeQueueBlockerResponse(BaseModel):
@@ -638,6 +650,8 @@ class MergeQueueListResponse(BaseModel):
     items: list[MergeQueueItemResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class WorkspaceLockResponse(BaseModel):
@@ -661,6 +675,8 @@ class WorkspaceLockListResponse(BaseModel):
     items: list[WorkspaceLockResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class RuntimeServiceResponse(BaseModel):
@@ -703,6 +719,8 @@ class WorkspaceLogListResponse(BaseModel):
     items: list[WorkspaceLogStreamResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class WorkspaceLogReadResponse(BaseModel):
@@ -761,6 +779,8 @@ class ValidationProvenanceListResponse(BaseModel):
     items: list[ValidationProvenanceItemResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class OperationResponse(BaseModel):
@@ -909,6 +929,8 @@ class OperationListResponse(BaseModel):
     items: list[OperationResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 class WorkspaceControlRequest(BaseModel):

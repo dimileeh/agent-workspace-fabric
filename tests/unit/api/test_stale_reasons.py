@@ -292,7 +292,12 @@ class TestWorkspaceStaleReasonsEndpoint:
         response = await client.get(f"/v1/workspaces/{workspace_id}/stale-reasons")
 
         assert response.status_code == 200
-        items = response.json()["items"]
+        body = response.json()
+        assert body["next_cursor"] is None
+        assert body["has_more"] is False
+        assert body["limit"] == 50
+        assert body["cursor"] is None
+        items = body["items"]
         assert len(items) == 1
         assert set(items[0]) == {
             "id",
@@ -355,6 +360,10 @@ class TestWorkspaceStaleReasonsEndpoint:
         assert response.status_code == 200
         body = response.json()
         assert "items" in body
+        assert body["next_cursor"] is None
+        assert body["has_more"] is False
+        assert body["limit"] == 50
+        assert body["cursor"] is None
         assert any(r["status"] == "active" for r in body["items"])
         assert all(r["workspace_id"] == workspace_id for r in body["items"])
 

@@ -95,8 +95,13 @@ class TestTaskList:
         response = await client.get("/v1/tasks")
 
         assert response.status_code == 200
+        body = response.json()
+        assert body["next_cursor"] is None
+        assert body["has_more"] is False
+        assert body["limit"] == 50
+        assert body["cursor"] is None
         items_by_workspace = {
-            item["workspace_id"]: item for item in response.json()["items"]
+            item["workspace_id"]: item for item in body["items"]
         }
         legacy = items_by_workspace[legacy_workspace_id]
         new = items_by_workspace[new_workspace_id]
@@ -456,6 +461,10 @@ class TestTaskList:
         body = response.json()
         assert body["task_id"] == task.id
         assert body["task_ref"] == "TICKET-LINEAGE"
+        assert body["next_cursor"] is None
+        assert body["has_more"] is False
+        assert body["limit"] == 100
+        assert body["cursor"] is None
         assert [item["attempt_id"] for item in body["items"]] == [
             third.id,
             second.id,
@@ -531,3 +540,7 @@ class TestTaskList:
         assert response.task_id == task.id
         assert response.task_ref == "TICKET-NO-ATTEMPTS"
         assert response.items == []
+        assert response.next_cursor is None
+        assert response.has_more is False
+        assert response.limit == 100
+        assert response.cursor is None

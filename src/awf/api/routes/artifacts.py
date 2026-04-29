@@ -33,6 +33,8 @@ class WorkspaceArtifactListResponse(BaseModel):
     items: list[WorkspaceArtifactResponse]
     next_cursor: str | None = None
     has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
 
 
 @router.get(
@@ -47,7 +49,7 @@ async def list_workspace_artifacts(
     await _require_workspace(session, workspace_id)
     artifact_dir = _workspace_artifact_dir(workspace_id)
     items = await asyncio.to_thread(_list_artifacts, workspace_id, artifact_dir)
-    return WorkspaceArtifactListResponse(items=items)
+    return WorkspaceArtifactListResponse(items=items, limit=50, cursor=None)
 
 
 async def _require_workspace(session: AsyncSession, workspace_id: str) -> None:

@@ -132,6 +132,8 @@ async def list_merge_queue(
         if has_more and page_rows
         else None,
         has_more=has_more,
+        limit=limit,
+        cursor=cursor,
     )
 
 

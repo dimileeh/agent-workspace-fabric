@@ -235,7 +235,6 @@ async def list_workspace_overview(
     cursor: Annotated[str | None, Query(max_length=128)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceOverviewListResponse:
-    del cursor
     rows = await WorkspaceRepository(session).list(
         status=workspace_status,
         agent=agent,
@@ -292,7 +291,7 @@ async def list_workspace_overview(
                 updated_at=ws.updated_at,
             )
         )
-    return WorkspaceOverviewListResponse(items=items)
+    return WorkspaceOverviewListResponse(items=items, limit=limit, cursor=cursor)
 
 
 @router.get("/{workspace_id}/events", response_model=WorkspaceEventListResponse)
@@ -315,7 +314,9 @@ async def list_workspace_events(
         limit=limit,
     )
     return WorkspaceEventListResponse(
-        items=[WorkspaceEventResponse.model_validate(row) for row in rows]
+        items=[WorkspaceEventResponse.model_validate(row) for row in rows],
+        limit=limit,
+        cursor=None,
     )
 
 
@@ -341,7 +342,11 @@ async def list_workspace_stale_reasons(
         if include_resolved
         else await stale_repo.list_active_for_workspace(workspace_id)
     )
-    return StaleReasonListResponse(items=[StaleReasonResponse.model_validate(row) for row in rows])
+    return StaleReasonListResponse(
+        items=[StaleReasonResponse.model_validate(row) for row in rows],
+        limit=50,
+        cursor=None,
+    )
 
 
 @router.post(

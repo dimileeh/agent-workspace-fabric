@@ -32,7 +32,9 @@ async def list_workspace_logs(
     await _require_workspace(session, workspace_id)
     rows = await WorkspaceLogStreamRepository(session).list_for_workspace(workspace_id)
     return WorkspaceLogListResponse(
-        items=[WorkspaceLogStreamResponse.model_validate(row) for row in rows]
+        items=[WorkspaceLogStreamResponse.model_validate(row) for row in rows],
+        limit=50,
+        cursor=None,
     )
 
 
