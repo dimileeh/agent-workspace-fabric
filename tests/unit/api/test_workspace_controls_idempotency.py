@@ -17,7 +17,12 @@ from awf.api.schemas import WorkspaceOperationRequest
 from awf.common.config import get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, Workspace, WorkspaceEvent
-from awf.db.repositories import TaskAttemptRepository, TaskRepository, WorkspaceRepository
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 
 _BODY = {
@@ -51,6 +56,7 @@ async def _seed_monitoring_workspace(
     engine: AsyncEngine,
     *,
     with_pr_url: bool = True,
+    with_open_candidate: bool = False,
     final_status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
     with_active_claims: bool = False,
 ) -> str:
@@ -75,7 +81,7 @@ async def _seed_monitoring_workspace(
             task_class=workspace.task_class,
             owned_paths=list(workspace.owned_paths),
         )
-        await TaskAttemptRepository(session).create_for_workspace(
+        attempt = await TaskAttemptRepository(session).create_for_workspace(
             task=task,
             workspace=workspace,
         )
@@ -134,6 +140,17 @@ async def _seed_monitoring_workspace(
             )
         elif final_status != WorkspaceStatus.monitoring_pr:
             raise AssertionError(f"unsupported seed status {final_status}")
+
+        if with_open_candidate:
+            if not workspace.pr_url:
+                raise AssertionError("open candidate seed requires a PR URL")
+            await MergeCandidateRepository(session).create_or_update_open_for_attempt(
+                task=task,
+                attempt=attempt,
+                workspace=workspace,
+                head_sha=workspace.monitor_last_commit_sha,
+                base_sha=workspace.base_commit,
+            )
 
         if with_active_claims:
             workspace.monitor_claimed_by = "dead-monitor-worker"
@@ -760,7 +777,7 @@ async def test_remonitor_rejects_incompatible_state_before_missing_pr_url(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("action", ["refresh", "validate"])
+@pytest.mark.parametrize("action", ["refresh", "validate", "rebase"])
 async def test_recovery_operations_require_authorization(
     client: AsyncClient,
     engine: AsyncEngine,
@@ -770,7 +787,11 @@ async def test_recovery_operations_require_authorization(
     final_status = (
         WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
     )
-    workspace_id = await _seed_monitoring_workspace(engine, final_status=final_status)
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=final_status,
+        with_open_candidate=action == "rebase",
+    )
     monkeypatch.setenv("AWF_API_TOKEN", "secret")
     get_settings.cache_clear()
 
@@ -785,7 +806,7 @@ async def test_recovery_operations_require_authorization(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("action", ["refresh", "validate"])
+@pytest.mark.parametrize("action", ["refresh", "validate", "rebase"])
 async def test_recovery_operations_require_idempotency_key(
     client: AsyncClient,
     engine: AsyncEngine,
@@ -795,7 +816,11 @@ async def test_recovery_operations_require_idempotency_key(
     final_status = (
         WorkspaceStatus.ready if action == "refresh" else WorkspaceStatus.monitoring_pr
     )
-    workspace_id = await _seed_monitoring_workspace(engine, final_status=final_status)
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=final_status,
+        with_open_candidate=action == "rebase",
+    )
 
     response = await client.post(
         f"/v1/workspaces/{workspace_id}/{action}",
@@ -953,6 +978,100 @@ async def test_validate_endpoint_returns_operation_response_and_coalesces_active
         "operation_id": payload["id"],
         "recovery_mode": "validate_only",
         "requested_tier": 2,
+        "expected_version": 7,
+    }
+
+
+@pytest.mark.unit
+async def test_rebase_endpoint_returns_operation_response_and_coalesces_active_request(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        with_open_candidate=True,
+    )
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": "rebase-first",
+            "If-Match": "7",
+        },
+    )
+    replay = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "rebase-second"},
+    )
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    payload = first.json()
+    assert replay.json()["id"] == payload["id"]
+    assert payload["workspace_id"] == workspace_id
+    assert payload["type"] == "rebase"
+    assert payload["status"] == "pending"
+    assert payload["idempotency_key"] == "rebase-first"
+    assert payload["owner"] == "operator_api"
+    assert payload["source"] == "operator_api"
+    assert payload["reason"] == "base branch advanced"
+    assert payload["reason_code"] == "OPERATOR_REBASE"
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        operations = (
+            await session.execute(
+                select(Operation).where(Operation.workspace_id == workspace_id)
+            )
+        ).scalars().all()
+        candidate = (
+            await session.execute(
+                select(MergeCandidate).where(MergeCandidate.workspace_id == workspace_id)
+            )
+        ).scalar_one()
+        rebase_event = (
+            await session.execute(
+                select(WorkspaceEvent).where(
+                    WorkspaceEvent.workspace_id == workspace_id,
+                    WorkspaceEvent.event_type == "workspace.rebase_requested",
+                )
+            )
+        ).scalar_one()
+
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert workspace.version == 8
+    assert [operation.id for operation in operations] == [payload["id"]]
+    assert operations[0].payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "base branch advanced",
+        "reason_code": "OPERATOR_REBASE",
+        "requested_action": "rebase",
+        "recovery_mode": "rebase_only",
+        "candidate_id": candidate.id,
+        "attempt_id": candidate.attempt_id,
+        "task_id": candidate.task_id,
+        "pr_number": 42,
+        "pr_url": "https://github.com/example/remonitor/pull/42",
+        "source_head_sha": "b" * 40,
+        "source_base_sha": "a" * 40,
+        "target_branch": "development",
+        "remote_branch": f"awf/{workspace_id}",
+        "expected_version": 7,
+    }
+    assert rebase_event.reason_code == "OPERATOR_REBASE"
+    assert rebase_event.payload == {
+        "source": "operator_api",
+        "reason": "base branch advanced",
+        "operation_id": payload["id"],
+        "recovery_mode": "rebase_only",
+        "candidate_id": candidate.id,
         "expected_version": 7,
     }
 
@@ -1149,7 +1268,118 @@ async def test_validate_same_key_with_different_tier_returns_conflict(
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("action", ["refresh", "validate"])
+async def test_rebase_same_key_with_different_reason_returns_idempotency_conflict(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        with_open_candidate=True,
+    )
+    headers = {**_auth(monkeypatch), "Idempotency-Key": "rebase-reason-conflict"}
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers=headers,
+    )
+    before_counts = await _counts(engine, workspace_id)
+    conflict = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "different base branch reason"},
+        headers=headers,
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+    assert after_counts == before_counts
+
+
+@pytest.mark.unit
+async def test_rebase_fresh_key_with_different_reason_rejects_active_rebase_conflict(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        with_open_candidate=True,
+    )
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "rebase-original"},
+    )
+    before_counts = await _counts(engine, workspace_id)
+    conflict = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "different base branch reason"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "rebase-conflicting"},
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "WORKSPACE_REBASE_CONFLICT"
+    assert after_counts == before_counts
+
+
+@pytest.mark.unit
+async def test_rebase_fresh_key_stale_if_match_rejects_before_active_coalesce(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        with_open_candidate=True,
+    )
+    headers = {
+        **_auth(monkeypatch),
+        "Idempotency-Key": "rebase-original-version",
+        "If-Match": "7",
+    }
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers=headers,
+    )
+    replay = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers=headers,
+    )
+    before_counts = await _counts(engine, workspace_id)
+    conflict = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": "rebase-fresh-stale-version",
+            "If-Match": "7",
+        },
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert first.status_code == 202
+    assert replay.status_code == 202
+    assert replay.json()["id"] == first.json()["id"]
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "VERSION_CONFLICT"
+    assert conflict.json()["detail"]["detail"] == {
+        "expected_version": 7,
+        "actual_version": 8,
+    }
+    assert after_counts == before_counts
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("action", ["refresh", "validate", "rebase"])
 async def test_recovery_operations_missing_workspace_return_not_found(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -1166,6 +1396,88 @@ async def test_recovery_operations_missing_workspace_return_not_found(
         "error_code": "NOT_FOUND",
         "message": "No workspace with id ws_missing",
     }
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("with_pr_url", "expected_status", "expected_code"),
+    [
+        (False, 400, "WORKSPACE_PR_URL_REQUIRED"),
+        (True, 404, "MERGE_CANDIDATE_NOT_FOUND"),
+    ],
+)
+async def test_rebase_rejects_missing_pr_or_candidate_without_operation(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    with_pr_url: bool,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        with_pr_url=with_pr_url,
+    )
+    if with_pr_url:
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            await MergeCandidateRepository(session).close_open_for_workspace(
+                workspace_id,
+                close_reason="TEST_MISSING_CANDIDATE",
+            )
+            await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": f"rebase-missing-{with_pr_url}"},
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert response.status_code == expected_status
+    assert response.json()["detail"]["error_code"] == expected_code
+    assert after_counts == before_counts
+
+
+@pytest.mark.unit
+async def test_rebase_rejects_active_destructive_operation_without_new_operation(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        with_open_candidate=True,
+    )
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        conflict = Operation(
+            id="op_active_destroy",
+            workspace_id=workspace_id,
+            type="destroy",
+            status="pending",
+            payload={"source": "operator_api"},
+        )
+        session.add(conflict)
+        await session.commit()
+    before_counts = await _counts(engine, workspace_id)
+
+    response = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers={**_auth(monkeypatch), "Idempotency-Key": "rebase-destroy-conflict"},
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert response.status_code == 409
+    assert response.json()["detail"]["error_code"] == "WORKSPACE_OPERATION_CONFLICT"
+    assert response.json()["detail"]["detail"] == {
+        "operation_id": "op_active_destroy",
+        "operation_type": "destroy",
+        "operation_status": "pending",
+    }
+    assert after_counts == before_counts
 
 
 @pytest.mark.unit
@@ -1211,6 +1523,7 @@ async def test_recovery_route_handlers_return_operation_response_directly(
 ) -> None:
     refresh_operation = _operation_row("op_refresh_direct", "refresh")
     validate_operation = _operation_row("op_validate_direct", "validate")
+    rebase_operation = _operation_row("op_rebase_direct", "rebase")
 
     class _Service:
         async def request_refresh_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
@@ -1218,6 +1531,9 @@ async def test_recovery_route_handlers_return_operation_response_directly(
 
         async def request_validate_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
             return validate_operation
+
+        async def request_rebase_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
+            return rebase_operation
 
     monkeypatch.setattr(controls_route, "_controls", lambda _session: _Service())
 
@@ -1235,11 +1551,20 @@ async def test_recovery_route_handlers_return_operation_response_directly(
         if_match=None,
         session=None,  # type: ignore[arg-type]
     )
+    rebase = await controls_route.rebase_workspace(
+        "ws_direct",
+        WorkspaceOperationRequest(reason="rebase"),
+        idempotency_key="rebase-direct",
+        if_match=None,
+        session=None,  # type: ignore[arg-type]
+    )
 
     assert refresh.id == "op_refresh_direct"
     assert refresh.type == "refresh"
     assert validate.id == "op_validate_direct"
     assert validate.type == "validate"
+    assert rebase.id == "op_rebase_direct"
+    assert rebase.type == "rebase"
 
 
 @pytest.mark.unit
@@ -1251,6 +1576,9 @@ async def test_recovery_route_handlers_map_control_errors_directly(
             raise controls_route.WorkspaceNotFoundError("ws_direct")
 
         async def request_validate_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
+            raise controls_route.WorkspaceNotFoundError("ws_direct")
+
+        async def request_rebase_workspace(self, *_args: Any, **_kwargs: Any) -> Operation:
             raise controls_route.WorkspaceNotFoundError("ws_direct")
 
     monkeypatch.setattr(controls_route, "_controls", lambda _session: _Service())
@@ -1271,9 +1599,18 @@ async def test_recovery_route_handlers_map_control_errors_directly(
             if_match=None,
             session=None,  # type: ignore[arg-type]
         )
+    with pytest.raises(HTTPException) as rebase_error:
+        await controls_route.rebase_workspace(
+            "ws_direct",
+            WorkspaceOperationRequest(reason="rebase"),
+            idempotency_key="rebase-direct",
+            if_match=None,
+            session=None,  # type: ignore[arg-type]
+        )
 
     assert refresh_error.value.status_code == 404
     assert validate_error.value.status_code == 404
+    assert rebase_error.value.status_code == 404
 
 
 async def _call_control(

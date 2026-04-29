@@ -12,8 +12,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace, WorkspaceEvent
-from awf.db.repositories import OperationRepository, WorkspaceEventRepository, WorkspaceRepository
+from awf.db.models import MergeCandidate, Operation, Workspace, WorkspaceEvent
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    OperationRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.service.controls import (
     ActiveWorkspaceDestroyError,
@@ -21,6 +28,10 @@ from awf.service.controls import (
     VersionConflictError,
     WorkspaceControlService,
     WorkspaceNotFoundError,
+    WorkspaceRebaseActiveConflictError,
+    WorkspaceRebaseMissingCandidateError,
+    WorkspaceRebaseMissingPrUrlError,
+    WorkspaceRebaseStateError,
     WorkspaceRefreshStateError,
     WorkspaceRemonitorMissingPrUrlError,
     WorkspaceRemonitorStateError,
@@ -128,6 +139,44 @@ async def _workspace(
     workspace.compose_file_path = f"/tmp/{workspace.id}/compose.yml"
     await session.flush()
     return workspace
+
+
+async def _workspace_with_candidate(
+    session: AsyncSession,
+    *,
+    status: WorkspaceStatus = WorkspaceStatus.monitoring_pr,
+    title: str = "rebase lifecycle",
+) -> tuple[Workspace, MergeCandidate]:
+    workspace = await _workspace(session, status=status, title=title)
+    workspace.branch_name = f"awf/{workspace.id}"
+    workspace.remote_push_branch = workspace.branch_name
+    workspace.base_commit = "a" * 40
+    workspace.monitor_last_commit_sha = "h" * 40
+    workspace.pr_url = "https://github.com/example/control-lifecycle/pull/50"
+    workspace.pr_number = 50
+    task = await TaskRepository(session).create_or_get(
+        repo_url=workspace.repo_url,
+        base_branch=workspace.branch_base,
+        title=workspace.task_title,
+        prompt=workspace.task_prompt,
+        external_id=workspace.task_external_id,
+        idempotency_key=None,
+        task_class=workspace.task_class,
+        owned_paths=list(workspace.owned_paths),
+    )
+    attempt = await TaskAttemptRepository(session).create_for_workspace(
+        task=task,
+        workspace=workspace,
+    )
+    candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
+        task=task,
+        attempt=attempt,
+        workspace=workspace,
+        head_sha=workspace.monitor_last_commit_sha,
+        base_sha=workspace.base_commit,
+    )
+    await session.flush()
+    return workspace, candidate
 
 
 def _service(
@@ -966,6 +1015,220 @@ async def test_validate_same_key_with_different_requested_tier_conflicts(
             requested_tier=3,
             idempotency_key="validate-tier-conflict",
         )
+
+
+@pytest.mark.unit
+async def test_rebase_monitoring_pr_creates_rebase_operation_and_coalesces(
+    session: AsyncSession,
+) -> None:
+    workspace, candidate = await _workspace_with_candidate(session)
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_rebase_workspace(
+        workspace.id,
+        reason="base branch advanced",
+        idempotency_key="rebase-first",
+        expected_version=workspace.version,
+    )
+    replay = await service.request_rebase_workspace(
+        workspace.id,
+        reason="base branch advanced",
+        idempotency_key="rebase-fresh-key",
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    rebase_event = next(
+        event for event in events if event.event_type == "workspace.rebase_requested"
+    )
+    state_event = next(
+        event
+        for event in events
+        if event.event_type == "workspace.state_changed"
+        and event.reason_code == "OPERATOR_REBASE"
+    )
+
+    assert replay.id == operation.id
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert workspace.version == 2
+    assert [row.id for row in operations] == [operation.id]
+    assert operation.type == OperationType.rebase.value
+    assert operation.status == OperationStatus.pending.value
+    assert operation.idempotency_key == "rebase-first"
+    assert operation.payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": "base branch advanced",
+        "reason_code": "OPERATOR_REBASE",
+        "requested_action": "rebase",
+        "recovery_mode": "rebase_only",
+        "candidate_id": candidate.id,
+        "attempt_id": candidate.attempt_id,
+        "task_id": candidate.task_id,
+        "pr_number": 50,
+        "pr_url": "https://github.com/example/control-lifecycle/pull/50",
+        "source_head_sha": "h" * 40,
+        "source_base_sha": "a" * 40,
+        "target_branch": "development",
+        "remote_branch": f"awf/{workspace.id}",
+        "expected_version": 1,
+    }
+    assert rebase_event.reason_code == "OPERATOR_REBASE"
+    assert rebase_event.payload == {
+        "source": "operator_api",
+        "reason": "base branch advanced",
+        "operation_id": operation.id,
+        "recovery_mode": "rebase_only",
+        "candidate_id": candidate.id,
+        "expected_version": 1,
+    }
+    assert state_event.old_state == WorkspaceStatus.monitoring_pr.value
+    assert state_event.new_state == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_rebase_fresh_key_with_stale_if_match_does_not_coalesce_active_operation(
+    session: AsyncSession,
+) -> None:
+    workspace, _candidate = await _workspace_with_candidate(session)
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_rebase_workspace(
+        workspace.id,
+        reason="base branch advanced",
+        idempotency_key="rebase-original",
+        expected_version=workspace.version,
+    )
+
+    replay = await service.request_rebase_workspace(
+        workspace.id,
+        reason="base branch advanced",
+        idempotency_key="rebase-original",
+        expected_version=1,
+    )
+    with pytest.raises(VersionConflictError) as exc_info:
+        await service.request_rebase_workspace(
+            workspace.id,
+            reason="base branch advanced",
+            idempotency_key="rebase-fresh-stale-version",
+            expected_version=1,
+        )
+
+    assert replay.id == operation.id
+    assert workspace.version == 2
+    assert exc_info.value.detail == {"expected_version": 1, "actual_version": 2}
+    assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
+
+
+@pytest.mark.unit
+async def test_rebase_same_key_with_different_reason_conflicts(
+    session: AsyncSession,
+) -> None:
+    workspace, _candidate = await _workspace_with_candidate(session)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.request_rebase_workspace(
+        workspace.id,
+        reason="base branch advanced",
+        idempotency_key="rebase-reason-conflict",
+    )
+
+    with pytest.raises(IdempotencyConflictError):
+        await service.request_rebase_workspace(
+            workspace.id,
+            reason="different base branch reason",
+            idempotency_key="rebase-reason-conflict",
+        )
+
+
+@pytest.mark.unit
+async def test_rebase_active_incompatible_payload_conflicts_without_duplicate_operation(
+    session: AsyncSession,
+) -> None:
+    workspace, _candidate = await _workspace_with_candidate(session)
+    service, _stopper, _cleaner = _service(session)
+
+    operation = await service.request_rebase_workspace(
+        workspace.id,
+        reason="base branch advanced",
+        idempotency_key="rebase-original",
+    )
+
+    with pytest.raises(WorkspaceRebaseActiveConflictError) as exc_info:
+        await service.request_rebase_workspace(
+            workspace.id,
+            reason="different base branch reason",
+            idempotency_key="rebase-conflicting",
+        )
+
+    assert exc_info.value.error_code == "WORKSPACE_REBASE_CONFLICT"
+    assert exc_info.value.detail == {
+        "operation_id": operation.id,
+        "operation_type": OperationType.rebase.value,
+        "operation_status": OperationStatus.pending.value,
+    }
+    assert [row.id for row in await _operations(session, workspace.id)] == [operation.id]
+
+
+@pytest.mark.unit
+async def test_rebase_rejects_missing_pr_candidate_state_and_destructive_conflicts(
+    session: AsyncSession,
+) -> None:
+    wrong_state, _wrong_candidate = await _workspace_with_candidate(
+        session,
+        status=WorkspaceStatus.completed,
+        title="rebase completed",
+    )
+    missing_pr = await _workspace(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+        title="rebase missing pr",
+    )
+    missing_candidate = await _workspace(
+        session,
+        status=WorkspaceStatus.monitoring_pr,
+        title="rebase missing candidate",
+    )
+    missing_candidate.pr_url = "https://github.com/example/control-lifecycle/pull/51"
+    missing_candidate.pr_number = 51
+    destructive, _destructive_candidate = await _workspace_with_candidate(
+        session,
+        title="rebase destructive conflict",
+    )
+    conflict = await OperationRepository(session).create(
+        workspace_id=destructive.id,
+        operation_type=OperationType.destroy,
+        status=OperationStatus.running,
+        payload={"source": "operator_api"},
+    )
+    service, _stopper, _cleaner = _service(session)
+
+    with pytest.raises(WorkspaceRebaseStateError) as wrong_state_error:
+        await service.request_rebase_workspace(wrong_state.id, reason="rebase")
+    with pytest.raises(WorkspaceRebaseMissingPrUrlError) as missing_pr_error:
+        await service.request_rebase_workspace(missing_pr.id, reason="rebase")
+    with pytest.raises(WorkspaceRebaseMissingCandidateError) as missing_candidate_error:
+        await service.request_rebase_workspace(missing_candidate.id, reason="rebase")
+    with pytest.raises(WorkspaceRebaseActiveConflictError) as conflict_error:
+        await service.request_rebase_workspace(destructive.id, reason="rebase")
+
+    assert wrong_state_error.value.detail == {
+        "status": WorkspaceStatus.completed.value,
+        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+    }
+    assert missing_pr_error.value.detail == {"status": WorkspaceStatus.monitoring_pr.value}
+    assert missing_candidate_error.value.detail == {
+        "workspace_id": missing_candidate.id,
+        "pr_url": "https://github.com/example/control-lifecycle/pull/51",
+    }
+    assert conflict_error.value.detail == {
+        "operation_id": conflict.id,
+        "operation_type": OperationType.destroy.value,
+        "operation_status": OperationStatus.running.value,
+    }
+    assert await _operations(session, wrong_state.id) == []
+    assert await _operations(session, missing_pr.id) == []
+    assert await _operations(session, missing_candidate.id) == []
+    assert [row.id for row in await _operations(session, destructive.id)] == [conflict.id]
 
 
 @pytest.mark.unit

@@ -102,6 +102,7 @@ async def _seed_ready_workspace_with_recovery(
     create_worktree: bool = True,
     recovery_mode: str = "validate_only",
     source: str = "pr_monitor",
+    operation_type: OperationType = OperationType.validate,
 ) -> str:
     """Insert a workspace already in ``ready`` with a pending `pr_monitor`
     validate operation — the shape the monitor's RECOVERY_DISPATCH path
@@ -136,7 +137,7 @@ async def _seed_ready_workspace_with_recovery(
         await repo.transition(ws, to=WorkspaceStatus.ready, reason_code="RECOVERY_DISPATCH")
         await OperationRepository(s).create(
             workspace_id=ws.id,
-            operation_type=OperationType.validate,
+            operation_type=operation_type,
             payload={
                 "owner": source,
                 "source": source,
@@ -264,6 +265,11 @@ def test_get_active_recovery_payload_returns_payload_when_pending() -> None:
         status=OperationStatus.pending.value,
         payload={"source": "operator_api", "recovery_mode": "validate_only"},
     )
+    operator_rebase = _FakeOperation(
+        status=OperationStatus.pending.value,
+        payload={"source": "operator_api", "recovery_mode": "rebase_only"},
+        operation_type=OperationType.rebase.value,
+    )
     operator = _FakeOperation(
         status=OperationStatus.pending.value,
         payload={"source": "operator_api"},
@@ -281,6 +287,10 @@ def test_get_active_recovery_payload_returns_payload_when_pending() -> None:
     assert _get_active_recovery_payload(_FakeWorkspace([pending])) == pending.payload
     assert _get_active_recovery_payload(_FakeWorkspace([running])) == running.payload
     assert _get_active_recovery_payload(_FakeWorkspace([operator_api])) == operator_api.payload
+    assert (
+        _get_active_recovery_payload(_FakeWorkspace([operator_rebase]))
+        == operator_rebase.payload
+    )
     assert _get_active_recovery_payload(_FakeWorkspace([succeeded])) is None
     assert _get_active_recovery_payload(_FakeWorkspace([operator])) is None
     assert _get_active_recovery_payload(_FakeWorkspace([wrong_type])) is None
@@ -878,6 +888,51 @@ async def test_rebase_only_recovery_marks_operation_failed_when_recording_raises
     assert rebase_ops[0].error_message == "write exploded"
     assert isinstance(rebase_ops[0].result, dict)
     assert rebase_ops[0].result["reason_code"] == "MONITOR_RECOVERY_REBASE_FAILED"
+
+
+@pytest.mark.unit
+async def test_operator_rebase_operation_is_reused_and_failed_when_rebase_fails(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        recovery_mode="rebase_only",
+        source="operator_api",
+        operation_type=OperationType.rebase,
+    )
+
+    fake.queue_result(returncode=0)  # git fetch origin <base>
+    fake.queue_result(returncode=0)  # git switch <branch>
+    fake.queue_result(returncode=1)  # git merge-base --is-ancestor origin/<base> HEAD
+    fake.queue_result(returncode=1, stderr="conflict on README.md")  # git rebase
+    fake.queue_result(returncode=0)  # git rebase --abort
+
+    await executor.execute(ws_id)
+
+    assert _all_adapter_args(fake) == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.failed.value
+    rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
+    assert len(rebase_ops) == 1
+    assert rebase_ops[0].payload is not None
+    assert rebase_ops[0].payload["source"] == "operator_api"
+    assert rebase_ops[0].status == OperationStatus.failed.value
+    assert rebase_ops[0].started_at is not None
+    assert rebase_ops[0].finished_at is not None
+    assert rebase_ops[0].error_code == "MONITOR_RECOVERY_REBASE_FAILED"
+    assert "conflict on README.md" in (rebase_ops[0].error_message or "")
+    assert rebase_ops[0].result == {
+        "status": "failed",
+        "reason_code": "MONITOR_RECOVERY_REBASE_FAILED",
+        "source_base_sha": "a" * 40,
+        "source_head_sha": "d" * 40,
+    }
 
 
 @pytest.mark.unit

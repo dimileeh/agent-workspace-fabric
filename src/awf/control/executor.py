@@ -59,7 +59,7 @@ from awf.db.enums import (
     TaskClass,
     WorkspaceStatus,
 )
-from awf.db.models import Workspace
+from awf.db.models import Operation, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -132,22 +132,33 @@ class _MonitorRebaseRecoveryError(RuntimeError):
 
 
 def _get_active_recovery_payload(workspace: Any) -> dict[str, Any] | None:
-    """Return the active validate-only recovery payload (or ``None``).
+    """Return the active monitor/operator recovery payload (or ``None``).
 
-    Recovery operations use a pending/running ``validate`` operation with
-    ``recovery_mode`` set. The executor uses that as the discriminator that
-    separates recovery from a fresh feature-execution pass.
+    Recovery operations use a pending/running operation with ``recovery_mode``
+    set. Validate-only recovery is recorded as ``validate``; public operator
+    rebase requests are recorded as ``rebase`` but run through the same
+    rebase-only executor path.
     """
     operations = getattr(workspace, "operations", None) or []
     for operation in operations:
         if operation.status not in _RECOVERY_ACTIVE_OPERATION_STATUSES:
             continue
-        if getattr(operation, "type", None) != OperationType.validate.value:
+        operation_type = getattr(operation, "type", None)
+        if operation_type not in {
+            OperationType.validate.value,
+            OperationType.rebase.value,
+        }:
             continue
         payload = operation.payload
         if not _is_validate_only_recovery_payload(payload):
             continue
-        return cast(dict[str, Any], payload)
+        recovery_payload = cast(dict[str, Any], payload)
+        if (
+            operation_type == OperationType.rebase.value
+            and recovery_payload.get("recovery_mode") != "rebase_only"
+        ):
+            continue
+        return recovery_payload
     return None
 
 
@@ -2083,10 +2094,26 @@ class WorkspaceExecutor:
         source_head_sha: str | None,
         recovery_payload: Mapping[str, Any],
     ) -> MonitorOperationHandle | None:
-        async with self._session_factory() as session:
+        session_factory = cast(Any, self._session_factory)
+        if not callable(session_factory):  # test-only lightweight executor
+            return None
+        async with session_factory() as session:
             workspace = await WorkspaceRepository(session).get(workspace_id)
             if workspace is None:  # pragma: no cover - destroyed mid-recovery
                 return None
+            repo = OperationRepository(session)
+            existing_rebase = await self._find_active_rebase_recovery_operation(
+                repo,
+                workspace_id=workspace_id,
+                recovery_payload=recovery_payload,
+            )
+            if existing_rebase is not None:
+                await repo.start(existing_rebase)
+                await session.commit()
+                return MonitorOperationHandle(
+                    operation_id=existing_rebase.id,
+                    should_finish=True,
+                )
             pr_number = _int_or_none(recovery_payload.get("pr_number")) or workspace.pr_number
             if pr_number is None:
                 pr_number = 0
@@ -2121,6 +2148,27 @@ class WorkspaceExecutor:
             await session.commit()
             return handle
 
+    async def _find_active_rebase_recovery_operation(
+        self,
+        repo: OperationRepository,
+        *,
+        workspace_id: str,
+        recovery_payload: Mapping[str, Any],
+    ) -> Operation | None:
+        for status in (OperationStatus.pending, OperationStatus.running):
+            operations = await repo.list_for_workspace(
+                workspace_id,
+                operation_type=OperationType.rebase,
+                status=status,
+                limit=100,
+            )
+            for operation in operations:
+                if not _is_validate_only_recovery_payload(operation.payload):
+                    continue
+                if operation.payload == dict(recovery_payload):
+                    return operation
+        return None
+
     async def _finish_rebase_recovery_operation(
         self,
         operation: MonitorOperationHandle | None,
@@ -2152,7 +2200,7 @@ class WorkspaceExecutor:
         branch_name: str,
         remote_branch: str,
         reason: str,
-        recovery_payload: Mapping[str, Any],
+        recovery_payload: Mapping[str, Any] | None = None,
     ) -> _RebaseRecoveryResult:
         """Rebase an already-open PR branch onto the latest target branch.
 
@@ -2177,6 +2225,7 @@ class WorkspaceExecutor:
                 ]
             )
 
+        recovery_payload = recovery_payload or {}
         source_base_sha = _str_or_none(recovery_payload.get("source_base_sha"))
         source_head_sha = _str_or_none(recovery_payload.get("source_head_sha"))
         operation = await self._begin_rebase_recovery_operation(
