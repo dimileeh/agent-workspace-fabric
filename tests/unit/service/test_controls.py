@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -456,6 +456,174 @@ async def test_destroy_workspace_records_cleanup_failures(
 
 
 @pytest.mark.unit
+async def test_destroy_workspace_records_structured_partial_cleanup_and_retry(
+    engine: AsyncEngine,
+) -> None:
+    partial_cleanup = {
+        "status": "partial",
+        "reason_code": "CLEANUP_PARTIAL",
+        "steps": [
+            {
+                "name": "compose_down",
+                "status": "failed",
+                "reason_code": "COMPOSE_COMMAND_FAILED",
+                "error": "network still in use",
+            },
+            {
+                "name": "worktree_remove",
+                "status": "succeeded",
+                "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+            },
+        ],
+        "failed_steps": [
+            {
+                "name": "compose_down",
+                "status": "failed",
+                "reason_code": "COMPOSE_COMMAND_FAILED",
+                "error": "network still in use",
+            }
+        ],
+        "completed_steps": [
+            {
+                "name": "worktree_remove",
+                "status": "succeeded",
+                "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+            }
+        ],
+    }
+    successful_cleanup = {
+        "status": "succeeded",
+        "reason_code": "CLEANUP_SUCCEEDED",
+        "steps": [
+            {
+                "name": "compose_down",
+                "status": "succeeded",
+                "reason_code": "COMPOSE_DOWN_SUCCEEDED",
+            },
+            {
+                "name": "worktree_remove",
+                "status": "succeeded",
+                "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+            },
+        ],
+        "failed_steps": [],
+        "completed_steps": [
+            {
+                "name": "compose_down",
+                "status": "succeeded",
+                "reason_code": "COMPOSE_DOWN_SUCCEEDED",
+            },
+            {
+                "name": "worktree_remove",
+                "status": "succeeded",
+                "reason_code": "WORKTREE_REMOVE_SUCCEEDED",
+            },
+        ],
+    }
+    cleaner = _SequencedCleaner([partial_cleanup, successful_cleanup])
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.failed)
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: cleaner,
+        )
+
+        failed_response = await service.destroy_workspace(
+            workspace.id,
+            force=False,
+            remove_volumes=True,
+            remove_worktree=True,
+            idempotency_key="destroy-partial",
+        )
+        failed_events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        failed_operations = await OperationRepository(session).list_for_workspace(
+            workspace.id,
+            operation_type=OperationType.destroy,
+        )
+
+        retry_response = await service.destroy_workspace(
+            workspace.id,
+            force=False,
+            remove_volumes=True,
+            remove_worktree=True,
+            idempotency_key="destroy-retry",
+        )
+        retry_events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        retry_operations = await OperationRepository(session).list_for_workspace(
+            workspace.id,
+            operation_type=OperationType.destroy,
+        )
+
+    assert failed_response.status == WorkspaceStatus.failed
+    failed_operation = failed_operations[0]
+    assert failed_operation.status == OperationStatus.failed.value
+    assert failed_operation.error_code == "CLEANUP_FAILED"
+    assert failed_operation.error_message == "network still in use"
+    assert failed_operation.result == {
+        "status": WorkspaceStatus.failed.value,
+        "cleanup": partial_cleanup,
+    }
+    cleanup_event = next(event for event in failed_events if event.reason_code == "CLEANUP_FAILED")
+    assert cleanup_event.payload is not None
+    assert cleanup_event.payload["cleanup"] == partial_cleanup
+
+    assert retry_response.status == WorkspaceStatus.destroyed
+    retry_operation = retry_operations[0]
+    assert retry_operation.status == OperationStatus.succeeded.value
+    assert retry_operation.result == {
+        "status": WorkspaceStatus.destroyed.value,
+        "cleanup": successful_cleanup,
+    }
+    retry_cleanup_event = next(event for event in retry_events if event.reason_code == "DESTROYED")
+    assert retry_cleanup_event.payload is not None
+    assert retry_cleanup_event.payload["cleanup"] == retry_operation.result["cleanup"]
+    assert len(cleaner.calls) == 2
+
+
+@pytest.mark.unit
+async def test_destroy_already_destroyed_workspace_records_skipped_cleanup_detail(
+    engine: AsyncEngine,
+) -> None:
+    cleaner = _RecordingCleaner()
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(session, status=WorkspaceStatus.destroyed)
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: cleaner,
+        )
+
+        response = await service.destroy_workspace(
+            workspace.id,
+            force=False,
+            remove_volumes=True,
+            remove_worktree=True,
+            idempotency_key="destroy-already-clean",
+        )
+        operations = await OperationRepository(session).list_for_workspace(
+            workspace.id,
+            operation_type=OperationType.destroy,
+        )
+
+    assert response.status == WorkspaceStatus.destroyed
+    assert response.message == "workspace already destroyed"
+    assert cleaner.calls == []
+    assert operations[0].result == {
+        "status": WorkspaceStatus.destroyed.value,
+        "cleanup": {
+            "status": "skipped",
+            "reason_code": "WORKSPACE_ALREADY_DESTROYED",
+            "steps": [],
+            "failed_steps": [],
+            "completed_steps": [],
+        },
+    }
+
+
+@pytest.mark.unit
 async def test_validate_exact_idempotency_replay_survives_terminal_workspace_movement(
     engine: AsyncEngine,
 ) -> None:
@@ -664,3 +832,33 @@ class _RecordingCleaner:
             }
         )
         return list(self.failures)
+
+
+class _SequencedCleaner:
+    def __init__(self, results: Sequence[Mapping[str, object]]) -> None:
+        self.results = list(results)
+        self.calls: list[dict[str, object]] = []
+
+    async def cleanup(
+        self,
+        *,
+        workspace_id: str,
+        repo_url: str,
+        compose_project_name: str | None = None,
+        compose_file_path: Path | None = None,
+        worktree_host_path: Path | None = None,
+        remove_volumes: bool = True,
+        remove_worktree: bool = True,
+    ) -> Mapping[str, object]:
+        self.calls.append(
+            {
+                "workspace_id": workspace_id,
+                "repo_url": repo_url,
+                "compose_project_name": compose_project_name,
+                "compose_file_path": compose_file_path,
+                "worktree_host_path": worktree_host_path,
+                "remove_volumes": remove_volumes,
+                "remove_worktree": remove_worktree,
+            }
+        )
+        return self.results.pop(0)
