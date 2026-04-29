@@ -8,6 +8,7 @@ import json
 from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
+from itertools import chain
 from typing import cast
 
 from sqlalchemy import and_, or_, select
@@ -133,9 +134,10 @@ async def list_merge_queue_response(
         before_workspace_id=decoded_cursor.workspace_id if decoded_cursor is not None else None,
         limit=limit + 1,
     )
-    queue_rows: list[MergeCandidate | Workspace] = [*candidate_rows, *legacy_rows]
+    candidate_iter: Iterable[MergeCandidate | Workspace] = candidate_rows
+    legacy_iter: Iterable[MergeCandidate | Workspace] = legacy_rows
     rows = sorted(
-        queue_rows,
+        chain(candidate_iter, legacy_iter),
         key=lambda row: (_row_workspace(row).updated_at, _row_workspace(row).id),
         reverse=True,
     )
