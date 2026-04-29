@@ -179,7 +179,7 @@ A `WorkspaceProfile` can describe:
 - `validation`: health checks, artifact paths, timeout and tier hints.
 - `monitor`: PR-monitor policy such as initial review grace.
 - `secrets`: named mounts or env leases.
-- `security`: egress policy plus profile lint policy for local credential mounts.
+- `security`: local egress policy, related security declarations, and profile lint policy for credential mounts.
 - `ports`: endpoint names exposed to agents or tests.
 
 Resolution order:
@@ -258,6 +258,29 @@ Preview the profile AWF would resolve for a checkout:
 ```bash
 uv run --python 3.12 --extra dev awf profile preview . --profile auto
 ```
+
+### Local egress policy
+
+Workspace profiles can declare `security.egress`, and local Docker mode enforces
+the subset that Compose can represent safely:
+
+| Mode | Local Docker behavior |
+| --- | --- |
+| `open` | Default. The workspace network remains public and the agent keeps `host.docker.internal:host-gateway`. |
+| `offline` | The workspace Compose network renders `internal: true`, and the agent host-gateway mapping is omitted. Profile services remain reachable on `awf_net`. |
+| `mirrored` with no allowlist | Uses the same internal-network behavior as `offline`, for profiles that provide in-stack mirror sidecars. |
+| `allowlist` | Rejected before `docker compose up`; local Compose cannot enforce destination allowlists generically. |
+| `mirrored` with allowlist entries | Rejected before `docker compose up`; external destination filtering needs a future proxy/firewall backend. |
+
+Policy rejections fail the workspace as `policy_failure` while preserving a
+specific terminal event reason code:
+
+- `LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED`
+- `LOCAL_EGRESS_MIRRORED_ALLOWLIST_UNSUPPORTED`
+
+This local slice does not implement cloud `NetworkPolicy`, host firewall rules,
+iptables/nftables mutation, DNS filtering, transparent proxies, or package
+registry mirror management.
 
 ## Workspace Lifecycle
 

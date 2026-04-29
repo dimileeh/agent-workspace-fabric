@@ -14,6 +14,7 @@ from awf.node.compose_manager import (
     ComposeProjectPaths,
     WorkspaceComposeSpec,
 )
+from awf.node.egress_policy import local_egress_plan
 from awf.node.git_manager import WorktreeLayout
 from awf.profiles.compose import (
     agent_environment_with_host_auth,
@@ -55,6 +56,7 @@ class ComposeStackLauncher:
     async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths:
         layout = request.layout
         profile = request.profile
+        egress_plan = local_egress_plan(profile.security.egress)
         # Linked git worktrees store writable refs/objects in the common mirror.
         # Agents need that metadata writable when they make local commits.
         mirror_mount = AuthMount(
@@ -87,5 +89,7 @@ class ComposeStackLauncher:
             auth_mounts=tuple(auth_mounts),
             git_name=DEFAULT_GIT_AUTHOR_NAME,
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
+            network_internal=egress_plan.network_internal,
+            host_gateway_enabled=egress_plan.host_gateway_enabled,
         )
         return await self._compose.up(spec, wait=True)

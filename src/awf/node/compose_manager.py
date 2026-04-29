@@ -155,6 +155,8 @@ class WorkspaceComposeSpec:
     git_email: str | None = None
     services: tuple[ComposeService, ...] = ()
     companions: tuple[CompanionService, ...] = ()
+    network_internal: bool = False
+    host_gateway_enabled: bool = True
 
     def project_name(self) -> str:
         return f"awf_{self.workspace_id}"
@@ -255,6 +257,8 @@ class ComposeManager:
             services=services,
             named_volumes=named_volumes,
             agent_depends_on=agent_depends_on,
+            network_internal=spec.network_internal,
+            host_gateway_enabled=spec.host_gateway_enabled,
         )
         compose_file.write_text(rendered, encoding="utf-8")
 
