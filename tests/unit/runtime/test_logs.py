@@ -11,8 +11,10 @@ from typing import Any
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.runtime.logs as logs_module
 from awf.adapters.codex import CodexAdapter
 from awf.common.commands import FakeCommandRunner
+from awf.common.redaction import REDACTION_MARKER
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.logs import LogBroadcaster, LogStore, WorkspaceLogSink, stream_compose_service_logs
@@ -142,8 +144,7 @@ async def test_log_sink_write_uses_threaded_file_append(
         await sink.write("def\n")
         frame = queue.get_nowait()
 
-    assert len(to_thread_calls) == 1
-    assert to_thread_calls[0][0].__name__ == "_append_log_bytes"
+    assert [call[0].__name__ for call in to_thread_calls] == ["redact_secrets", "_append_log_bytes"]
     assert path.read_bytes() == b"abcdef\n"
     assert frame.offset == 3
     assert frame.data == "def\n"
@@ -203,6 +204,176 @@ async def test_log_sink_updates_metadata_under_write_lock(
 
 
 @pytest.mark.unit
+async def test_workspace_log_sink_redacts_persisted_data_live_frames_and_metadata(
+    engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@example.com:repo/app.git",
+            branch_base="main",
+            task_title="Redact logs",
+            task_prompt="Keep workspace logs safe.",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+    broadcaster = LogBroadcaster()
+    store = LogStore(root=tmp_path, session_factory=factory, broadcaster=broadcaster)
+    sink = await store.open_stream(
+        workspace_id=workspace.id,
+        stream_id="agent.stdout",
+        source="agent",
+        name="Codex agent stdout",
+        kind="stdout",
+    )
+    raw_secret_bodies = (
+        "ghp_LOGredactGitHubToken123456",
+        "sk-fakeOpenAIKey123456789",
+        "sk-ant-fakeAnthropicKey123456789",
+        "AIzaFakeGeminiApiKey1234567890ABCD",
+        "frameBearerToken123456",
+        "url-password-value",
+        "awf-api-token-123456",
+    )
+    raw_line = (
+        "context before "
+        "github ghp_LOGredactGitHubToken123456 "
+        "openai sk-fakeOpenAIKey123456789 "
+        "anthropic sk-ant-fakeAnthropicKey123456789 "
+        "gemini AIzaFakeGeminiApiKey1234567890ABCD "
+        "Authorization: Bearer frameBearerToken123456 "
+        "repo https://user:url-password-value@github.com/example/repo.git "
+        "AWF_API_TOKEN=awf-api-token-123456 context after\n"
+    )
+
+    async with broadcaster.subscribe(workspace.id) as queue:
+        await sink.write(raw_line)
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    persisted = sink.path.read_text(encoding="utf-8")
+    for raw_secret_body in raw_secret_bodies:
+        assert raw_secret_body not in persisted
+        assert raw_secret_body not in frame.data
+    assert "context before" in persisted
+    assert "context after" in persisted
+    assert "Authorization: Bearer <redacted>" in persisted
+    assert "https://<redacted>@github.com/example/repo.git" in persisted
+    assert "AWF_API_TOKEN=<redacted>" in persisted
+    assert persisted.count(REDACTION_MARKER) == 7
+    assert frame.data == persisted
+    assert frame.offset == 0
+
+    async with factory() as session:
+        stream = await WorkspaceLogStreamRepository(session).get(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+        )
+
+    assert stream is not None
+    assert stream.byte_count == len(persisted.encode("utf-8"))
+    assert stream.line_count == 1
+
+
+@pytest.mark.unit
+async def test_workspace_log_sink_does_not_redact_live_frame_after_persisting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    redaction_inputs: list[str] = []
+
+    def fake_redact_secrets(data: str) -> str:
+        redaction_inputs.append(data)
+        return data.replace("token", "token<redaction-pass>")
+
+    monkeypatch.setattr(logs_module, "redact_secrets", fake_redact_secrets)
+    path = tmp_path / "workspace.log"
+    broadcaster = LogBroadcaster()
+    sink = WorkspaceLogSink(
+        workspace_id="ws_single_redact",
+        stream_id="agent.stdout",
+        source="agent",
+        fd="stdout",
+        path=path,
+        session_factory=None,
+        broadcaster=broadcaster,
+    )
+
+    async with broadcaster.subscribe("ws_single_redact") as queue:
+        await sink.write("live token\n")
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    persisted = path.read_text(encoding="utf-8")
+    assert redaction_inputs == ["live token\n"]
+    assert persisted == "live token<redaction-pass>\n"
+    assert frame.data == persisted
+
+
+@pytest.mark.unit
+async def test_workspace_log_sink_redacts_tokens_split_across_write_boundaries(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workspace.log"
+    broadcaster = LogBroadcaster()
+    sink = WorkspaceLogSink(
+        workspace_id="ws_split",
+        stream_id="agent.stdout",
+        source="agent",
+        fd="stdout",
+        path=path,
+        session_factory=None,
+        broadcaster=broadcaster,
+    )
+
+    async with broadcaster.subscribe("ws_split") as queue:
+        await sink.write("context ghp_FA")
+        assert not path.exists() or path.read_text(encoding="utf-8") == ""
+        assert queue.empty()
+
+        await sink.write("KEgithubTokenValue123456 done\n")
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    persisted = path.read_text(encoding="utf-8")
+    assert persisted == f"context {REDACTION_MARKER} done\n"
+    assert frame.data == persisted
+    assert frame.offset == 0
+    for raw_fragment in ("ghp_FA", "KEgithubTokenValue123456"):
+        assert raw_fragment not in persisted
+        assert raw_fragment not in frame.data
+
+
+@pytest.mark.unit
+async def test_workspace_log_sink_flushes_pending_redacted_data_on_close(tmp_path: Path) -> None:
+    path = tmp_path / "workspace.log"
+    broadcaster = LogBroadcaster()
+    sink = WorkspaceLogSink(
+        workspace_id="ws_pending",
+        stream_id="agent.stdout",
+        source="agent",
+        fd="stdout",
+        path=path,
+        session_factory=None,
+        broadcaster=broadcaster,
+    )
+
+    async with broadcaster.subscribe("ws_pending") as queue:
+        await sink.write("partial ghp_PENDINGgithubTokenValue123456")
+        assert not path.exists() or path.read_text(encoding="utf-8") == ""
+        assert queue.empty()
+
+        await sink.close()
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    persisted = path.read_text(encoding="utf-8")
+    assert persisted == f"partial {REDACTION_MARKER}"
+    assert frame.data == persisted
+    assert "ghp_PENDINGgithubTokenValue123456" not in persisted
+    assert "ghp_PENDINGgithubTokenValue123456" not in frame.data
+
+
+@pytest.mark.unit
 async def test_log_broadcaster_delivers_workspace_frames() -> None:
     broadcaster = LogBroadcaster()
 
@@ -219,6 +390,55 @@ async def test_log_broadcaster_delivers_workspace_frames() -> None:
 
     assert frame.workspace_id == "ws_1"
     assert frame.stream_id == "agent.stdout"
+
+
+@pytest.mark.unit
+async def test_log_broadcaster_redacts_direct_live_frames() -> None:
+    broadcaster = LogBroadcaster()
+
+    async with broadcaster.subscribe("ws_1") as queue:
+        await broadcaster.publish(
+            workspace_id="ws_1",
+            stream_id="agent.stdout",
+            source="agent",
+            fd="stdout",
+            offset=0,
+            data="Authorization: Bearer directBearerToken123456\n",
+        )
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    assert frame.data == "Authorization: Bearer <redacted>\n"
+    assert "directBearerToken123456" not in frame.data
+
+
+@pytest.mark.unit
+async def test_log_broadcaster_offloads_direct_live_frame_redaction(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    to_thread_calls: list[tuple[Callable[..., object], tuple[object, ...]]] = []
+
+    async def fake_to_thread(func: Callable[..., object], /, *args: object) -> object:
+        to_thread_calls.append((func, args))
+        return func(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    broadcaster = LogBroadcaster()
+
+    async with broadcaster.subscribe("ws_1") as queue:
+        await broadcaster.publish(
+            workspace_id="ws_1",
+            stream_id="agent.stdout",
+            source="agent",
+            fd="stdout",
+            offset=0,
+            data="Authorization: Bearer directBearerToken123456\n",
+        )
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    assert to_thread_calls == [
+        (logs_module.redact_secrets, ("Authorization: Bearer directBearerToken123456\n",)),
+    ]
+    assert frame.data == "Authorization: Bearer <redacted>\n"
 
 
 @pytest.mark.unit

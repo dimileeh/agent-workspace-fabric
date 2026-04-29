@@ -15,6 +15,7 @@ from typing import Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.redaction import redact_secrets
 from awf.db.repositories import WorkspaceLogStreamRepository
 
 
@@ -71,6 +72,27 @@ class LogBroadcaster:
         offset: int,
         data: str,
     ) -> None:
+        redacted_data = await asyncio.to_thread(redact_secrets, data)
+        self.publish_redacted(
+            workspace_id=workspace_id,
+            stream_id=stream_id,
+            source=source,
+            fd=fd,
+            offset=offset,
+            data=redacted_data,
+        )
+
+    def publish_redacted(
+        self,
+        *,
+        workspace_id: str,
+        stream_id: str,
+        source: str,
+        fd: str,
+        offset: int,
+        data: str,
+    ) -> None:
+        """Publish data that has already passed through redact_secrets."""
         frame = LogFrame(
             seq=next(self._seq),
             workspace_id=workspace_id,
@@ -291,39 +313,72 @@ class WorkspaceLogSink:
     session_factory: async_sessionmaker[AsyncSession] | None
     broadcaster: LogBroadcaster
     _write_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _pending_data: str = field(default="", init=False, repr=False)
 
     async def write(self, data: str) -> None:
         if not data:
             return
-        encoded = data.encode("utf-8")
+        frame: tuple[int, str] | None = None
         async with self._write_lock:
-            offset = await asyncio.to_thread(_append_log_bytes, self.path, encoded)
+            self._pending_data += data
+            raw_data = self._pop_complete_lines_locked()
+            if raw_data:
+                frame = await self._append_redacted_locked(raw_data)
+        if frame is not None:
+            await self._publish_frame(frame)
+
+    async def close(self) -> None:
+        frame: tuple[int, str] | None = None
+        async with self._write_lock:
+            if self._pending_data:
+                raw_data = self._pending_data
+                self._pending_data = ""
+                frame = await self._append_redacted_locked(raw_data)
             if self.session_factory is not None:
                 async with self.session_factory() as session:
                     repo = WorkspaceLogStreamRepository(session)
-                    await repo.append_metadata(
-                        workspace_id=self.workspace_id,
-                        stream_id=self.stream_id,
-                        byte_delta=len(encoded),
-                        line_delta=data.count("\n"),
-                    )
+                    await repo.close(workspace_id=self.workspace_id, stream_id=self.stream_id)
                     await session.commit()
-        await self.broadcaster.publish(
+        if frame is not None:
+            await self._publish_frame(frame)
+
+    def _pop_complete_lines_locked(self) -> str:
+        # Hold partial lines so token prefixes split across writes are redacted
+        # before any bytes are persisted or streamed.
+        last_newline = self._pending_data.rfind("\n")
+        if last_newline == -1:
+            return ""
+        split_at = last_newline + 1
+        raw_data = self._pending_data[:split_at]
+        self._pending_data = self._pending_data[split_at:]
+        return raw_data
+
+    async def _append_redacted_locked(self, raw_data: str) -> tuple[int, str]:
+        redacted_data = await asyncio.to_thread(redact_secrets, raw_data)
+        encoded = redacted_data.encode("utf-8")
+        offset = await asyncio.to_thread(_append_log_bytes, self.path, encoded)
+        if self.session_factory is not None:
+            async with self.session_factory() as session:
+                repo = WorkspaceLogStreamRepository(session)
+                await repo.append_metadata(
+                    workspace_id=self.workspace_id,
+                    stream_id=self.stream_id,
+                    byte_delta=len(encoded),
+                    line_delta=redacted_data.count("\n"),
+                )
+                await session.commit()
+        return offset, redacted_data
+
+    async def _publish_frame(self, frame: tuple[int, str]) -> None:
+        offset, redacted_data = frame
+        self.broadcaster.publish_redacted(
             workspace_id=self.workspace_id,
             stream_id=self.stream_id,
             source=self.source,
             fd=self.fd,
             offset=offset,
-            data=data,
+            data=redacted_data,
         )
-
-    async def close(self) -> None:
-        if self.session_factory is None:
-            return
-        async with self.session_factory() as session:
-            repo = WorkspaceLogStreamRepository(session)
-            await repo.close(workspace_id=self.workspace_id, stream_id=self.stream_id)
-            await session.commit()
 
 
 def _append_log_bytes(path: Path, data: bytes) -> int:
