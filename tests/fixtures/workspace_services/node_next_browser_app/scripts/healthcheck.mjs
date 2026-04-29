@@ -53,7 +53,7 @@ if (url === null) {
 }
 
 const { body, response } = await fetchHealthResponse(url, target);
-if (!response.ok || body !== "ok\n") {
+if (!response.ok || body.trim() !== "ok") {
   throw new Error(`unexpected ${target} health response: ${response.status} ${JSON.stringify(body)}`);
 }
 

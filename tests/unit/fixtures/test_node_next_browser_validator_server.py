@@ -123,8 +123,43 @@ class _HangingHealthHandler(BaseHTTPRequestHandler):
         return
 
 
+class _TrailingWhitespaceHealthHandler(BaseHTTPRequestHandler):
+    def do_GET(self) -> None:
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"ok\r\n  ")
+
+    def log_message(self, format: str, *args: object) -> None:
+        return
+
+
 class _HangingHealthServer(ThreadingHTTPServer):
     daemon_threads = True
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
+def test_healthcheck_accepts_trimmed_ok_response() -> None:
+    """Health endpoint checks should tolerate benign trailing whitespace."""
+    server = _HangingHealthServer(("127.0.0.1", 0), _TrailingWhitespaceHealthHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    try:
+        port = server.server_address[1]
+        result = subprocess.run(
+            ["node", "scripts/healthcheck.mjs", "app"],
+            cwd=_FIXTURE_ROOT,
+            env={**os.environ, "APP_BASE_URL": f"http://127.0.0.1:{port}"},
+            capture_output=True,
+            timeout=2,
+            check=False,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    assert result.returncode == 0
+    assert result.stdout == b"ok\r\n  "
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required")
