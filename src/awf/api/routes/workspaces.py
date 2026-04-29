@@ -344,7 +344,7 @@ async def list_workspace_stale_reasons(
     )
     return StaleReasonListResponse(
         items=[StaleReasonResponse.model_validate(row) for row in rows],
-        limit=50,
+        limit=len(rows),
         cursor=None,
     )
 
