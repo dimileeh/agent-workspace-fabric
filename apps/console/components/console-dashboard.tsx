@@ -40,6 +40,7 @@ import {
   renderLogEntries,
   statusTone,
   toneClass,
+  toneFillClass,
 } from "@/lib/format";
 import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "@/lib/agent-format";
 import { omitUndefined } from "@/lib/api-payload";
@@ -76,6 +77,7 @@ import type {
   ListEnvelope,
   MergeQueueItem,
   Operation,
+  CapacityDimension,
   ConcurrencyLane,
   ResourceSaturationSummary,
   RuntimeService,
@@ -1797,6 +1799,8 @@ function ResourceCapacityPanel({
                 saturation.reserved_resources.peak_memory_gb,
               )} peak`}
             />
+            <Fact label="Reserved disk" value={formatCapacityValue(saturation.reserved_resources.disk_mb, "mb")} />
+            <Fact label="DinD slots" value={`${saturation.reserved_resources.dind_slots} reserved`} />
             <Fact
               label="Disk free"
               value={`${bytes(saturation.disk.free_bytes)} / ${formatPercent(saturation.disk.percent_free)}`}
@@ -1807,6 +1811,26 @@ function ResourceCapacityPanel({
             <LaneMeter label="Provision" lane={saturation.concurrency.provision} />
             <LaneMeter label="Execution" lane={saturation.concurrency.execution} />
           </div>
+          <div className="grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+            <ResourceDimensionMeter label="CPU peak" dimension={saturation.capacity.peak_cpu} unit="cores" />
+            <ResourceDimensionMeter label="Memory peak" dimension={saturation.capacity.peak_memory_gb} unit="gb" />
+            <ResourceDimensionMeter label="Disk" dimension={saturation.capacity.disk_mb} unit="mb" />
+            <ResourceDimensionMeter label="DinD" dimension={saturation.capacity.dind_slots} unit="slots" />
+          </div>
+          {saturation.capacity.pressure_reasons.length > 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {saturation.capacity.pressure_reasons.map((reason) => (
+                <span
+                  key={reason}
+                  className={`inline-flex min-h-6 items-center rounded-md border px-2 text-[11px] font-medium ${toneClass(
+                    reason.endsWith("_UNKNOWN") ? "warn" : "bad",
+                  )}`}
+                >
+                  {reason}
+                </span>
+              ))}
+            </div>
+          ) : null}
           <div className="grid gap-2 md:grid-cols-2">
             <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(saturation.disk.ok ? "good" : "bad")}`}>
               <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2352,6 +2376,43 @@ function LaneMeter({ label, lane }: { label: string; lane: ConcurrencyLane }) {
         <span>{lane.queued} queued</span>
         <span>{lane.available} available</span>
       </div>
+    </div>
+  );
+}
+
+type CapacityUnit = "cores" | "gb" | "mb" | "slots";
+
+function ResourceDimensionMeter({
+  label,
+  dimension,
+  unit,
+}: {
+  label: string;
+  dimension: CapacityDimension;
+  unit: CapacityUnit;
+}) {
+  const limit = dimension.limit;
+  const hasLimit = limit !== null && limit > 0;
+  const fill = hasLimit ? Math.min(100, Math.max(0, (dimension.reserved / limit) * 100)) : 0;
+  const tone = dimension.reason_code ? (dimension.reason_code.endsWith("_UNKNOWN") ? "warn" : "bad") : "good";
+
+  return (
+    <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(tone)}`}>
+      <div className="flex items-center justify-between gap-2">
+        <span className="font-semibold text-slate-900">{label}</span>
+        <span className="mono text-slate-700">
+          {formatCapacityValue(dimension.reserved, unit)}
+          {hasLimit ? ` / ${formatCapacityValue(limit, unit)}` : " / unknown"}
+        </span>
+      </div>
+      <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/70">
+        <div className={`h-full ${toneFillClass(tone)}`} style={{ width: `${fill}%` }} />
+      </div>
+      <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-slate-700">
+        <span>{formatCapacityValue(dimension.available, unit)} available</span>
+        <span>{formatCapacityValue(dimension.available_after_next_default, unit)} after next</span>
+      </div>
+      {dimension.reason_code ? <div className="mono mt-1 truncate text-[11px]">{dimension.reason_code}</div> : null}
     </div>
   );
 }
@@ -3288,6 +3349,22 @@ function formatScalar(value: number): string {
 
 function formatGb(value: number): string {
   return `${formatScalar(value)} GB`;
+}
+
+function formatCapacityValue(value: number | null, unit: CapacityUnit): string {
+  if (value === null) {
+    return "unknown";
+  }
+  if (unit === "gb") {
+    return formatGb(value);
+  }
+  if (unit === "mb") {
+    return bytes(value * 1024 * 1024);
+  }
+  if (unit === "slots") {
+    return `${Math.round(value)} slots`;
+  }
+  return `${formatScalar(value)} cores`;
 }
 
 function formatPercent(value: number): string {

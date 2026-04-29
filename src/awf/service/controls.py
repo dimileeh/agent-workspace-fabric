@@ -21,6 +21,7 @@ from awf.db.models import Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    ResourceReservationRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
 )
@@ -916,6 +917,9 @@ class WorkspaceControlService:
         )
         secret_lease_summary = await self._revoke_destroy_secret_leases(workspace)
         if current == WorkspaceStatus.destroyed:
+            await ResourceReservationRepository(
+                self._session
+            ).release_active_for_workspace(workspace_id)
             cleanup_result = WorkspaceCleanupResult.skipped(
                 reason_code="WORKSPACE_ALREADY_DESTROYED"
             )

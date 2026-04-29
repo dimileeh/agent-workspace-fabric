@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError
@@ -243,6 +243,12 @@ class Provisioner:
                     mode="json", by_alias=True
                 )
                 persisted.profile_ref = persisted.profile_ref or profile_resolution.profile.name
+            await _reconcile_active_reservation_for_profile(
+                session,
+                workspace_id=workspace_id,
+                node_id=self._config.node_id,
+                profile=profile,
+            )
 
             await repo.transition(
                 persisted,
@@ -426,3 +432,19 @@ class Provisioner:
                 "actual_status": ws.status,
             },
         )
+
+
+async def _reconcile_active_reservation_for_profile(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    node_id: str,
+    profile: WorkspaceProfile,
+) -> None:
+    reservation = await ResourceReservationRepository(session).active_for_workspace(
+        workspace_id
+    )
+    if reservation is None:
+        return
+    reservation.node_id = node_id
+    reservation.dind_slots = 1 if profile.docker.mode.value == "dind" else 0

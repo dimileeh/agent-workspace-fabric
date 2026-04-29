@@ -75,6 +75,12 @@ ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
 ACTIVE_OWNED_PATH_CONFLICT_STATUSES: Final[tuple[str, ...]] = (
     ACTIVE_OWNED_PATH_OVERLAP_STATUSES
 )
+ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES: Final[tuple[str, ...]] = (
+    WorkspaceStatus.completed.value,
+    WorkspaceStatus.failed.value,
+    WorkspaceStatus.cancelled.value,
+    WorkspaceStatus.destroyed.value,
+)
 OWNED_PATH_EXACT_MATCH_REASON: Final = "OWNED_PATH_EXACT_MATCH"
 OWNED_PATH_ANCESTOR_MATCH_REASON: Final = "OWNED_PATH_ANCESTOR_MATCH"
 OWNED_PATH_WILDCARD_MATCH_REASON: Final = "OWNED_PATH_WILDCARD_MATCH"
@@ -466,6 +472,7 @@ class ResourceReservationRepository:
         peak_cpu: float,
         peak_memory_gb: float,
         disk_mb: int | None,
+        dind_slots: int = 0,
         phase: str,
         reserved_at: datetime | None = None,
     ) -> ResourceReservation:
@@ -479,6 +486,7 @@ class ResourceReservationRepository:
             peak_cpu=peak_cpu,
             peak_memory_gb=peak_memory_gb,
             disk_mb=disk_mb,
+            dind_slots=dind_slots,
             phase=phase,
             reserved_at=reserved_at or datetime.now(UTC),
             released_at=None,
@@ -532,6 +540,63 @@ class ResourceReservationRepository:
         rows = list(result.scalars())
         rows.sort(key=lambda row: (row.reserved_at, row.id))
         return rows
+
+    async def active_latest_totals(self) -> dict[str, float | int]:
+        latest_active_reservations = (
+            select(
+                ResourceReservation.workspace_id.label("workspace_id"),
+                ResourceReservation.steady_cpu.label("steady_cpu"),
+                ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
+                ResourceReservation.peak_cpu.label("peak_cpu"),
+                ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
+                ResourceReservation.disk_mb.label("disk_mb"),
+                ResourceReservation.dind_slots.label("dind_slots"),
+                func.row_number()
+                .over(
+                    partition_by=ResourceReservation.workspace_id,
+                    order_by=(
+                        ResourceReservation.reserved_at.desc(),
+                        ResourceReservation.id.desc(),
+                    ),
+                )
+                .label("reservation_rank"),
+            )
+            .join(Workspace, ResourceReservation.workspace_id == Workspace.id)
+            .where(
+                ResourceReservation.released_at.is_(None),
+                ~Workspace.status.in_(ACTIVE_RESOURCE_RESERVATION_EXCLUDED_STATUSES),
+            )
+            .subquery()
+        )
+        stmt = (
+            select(
+                func.count(latest_active_reservations.c.workspace_id),
+                func.coalesce(func.sum(latest_active_reservations.c.steady_cpu), 0.0),
+                func.coalesce(
+                    func.sum(latest_active_reservations.c.steady_memory_gb),
+                    0.0,
+                ),
+                func.coalesce(func.sum(latest_active_reservations.c.peak_cpu), 0.0),
+                func.coalesce(
+                    func.sum(latest_active_reservations.c.peak_memory_gb),
+                    0.0,
+                ),
+                func.coalesce(func.sum(latest_active_reservations.c.disk_mb), 0),
+                func.coalesce(func.sum(latest_active_reservations.c.dind_slots), 0),
+            )
+            .select_from(latest_active_reservations)
+            .where(latest_active_reservations.c.reservation_rank == 1)
+        )
+        row = (await self._session.execute(stmt)).one()
+        return {
+            "workspace_count": int(row[0] or 0),
+            "steady_cpu": float(row[1] or 0.0),
+            "steady_memory_gb": float(row[2] or 0.0),
+            "peak_cpu": float(row[3] or 0.0),
+            "peak_memory_gb": float(row[4] or 0.0),
+            "disk_mb": int(row[5] or 0),
+            "dind_slots": int(row[6] or 0),
+        }
 
 
 class MergeCandidateRepository:

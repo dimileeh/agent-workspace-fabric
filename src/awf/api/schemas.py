@@ -178,6 +178,7 @@ class ResourceReservationSummaryResponse(BaseModel):
     peak_cpu: float
     peak_memory_gb: float
     disk_mb: int | None
+    dind_slots: int
     phase: str
     reserved_at: datetime
     released_at: datetime | None

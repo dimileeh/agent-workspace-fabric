@@ -63,6 +63,8 @@ async def _workspace_with_reservation(
     steady_memory_gb: float,
     peak_cpu: float,
     peak_memory_gb: float,
+    disk_mb: int | None = None,
+    dind_slots: int = 0,
 ) -> str:
     factory = make_session_factory(engine)
     async with factory() as session:
@@ -98,7 +100,8 @@ async def _workspace_with_reservation(
             steady_memory_gb=steady_memory_gb,
             peak_cpu=peak_cpu,
             peak_memory_gb=peak_memory_gb,
-            disk_mb=None,
+            disk_mb=disk_mb,
+            dind_slots=dind_slots,
             phase="workspace_lifecycle",
         )
         await session.commit()
@@ -186,6 +189,7 @@ async def test_resource_saturation_endpoint_reports_local_capacity_inputs(
     app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
         provider_settings,
         ok=True,
+        free_bytes=16 * 1024 * 1024 * 1024,
     )
     now = datetime.now(UTC)
     for status in (
@@ -221,6 +225,8 @@ async def test_resource_saturation_endpoint_reports_local_capacity_inputs(
         "steady_memory_gb": 22.5,
         "peak_cpu": 12.0,
         "peak_memory_gb": 36.0,
+        "disk_mb": 0,
+        "dind_slots": 0,
     }
     assert body["concurrency"]["execution"] == {
         "limit": 2,
@@ -250,6 +256,7 @@ async def test_resource_saturation_endpoint_serializes_orphan_resource_summary(
     app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
         provider_settings,
         ok=True,
+        free_bytes=16 * 1024 * 1024 * 1024,
     )
     (tmp_path / "git" / "worktrees" / "ws_done").mkdir(parents=True)
 
@@ -299,6 +306,7 @@ async def test_resource_saturation_endpoint_serializes_runtime_health_provider(
     app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
         provider_settings,
         ok=True,
+        free_bytes=16 * 1024 * 1024 * 1024,
     )
 
     def _runtime_health_provider(
@@ -402,11 +410,15 @@ async def test_resource_saturation_endpoint_uses_persisted_active_reservations(
         workspace_steady_memory_gb=10.0,
         workspace_peak_cpu=6.0,
         workspace_peak_memory_gb=16.0,
+        local_capacity_cpu_cores=24.0,
+        local_capacity_memory_gb=96.0,
+        local_capacity_dind_slots=2,
     )
     app.dependency_overrides[get_settings] = lambda: settings
     app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
         provider_settings,
         ok=True,
+        free_bytes=16 * 1024 * 1024 * 1024,
     )
     now = datetime.now(UTC)
     await _workspace_with_reservation(
@@ -417,6 +429,8 @@ async def test_resource_saturation_endpoint_uses_persisted_active_reservations(
         steady_memory_gb=12.0,
         peak_cpu=8.0,
         peak_memory_gb=24.0,
+        disk_mb=4096,
+        dind_slots=1,
     )
     await _workspace(
         engine,
@@ -435,7 +449,85 @@ async def test_resource_saturation_endpoint_uses_persisted_active_reservations(
         "steady_memory_gb": 22.0,
         "peak_cpu": 14.0,
         "peak_memory_gb": 40.0,
+        "disk_mb": 4096,
+        "dind_slots": 1,
     }
+    assert body["capacity"]["peak_cpu"] == {
+        "limit": 24.0,
+        "reserved": 14.0,
+        "available": 10.0,
+        "available_after_next_default": 4.0,
+        "reason_code": None,
+    }
+    assert body["capacity"]["peak_memory_gb"] == {
+        "limit": 96.0,
+        "reserved": 40.0,
+        "available": 56.0,
+        "available_after_next_default": 40.0,
+        "reason_code": None,
+    }
+    assert body["capacity"]["disk_mb"]["reserved"] == 4096
+    assert body["capacity"]["dind_slots"] == {
+        "limit": 2,
+        "reserved": 1,
+        "available": 1,
+        "available_after_next_default": 1,
+        "reason_code": None,
+    }
+    assert body["capacity"]["pressure_reasons"] == []
+
+
+@pytest.mark.unit
+async def test_resource_saturation_endpoint_serializes_capacity_and_pressure(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = metrics_app_and_client
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-metrics-work",
+        min_free_disk_bytes=700,
+        local_capacity_cpu_cores=8.0,
+        local_capacity_memory_gb=20.0,
+        local_capacity_dind_slots=1,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
+        provider_settings,
+        ok=True,
+        free_bytes=2 * 1024 * 1024 * 1024,
+    )
+    now = datetime.now(UTC)
+    await _workspace_with_reservation(
+        engine,
+        status=WorkspaceStatus.running,
+        updated_at=now - timedelta(minutes=5),
+        steady_cpu=4.0,
+        steady_memory_gb=12.0,
+        peak_cpu=9.0,
+        peak_memory_gb=21.0,
+        disk_mb=4096,
+        dind_slots=1,
+    )
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["reserved_resources"]["disk_mb"] == 4096
+    assert body["reserved_resources"]["dind_slots"] == 1
+    assert body["capacity"]["peak_cpu"]["reason_code"] == "PEAK_CPU_CAPACITY_SATURATED"
+    assert body["capacity"]["peak_memory_gb"]["reason_code"] == (
+        "PEAK_MEMORY_CAPACITY_SATURATED"
+    )
+    assert body["capacity"]["disk_mb"]["reason_code"] == "DISK_RESERVATION_PRESSURE"
+    assert body["capacity"]["dind_slots"]["reason_code"] == "DIND_CAPACITY_SATURATED"
+    assert body["capacity"]["pressure_reasons"] == [
+        "PEAK_CPU_CAPACITY_SATURATED",
+        "PEAK_MEMORY_CAPACITY_SATURATED",
+        "DISK_RESERVATION_PRESSURE",
+        "DIND_CAPACITY_SATURATED",
+    ]
 
 
 @pytest.mark.unit

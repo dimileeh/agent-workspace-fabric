@@ -16,7 +16,13 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import SecretLeaseRepository, WorkspaceRepository
+from awf.db.repositories import (
+    ResourceReservationRepository,
+    SecretLeaseRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPolicyError
@@ -351,6 +357,69 @@ class TestSuccess:
             assert (None, "requested") in transitions
             assert ("requested", "provisioning") in transitions
             assert ("provisioning", "ready") in transitions
+
+    @pytest.mark.unit
+    async def test_provisioner_updates_auto_profile_dind_reservation(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        (origin_repo / "docker-compose.yml").write_text("services: {}\n", encoding="utf-8")
+        _git(["add", "docker-compose.yml"], origin_repo)
+        _git(["commit", "-q", "-m", "add compose profile"], origin_repo)
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                profile_ref="auto",
+                test_commands=[],
+            )
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=f"provisioner-dind:{ws.id}",
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            attempt = await TaskAttemptRepository(s).create_for_workspace(
+                task=task,
+                workspace=ws,
+            )
+            await ResourceReservationRepository(s).create(
+                workspace_id=ws.id,
+                attempt_id=attempt.id,
+                node_id="local",
+                steady_cpu=3.0,
+                steady_memory_gb=10.0,
+                peak_cpu=6.0,
+                peak_memory_gb=16.0,
+                disk_mb=None,
+                dind_slots=0,
+                phase="workspace_lifecycle",
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.resolved_profile is not None
+            assert reloaded.resolved_profile["docker"]["mode"] == "dind"
+            reservation = await ResourceReservationRepository(s).active_for_workspace(ws_id)
+            assert reservation is not None
+            assert reservation.dind_slots == 1
+            assert reservation.node_id == "test-node-01"
 
 
 class TestFailureHandling:
