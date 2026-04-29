@@ -1973,12 +1973,14 @@ class TestExecutorCoverageEdges:
             assert ws.events[-1].payload["action"] == "persist_pr"
 
     @pytest.mark.unit
-    async def test_resume_pr_monitor_compose_failure_marks_infrastructure_failure(
+    async def test_resume_pr_monitor_compose_failure_records_warning_and_runs_monitor(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
     ) -> None:
+        monitor_calls: list[str] = []
+
         class _FailingCompose:
             async def ensure_project_up(
                 self,
@@ -1997,18 +1999,166 @@ class TestExecutorCoverageEdges:
                     reason_code="COMPOSE_UP_FAILED",
                 )
 
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
         ws_id = await _seed_monitoring_pr(factory)
-        executor = _make_executor(fake, factory, tmp_path, compose=_FailingCompose())
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            compose=_FailingCompose(),
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
 
         await executor.resume_pr_monitor(ws_id)
 
+        assert monitor_calls == [ws_id]
         async with factory() as s:
             ws = await WorkspaceRepository(s).get(ws_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.failed.value
-            assert ws.failure_reason == "infrastructure_failure"
-            assert "compose stack failed to start" in (ws.failure_message or "")
-            assert ws.events[-1].reason_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            compose_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.monitor_runtime_restart_failed"
+            ]
+        assert len(compose_events) == 1
+        assert compose_events[0].reason_code == "MONITOR_RECOVERY_COMPOSE_FAILED"
+        assert compose_events[0].payload == {
+            "compose_project_name": "awf_x",
+            "compose_file_path": "/tmp/awf/x/compose.yml",
+            "operation": "up",
+            "returncode": 1,
+            "stderr": "network unavailable",
+            "reason_code": "COMPOSE_UP_FAILED",
+        }
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_compose_failure_continues_when_warning_record_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_calls: list[str] = []
+
+        class _OneShotFailingSessionFactory:
+            def __init__(self, inner: async_sessionmaker[AsyncSession]) -> None:
+                self._inner = inner
+                self.fail_next = False
+
+            def __call__(self) -> AsyncSession:
+                if self.fail_next:
+                    self.fail_next = False
+                    raise RuntimeError("session pool exhausted")
+                return self._inner()
+
+        session_factory = _OneShotFailingSessionFactory(factory)
+
+        class _FailingCompose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+            ) -> None:
+                del project_name, compose_file, workspace_id, wait
+                session_factory.fail_next = True
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=1,
+                    stdout="",
+                    stderr="network unavailable",
+                    reason_code="COMPOSE_UP_FAILED",
+                )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(factory)
+        executor = _make_executor(
+            fake,
+            session_factory,
+            tmp_path,
+            compose=_FailingCompose(),
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            await executor.resume_pr_monitor(ws_id)
+
+        assert monitor_calls == [ws_id]
+        assert any(
+            entry["event"] == "executor.monitor_runtime_restart_failed_record_failed"
+            for entry in captured
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            assert not [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.monitor_runtime_restart_failed"
+            ]
+
+    @pytest.mark.unit
+    async def test_resume_pr_monitor_never_recreates_pr_or_runs_feature_agent(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_calls: list[str] = []
+        validation = _RecordingValidation()
+
+        class _UnexpectedPrCreator:
+            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
+                raise AssertionError("resume_pr_monitor must not push or create a PR")
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                assert compose_project == "awf_x"
+                assert compose_file == Path("/tmp/awf/x/compose.yml")
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(factory)
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_UnexpectedPrCreator(),
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+
+        await executor.resume_pr_monitor(ws_id)
+
+        assert monitor_calls == [ws_id]
+        assert validation.calls == []
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.pr_url == "https://github.com/x/y/pull/42"
 
     @pytest.mark.unit
     async def test_resume_pr_monitor_factory_failure_marks_recovery_failed(

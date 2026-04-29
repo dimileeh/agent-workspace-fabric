@@ -27,8 +27,12 @@ from awf.control.worker import (
     _stale_active_execution_failure_message,
 )
 from awf.db.base import Base
-from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.repositories import (
+    OperationRepository,
+    WorkspaceEventRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
@@ -127,6 +131,10 @@ async def _create_monitoring_pr(
     *,
     pr_number: int = 123,
     with_pr_url: bool = True,
+    monitor_iter_count: int = 0,
+    monitor_threads_addressed: dict[str, str] | None = None,
+    monitor_last_commit_sha: str | None = None,
+    monitor_started_at: datetime | None = None,
 ) -> str:
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -152,6 +160,11 @@ async def _create_monitoring_pr(
             ws.pr_url = f"https://github.com/example/repo/pull/{pr_number}"
             ws.pr_number = pr_number
         await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
+        ws.monitor_iter_count = monitor_iter_count
+        ws.monitor_threads_addressed = dict(monitor_threads_addressed or {})
+        ws.monitor_last_commit_sha = monitor_last_commit_sha
+        if monitor_started_at is not None:
+            ws.monitor_started_at = monitor_started_at
         await s.commit()
         return ws.id
 
@@ -309,6 +322,16 @@ class _RecordingRuntimeInspector:
     async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
         self.calls.append(compose_project_name)
         return self._snapshots[compose_project_name]
+
+
+class _RaisingRuntimeInspector:
+    def __init__(self, exc: Exception) -> None:
+        self.exc = exc
+        self.calls: list[str | None] = []
+
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        self.calls.append(compose_project_name)
+        raise self.exc
 
 
 async def _noop_project_stop(_compose_project_name: str | None) -> None:
@@ -880,10 +903,26 @@ class TestRunOnceMonitorRecovery:
             session_factory, origin_repo, "needs-monitor-resume"
         )
         executor = _RecordingExecutor()
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{monitor_id}": RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="agent",
+                            image="awf-agent:latest",
+                            state="running",
+                        )
+                    ],
+                )
+            }
+        )
         worker = ControlWorker(
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
+            runtime_inspector=inspector,
             config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=3),
         )
 
@@ -892,6 +931,303 @@ class TestRunOnceMonitorRecovery:
 
         assert executor.calls == []
         assert executor.resume_calls == [monitor_id]
+
+    @pytest.mark.unit
+    async def test_fresh_worker_records_recovery_operation_when_resuming_monitoring_pr(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_started_at = datetime.now(UTC) - timedelta(minutes=20)
+        monitor_threads = {"thread-1": "fix_committed", "thread-2": "defer"}
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "restart-recoverable-monitor",
+            pr_number=456,
+            monitor_iter_count=9,
+            monitor_threads_addressed=monitor_threads,
+            monitor_last_commit_sha="d" * 40,
+            monitor_started_at=monitor_started_at,
+        )
+        executor = _RecordingExecutor()
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{monitor_id}": RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="agent",
+                            image="awf-agent:latest",
+                            state="running",
+                        )
+                    ],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=3),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
+        assert executor.resume_calls == [monitor_id]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.pr_url == "https://github.com/example/repo/pull/456"
+            assert ws.pr_number == 456
+            assert ws.monitor_iter_count == 9
+            assert ws.monitor_threads_addressed == monitor_threads
+            assert ws.monitor_last_commit_sha == "d" * 40
+            assert ws.monitor_started_at is not None
+            assert ws.monitor_started_at.replace(tzinfo=UTC) == monitor_started_at
+            operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
+            events = await WorkspaceEventRepository(s).list(workspace_id=monitor_id)
+
+        remonitor_operations = [
+            operation
+            for operation in operations
+            if operation.type == OperationType.remonitor.value
+        ]
+        assert len(remonitor_operations) == 1
+        operation = remonitor_operations[0]
+        assert operation.status == OperationStatus.succeeded.value
+        assert operation.payload is not None
+        assert operation.payload["source"] == "worker_restart"
+        assert operation.payload["owner"] == "control_worker"
+        assert operation.payload["requested_action"] == OperationType.remonitor.value
+        assert operation.payload["reason_code"] == "MONITOR_RECOVERY_AFTER_RESTART"
+        assert operation.payload["pr_url"] == "https://github.com/example/repo/pull/456"
+        assert operation.payload["pr_number"] == 456
+        assert operation.payload["worker_id"].startswith("control-worker-")
+        assert operation.payload["previous_claim"] == {
+            "monitor_claimed_by": None,
+            "monitor_claim_expires_at": None,
+            "execution_claimed_by": None,
+            "execution_claim_expires_at": None,
+        }
+        assert operation.payload["runtime_stranding_reason"] is None
+        assert operation.result is not None
+        assert operation.result["status"] == WorkspaceStatus.monitoring_pr.value
+
+        recovery_events = [
+            event
+            for event in events
+            if event.event_type == "workspace.monitor_recovery_started"
+        ]
+        assert len(recovery_events) == 1
+        assert recovery_events[0].reason_code == "MONITOR_RECOVERY_AFTER_RESTART"
+        assert recovery_events[0].payload is not None
+        assert recovery_events[0].payload["operation_id"] == operation.id
+        assert recovery_events[0].payload["monitor_state"] == {
+            "monitor_started_at": monitor_started_at.isoformat(),
+            "monitor_iter_count": 9,
+            "monitor_threads_addressed_count": 2,
+            "monitor_last_commit_sha": "d" * 40,
+        }
+
+    @pytest.mark.unit
+    async def test_restart_recovery_does_not_claim_rows_with_active_monitor_lease(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "active-monitor-lease",
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "healthy-monitor-worker"
+            ws.monitor_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+            await s.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=3),
+        )
+
+        assert await worker.run_once() == 0
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
+        assert executor.resume_calls == []
+        async with session_factory() as s:
+            operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
+            recovery_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.monitor_claimed_by == "healthy-monitor-worker"
+            assert ws.monitor_claim_expires_at is not None
+        assert [
+            operation
+            for operation in operations
+            if operation.type == OperationType.remonitor.value
+        ] == []
+        assert recovery_events == []
+
+    @pytest.mark.unit
+    async def test_runtime_stranded_monitoring_pr_with_open_pr_records_and_resumes(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "stranded-monitor-runtime",
+            pr_number=789,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "dead-monitor-worker"
+            ws.monitor_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{monitor_id}": RuntimeSnapshot(
+                    stack_state="stopped",
+                    reason="compose project has no running containers",
+                    services=[],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=3,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert inspector.calls == [f"awf_{monitor_id}"]
+        assert executor.calls == []
+        assert executor.resume_calls == [monitor_id]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            assert ws.monitor_claimed_by is None
+            assert ws.monitor_claim_expires_at is None
+            runtime_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
+            recovery_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+
+        assert len(runtime_events) == 1
+        assert runtime_events[0].reason_code == "STRANDED_WORKSPACE"
+        assert runtime_events[0].payload is not None
+        assert runtime_events[0].payload["decision"] == "remonitor_workspace"
+        assert len(recovery_events) == 1
+        assert recovery_events[0].payload is not None
+        assert recovery_events[0].payload["runtime_stranding_reason"] == "STRANDED_WORKSPACE"
+        remonitor_operations = [
+            operation
+            for operation in operations
+            if operation.type == OperationType.remonitor.value
+        ]
+        assert len(remonitor_operations) == 1
+        assert remonitor_operations[0].status == OperationStatus.succeeded.value
+        assert remonitor_operations[0].payload is not None
+        assert remonitor_operations[0].payload["runtime_stranding_reason"] == (
+            "STRANDED_WORKSPACE"
+        )
+
+    @pytest.mark.unit
+    async def test_runtime_inspection_unavailable_does_not_block_open_pr_remonitor(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "unavailable-runtime-monitor",
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "dead-monitor-worker"
+            ws.monitor_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await s.commit()
+
+        inspector = _RaisingRuntimeInspector(RuntimeError("Cannot connect to Docker"))
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=3,
+                stale_active_execution_scan_interval_seconds=0.0,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert inspector.calls == [f"awf_{monitor_id}"]
+        assert executor.resume_calls == [monitor_id]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+            runtime_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            recovery_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+
+        assert len(runtime_events) == 1
+        assert runtime_events[0].reason_code == "RUNTIME_INSPECTION_UNAVAILABLE"
+        assert runtime_events[0].payload is not None
+        assert runtime_events[0].payload["decision"] == "remonitor_workspace"
+        assert runtime_events[0].payload["runtime"]["stack_state"] == "unavailable"
+        assert len(recovery_events) == 1
+        assert recovery_events[0].payload is not None
+        assert recovery_events[0].payload["runtime_stranding_reason"] == (
+            "RUNTIME_INSPECTION_UNAVAILABLE"
+        )
 
     @pytest.mark.unit
     async def test_operator_remonitor_clears_active_claim_so_worker_resumes(
