@@ -1623,10 +1623,7 @@ class WorkspaceExecutor:
         if not workspace.pr_url or workspace.monitor_started_at is None:
             return False
 
-        message = (
-            "workspace already has an open PR but no active monitor/operator "
-            "recovery operation; refusing to re-enter full agent execution"
-        )
+        message = "open PR exists; monitor recovery required"
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
             persisted = await repo.get(workspace_id)

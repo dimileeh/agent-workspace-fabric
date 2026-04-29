@@ -739,7 +739,7 @@ async def test_open_pr_ready_without_recovery_operation_is_blocked_before_featur
     assert ws is not None
     assert ws.status == WorkspaceStatus.failed.value
     assert ws.failure_reason == "infrastructure_failure"
-    assert "already has an open PR" in (ws.failure_message or "")
+    assert ws.failure_message == "open PR exists; monitor recovery required"
     assert any(
         event.event_type == "workspace.pr_reexecution_blocked"
         and event.reason_code == "PR_REEXECUTION_GUARD"
