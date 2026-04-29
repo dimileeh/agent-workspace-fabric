@@ -803,6 +803,24 @@ def test_provider_readiness_default_subprocess_and_http_wrappers(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "ghp_providerreadinesssecret",
+        "gho_providerreadinesssecret",
+        "github_pat_providerreadinesssecret",
+        "sk-proj-provider-readiness-secret",
+        "sk-ant-provider-readiness-secret",
+        "sk-provider-readiness-secret",
+        "AIzaProviderReadinessSecret",
+        "xoxb-provider-readiness-secret",
+    ],
+)
+def test_provider_readiness_redacts_known_token_patterns(secret: str) -> None:
+    assert provider_readiness._redact(f"token {secret}", frozenset()) == "token <redacted>"
+
+
+@pytest.mark.unit
 def test_provider_readiness_redacts_secret_values_from_details(tmp_path: Path) -> None:
     github_secret = "ghp_super_secret"
     env = {

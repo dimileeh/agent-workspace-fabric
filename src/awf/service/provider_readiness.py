@@ -64,16 +64,32 @@ _KNOWN_SECRET_ENV_KEYS = frozenset(
 )
 
 _URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s:@]+(?::[^/\s@]+)?@)")
+_GITHUB_TOKEN_PATTERNS = (
+    r"gh[pousr]_[A-Za-z0-9_]{8,}",
+    r"github_pat_[A-Za-z0-9_]{8,}",
+)
+_OPENAI_TOKEN_PATTERNS = (
+    r"sk-proj-[A-Za-z0-9_-]{8,}",
+)
+_ANTHROPIC_TOKEN_PATTERNS = (r"sk-ant-[A-Za-z0-9_-]{8,}",)
+_GENERIC_SK_TOKEN_PATTERNS = (
+    r"sk-[A-Za-z0-9_-]{8,}",
+)
+_GOOGLE_TOKEN_PATTERNS = (r"AIza[A-Za-z0-9_-]{12,}",)
+_SLACK_TOKEN_PATTERNS = (r"xox[baprs]-[A-Za-z0-9-]{8,}",)
+# Keep provider-specific sk-* families before the generic sk-* fallback.
+_KNOWN_TOKEN_PATTERNS = (
+    *_GITHUB_TOKEN_PATTERNS,
+    *_OPENAI_TOKEN_PATTERNS,
+    *_ANTHROPIC_TOKEN_PATTERNS,
+    *_GENERIC_SK_TOKEN_PATTERNS,
+    *_GOOGLE_TOKEN_PATTERNS,
+    *_SLACK_TOKEN_PATTERNS,
+)
 _TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])("
-    r"gh[pousr]_[A-Za-z0-9_]{8,}|"
-    r"github_pat_[A-Za-z0-9_]{8,}|"
-    r"sk-proj-[A-Za-z0-9_-]{8,}|"
-    r"sk-ant-[A-Za-z0-9_-]{8,}|"
-    r"sk-[A-Za-z0-9_-]{8,}|"
-    r"AIza[A-Za-z0-9_-]{12,}|"
-    r"xox[baprs]-[A-Za-z0-9-]{8,}"
-    r")(?![A-Za-z0-9])"
+    + "|".join(_KNOWN_TOKEN_PATTERNS)
+    + r")(?![A-Za-z0-9])"
 )
 
 
