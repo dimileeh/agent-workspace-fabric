@@ -172,3 +172,48 @@ def test_profile_services_rejects_absolute_volume_sources(tmp_path: Path) -> Non
 
     with pytest.raises(ValueError, match="workspace-relative"):
         profile_services(profile, base_path=tmp_path / "repo")
+
+
+@pytest.mark.unit
+def test_profile_services_rejects_volume_sources_that_escape_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-path",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("../host-secrets", "/run/secrets")],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="escapes workspace root"):
+        profile_services(profile, base_path=repo)
+
+
+@pytest.mark.unit
+def test_profile_services_rejects_symlink_escape_volume_sources(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    external = tmp_path / "external"
+    repo.mkdir()
+    external.mkdir()
+    (repo / "linked").symlink_to(external, target_is_directory=True)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-path",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("linked/host-secrets", "/run/secrets")],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="escapes workspace root"):
+        profile_services(profile, base_path=repo)
