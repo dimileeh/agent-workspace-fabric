@@ -38,3 +38,5 @@ awf:
         timeout_seconds: 300
       - command: uv run pytest tests/unit/cli -q
         timeout_seconds: 300
+      - command: uv run --python 3.12 --extra dev pytest tests/unit/control/test_test_quality_guardrails_self.py -q
+        timeout_seconds: 300
