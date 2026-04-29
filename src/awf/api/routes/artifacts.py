@@ -51,6 +51,12 @@ async def list_workspace_artifacts(
 
 
 async def _require_workspace(session: AsyncSession, workspace_id: str) -> None:
+    """Backward-compatible 404 helper retained for direct importers.
+
+    Artifact routes now use ``list_workspace_artifacts_metadata`` so REST and
+    MCP share one workspace-existence check and missing-workspace sentinel.
+    """
+
     if not await WorkspaceRepository(session).exists(workspace_id):
         raise _workspace_not_found(workspace_id)
 
