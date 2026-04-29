@@ -31,7 +31,7 @@ async def list_operations(
         limit=limit,
     )
     return OperationListResponse(
-        items=[OperationResponse.model_validate(row) for row in rows],
+        items=rows,
         next_cursor=None,
         has_more=False,
         limit=limit,

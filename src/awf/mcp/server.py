@@ -26,7 +26,6 @@ from awf.api.routes import metrics as metrics_routes
 from awf.api.schemas import (
     ErrorResponse,
     OperationListResponse,
-    OperationResponse,
     OwnedPath,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
@@ -595,7 +594,7 @@ def build_mcp_server(
             limit=limit,
         )
         response = OperationListResponse(
-            items=[OperationResponse.model_validate(row) for row in rows],
+            items=rows,
             next_cursor=None,
             has_more=False,
             limit=limit,

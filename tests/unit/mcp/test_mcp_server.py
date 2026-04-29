@@ -17,7 +17,7 @@ import pytest
 from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import WorkspaceControlResponse
+from awf.api.schemas import OperationResponse, WorkspaceControlResponse
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
@@ -53,6 +53,23 @@ _CREATE_ARGS: dict[str, object] = {
     "agent": "codex",
     "test_commands": ["pytest -q"],
 }
+
+
+def _operation_response() -> OperationResponse:
+    return OperationResponse(
+        id="op_prevalidated",
+        workspace_id="ws_prevalidated",
+        type="validate",
+        status="succeeded",
+        error_code=None,
+        error_message=None,
+        payload=None,
+        result=None,
+        idempotency_key=None,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        started_at=None,
+        finished_at=None,
+    )
 
 
 async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
@@ -191,6 +208,30 @@ class TestToolRegistration:
         overlap_props = tools["awf_get_overlap_graph"].inputSchema["properties"]
         assert overlap_props["limit"]["default"] == 100
         assert overlap_props["limit"]["maximum"] == 500
+
+
+class TestOperationTools:
+    @pytest.mark.unit
+    async def test_list_operations_uses_prevalidated_service_responses(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        operation = _operation_response()
+
+        class PrevalidatedOperationService:
+            async def list_all_operations(self, **kwargs) -> list[OperationResponse]:  # type: ignore[no-untyped-def]
+                return [operation]
+
+        def fail_model_validate(cls, value) -> OperationResponse:  # type: ignore[no-untyped-def]
+            raise AssertionError("OperationResponse.model_validate should not be called")
+
+        monkeypatch.setattr(OperationResponse, "model_validate", classmethod(fail_model_validate))
+        mcp = build_mcp_server(service=PrevalidatedOperationService())  # type: ignore[arg-type]
+
+        payload = await _call(mcp, "awf_list_operations", {})
+
+        assert isinstance(payload, dict)
+        assert payload["items"][0]["id"] == operation.id
 
 
 class TestCreateWorkspace:

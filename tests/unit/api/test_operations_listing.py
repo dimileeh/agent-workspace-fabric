@@ -11,6 +11,23 @@ from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 
 
+def _operation_response() -> OperationResponse:
+    return OperationResponse(
+        id="op_prevalidated",
+        workspace_id="ws_prevalidated",
+        type="validate",
+        status="succeeded",
+        error_code=None,
+        error_message=None,
+        payload=None,
+        result=None,
+        idempotency_key=None,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        started_at=None,
+        finished_at=None,
+    )
+
+
 @pytest.fixture
 async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     factory = make_session_factory(engine)
@@ -90,6 +107,35 @@ async def test_list_operations_global(client: AsyncClient, sample_data):
     assert response.status_code == 200
     assert len(response.json()["items"]) == 1
     assert response.json()["items"][0]["type"] == "validate"
+
+
+@pytest.mark.unit
+async def test_list_operations_uses_prevalidated_service_responses(
+    client: AsyncClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    operation = _operation_response()
+
+    class PrevalidatedOperationService:
+        def __init__(self, session_factory) -> None:  # type: ignore[no-untyped-def]
+            self.session_factory = session_factory
+
+        async def list_all_operations(self, **kwargs) -> list[OperationResponse]:  # type: ignore[no-untyped-def]
+            return [operation]
+
+    def fail_model_validate(cls, value) -> OperationResponse:  # type: ignore[no-untyped-def]
+        raise AssertionError("OperationResponse.model_validate should not be called")
+
+    monkeypatch.setattr(
+        "awf.api.routes.operations.WorkspaceService",
+        PrevalidatedOperationService,
+    )
+    monkeypatch.setattr(OperationResponse, "model_validate", classmethod(fail_model_validate))
+
+    response = await client.get("/v1/operations")
+
+    assert response.status_code == 200
+    assert response.json()["items"][0]["id"] == operation.id
 
 
 @pytest.mark.unit
