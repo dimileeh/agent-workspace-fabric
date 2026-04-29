@@ -566,6 +566,13 @@ class WorkspaceControlService:
         idempotency_key: str | None = None,
         expected_version: int | None = None,
     ) -> Operation:
+        """Create or replay an operator refresh operation.
+
+        Exact idempotency-key replays return the stored operation even if the
+        workspace later enters destruction. Fresh-key active coalescing still
+        observes current state eligibility, so it is rejected once destruction
+        has started.
+        """
         repo = WorkspaceRepository(self._session)
         operations = OperationRepository(self._session)
         payload = _operator_operation_payload(

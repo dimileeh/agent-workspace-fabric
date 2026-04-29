@@ -1185,6 +1185,11 @@ The console uses these AWF endpoints:
 - `GET /v1/workspaces/{id}/operations` for active and completed operations.
 - `GET /v1/workspaces/{id}/logs` and `GET /v1/workspaces/{id}/logs/{stream_id}` for log metadata and tail reads.
 - `POST /v1/workspaces/{id}/remonitor` for audited operator PR-monitor recovery; CLI: `awf workspace remonitor <id> --idempotency-key <key>`.
+- `POST /v1/workspaces/{id}/refresh`, `/validate`, and `/rebase` for async
+  operator recovery operations. Duplicate `Idempotency-Key` replays return the
+  stored operation after later workspace state changes; fresh-key active
+  coalescing still checks current state, so refresh coalesces are rejected once
+  destruction starts.
 - `WebSocket /v1/workspaces/{id}/ws`, proxied as browser-safe SSE at `/api/awf/workspaces/{id}/stream`, for live events and log frames.
 
 Recent dogfood observability slices added:
