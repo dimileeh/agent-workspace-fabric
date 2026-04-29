@@ -78,19 +78,16 @@ async def list_validation_provenance(
     validation_runs = await ValidationRunRepository(session).list_for_workspace(workspace_id)
     streams = await stream_repo.list_validation_for_workspace(workspace_id)
     if validation_runs:
-        return ValidationProvenanceListResponse(
-            items=_build_persisted_validation_items(
-                workspace,
-                validation_runs,
-                streams,
-            ),
-            limit=50,
-            cursor=None,
+        items = _build_persisted_validation_items(
+            workspace,
+            validation_runs,
+            streams,
         )
-
+    else:
+        items = _build_validation_items(workspace, streams)
     return ValidationProvenanceListResponse(
-        items=_build_validation_items(workspace, streams),
-        limit=50,
+        items=items,
+        limit=len(items),
         cursor=None,
     )
 
