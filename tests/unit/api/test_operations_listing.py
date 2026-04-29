@@ -247,6 +247,102 @@ async def test_operation_response_derives_pr_monitor_recovery_fields(
 
 
 @pytest.mark.unit
+async def test_monitor_state_operations_list_and_filter_through_existing_endpoints(
+    client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    ws_repo = WorkspaceRepository(session)
+    op_repo = OperationRepository(session)
+    ws = await ws_repo.create(
+        repo_url="https://github.com/org/repo_monitor_state",
+        branch_base="main",
+        task_title="monitor state operation",
+        task_prompt="prompt",
+        agent="claude-3-sonnet",
+        test_commands=[],
+    )
+    operation = await op_repo.create(
+        workspace_id=ws.id,
+        operation_type=OperationType.monitor_state,
+        status=OperationStatus.succeeded,
+        payload={
+            "owner": "pr_monitor",
+            "source": "pr_monitor",
+            "action": "merge_ready",
+            "requested_action": "merge",
+            "reason": "All gates are clean.",
+            "reason_code": "MERGE_READY",
+            "pr_number": 44,
+            "pr_url": "https://github.com/org/repo_monitor_state/pull/44",
+            "source_head_sha": "d" * 40,
+            "source_base_sha": "e" * 40,
+        },
+    )
+    await session.commit()
+
+    global_response = await client.get(f"/v1/operations?workspace_id={ws.id}")
+    global_filter_response = await client.get("/v1/operations?type=monitor_state")
+    workspace_response = await client.get(f"/v1/workspaces/{ws.id}/operations")
+    workspace_filter_response = await client.get(
+        f"/v1/workspaces/{ws.id}/operations?type=monitor_state"
+    )
+
+    for response in (
+        global_response,
+        global_filter_response,
+        workspace_response,
+        workspace_filter_response,
+    ):
+        assert response.status_code == 200
+        items = response.json()["items"]
+        assert [item["id"] for item in items] == [operation.id]
+        assert items[0]["type"] == "monitor_state"
+        assert items[0]["action"] == "merge_ready"
+        assert items[0]["owner"] == "pr_monitor"
+        assert items[0]["reason_code"] == "MERGE_READY"
+
+
+@pytest.mark.unit
+async def test_legacy_operation_without_payload_or_result_serializes_audit_fields(
+    client: AsyncClient,
+    session: AsyncSession,
+) -> None:
+    ws_repo = WorkspaceRepository(session)
+    op_repo = OperationRepository(session)
+    ws = await ws_repo.create(
+        repo_url="https://github.com/org/repo_legacy_operation",
+        branch_base="main",
+        task_title="legacy operation",
+        task_prompt="prompt",
+        agent="claude-3-sonnet",
+        test_commands=[],
+    )
+    operation = await op_repo.create(
+        workspace_id=ws.id,
+        operation_type=OperationType.create,
+        status=OperationStatus.succeeded,
+        payload=None,
+    )
+    await session.commit()
+
+    response = await client.get(f"/v1/operations/{operation.id}")
+
+    assert response.status_code == 200
+    item = response.json()
+    assert item["payload"] is None
+    assert item["result"] is None
+    assert item["owner"] is None
+    assert item["source"] is None
+    assert item["action"] is None
+    assert item["reason"] is None
+    assert item["reason_code"] is None
+    assert item["failure_code"] is None
+    assert item["failure_message"] is None
+    assert item["log_stream_refs"] == {}
+    assert item["log_stream_ids"] == []
+
+
+@pytest.mark.unit
 async def test_operation_response_derives_failure_fields_from_error_columns(
     client: AsyncClient,
     session: AsyncSession,

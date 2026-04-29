@@ -13,6 +13,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.base import Base
+from awf.db.enums import OperationStatus, OperationType
+from awf.db.repositories import OperationRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime import pr_monitor_runner as runner_mod
 from awf.runtime.pr_monitor import (
@@ -483,6 +485,17 @@ async def test_execute_merge_blocks_pr_93_regression_until_non_check_reviewer_se
         _non_check_reviewer_settle_started_key(pr_number=93, head_sha="head-a")
         in state.threads_addressed_ids
     )
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=ws_id)
+    assert [(op.type, op.status, op.payload["action"]) for op in operations] == [
+        (
+            OperationType.monitor_state.value,
+            OperationStatus.succeeded.value,
+            "reviewer_settle_wait",
+        )
+    ]
+    assert operations[0].payload["reason_code"] == "NON_CHECK_REVIEWER_SETTLE"
+    assert operations[0].payload["missing_reviewers"] == ["greptile-apps"]
 
 
 @pytest.mark.unit

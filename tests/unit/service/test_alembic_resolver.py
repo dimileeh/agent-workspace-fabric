@@ -296,6 +296,77 @@ def test_resolver_refuses_duplicate_non_head_revision_ids_without_warning_text(
 
 
 @pytest.mark.unit
+def test_resolver_refuses_missing_tuple_dependencies_without_mutating(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "base001", None)
+    (tmp_path / "migrations" / "versions" / "head001.py").write_text(
+        'revision = "head001"\n'
+        'down_revision = "base001"\n'
+        "branch_labels = None\n"
+        'depends_on = ("missing_dep", "other_missing_dep")\n',
+        encoding="utf-8",
+    )
+
+    result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
+
+    assert result.status == AlembicResolveStatus.refused
+    assert result.reason_code == "ALEMBIC_GRAPH_UNSAFE"
+    assert result.generated_path is None
+    assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
+    assert result.to_dict()["details"]["missing_dependencies"] == [
+        "missing_dep",
+        "other_missing_dep",
+    ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("exc", "reason_code", "message"),
+    [
+        (
+            RevisionError("duplicate revision"),
+            "ALEMBIC_GRAPH_UNSAFE",
+            "Alembic revision graph is unsafe to merge automatically.",
+        ),
+        (
+            RuntimeError("graph locked"),
+            "ALEMBIC_GRAPH_UNREADABLE",
+            "Alembic revision graph could not be read safely.",
+        ),
+    ],
+)
+def test_safe_heads_refuses_revision_loading_exceptions(
+    exc: Exception,
+    reason_code: str,
+    message: str,
+) -> None:
+    class BrokenScriptDirectory:
+        def _load_revisions(self) -> tuple[object, ...]:
+            raise exc
+
+    result = _safe_heads(BrokenScriptDirectory())
+
+    assert isinstance(result, AlembicResolveResult)
+    assert result.status == AlembicResolveStatus.refused
+    assert result.reason_code == reason_code
+    assert result.message == message
+    assert result.details == {
+        "error_type": type(exc).__name__,
+        "error": str(exc),
+    }
+
+
+@pytest.mark.unit
+def test_relative_path_returns_none_for_paths_outside_root(tmp_path: Path) -> None:
+    root = tmp_path / "repo"
+    inside = root / "migrations" / "versions" / "merge.py"
+    outside = tmp_path / "other" / "merge.py"
+
+    assert _relative_path(inside, root) == "migrations/versions/merge.py"
+    assert _relative_path(outside, root) is None
+
+
+@pytest.mark.unit
 def test_render_merge_revision_uses_tuple_syntax_for_one_head() -> None:
     rendered = _render_merge_revision(
         revision="merge001",

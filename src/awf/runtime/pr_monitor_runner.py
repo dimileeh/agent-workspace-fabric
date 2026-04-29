@@ -82,10 +82,12 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_operations import (
     MonitorOperationHandle,
+    begin_monitor_state_operation,
     build_monitor_operation_payload,
     create_or_start_monitor_operation,
     finish_monitor_operation,
     monitor_operation_idempotency_key,
+    record_monitor_state_operation,
     retryable_monitor_operation_idempotency_key,
 )
 from awf.service.gc import run_workspace_filesystem_gc
@@ -264,7 +266,7 @@ class PullRequestMonitorRunner:
         pr_number: int,
         status: PRStatus,
         base_branch: str,
-        remote_branch: str,
+        remote_branch: str | None,
         operation_status: OperationStatus = OperationStatus.running,
         recovery_mode: str | None = None,
         stale_reason: str | None = None,
@@ -334,6 +336,156 @@ class PullRequestMonitorRunner:
                 error_message=error_message,
             )
             await session.commit()
+
+    async def _begin_monitor_state_operation(
+        self,
+        *,
+        workspace_id: str,
+        action: str,
+        requested_action: str,
+        reason: str | None,
+        reason_code: str,
+        pr_number: int,
+        status: PRStatus,
+        base_branch: str,
+        remote_branch: str | None,
+        monitor_log: WorkspaceLogSink | None = None,
+        recovery_mode: str | None = None,
+        stale_reason: str | None = None,
+        extra_payload: Mapping[str, Any] | None = None,
+        extra_identity: Sequence[object] = (),
+    ) -> MonitorOperationHandle | None:
+        log_refs = {"monitor": monitor_log.stream_id} if monitor_log is not None else None
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None:  # pragma: no cover - defensive invariant
+                return None
+            handle = await begin_monitor_state_operation(
+                session,
+                workspace=workspace,
+                action=action,
+                requested_action=requested_action,
+                reason=reason,
+                reason_code=reason_code,
+                pr_number=pr_number,
+                source_head_sha=status.head_sha,
+                source_base_sha=workspace.base_commit,
+                target_branch=base_branch,
+                remote_branch=remote_branch,
+                recovery_mode=recovery_mode,
+                stale_reason=stale_reason,
+                log_stream_refs=log_refs,
+                extra=extra_payload,
+                extra_identity=extra_identity,
+            )
+            await session.commit()
+            return handle
+
+    async def _record_monitor_state_operation(
+        self,
+        *,
+        workspace_id: str,
+        action: str,
+        requested_action: str,
+        reason: str | None,
+        reason_code: str,
+        pr_number: int,
+        status: PRStatus,
+        base_branch: str,
+        remote_branch: str | None,
+        result: Mapping[str, Any] | None = None,
+        monitor_log: WorkspaceLogSink | None = None,
+        recovery_mode: str | None = None,
+        stale_reason: str | None = None,
+        extra_payload: Mapping[str, Any] | None = None,
+        extra_identity: Sequence[object] = (),
+    ) -> None:
+        log_refs = {"monitor": monitor_log.stream_id} if monitor_log is not None else None
+        async with self._deps.session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(workspace_id)
+            if workspace is None:  # pragma: no cover - defensive invariant
+                return
+            await record_monitor_state_operation(
+                session,
+                workspace=workspace,
+                action=action,
+                requested_action=requested_action,
+                reason=reason,
+                reason_code=reason_code,
+                pr_number=pr_number,
+                source_head_sha=status.head_sha,
+                source_base_sha=workspace.base_commit,
+                target_branch=base_branch,
+                remote_branch=remote_branch,
+                result=result,
+                recovery_mode=recovery_mode,
+                stale_reason=stale_reason,
+                log_stream_refs=log_refs,
+                extra=extra_payload,
+                extra_identity=extra_identity,
+            )
+            await session.commit()
+
+    async def _sleep_with_monitor_state_operation(
+        self,
+        *,
+        workspace_id: str,
+        action: str,
+        requested_action: str,
+        reason: str | None,
+        reason_code: str,
+        pr_number: int,
+        status: PRStatus,
+        base_branch: str,
+        remote_branch: str | None,
+        wait_seconds: float,
+        monitor_log: WorkspaceLogSink | None = None,
+        recovery_mode: str | None = None,
+        stale_reason: str | None = None,
+        extra_payload: Mapping[str, Any] | None = None,
+        extra_identity: Sequence[object] = (),
+    ) -> None:
+        payload = {"wait_seconds": wait_seconds, **dict(extra_payload or {})}
+        operation = await self._begin_monitor_state_operation(
+            workspace_id=workspace_id,
+            action=action,
+            requested_action=requested_action,
+            reason=reason,
+            reason_code=reason_code,
+            pr_number=pr_number,
+            status=status,
+            base_branch=base_branch,
+            remote_branch=remote_branch,
+            monitor_log=monitor_log,
+            recovery_mode=recovery_mode,
+            stale_reason=stale_reason,
+            extra_payload=payload,
+            extra_identity=extra_identity,
+        )
+        try:
+            await self._deps.sleep(wait_seconds)
+        except Exception as exc:
+            await self._finish_monitor_operation(
+                operation,
+                status=OperationStatus.failed,
+                result={
+                    "status": "failed",
+                    "outcome": "wait_failed",
+                    "reason_code": reason_code,
+                },
+                error_code=reason_code,
+                error_message=str(exc),
+            )
+            raise
+        await self._finish_monitor_operation(
+            operation,
+            status=OperationStatus.succeeded,
+            result={
+                "status": "succeeded",
+                "outcome": "wait_elapsed",
+                "slept_seconds": wait_seconds,
+            },
+        )
 
     async def _open_monitor_log(self, workspace_id: str) -> WorkspaceLogSink | None:
         if self._deps.log_store is None:
@@ -655,6 +807,19 @@ class PullRequestMonitorRunner:
                 status=status,
                 state=state,
             )
+            await self._record_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="completed",
+                requested_action="complete",
+                reason="PR was already completed upstream.",
+                reason_code="SHORT_CIRCUIT_COMPLETED",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                result={"status": "succeeded", "outcome": "already_completed"},
+                monitor_log=monitor_log,
+            )
             await self._terminate_completed(
                 workspace_id,
                 pr_merge_sha=None,
@@ -690,7 +855,31 @@ class PullRequestMonitorRunner:
             )
             if emitted_stale_warning:
                 await self._persist_state(workspace_id, state)
-            await self._deps.sleep(self._config.poll_interval_seconds)
+            await self._sleep_with_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="check_wait",
+                requested_action="wait_for_ci",
+                reason=(
+                    "CI checks are still pending."
+                    if action.reason == "pending_checks"
+                    else "GitHub has not reported a stable mergeable state."
+                ),
+                reason_code="CHECK_WAIT",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                wait_seconds=self._config.poll_interval_seconds,
+                monitor_log=monitor_log,
+                extra_payload={
+                    "wait_reason": action.reason,
+                    "check_state": status.check_state.value,
+                    "merge_state": (
+                        status.merge_state_status.value if status.merge_state_status else None
+                    ),
+                },
+                extra_identity=(action.reason,),
+            )
             return False
 
         if isinstance(action, SyncBase):
@@ -975,8 +1164,46 @@ class PullRequestMonitorRunner:
                 monitor_log=monitor_log,
             )
             if settle_decision.wait_seconds > 0:
-                await self._deps.sleep(settle_decision.wait_seconds)
+                await self._sleep_with_monitor_state_operation(
+                    workspace_id=workspace_id,
+                    action="reviewer_settle_wait",
+                    requested_action="merge",
+                    reason="Waiting for configured non-check reviewers to settle.",
+                    reason_code="NON_CHECK_REVIEWER_SETTLE",
+                    pr_number=pr_number,
+                    status=status,
+                    base_branch=base_branch,
+                    remote_branch=remote_branch,
+                    wait_seconds=settle_decision.wait_seconds,
+                    monitor_log=monitor_log,
+                    extra_payload={
+                        "settle_seconds": self._config.non_check_reviewer_settle_seconds,
+                        "configured_reviewers": list(settle_decision.configured_reviewers),
+                        "missing_reviewers": list(settle_decision.missing_reviewers),
+                        "visible_reviewers": list(settle_decision.visible_reviewers),
+                        "elapsed_seconds": settle_decision.elapsed_seconds,
+                    },
+                    extra_identity=(
+                        *settle_decision.configured_reviewers,
+                        *settle_decision.missing_reviewers,
+                        settle_decision.started_at,
+                    ),
+                )
                 return False
+
+            await self._record_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="merge_ready",
+                requested_action="merge",
+                reason="Comments, checks, freshness, policy, and queue gates are clean.",
+                reason_code="MERGE_READY",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                result={"status": "succeeded", "outcome": "ready_to_merge"},
+                monitor_log=monitor_log,
+            )
 
             await self._record_merge_coordination_event(
                 "monitor.merge_critical_section_waiting",
@@ -991,6 +1218,7 @@ class PullRequestMonitorRunner:
             fresh_status: PRStatus | None = None
             merge_sha: str | None = None
             merge_blocker: GitHubClientError | None = None
+            merge_operation: MonitorOperationHandle | None = None
             recheck_error: GitHubClientError | None = None
             merge_status = status
             queue_blockers_after_lock: list[MergeQueueBlocker] = []
@@ -1057,10 +1285,43 @@ class PullRequestMonitorRunner:
                         and merge_gate_after_lock is not None
                         and not _merge_gate_blocks(merge_gate_after_lock)
                     ):
+                        merge_operation = await self._begin_monitor_state_operation(
+                            workspace_id=workspace_id,
+                            action="merge",
+                            requested_action="merge",
+                            reason="Merging PR after all monitor gates passed.",
+                            reason_code="MERGE",
+                            pr_number=pr_number,
+                            status=merge_status,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            monitor_log=monitor_log,
+                        )
                         try:
                             merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
                         except GitHubClientError as exc:
                             merge_blocker = exc
+                            await self._finish_monitor_operation(
+                                merge_operation,
+                                status=OperationStatus.failed,
+                                result={
+                                    "status": "failed",
+                                    "outcome": "github_merge_failed",
+                                    "reason_code": "GITHUB_MERGE_FAILED",
+                                },
+                                error_code="GITHUB_MERGE_FAILED",
+                                error_message=str(exc),
+                            )
+                        else:
+                            await self._finish_monitor_operation(
+                                merge_operation,
+                                status=OperationStatus.succeeded,
+                                result={
+                                    "status": "succeeded",
+                                    "outcome": "merged",
+                                    "merge_sha": merge_sha,
+                                },
+                            )
 
             if queue_blockers_after_lock:
                 await self._wait_for_merge_queue(
@@ -1172,6 +1433,24 @@ class PullRequestMonitorRunner:
                 merged=True,
                 status=merge_status,
                 state=state,
+            )
+            await self._record_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="completed",
+                requested_action="complete",
+                reason="PR monitor completed after merging the PR.",
+                reason_code="MERGE_COMPLETED",
+                pr_number=pr_number,
+                status=merge_status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                result={
+                    "status": "succeeded",
+                    "outcome": "merged",
+                    "merge_sha": merge_sha,
+                },
+                monitor_log=monitor_log,
+                extra_identity=("merge", merge_sha),
             )
             await self._terminate_completed(
                 workspace_id,
@@ -1519,7 +1798,26 @@ class PullRequestMonitorRunner:
                     grace_seconds=self._config.initial_review_grace_period_seconds,
                     head_sha=status.head_sha[:10],
                 )
-            await self._deps.sleep(grace_wait_seconds)
+            await self._sleep_with_monitor_state_operation(
+                workspace_id=workspace_id,
+                action="grace_wait",
+                requested_action=req_action or "merge",
+                reason="Initial review grace period is still active.",
+                reason_code="INITIAL_REVIEW_GRACE",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                wait_seconds=grace_wait_seconds,
+                monitor_log=monitor_log,
+                stale_reason=stale_reason,
+                extra_payload={
+                    "grace_seconds": self._config.initial_review_grace_period_seconds,
+                    "req_action": req_action,
+                    "stale_reason": stale_reason,
+                },
+                extra_identity=(stale_reason, req_action),
+            )
             return False
 
         if stale_reason is not None:
@@ -1551,6 +1849,7 @@ class PullRequestMonitorRunner:
                         OperationStatus.pending.value,
                         OperationStatus.running.value,
                     )
+                    and op.type != OperationType.monitor_state.value
                     and isinstance(op.payload, dict)
                     and op.payload.get("source") == "pr_monitor"
                     for op in _ws.operations
@@ -1787,7 +2086,25 @@ class PullRequestMonitorRunner:
                 ],
             )
             state.mark_addressed(key, "waiting")
-        await self._deps.sleep(self._config.poll_interval_seconds)
+        await self._sleep_with_monitor_state_operation(
+            workspace_id=workspace_id,
+            action="merge_queue_wait",
+            requested_action="merge",
+            reason="An older merge candidate must clear first.",
+            reason_code="MERGE_QUEUE_WAIT",
+            pr_number=pr_number,
+            status=status,
+            base_branch=base_branch,
+            remote_branch=None,
+            wait_seconds=self._config.poll_interval_seconds,
+            monitor_log=monitor_log,
+            extra_payload={
+                "blocker_count": len(blockers),
+                "blocker_reason_code": blocker.reason_code,
+                **{key: value for key, value in payload.items() if key != "reason_code"},
+            },
+            extra_identity=(blocker.candidate_id,),
+        )
 
     async def _post_human_notification_once(
         self,

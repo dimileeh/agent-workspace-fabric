@@ -1086,8 +1086,67 @@ async def test_merge_queue_wait_records_event_once_per_head_and_blocker(
         events = [
             event for event in ws.events if event.event_type == "workspace.merge_queue_waiting"
         ]
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
         assert len(events) == 1
         assert events[0].payload["blocker_candidate_id"] == "mc_older"
+        assert [(op.type, op.status, op.payload["action"]) for op in operations] == [
+            (
+                OperationType.monitor_state.value,
+                OperationStatus.succeeded.value,
+                "merge_queue_wait",
+            )
+        ]
+        assert operations[0].payload["reason_code"] == "MERGE_QUEUE_WAIT"
+        assert operations[0].payload["blocker_candidate_id"] == "mc_older"
+
+
+@pytest.mark.unit
+async def test_monitor_state_sleep_failure_marks_operation_failed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+
+    class FailingSleep(RecordedSleep):
+        async def __call__(self, seconds: float) -> None:
+            assert seconds == 15
+            raise RuntimeError("sleep backend unavailable")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=FailingSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(RuntimeError, match="sleep backend unavailable"):
+        await runner._sleep_with_monitor_state_operation(
+            workspace_id=workspace_id,
+            action="grace_wait",
+            requested_action="validate",
+            reason="Initial review grace period is still active.",
+            reason_code="INITIAL_REVIEW_GRACE",
+            pr_number=42,
+            status=_status_for_helpers(),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            wait_seconds=15,
+        )
+
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        assert len(operations) == 1
+        operation = operations[0]
+        assert operation.type == OperationType.monitor_state.value
+        assert operation.status == OperationStatus.failed.value
+        assert operation.error_code == "INITIAL_REVIEW_GRACE"
+        assert operation.error_message == "sleep backend unavailable"
+        assert operation.result == {
+            "status": "failed",
+            "outcome": "wait_failed",
+            "reason_code": "INITIAL_REVIEW_GRACE",
+        }
 
 
 @pytest.mark.unit

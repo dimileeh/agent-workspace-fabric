@@ -67,7 +67,7 @@ def test_cleanup_result_normalization_preserves_structured_result() -> None:
 
 
 @pytest.mark.unit
-def test_cleanup_result_mapping_falls_back_to_legacy_step_lists() -> None:
+def test_cleanup_result_mapping_falls_back_to_unknown_legacy_step_lists() -> None:
     cleanup = controls._normalize_cleanup_result(
         {
             "status": "unknown",
@@ -94,6 +94,57 @@ def test_cleanup_result_mapping_falls_back_to_legacy_step_lists() -> None:
     assert [step.status for step in cleanup.steps] == ["succeeded", "failed"]
     assert cleanup.steps[1].reason_code == "CLEANUP_STEP_FAILED"
     assert cleanup.steps[1].error is None
+
+
+@pytest.mark.unit
+def test_normalize_cleanup_result_accepts_legacy_step_lists() -> None:
+    result = controls._normalize_cleanup_result(
+        {
+            "status": "succeeded",
+            "steps": "legacy",
+            "completed_steps": [
+                {"name": "", "status": "succeeded", "reason_code": "", "error": ""},
+                "ignored",
+            ],
+            "failed_steps": [
+                {"status": "unknown"},
+            ],
+        }
+    )
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "CLEANUP_SUCCEEDED"
+    assert [step.to_dict() for step in result.steps] == [
+        {
+            "name": "cleanup_step_1",
+            "status": "succeeded",
+            "reason_code": "CLEANUP_STEP_SUCCEEDED",
+        },
+        {
+            "name": "cleanup_step_3",
+            "status": "failed",
+            "reason_code": "CLEANUP_STEP_FAILED",
+        },
+    ]
+    assert controls._cleanup_failure_message(result) == "cleanup_step_3"
+
+
+@pytest.mark.unit
+def test_normalize_cleanup_result_handles_sequence_and_empty_cleanup_shapes() -> None:
+    existing = controls.WorkspaceCleanupResult.skipped(reason_code="NOTHING_TO_CLEAN")
+    failed = controls._normalize_cleanup_result(["compose down failed"])
+    empty = controls._normalize_cleanup_result([])
+    skipped = controls._normalize_cleanup_result({"status": "skipped", "steps": []})
+    partial = controls._normalize_cleanup_result({"status": "unexpected", "steps": []})
+
+    assert controls._normalize_cleanup_result(existing) is existing
+    assert failed.status == "partial"
+    assert failed.reason_code == "CLEANUP_PARTIAL"
+    assert failed.failure_messages == ("compose down failed",)
+    assert empty.status == "succeeded"
+    assert empty.reason_code == "CLEANUP_SUCCEEDED"
+    assert controls._cleanup_failure_message(skipped) == "CLEANUP_SKIPPED"
+    assert controls._cleanup_failure_message(partial) == "CLEANUP_PARTIAL"
 
 
 @pytest.mark.unit

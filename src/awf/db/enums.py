@@ -71,6 +71,7 @@ class OperationType(StrEnum):
     comment_repair = "comment_repair"
     ci_repair = "ci_repair"
     human_wait = "human_wait"
+    monitor_state = "monitor_state"
     destroy = "destroy"
 
 
