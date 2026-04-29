@@ -9,6 +9,7 @@ import pytest
 
 from awf.node import stack_launcher as stack_launcher_mod
 from awf.node.compose_manager import AuthMount, ComposeProjectPaths, WorkspaceComposeSpec
+from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import (
@@ -72,6 +73,14 @@ class _FailingAuthMountResolver:
         raise RuntimeError("auth mount resolution failed")
 
 
+def _layout() -> WorktreeLayout:
+    return WorktreeLayout(
+        mirror_path=Path("/host/awf/git/mirrors/repo.git"),
+        worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
+        branch_name="awf/ws_launcher",
+    )
+
+
 @pytest.mark.unit
 async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     compose = _RecordingCompose()
@@ -120,6 +129,140 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
     assert spec.auth_mounts[0].source == str(layout.mirror_path)
     assert spec.auth_mounts[0].target == str(layout.mirror_path)
     assert spec.auth_mounts[0].mode == "rw"
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_default_open_egress_keeps_compatible_flags() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="generic"),
+        )
+    )
+
+    assert compose.waits == [True]
+    assert len(compose.specs) == 1
+    assert compose.specs[0].network_internal is False
+    assert compose.specs[0].host_gateway_enabled is True
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_offline_egress_uses_internal_network_flags() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile.model_validate(
+                {"name": "offline", "security": {"egress": {"mode": "offline"}}}
+            ),
+        )
+    )
+
+    assert len(compose.specs) == 1
+    assert compose.specs[0].network_internal is True
+    assert compose.specs[0].host_gateway_enabled is False
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_mirrored_without_allowlist_uses_internal_network_flags() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile.model_validate(
+                {"name": "mirrored", "security": {"egress": {"mode": "mirrored"}}}
+            ),
+        )
+    )
+
+    assert len(compose.specs) == 1
+    assert compose.specs[0].network_internal is True
+    assert compose.specs[0].host_gateway_enabled is False
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_rejects_allowlist_egress_before_compose_up() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    with pytest.raises(LocalEgressPolicyError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=WorkspaceProfile.model_validate(
+                    {
+                        "name": "allowlisted",
+                        "security": {
+                            "egress": {
+                                "mode": "allowlist",
+                                "allowlist": ["api.github.com"],
+                            }
+                        },
+                    }
+                ),
+            )
+        )
+
+    assert raised.value.reason_code == "LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED"
+    assert raised.value.mode == "allowlist"
+    assert compose.specs == []
+    assert compose.waits == []
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_rejects_mirrored_allowlist_before_compose_up() -> None:
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    with pytest.raises(LocalEgressPolicyError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=WorkspaceProfile.model_validate(
+                    {
+                        "name": "mirrored",
+                        "security": {
+                            "egress": {
+                                "mode": "mirrored",
+                                "allowlist": ["npm.internal.example"],
+                            }
+                        },
+                    }
+                ),
+            )
+        )
+
+    assert raised.value.reason_code == "LOCAL_EGRESS_MIRRORED_ALLOWLIST_UNSUPPORTED"
+    assert raised.value.mode == "mirrored"
+    assert compose.specs == []
+    assert compose.waits == []
 
 
 @pytest.mark.unit

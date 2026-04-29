@@ -72,6 +72,63 @@ class TestRender:
         ]
 
     @pytest.mark.unit
+    def test_open_egress_policy_keeps_public_network_and_host_gateway(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(tmp_path, network_internal=False, host_gateway_enabled=True)
+            ).compose_file.read_text()
+        )
+
+        assert "internal" not in parsed["networks"]["awf_net"]
+        assert parsed["services"]["agent"]["extra_hosts"] == [
+            "host.docker.internal:host-gateway"
+        ]
+
+    @pytest.mark.unit
+    def test_offline_egress_policy_renders_internal_network_without_host_gateway(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(tmp_path, network_internal=True, host_gateway_enabled=False)
+            ).compose_file.read_text()
+        )
+
+        assert parsed["networks"]["awf_net"]["internal"] is True
+        assert "extra_hosts" not in parsed["services"]["agent"]
+
+    @pytest.mark.unit
+    def test_offline_egress_policy_keeps_agent_and_services_on_awf_network(
+        self,
+        manager: ComposeManager,
+        tmp_path: Path,
+    ) -> None:
+        parsed = yaml.safe_load(
+            manager.render(
+                _spec(
+                    tmp_path,
+                    network_internal=True,
+                    host_gateway_enabled=False,
+                    services=(
+                        ComposeService(
+                            name="mirror",
+                            image="registry-mirror:local",
+                        ),
+                    ),
+                )
+            ).compose_file.read_text()
+        )
+
+        assert parsed["services"]["agent"]["networks"] == ["awf_net"]
+        assert parsed["services"]["mirror"]["networks"] == ["awf_net"]
+
+    @pytest.mark.unit
     def test_profile_service_password_placeholders_are_resolved(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:

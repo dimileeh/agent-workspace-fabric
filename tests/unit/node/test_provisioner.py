@@ -19,8 +19,10 @@ from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
+from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.resolver import ProfileResolutionError
 
 
@@ -342,6 +344,76 @@ class TestFailureHandling:
             assert reloaded.failure_message is not None
             assert "docker compose up failed" in reloaded.failure_message
             assert "pull access denied for awf-agent-runtime:test" in reloaded.failure_message
+
+    @pytest.mark.unit
+    async def test_local_egress_policy_failure_marks_failed_before_compose_up(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingCompose:
+            def __init__(self) -> None:
+                self.up_calls: list[Any] = []
+
+            async def up(self, spec: Any, *, wait: bool = True) -> object:
+                self.up_calls.append((spec, wait))
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_policy"),
+                    compose_file=Path("/tmp/awf-compose/ws_policy/compose.yml"),
+                )
+
+        compose = _RecordingCompose()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=ComposeStackLauncher(
+                compose=compose,  # type: ignore[arg-type]
+                agent_runtime_image="awf-agent-runtime:test",
+            ),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                requested_profile={
+                    "name": "restricted",
+                    "security": {
+                        "egress": {
+                            "mode": "allowlist",
+                            "allowlist": ["api.github.com"],
+                        }
+                    },
+                },
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(LocalEgressPolicyError) as raised:
+            await provisioner.provision(ws_id)
+
+        assert raised.value.reason_code == "LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED"
+        assert compose.up_calls == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            assert reloaded.failure_reason == "policy_failure"
+            assert reloaded.failure_message is not None
+            assert len(reloaded.failure_message) <= 2000
+            assert "LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED" in reloaded.failure_message
+            failed_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            ]
+            assert failed_events[-1].reason_code == "LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED"
 
     @pytest.mark.unit
     async def test_missing_base_branch_marks_workspace_failed(

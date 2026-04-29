@@ -60,9 +60,10 @@ services:
       {% if auth_mounts %}{% for m in auth_mounts %}
       - "{{ m.source }}:{{ m.target }}:{{ m.mode | default('ro') }}"
       {% endfor %}{% endif %}
+    {% if host_gateway_enabled %}
     extra_hosts:
       - "host.docker.internal:host-gateway"
-    {% if agent_depends_on %}depends_on:
+    {% endif %}{% if agent_depends_on %}depends_on:
       {% for dep in agent_depends_on %}{{ dep }}:
         condition: service_healthy
       {% endfor %}
@@ -88,3 +89,5 @@ services:
 networks:
   awf_net:
     name: "awf-{{ workspace_id }}-net"
+    {% if network_internal %}internal: true
+    {% endif %}
