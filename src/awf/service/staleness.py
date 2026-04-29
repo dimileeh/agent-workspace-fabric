@@ -141,6 +141,14 @@ REASON_SCHEMA: Final[str] = "STALE_SCHEMA"
 REASON_DEPENDENCY: Final[str] = "STALE_DEPENDENCY"
 REASON_BUILD_CONFIG: Final[str] = "STALE_BUILD_CONFIG"
 REASON_PLAN_ARTIFACT_OVERLAP: Final[str] = ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON
+_BLOCKING_REASON_PRIORITY: Final[dict[str, int]] = {
+    REASON_OVERLAP: 0,
+    REASON_SCHEMA: 1,
+    REASON_DEPENDENCY: 2,
+    REASON_BUILD_CONFIG: 3,
+    REASON_TARGET_ADVANCED: 4,
+}
+_DEFAULT_BLOCKING_REASON_PRIORITY: Final[int] = len(_BLOCKING_REASON_PRIORITY)
 
 TRIGGER_TARGET_ADVANCED: Final[str] = "target_advanced"
 TRIGGER_PATH_OVERLAP: Final[str] = "path_overlap"
@@ -473,8 +481,13 @@ class StalenessRefreshService:
             ],
         )
 
-        stale = any(finding.blocks_merge for finding in findings)
-        await self._mark_candidate_stale(candidate, stale=stale)
+        blocking_reason = _primary_blocking_reason(findings)
+        stale = blocking_reason is not None
+        await self._mark_candidate_stale(
+            candidate,
+            stale=stale,
+            stale_reason=blocking_reason,
+        )
 
         if newly_added:
             await self._emit_events(
@@ -512,6 +525,7 @@ class StalenessRefreshService:
         candidate: MergeCandidate,
         *,
         stale: bool,
+        stale_reason: str | None,
     ) -> None:
         from awf.db.repositories import sync_candidate_readiness
         from awf.runtime.merge_eligibility import compute_stale_reason
@@ -525,6 +539,7 @@ class StalenessRefreshService:
         next_stale = stale or validation_reason is not None
         next_stale_reason = (
             validation_reason
+            or (stale_reason if stale else None)
             or (existing_validation_reason if stale else None)
             or ("stale" if stale else None)
         )
@@ -587,6 +602,25 @@ def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
         task_class=workspace.task_class or attempt.task_class,
         base_sha=candidate.base_sha,
     )
+
+
+def _primary_blocking_reason(findings: Sequence[StalenessFinding]) -> str | None:
+    primary = min(
+        (
+            (index, finding)
+            for index, finding in enumerate(findings)
+            if finding.blocks_merge
+        ),
+        key=lambda item: (
+            _BLOCKING_REASON_PRIORITY.get(
+                item[1].reason_code,
+                _DEFAULT_BLOCKING_REASON_PRIORITY,
+            ),
+            item[0],
+        ),
+        default=None,
+    )
+    return primary[1].reason_code if primary is not None else None
 
 
 async def _load_candidate(session: AsyncSession, candidate_id: str) -> MergeCandidate | None:
