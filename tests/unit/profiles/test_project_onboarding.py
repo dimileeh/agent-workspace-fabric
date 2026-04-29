@@ -46,6 +46,30 @@ def test_detects_python_template_and_generates_valid_profile(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+def test_compose_diagnostics_are_silent_for_non_dind_profile(
+    tmp_path: Path,
+) -> None:
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "app"\n', encoding="utf-8")
+    (tmp_path / "docker-compose.yml").write_text(
+        "services:\n"
+        "  api:\n"
+        "    image: example/api:latest\n"
+        "    environment:\n"
+        "      API_TOKEN: ${API_TOKEN}\n",
+        encoding="utf-8",
+    )
+
+    preview = preview_project_onboarding(tmp_path, template="python")
+
+    assert preview.inspection.compose_services
+    assert preview.draft.template == "python"
+    assert preview.draft.profile.docker.mode == DockerMode.none
+    assert preview.diagnostics.missing_secrets == []
+    assert preview.diagnostics.missing_ports == []
+    assert preview.diagnostics.missing_healthchecks == []
+
+
+@pytest.mark.unit
 def test_detects_node_nextjs_template_from_package_json(tmp_path: Path) -> None:
     (tmp_path / "package.json").write_text(
         json.dumps(

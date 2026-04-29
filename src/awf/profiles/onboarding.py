@@ -430,20 +430,24 @@ def _diagnostics_for(
     if template == "multi-service" and not inspection.compose_file:
         missing_services.extend(inspection.service_directories)
 
-    missing_secrets = sorted(
-        {
-            secret_name
-            for service in inspection.compose_services
-            for secret_name in service.secret_names
-            if secret_name not in declared_secrets
-        }
-    )
-    missing_ports = [
-        service.name for service in inspection.compose_services if not service.ports
-    ]
-    missing_healthchecks = [
-        service.name for service in inspection.compose_services if not service.has_healthcheck
-    ]
+    missing_secrets: list[str] = []
+    missing_ports: list[str] = []
+    missing_healthchecks: list[str] = []
+    if profile.docker.mode == DockerMode.dind:
+        missing_secrets = sorted(
+            {
+                secret_name
+                for service in inspection.compose_services
+                for secret_name in service.secret_names
+                if secret_name not in declared_secrets
+            }
+        )
+        missing_ports = [
+            service.name for service in inspection.compose_services if not service.ports
+        ]
+        missing_healthchecks = [
+            service.name for service in inspection.compose_services if not service.has_healthcheck
+        ]
 
     if template == "node-playwright":
         if not profile.ports:
