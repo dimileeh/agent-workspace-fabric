@@ -21,8 +21,8 @@ from awf.control.worker import (
     _stale_active_execution_failure_message,
 )
 from awf.db.base import Base
-from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.inspection import RuntimeSnapshot
 
@@ -380,6 +380,40 @@ async def test_safely_execute_and_resume_noop_without_executor(
     await worker._safely_resume_pr_monitor("ws_missing")
 
     assert worker._execution_tasks == {}
+
+
+@pytest.mark.unit
+async def test_safely_resume_marks_recovery_operation_failed_without_executor(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _seed_status(
+        factory,
+        WorkspaceStatus.monitoring_pr,
+        title="missing-executor-monitor-recovery",
+    )
+    async with factory() as s:
+        operation = await OperationRepository(s).create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.remonitor,
+            status=OperationStatus.running,
+            payload={"requested_action": OperationType.remonitor.value},
+        )
+        operation_id = operation.id
+        await s.commit()
+
+    worker = _worker(factory)
+
+    await worker._safely_resume_pr_monitor(
+        workspace_id,
+        recovery_operation_id=operation_id,
+    )
+
+    async with factory() as s:
+        operation = await OperationRepository(s).get(operation_id)
+        assert operation is not None
+        assert operation.status == OperationStatus.failed.value
+        assert operation.error_code == "MONITOR_RECOVERY_NO_EXECUTOR"
+        assert operation.finished_at is not None
 
 
 @pytest.mark.unit

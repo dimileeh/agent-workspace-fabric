@@ -9,6 +9,7 @@ specific merge-gate branch without running the full monitor integration loop.
 
 from __future__ import annotations
 
+import time
 from collections.abc import AsyncIterator
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -1060,6 +1061,62 @@ async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_conte
         "target_branch": "development",
         "remote_branch": f"awf/{workspace_id}",
     }
+
+
+@pytest.mark.unit
+async def test_monitor_runner_loads_persisted_state_on_resume(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 91
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha="f" * 40,
+    )
+    monitor_started_at = datetime.now(UTC) - timedelta(minutes=12)
+    review_started_at = datetime.now(UTC) - timedelta(minutes=7)
+    grace_started_key = _initial_review_grace_started_key(pr_number)
+    persisted_threads = {
+        "thread-1": "fix_committed",
+        "thread-2": "defer",
+        grace_started_key: _initial_review_grace_wall_started_value_from_datetime(
+            review_started_at
+        ),
+    }
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.monitor_iter_count = 8
+        workspace.monitor_threads_addressed = dict(persisted_threads)
+        workspace.monitor_last_commit_sha = "e" * 40
+        workspace.monitor_started_at = monitor_started_at
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    before = time.monotonic()
+    workspace = await runner._load_workspace(workspace_id)
+    state = runner._load_state(workspace)
+    after = time.monotonic()
+
+    assert state.iter_count == 8
+    assert state.last_push_sha == "e" * 40
+    assert state.threads_addressed_ids["thread-1"] == "fix_committed"
+    assert state.threads_addressed_ids["thread-2"] == "defer"
+
+    monitor_elapsed = (datetime.now(UTC) - monitor_started_at).total_seconds()
+    assert before - monitor_elapsed - 1 <= state.started_at <= after - monitor_elapsed + 1
+
+    grace_elapsed = (datetime.now(UTC) - review_started_at).total_seconds()
+    grace_runtime_started = float(state.threads_addressed_ids[grace_started_key])
+    assert before - grace_elapsed - 1 <= grace_runtime_started <= after - grace_elapsed + 1
 
 
 @pytest.mark.unit

@@ -14,6 +14,7 @@ from awf.service.workspace_runtime_health import (
     _metadata_finding,
     classify_resource_inventory,
     classify_runtime_snapshot,
+    has_open_pr_for_remonitor,
     retry_policy_allows_runtime_recovery,
     runtime_resource_from_detected,
 )
@@ -76,6 +77,27 @@ def test_resource_inventory_skips_pre_provisioned_request_without_metadata() -> 
 
     assert classify_resource_inventory(requested, resources=()) is None
     assert _metadata_finding(requested) is None
+
+
+@pytest.mark.unit
+def test_open_pr_remonitor_predicate_accepts_model_and_candidate_statuses() -> None:
+    assert has_open_pr_for_remonitor(
+        WorkspaceStatus.monitoring_pr.value,
+        "https://github.com/example/repo/pull/123",
+    )
+    assert has_open_pr_for_remonitor(
+        WorkspaceStatus.monitoring_pr,
+        "https://github.com/example/repo/pull/123",
+    )
+
+    assert not has_open_pr_for_remonitor(
+        WorkspaceStatus.monitoring_pr.value,
+        None,
+    )
+    assert not has_open_pr_for_remonitor(
+        WorkspaceStatus.running,
+        "https://github.com/example/repo/pull/123",
+    )
 
 
 @pytest.mark.unit
