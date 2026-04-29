@@ -6,11 +6,15 @@ import { handleWorkspaceControlRoute } from "./workspace-control-routes.ts";
 const originalFetch = globalThis.fetch;
 const originalBaseUrl = process.env.AWF_API_BASE_URL;
 const originalToken = process.env.AWF_API_TOKEN;
+const originalCryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
 
 afterEach(() => {
   globalThis.fetch = originalFetch;
   process.env.AWF_API_BASE_URL = originalBaseUrl;
   process.env.AWF_API_TOKEN = originalToken;
+  if (originalCryptoDescriptor) {
+    Object.defineProperty(globalThis, "crypto", originalCryptoDescriptor);
+  }
 });
 
 test("remonitor BFF posts with server token and idempotency key", async () => {
@@ -82,6 +86,33 @@ test("refresh BFF preserves structured AWF errors", async () => {
       message: "Workspace cannot be refreshed from this state.",
     },
   });
+});
+
+test("BFF generates idempotency key without global crypto", async () => {
+  const calls = [];
+  process.env.AWF_API_BASE_URL = "https://awf.example.test";
+  process.env.AWF_API_TOKEN = "server-token";
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: undefined,
+  });
+  globalThis.fetch = async (url, init) => {
+    calls.push({ url, init });
+    return jsonResponse({
+      workspace_id: "ws_123",
+      operation_id: "op_refresh",
+      operation_status: "pending",
+      status: "queued",
+      message: "refresh queued",
+    });
+  };
+
+  const response = await handleWorkspaceControlRoute("refresh", "ws_123", jsonRequest({}));
+
+  assert.equal(response.status, 200);
+  assert.equal(calls.length, 1);
+  const headers = normalizeHeaders(calls[0].init.headers);
+  assert.match(headers["idempotency-key"], /^console:[0-9a-f-]{36}$/);
 });
 
 test("revalidate BFF maps to validate endpoint and requested tier", async () => {

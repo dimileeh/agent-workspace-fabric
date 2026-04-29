@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { proxyAwf } from "./awf-server.ts";
 import type { ValidationTier, WorkspaceOperatorAction } from "./types.ts";
 
@@ -136,7 +138,7 @@ function idempotencyKey(
 ): { ok: true; value: string } | { ok: false; message: string } {
   const candidate = cleanHeader(rawKey) ?? cleanHeader(headers.get("idempotency-key"));
   if (!candidate) {
-    return { ok: true, value: `console:${crypto.randomUUID()}` };
+    return { ok: true, value: `console:${randomUUID()}` };
   }
   if (candidate.length > maxIdempotencyKeyLength) {
     return { ok: false, message: "idempotency_key must be 200 characters or fewer." };
