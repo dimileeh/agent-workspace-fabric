@@ -279,7 +279,7 @@ async def test_create_v2_writes_resource_summary_with_disk_dind_and_capacity(
         "limit": 12288,
         "reserved": 4096,
         "available": 8192,
-        "available_after_next_default": 8192,
+        "available_after_next_default": None,
         "reason_code": None,
     }
     assert summary["capacity"]["dind_slots"] == {
@@ -371,7 +371,7 @@ async def test_create_v2_resource_summary_includes_existing_active_reservations(
         "limit": 12288,
         "reserved": 12288,
         "available": 0,
-        "available_after_next_default": 0,
+        "available_after_next_default": None,
         "reason_code": "DISK_RESERVATION_PRESSURE",
     }
     assert summary["capacity"]["dind_slots"] == {

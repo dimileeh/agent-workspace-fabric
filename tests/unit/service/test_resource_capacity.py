@@ -66,5 +66,6 @@ def test_disk_capacity_reports_admission_failure_separately_from_reservations() 
     )
 
     assert summary.disk_mb.available == 2 * 1024
+    assert summary.disk_mb.available_after_next_default is None
     assert summary.disk_mb.reason_code == "INSUFFICIENT_DISK"
     assert summary.pressure_reasons == ("INSUFFICIENT_DISK",)

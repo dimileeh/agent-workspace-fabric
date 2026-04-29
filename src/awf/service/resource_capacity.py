@@ -177,7 +177,7 @@ def _disk_dimension(*, disk_check: DiskCheck | None, reserved_mb: int) -> Capaci
         limit=limit,
         reserved=reserved_mb,
         available=max(0, raw_available),
-        available_after_next_default=max(0, raw_available),
+        available_after_next_default=None,
         reason_code=_disk_reason_code(disk_check=disk_check, raw_available=raw_available),
     )
 
