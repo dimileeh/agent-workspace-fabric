@@ -720,6 +720,13 @@ class ControlWorker:
         recovery_operation_id: str | None = None,
     ) -> None:
         if self._executor is None:
+            await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.failed,
+                error_code="MONITOR_RECOVERY_NO_EXECUTOR",
+                error_message="Worker has no executor configured.",
+            )
             return
         try:
             await self._executor.resume_pr_monitor(workspace_id)
