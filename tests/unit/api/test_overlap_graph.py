@@ -107,7 +107,7 @@ async def test_get_overlap_graph_serializes_reason_codes_and_affected_workspace_
 
     assert response.status_code == 200
     body = response.json()
-    assert body["has_more"] is False
+    assert "has_more" not in body
     assert body["summary"] == {
         "node_count": 2,
         "queued_count": 1,

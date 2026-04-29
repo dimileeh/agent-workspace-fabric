@@ -89,7 +89,6 @@ class WorkspaceOverlapGraph:
     nodes: tuple[WorkspaceOverlapNode, ...]
     edges: tuple[WorkspaceOverlapEdge, ...]
     summary: WorkspaceOverlapGraphSummary
-    has_more: bool
 
 
 @dataclass(frozen=True)
@@ -157,7 +156,6 @@ async def build_workspace_overlap_graph_for_session(
         nodes=nodes,
         edges=edges,
         summary=_graph_summary(nodes, edges, has_more=has_more),
-        has_more=has_more,
     )
 
 

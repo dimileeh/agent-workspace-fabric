@@ -728,7 +728,6 @@ class WorkspaceOverlapGraphResponse(BaseModel):
     nodes: list[WorkspaceOverlapGraphNodeResponse]
     edges: list[WorkspaceOverlapGraphEdgeResponse]
     summary: WorkspaceOverlapGraphSummaryResponse
-    has_more: bool = False
 
 
 class RuntimeServiceResponse(BaseModel):
