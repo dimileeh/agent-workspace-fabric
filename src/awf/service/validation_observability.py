@@ -142,7 +142,7 @@ def _summary_freshness_and_reason(
     if latest_validation is None:
         return "unavailable", VALIDATION_UNAVAILABLE_REASON
     if latest_satisfied_tier is None or latest_satisfied_tier < required_tier:
-        return latest_validation.freshness_status, VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+        return "stale", VALIDATION_INSUFFICIENT_TIER_STALE_REASON
     if latest_validation.freshness_reason_code is not None:
         return latest_validation.freshness_status, latest_validation.freshness_reason_code
     return latest_validation.freshness_status, "validation_target_unknown"

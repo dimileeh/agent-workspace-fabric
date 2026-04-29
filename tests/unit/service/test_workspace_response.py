@@ -235,9 +235,10 @@ def test_workspace_validation_summary_ignores_other_attempt_runs() -> None:
 
     assert summary.required_tier == 2
     assert summary.latest_satisfied_tier == 1
-    assert summary.freshness_status == "fresh"
+    assert summary.freshness_status == "stale"
     assert summary.reason_code == "validation_insufficient_tier"
     assert summary.latest_validation is not None
+    assert summary.latest_validation.freshness_status == "fresh"
     assert summary.latest_validation.validation_run_id == "vr_canonical"
 
 
@@ -295,5 +296,7 @@ def test_workspace_validation_summary_requires_post_rebase_validation() -> None:
 
     assert summary.required_tier == 2
     assert summary.latest_satisfied_tier is None
-    assert summary.freshness_status == "fresh"
+    assert summary.freshness_status == "stale"
     assert summary.reason_code == "validation_insufficient_tier"
+    assert summary.latest_validation is not None
+    assert summary.latest_validation.freshness_status == "fresh"
