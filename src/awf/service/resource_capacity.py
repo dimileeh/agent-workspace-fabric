@@ -171,8 +171,9 @@ def _disk_dimension(*, disk_check: DiskCheck | None, reserved_mb: int) -> Capaci
             available_after_next_default=None,
             reason_code="DISK_CAPACITY_UNKNOWN",
         )
-    limit = disk_check.free_bytes // _MIB
-    raw_available = limit - reserved_mb
+    limit = disk_check.total_bytes // _MIB
+    free_mb = disk_check.free_bytes // _MIB
+    raw_available = free_mb - reserved_mb
     return CapacityDimension(
         limit=limit,
         reserved=reserved_mb,

@@ -276,7 +276,7 @@ async def test_create_v2_writes_resource_summary_with_disk_dind_and_capacity(
         "reason_code": None,
     }
     assert summary["capacity"]["disk_mb"] == {
-        "limit": 12288,
+        "limit": 20480,
         "reserved": 4096,
         "available": 8192,
         "available_after_next_default": None,
@@ -368,7 +368,7 @@ async def test_create_v2_resource_summary_includes_existing_active_reservations(
         "reason_code": "PEAK_MEMORY_CAPACITY_SATURATED",
     }
     assert summary["capacity"]["disk_mb"] == {
-        "limit": 12288,
+        "limit": 20480,
         "reserved": 12288,
         "available": 0,
         "available_after_next_default": None,

@@ -95,13 +95,14 @@ def _disk_check(
     threshold_bytes: int = 400,
     reason: str = "SUFFICIENT_DISK",
 ) -> DiskCheck:
+    total_bytes = max(1000, free_bytes + 1)
     return DiskCheck(
         path="/tmp/awf-work",
         checked_path="/tmp",
-        total_bytes=1000,
-        used_bytes=1000 - free_bytes,
+        total_bytes=total_bytes,
+        used_bytes=total_bytes - free_bytes,
         free_bytes=free_bytes,
-        percent_free=round(free_bytes / 1000 * 100, 2),
+        percent_free=round(free_bytes / total_bytes * 100, 2),
         threshold_bytes=threshold_bytes,
         ok=ok,
         status="ok" if ok else "fail",
