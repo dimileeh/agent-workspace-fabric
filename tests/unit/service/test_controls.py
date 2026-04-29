@@ -538,6 +538,7 @@ async def test_destroy_workspace_records_structured_partial_cleanup_and_retry(
             remove_worktree=True,
             idempotency_key="destroy-retry",
         )
+        retry_events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
         retry_operations = await OperationRepository(session).list_for_workspace(
             workspace.id,
             operation_type=OperationType.destroy,
@@ -563,6 +564,9 @@ async def test_destroy_workspace_records_structured_partial_cleanup_and_retry(
         "status": WorkspaceStatus.destroyed.value,
         "cleanup": successful_cleanup,
     }
+    retry_cleanup_event = next(event for event in retry_events if event.reason_code == "DESTROYED")
+    assert retry_cleanup_event.payload is not None
+    assert retry_cleanup_event.payload["cleanup"] == retry_operation.result["cleanup"]
     assert len(cleaner.calls) == 2
 
 

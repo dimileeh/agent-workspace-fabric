@@ -888,6 +888,115 @@ async def test_cleanup_is_idempotent_after_partial_compose_failure(
 
 
 @pytest.mark.unit
+async def test_single_workspace_cleanup_is_idempotent_after_partial_compose_failure(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    compose_slug = "stored-single"
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        compose_file_path=str(work_dir / "compose" / compose_slug / "compose.yml"),
+        pr=True,
+    )
+    compose = work_dir / "compose" / compose_slug
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write(worktree / "repo.txt", "repo")
+    _write(compose / "compose.yml", "compose")
+    _write(auth / "codex" / "auth.json", "auth")
+    calls = 0
+
+    async def _compose_teardown(_candidate: object) -> WorkspaceGCComposeTeardownResult:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return WorkspaceGCComposeTeardownResult(
+                status="failed",
+                reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+                error="network still in use",
+            )
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+
+    first = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+    first_payload = first.to_dict()
+    first_candidate = first_payload["candidates"][0]
+
+    assert first.status == "partial"
+    assert first.reason_code == "CLEANUP_EXECUTION_PARTIAL"
+    assert first_candidate["compose_teardown"] == {
+        "status": "failed",
+        "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
+        "error": "network still in use",
+    }
+    assert {
+        data["status"] for data in first_candidate["paths"].values()
+    } == {"skipped"}
+    assert {
+        data["reason_code"] for data in first_candidate["paths"].values()
+    } == {"DOCKER_COMPOSE_DOWN_FAILED"}
+    assert {
+        data["error"] for data in first_candidate["paths"].values()
+    } == {"network still in use"}
+    assert worktree.exists()
+    assert compose.exists()
+    assert auth.exists()
+
+    second = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+
+    assert second.status == "succeeded"
+    assert set(second.deleted_paths) == {worktree, compose, auth}
+    assert not worktree.exists()
+    assert not compose.exists()
+    assert not auth.exists()
+
+    third = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        min_age_hours=24,
+        execute=True,
+        now=now,
+        compose_teardown=_compose_teardown,
+    )
+    third_payload = third.to_dict()
+    third_candidate = third_payload["candidates"][0]
+
+    assert third.status == "succeeded"
+    assert third.deleted_paths == []
+    assert third.delete_errors == []
+    assert {
+        data["status"] for data in third_candidate["paths"].values()
+    } == {"already_removed"}
+    assert {
+        data["reason_code"] for data in third_candidate["paths"].values()
+    } == {"PATH_ALREADY_REMOVED"}
+    assert all("error" not in data for data in third_candidate["paths"].values())
+
+
+@pytest.mark.unit
 async def test_gc_accepts_sync_compose_teardown_result(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
