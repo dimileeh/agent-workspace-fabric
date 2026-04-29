@@ -40,6 +40,28 @@ class TestCleanup:
         )
 
     @pytest.mark.unit
+    def test_cleanup_result_preserves_legacy_collection_equality(self) -> None:
+        step = WorkspaceCleanupStepResult(
+            name="compose_down",
+            status="failed",
+            reason_code="COMPOSE_DOWN_FAILED",
+            error="network still in use",
+        )
+        result = WorkspaceCleanupResult(
+            status="partial",
+            reason_code="CLEANUP_PARTIAL",
+            steps=(step,),
+        )
+
+        assert result == ["compose_down"]
+        assert result == ("compose_down",)
+        assert result == {"compose_down"}
+        assert result != {"worktree_remove"}
+        assert result != object()
+        assert bool(result) is True
+        assert bool(WorkspaceCleanupResult.from_steps([])) is False
+
+    @pytest.mark.unit
     async def test_happy_path_calls_compose_down_then_worktree_remove(
         self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
     ) -> None:

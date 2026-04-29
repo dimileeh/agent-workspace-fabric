@@ -345,4 +345,6 @@ async def test_ignored_boilerplate_does_not_complete_monitor_by_itself(
     assert not (artifacts_root / f"{workspace_id}.defer-signal.json").exists()
     async with factory() as session:
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
-    assert operations == []
+    assert [(operation.type, operation.payload["action"]) for operation in operations] == [
+        (OperationType.monitor_state.value, "grace_wait")
+    ]

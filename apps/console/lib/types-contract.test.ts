@@ -1,4 +1,5 @@
 import type {
+  Operation,
   ValidationFreshnessSummary,
   ValidationFreshnessStatus,
   ValidationRunSummary,
@@ -62,3 +63,41 @@ type ValidationRunSummaryIdentityFieldsArePresent = Expect<
 
 export const workspaceValidationProvenanceAllowsMissing: WorkspaceValidationProvenanceAllowsMissing = true;
 export const validationRunSummaryIdentityFieldsArePresent: ValidationRunSummaryIdentityFieldsArePresent = true;
+
+type OperationAuditFieldsAreNullable = Expect<
+  Equal<
+    Pick<
+      Operation,
+      | "owner"
+      | "source"
+      | "action"
+      | "pr_number"
+      | "pr_url"
+      | "source_head_sha"
+      | "source_base_sha"
+      | "reason"
+      | "reason_code"
+      | "failure_code"
+      | "failure_message"
+      | "log_stream_refs"
+      | "log_stream_ids"
+    >,
+    {
+      owner: string | null;
+      source: string | null;
+      action: string | null;
+      pr_number: number | null;
+      pr_url: string | null;
+      source_head_sha: string | null;
+      source_base_sha: string | null;
+      reason: string | null;
+      reason_code: string | null;
+      failure_code: string | null;
+      failure_message: string | null;
+      log_stream_refs: Record<string, unknown>;
+      log_stream_ids: string[];
+    }
+  >
+>;
+
+export const operationAuditFieldsAreNullable: OperationAuditFieldsAreNullable = true;
