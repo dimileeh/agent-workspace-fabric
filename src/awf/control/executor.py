@@ -2582,9 +2582,7 @@ class WorkspaceExecutor:
             workspace = await workspace_repo.get(workspace_id)
             if workspace is None:  # pragma: no cover - destroyed mid-recovery
                 return
-            if workspace.status != WorkspaceStatus.running.value and _is_callback_terminal_status(
-                workspace.status
-            ):
+            if _is_callback_terminal_status(workspace.status):
                 await workspace_repo.record_ignored_stale_callback(
                     workspace,
                     callback_source="executor",
