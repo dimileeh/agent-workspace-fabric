@@ -423,8 +423,18 @@ def test_service_status_provider_warnings_do_not_fail_by_default(tmp_path: Path)
     assert status["status"] == "ok"
     readiness = status["agent_readiness"]
     assert readiness["status"] == "ok"
+    assert set(readiness["providers"]) == {
+        "github",
+        "codex",
+        "claude_code",
+        "gemini",
+        "opencode",
+        "docker",
+    }
     assert readiness["providers"]["github"]["status"] == "warn"
     assert readiness["providers"]["github"]["reason"] == "GITHUB_TOKEN_ENV_MISSING"
+    assert readiness["providers"]["docker"]["status"] == "ok"
+    assert "DOCKER_HOST_BROAD_CONTROL" in readiness["security"]["reason_codes"]
 
 
 @pytest.mark.unit
@@ -448,6 +458,33 @@ def test_service_status_strict_provider_failure_sets_top_level_fail(tmp_path: Pa
     assert readiness["status"] == "fail"
     assert readiness["providers"]["github"]["status"] == "fail"
     assert readiness["providers"]["github"]["reason"] == "GITHUB_TOKEN_ENV_MISSING"
+
+
+@pytest.mark.unit
+def test_service_status_strict_codex_provider_failure_sets_top_level_fail(
+    tmp_path: Path,
+) -> None:
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_empty_workspace_view,
+            provider_environ={},
+            strict_providers={"codex"},
+        )
+    )
+
+    assert status["status"] == "fail"
+    readiness = status["agent_readiness"]
+    assert readiness["status"] == "fail"
+    assert readiness["strict_providers"] == ["codex"]
+    assert readiness["providers"]["codex"]["status"] == "fail"
+    assert readiness["providers"]["codex"]["reason"] == "CODEX_AUTH_MISSING"
+    assert "codex" in readiness["security"]["providers_with_warnings"]
 
 
 @pytest.mark.unit
