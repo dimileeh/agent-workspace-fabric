@@ -367,13 +367,13 @@ def _normalize_relative_path(value: str) -> str:
 
 
 def _split_volume_target(target: str) -> _VolumeTarget:
-    path, separator, mode_part = target.rpartition(":")
+    stripped = target.strip()
+    path, separator, mode_part = stripped.rpartition(":")
     if separator and path.startswith("/"):
         mode_flags = {item.strip() for item in mode_part.split(",") if item.strip()}
-        if "ro" in mode_flags:
-            return _VolumeTarget(path=path, mode="ro")
-        if "rw" in mode_flags:
-            return _VolumeTarget(path=path, mode="rw")
+        if mode_flags:
+            mode = "ro" if "ro" in mode_flags else "rw"
+            return _VolumeTarget(path=path, mode=mode)
     return _VolumeTarget(path=target, mode="rw")
 
 

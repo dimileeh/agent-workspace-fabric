@@ -293,3 +293,26 @@ def test_writable_host_home_auth_mounts_remain_errors_under_warn_policy() -> Non
     assert len(errors) == 1
     assert errors[0].reason_code == "HOST_HOME_AUTH_MOUNT_WRITABLE"
     assert errors[0].severity is ProfileLintSeverity.error
+
+
+@pytest.mark.unit
+def test_volume_target_flags_without_access_mode_preserve_auth_target() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "selinux-host-auth",
+            "security": {"host_home_auth_mounts": {"mode": "warn"}},
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("${AWF_HOST_HOME}/.config/gh", "/home/agent/.config/gh:z")],
+                }
+            ],
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert len(errors) == 1
+    assert errors[0].reason_code == "HOST_HOME_AUTH_MOUNT_WRITABLE"
+    assert errors[0].severity is ProfileLintSeverity.error
