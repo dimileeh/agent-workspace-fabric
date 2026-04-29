@@ -1141,11 +1141,21 @@ async def test_monitor_rebase_recovery_reports_git_failures(
     queued: list[tuple[int, str, str]],
     message: str,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runner = FakeCommandRunner()
     for returncode, stdout, stderr in queued:
         runner.queue_result(returncode=returncode, stdout=stdout, stderr=stderr)
     executor = _executor_with_runner(runner, tmp_path)
+
+    async def skip_begin_operation(**_kwargs: object) -> None:
+        return None
+
+    async def skip_finish_operation(*_args: object, **_kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(executor, "_begin_rebase_recovery_operation", skip_begin_operation)
+    monkeypatch.setattr(executor, "_finish_rebase_recovery_operation", skip_finish_operation)
 
     with pytest.raises(_MonitorRebaseRecoveryError, match=message):
         await executor._run_monitor_rebase_recovery(
@@ -1155,4 +1165,5 @@ async def test_monitor_rebase_recovery_reports_git_failures(
             branch_name="awf/ws",
             remote_branch="awf/ws",
             reason="stale",
+            recovery_payload={},
         )
