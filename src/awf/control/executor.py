@@ -114,6 +114,11 @@ _log = get_logger(__name__)
 
 WORKTREE_MISSING_REASON_CODE = "WORKTREE_MISSING"
 PR_REEXECUTION_GUARD_REASON_CODE = "PR_REEXECUTION_GUARD"
+_EXECUTOR_AUDIT_ACTOR = "executor"
+_AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
+_AUDIT_PR_CREATED_EVENT = "workspace.audit.pr_created"
+_GIT_PUSH_FAILED_REASON_CODE = "GIT_PUSH_FAILED"
+_PR_CREATE_FAILED_REASON_CODE = "PR_CREATE_FAILED"
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -294,6 +299,92 @@ class WorkspaceExecutor:
         self._pr_monitor = pr_monitor
         self._pr_monitor_factory = pr_monitor_factory
         self._log_store = log_store
+
+    async def _record_executor_pr_audit_event(
+        self,
+        workspace_id: str,
+        *,
+        event_type: str,
+        action: str,
+        outcome: str,
+        reason_code: str,
+        branch_name: str | None = None,
+        remote_branch: str | None = None,
+        pr_number: int | None = None,
+        pr_url: str | None = None,
+        source_head_sha: str | None = None,
+        source_base_sha: str | None = None,
+        operation_id: str | None = None,
+        operation_type: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:  # pragma: no cover - destroyed mid-flight
+                return
+            await self._add_executor_pr_audit_event(
+                repo,
+                workspace,
+                event_type=event_type,
+                action=action,
+                outcome=outcome,
+                reason_code=reason_code,
+                branch_name=branch_name,
+                remote_branch=remote_branch,
+                pr_number=pr_number,
+                pr_url=pr_url,
+                source_head_sha=source_head_sha,
+                source_base_sha=source_base_sha,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                evidence=evidence,
+            )
+            await session.commit()
+
+    async def _add_executor_pr_audit_event(
+        self,
+        repo: WorkspaceRepository,
+        workspace: Workspace,
+        *,
+        event_type: str,
+        action: str,
+        outcome: str,
+        reason_code: str,
+        branch_name: str | None = None,
+        remote_branch: str | None = None,
+        pr_number: int | None = None,
+        pr_url: str | None = None,
+        source_head_sha: str | None = None,
+        source_base_sha: str | None = None,
+        operation_id: str | None = None,
+        operation_type: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        resolved_branch_name = branch_name or workspace.branch_name
+        resolved_remote_branch = (
+            remote_branch
+            or workspace.remote_push_branch
+            or workspace.branch_name
+        )
+        await repo.add_audit_event(
+            workspace,
+            event_type=event_type,
+            actor=_EXECUTOR_AUDIT_ACTOR,
+            action=action,
+            outcome=outcome,
+            reason_code=reason_code,
+            operation_id=operation_id,
+            operation_type=operation_type,
+            pr_number=pr_number if pr_number is not None else workspace.pr_number,
+            pr_url=pr_url or workspace.pr_url,
+            source_head_sha=source_head_sha,
+            source_base_sha=source_base_sha or workspace.base_commit,
+            target_branch=workspace.branch_base,
+            remote_branch=resolved_remote_branch,
+            branch_name=resolved_branch_name,
+            evidence=evidence,
+        )
 
     async def execute(
         self,
@@ -1344,11 +1435,12 @@ class WorkspaceExecutor:
 
         pr_title = ws.task_title
         pr_body = _build_pr_body(ws, defaults=defaults)
+        push_branch_name = ws.branch_name or f"awf/{workspace_id}"
 
         try:
             pr = await self._pr_creator.push_and_open(
                 worktree_path=worktree_path,
-                branch_name=ws.branch_name or f"awf/{workspace_id}",
+                branch_name=push_branch_name,
                 base_branch=ws.branch_base,
                 title=pr_title,
                 body=pr_body,
@@ -1360,6 +1452,44 @@ class WorkspaceExecutor:
                 workspace_id=workspace_id,
                 operation=exc.operation,
                 returncode=exc.returncode,
+            )
+            if exc.operation != "git push":
+                await self._record_executor_pr_audit_event(
+                    workspace_id,
+                    event_type=_AUDIT_GIT_PUSH_EVENT,
+                    action="git_push",
+                    outcome="succeeded",
+                    reason_code="PR_UPDATED" if ws.pr_url else "PR_OPENED",
+                    branch_name=push_branch_name,
+                    remote_branch=push_branch_name,
+                    pr_number=_extract_pr_number(ws.pr_url) if ws.pr_url else None,
+                    pr_url=ws.pr_url,
+                    source_head_sha=exc.head_sha,
+                )
+            await self._record_executor_pr_audit_event(
+                workspace_id,
+                event_type=(
+                    _AUDIT_GIT_PUSH_EVENT
+                    if exc.operation == "git push"
+                    else _AUDIT_PR_CREATED_EVENT
+                ),
+                action="git_push" if exc.operation == "git push" else "pr_create",
+                outcome="failed",
+                reason_code=(
+                    _GIT_PUSH_FAILED_REASON_CODE
+                    if exc.operation == "git push"
+                    else _PR_CREATE_FAILED_REASON_CODE
+                ),
+                branch_name=push_branch_name,
+                remote_branch=push_branch_name,
+                pr_number=_extract_pr_number(ws.pr_url) if ws.pr_url else None,
+                pr_url=ws.pr_url,
+                source_head_sha=exc.head_sha,
+                evidence={
+                    "operation": exc.operation,
+                    "returncode": exc.returncode,
+                    "error_message": exc.stderr.strip() or "<no output>",
+                },
             )
             await self._mark_failed(
                 workspace_id=workspace_id,
@@ -1403,6 +1533,33 @@ class WorkspaceExecutor:
                 persisted.remote_push_branch = (
                     pr.branch or persisted.branch_name or f"awf/{workspace_id}"
                 )
+            pr_reason_code = "PR_UPDATED" if had_existing_pr_url else "PR_OPENED"
+            await self._add_executor_pr_audit_event(
+                repo,
+                persisted,
+                event_type=_AUDIT_GIT_PUSH_EVENT,
+                action="git_push",
+                outcome="succeeded",
+                reason_code=pr_reason_code,
+                branch_name=persisted.branch_name or pr.branch,
+                remote_branch=persisted.remote_push_branch or pr.branch,
+                pr_number=persisted.pr_number,
+                pr_url=persisted.pr_url,
+                source_head_sha=pr.head_sha,
+            )
+            await self._add_executor_pr_audit_event(
+                repo,
+                persisted,
+                event_type=_AUDIT_PR_CREATED_EVENT,
+                action="pr_create",
+                outcome="reused" if had_existing_pr_url else "succeeded",
+                reason_code=pr_reason_code,
+                branch_name=persisted.branch_name or pr.branch,
+                remote_branch=persisted.remote_push_branch or pr.branch,
+                pr_number=persisted.pr_number,
+                pr_url=persisted.pr_url,
+                source_head_sha=pr.head_sha,
+            )
             # Resolve which monitor (if any) to hand off to. Pre-constructed
             # ``pr_monitor`` wins (tests); otherwise the factory builds one
             # from the per-task adapter now that we have it.
@@ -1421,7 +1578,7 @@ class WorkspaceExecutor:
                 await repo.transition(
                     persisted,
                     to=WorkspaceStatus.monitoring_pr,
-                    reason_code="PR_UPDATED" if had_existing_pr_url else "PR_OPENED",
+                    reason_code=pr_reason_code,
                 )
                 await session.commit()
             else:
@@ -1430,7 +1587,7 @@ class WorkspaceExecutor:
                 await repo.transition(
                     persisted,
                     to=WorkspaceStatus.completed,
-                    reason_code="PR_UPDATED" if had_existing_pr_url else "PR_OPENED",
+                    reason_code=pr_reason_code,
                 )
                 await session.commit()
 
@@ -2549,6 +2706,25 @@ class WorkspaceExecutor:
         if remote_branch is not None:
             push = await git(["push", "--force-with-lease", "origin", f"HEAD:{remote_branch}"])
             if not push.ok:
+                await self._record_executor_pr_audit_event(
+                    workspace_id,
+                    event_type=_AUDIT_GIT_PUSH_EVENT,
+                    action="rebase_recovery_push",
+                    outcome="failed",
+                    reason_code="MONITOR_RECOVERY_REBASE_FAILED",
+                    operation_id=operation.operation_id if operation is not None else None,
+                    operation_type=OperationType.rebase.value,
+                    source_head_sha=head_sha,
+                    source_base_sha=base_sha,
+                    remote_branch=remote_branch,
+                    evidence={
+                        "operation": "git push --force-with-lease",
+                        "returncode": push.returncode,
+                        "error_message": push.stderr.strip() or "<no output>",
+                        "previous_source_base_sha": source_base_sha,
+                        "previous_source_head_sha": source_head_sha,
+                    },
+                )
                 raise _MonitorRebaseRecoveryError(
                     f"rebase recovery: git push --force-with-lease failed: {push.stderr}"
                 )
@@ -2557,6 +2733,7 @@ class WorkspaceExecutor:
             workspace_id=workspace_id,
             base_sha=base_sha,
             head_sha=head_sha,
+            remote_branch=remote_branch,
             source_base_sha=source_base_sha,
             source_head_sha=source_head_sha,
             operation=operation,
@@ -2571,6 +2748,7 @@ class WorkspaceExecutor:
         workspace_id: str,
         base_sha: str,
         head_sha: str,
+        remote_branch: str | None,
         source_base_sha: str | None,
         source_head_sha: str | None,
         operation: MonitorOperationHandle | None,
@@ -2631,6 +2809,28 @@ class WorkspaceExecutor:
                         "target_base_sha": base_sha,
                         "target_head_sha": head_sha,
                         "pushed": pushed,
+                        "rebased": rebased,
+                    },
+                )
+            if pushed:
+                await self._add_executor_pr_audit_event(
+                    workspace_repo,
+                    workspace,
+                    event_type=_AUDIT_GIT_PUSH_EVENT,
+                    action="rebase_recovery_push",
+                    outcome="succeeded",
+                    reason_code="REBASE_OK",
+                    operation_id=operation.operation_id if operation is not None else None,
+                    operation_type=OperationType.rebase.value,
+                    pr_number=workspace.pr_number,
+                    pr_url=workspace.pr_url,
+                    source_head_sha=head_sha,
+                    source_base_sha=base_sha,
+                    remote_branch=remote_branch or workspace.remote_push_branch,
+                    branch_name=workspace.branch_name,
+                    evidence={
+                        "previous_source_base_sha": source_base_sha,
+                        "previous_source_head_sha": source_head_sha,
                         "rebased": rebased,
                     },
                 )

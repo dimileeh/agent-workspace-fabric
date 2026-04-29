@@ -26,7 +26,7 @@ from awf.control.executor import (
 )
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
 from awf.runtime.pr_creator import PullRequestCreator
@@ -305,9 +305,97 @@ class TestHappyPath:
             assert ws is not None
             assert ws.status == WorkspaceStatus.completed.value
             assert ws.pr_url == "https://github.com/dimileeh/aira-agent/pull/123"
+            events = WorkspaceEventRepository(s)
+            push_events = await events.list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.git_push",
+                limit=10,
+            )
+            pr_events = await events.list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.pr_created",
+                limit=10,
+            )
+            assert len(push_events) == 1
+            assert push_events[0].reason_code == "PR_OPENED"
+            assert push_events[0].payload == {
+                "schema": "control_audit.v1",
+                "actor": "executor",
+                "source": "executor",
+                "action": "git_push",
+                "outcome": "succeeded",
+                "reason_code": "PR_OPENED",
+                "pr_number": 123,
+                "pr_url": "https://github.com/dimileeh/aira-agent/pull/123",
+                "source_head_sha": "deadbeef01",
+                "source_base_sha": "a" * 40,
+                "target_branch": "development",
+                "remote_branch": f"awf/{ws_id}",
+                "branch_name": f"awf/{ws_id}",
+            }
+            assert len(pr_events) == 1
+            assert pr_events[0].reason_code == "PR_OPENED"
+            assert pr_events[0].payload == {
+                "schema": "control_audit.v1",
+                "actor": "executor",
+                "source": "executor",
+                "action": "pr_create",
+                "outcome": "succeeded",
+                "reason_code": "PR_OPENED",
+                "pr_number": 123,
+                "pr_url": "https://github.com/dimileeh/aira-agent/pull/123",
+                "source_head_sha": "deadbeef01",
+                "source_base_sha": "a" * 40,
+                "target_branch": "development",
+                "remote_branch": f"awf/{ws_id}",
+                "branch_name": f"awf/{ws_id}",
+            }
         pr_body = _created_pr_body(fake)
         assert f"Automatically opened by AWF workspace `{ws_id}`" in pr_body
         assert "(agent: `codex`, model: `gpt-5`, effort: `xhigh`)." in pr_body
+
+    @pytest.mark.unit
+    async def test_reuses_existing_pr_audit_event(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.pr_url = "https://github.com/dimileeh/aira-agent/pull/321"
+            ws.pr_number = 321
+            await s.commit()
+
+        fake.queue_result(returncode=0, stdout="codex finished")
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="CHANGELOG.md\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")
+        _queue_pre_push_diagnostics(fake, head="reuse-head")
+        fake.queue_result(returncode=0)
+
+        await executor.execute(ws_id)
+
+        assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls)
+        async with factory() as s:
+            pr_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.pr_created",
+                limit=10,
+            )
+        assert len(pr_events) == 1
+        assert pr_events[0].payload is not None
+        assert pr_events[0].payload["outcome"] == "reused"
+        assert pr_events[0].payload["reason_code"] == "PR_UPDATED"
+        assert pr_events[0].payload["pr_number"] == 321
+        assert pr_events[0].payload["pr_url"] == "https://github.com/dimileeh/aira-agent/pull/321"
 
     @pytest.mark.unit
     async def test_task_policy_agent_model_overrides_adapter_default(
@@ -1136,6 +1224,82 @@ class TestFailurePaths:
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "infrastructure_failure"
+            push_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.git_push",
+                limit=10,
+            )
+            assert len(push_events) == 1
+            assert push_events[0].reason_code == "GIT_PUSH_FAILED"
+            assert push_events[0].payload is not None
+            assert push_events[0].payload["actor"] == "executor"
+            assert push_events[0].payload["action"] == "git_push"
+            assert push_events[0].payload["outcome"] == "failed"
+            assert push_events[0].payload["reason_code"] == "GIT_PUSH_FAILED"
+            assert push_events[0].payload["remote_branch"] == f"awf/{ws_id}"
+            assert push_events[0].payload["evidence"] == {
+                "operation": "git push",
+                "returncode": 128,
+                "error_message": "remote: perm denied",
+            }
+
+    @pytest.mark.unit
+    async def test_pr_create_failure_records_redacted_audit_after_successful_push(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(factory)
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="f\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0)
+        _queue_pre_push_diagnostics(fake, head="pushed-head")
+        fake.queue_result(returncode=0)
+        fake.queue_result(
+            returncode=1,
+            stderr=(
+                "GraphQL failed for https://user:ghp_should_not_persist@github.com/org/repo "
+                "Authorization: Bearer ghp_should_not_persist"
+            ),
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            events = WorkspaceEventRepository(s)
+            push_events = await events.list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.git_push",
+                limit=10,
+            )
+            pr_events = await events.list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.pr_created",
+                limit=10,
+            )
+        assert len(push_events) == 1
+        assert push_events[0].payload is not None
+        assert push_events[0].payload["outcome"] == "succeeded"
+        assert push_events[0].payload["source_head_sha"] == "pushed-head"
+        assert len(pr_events) == 1
+        assert pr_events[0].reason_code == "PR_CREATE_FAILED"
+        assert pr_events[0].payload is not None
+        assert pr_events[0].payload["outcome"] == "failed"
+        assert pr_events[0].payload["action"] == "pr_create"
+        assert pr_events[0].payload["evidence"]["operation"] == "gh pr create"
+        assert pr_events[0].payload["evidence"]["returncode"] == 1
+        assert "ghp_should_not_persist" not in repr(pr_events[0].payload)
+        assert "https://[redacted]@github.com/org/repo" in repr(pr_events[0].payload)
 
     @pytest.mark.unit
     async def test_agent_makes_no_changes_marks_failed(
