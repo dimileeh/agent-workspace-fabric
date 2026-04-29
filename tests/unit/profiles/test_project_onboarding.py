@@ -193,6 +193,34 @@ def test_detects_multi_service_template_when_compose_has_multiple_services(
 
 
 @pytest.mark.unit
+def test_compose_port_draft_omits_non_web_endpoints(tmp_path: Path) -> None:
+    (tmp_path / "compose.yaml").write_text(
+        "services:\n"
+        "  web:\n"
+        "    image: example/web\n"
+        "    ports:\n"
+        '      - "18080:8080"\n'
+        "  secure:\n"
+        "    image: example/secure\n"
+        "    ports:\n"
+        '      - "443:443"\n'
+        "  db:\n"
+        "    image: postgres:16\n"
+        "    ports:\n"
+        '      - "5432:5432"\n',
+        encoding="utf-8",
+    )
+
+    preview = preview_project_onboarding(tmp_path)
+
+    assert preview.draft.profile.ports == {
+        "web": "http://web:8080",
+        "secure": "https://secure:443",
+    }
+    assert preview.diagnostics.missing_ports == ["db"]
+
+
+@pytest.mark.unit
 def test_preview_reports_missing_sections(tmp_path: Path) -> None:
     preview = preview_project_onboarding(tmp_path)
     payload = preview.to_dict()

@@ -44,6 +44,8 @@ _SECRET_NAME_RE = re.compile(
     r"(SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL|ACCESS_KEY)",
     re.IGNORECASE,
 )
+_HTTP_COMPOSE_PORTS = frozenset({80, 3000, 3001, 4173, 5000, 5173, 8000, 8080, 8081, 8888})
+_HTTPS_COMPOSE_PORTS = frozenset({443, 8443})
 
 
 @dataclass(frozen=True, slots=True)
@@ -443,7 +445,9 @@ def _diagnostics_for(
             }
         )
         missing_ports = [
-            service.name for service in inspection.compose_services if not service.ports
+            service.name
+            for service in inspection.compose_services
+            if _compose_service_endpoint(service) is None
         ]
         missing_healthchecks = [
             service.name for service in inspection.compose_services if not service.has_healthcheck
@@ -712,10 +716,32 @@ def _playwright_command(package_manager: str) -> str:
 def _compose_ports(inspection: ProjectInspection) -> dict[str, str]:
     ports: dict[str, str] = {}
     for service in inspection.compose_services:
-        port = _first_container_port(service.ports)
-        if port is not None:
-            ports[service.name] = f"http://{service.name}:{port}"
+        endpoint = _compose_service_endpoint(service)
+        if endpoint is not None:
+            ports[service.name] = endpoint
     return ports
+
+
+def _compose_service_endpoint(service: ComposeServiceInspection) -> str | None:
+    port = _first_container_port(service.ports)
+    if port is None:
+        return None
+    scheme = _compose_web_port_scheme(port)
+    if scheme is None:
+        return None
+    return f"{scheme}://{service.name}:{port}"
+
+
+def _compose_web_port_scheme(port: str) -> str | None:
+    try:
+        container_port = int(port)
+    except ValueError:
+        return None
+    if container_port in _HTTPS_COMPOSE_PORTS:
+        return "https"
+    if container_port in _HTTP_COMPOSE_PORTS:
+        return "http"
+    return None
 
 
 def _first_container_port(ports: tuple[str, ...]) -> str | None:
