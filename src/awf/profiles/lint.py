@@ -325,7 +325,6 @@ def _lint_service_volume(
                     "use declared secrets or a per-workspace auth directory."
                 ),
                 path=path,
-                severity=_host_home_policy_severity(profile),
                 details=details,
             ),
         )

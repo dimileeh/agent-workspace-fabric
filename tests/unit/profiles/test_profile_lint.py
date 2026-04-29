@@ -280,6 +280,29 @@ def test_broad_host_home_auth_mounts_block_by_default(source: str) -> None:
 
 
 @pytest.mark.unit
+def test_broad_host_home_auth_mounts_remain_errors_under_warn_policy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-host-home-warn",
+            "security": {"host_home_auth_mounts": {"mode": "warn"}},
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("${HOME}", "/home/agent")],
+                }
+            ],
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert len(errors) == 1
+    assert errors[0].reason_code == "HOST_HOME_AUTH_MOUNT_TOO_BROAD"
+    assert errors[0].severity is ProfileLintSeverity.error
+
+
+@pytest.mark.unit
 def test_writable_host_home_auth_mounts_remain_errors_under_warn_policy() -> None:
     profile = WorkspaceProfile.model_validate(
         {
