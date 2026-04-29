@@ -19,6 +19,10 @@ from awf.service.controls import (
     WorkspaceControlError,
     WorkspaceControlService,
     WorkspaceNotFoundError,
+    WorkspaceRebaseActiveConflictError,
+    WorkspaceRebaseMissingCandidateError,
+    WorkspaceRebaseMissingPrUrlError,
+    WorkspaceRebaseStateError,
     WorkspaceRefreshStateError,
     WorkspaceRemonitorMissingPrUrlError,
     WorkspaceRemonitorStateError,
@@ -142,6 +146,30 @@ async def validate_workspace(
         raise _http_error(exc) from exc
 
 
+@router.post(
+    "/rebase",
+    response_model=OperationResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+)
+async def rebase_workspace(
+    workspace_id: str,
+    payload: WorkspaceOperationRequest,
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    if_match: str | None = Header(default=None, alias="If-Match"),
+    session: AsyncSession = Depends(get_db_session),
+) -> OperationResponse:
+    try:
+        operation = await _controls(session).request_rebase_workspace(
+            workspace_id,
+            reason=payload.reason,
+            idempotency_key=_require_idempotency_key(idempotency_key),
+            expected_version=_parse_if_match(if_match),
+        )
+        return OperationResponse.model_validate(operation)
+    except WorkspaceControlError as exc:
+        raise _http_error(exc) from exc
+
+
 @router.delete("", response_model=WorkspaceControlResponse)
 async def destroy_workspace(
     workspace_id: str,
@@ -181,9 +209,12 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
         (
             WorkspaceRemonitorMissingPrUrlError,
             WorkspaceValidateMissingPrUrlError,
+            WorkspaceRebaseMissingPrUrlError,
         ),
     ):
         status_code = status.HTTP_400_BAD_REQUEST
+    elif isinstance(exc, WorkspaceRebaseMissingCandidateError):
+        status_code = status.HTTP_404_NOT_FOUND
     elif isinstance(
         exc,
         (
@@ -193,6 +224,8 @@ def _http_error(exc: WorkspaceControlError) -> HTTPException:
             WorkspaceRefreshStateError,
             WorkspaceRemonitorStateError,
             WorkspaceValidateStateError,
+            WorkspaceRebaseActiveConflictError,
+            WorkspaceRebaseStateError,
         ),
     ):
         status_code = status.HTTP_409_CONFLICT

@@ -16,6 +16,8 @@ from awf.service.controls import (
     VersionConflictError,
     WorkspaceControlError,
     WorkspaceNotFoundError,
+    WorkspaceRebaseMissingCandidateError,
+    WorkspaceRebaseMissingPrUrlError,
     WorkspaceRemonitorMissingPrUrlError,
 )
 
@@ -76,6 +78,16 @@ def test_require_idempotency_key_strips_valid_values() -> None:
         (
             WorkspaceRemonitorMissingPrUrlError(SimpleNamespace(status="monitoring_pr")),
             400,
+        ),
+        (
+            WorkspaceRebaseMissingPrUrlError(SimpleNamespace(status="monitoring_pr")),
+            400,
+        ),
+        (
+            WorkspaceRebaseMissingCandidateError(
+                SimpleNamespace(id="ws_1", pr_url="https://github.com/x/y/pull/1")
+            ),
+            404,
         ),
         (
             IdempotencyConflictError(),

@@ -41,8 +41,16 @@ _VALIDATE_REPLAY_STATUSES = frozenset(
         WorkspaceStatus.validating,
     }
 )
+_REBASE_ELIGIBLE_STATUSES = frozenset({WorkspaceStatus.monitoring_pr})
 _DESTROYING_OR_DESTROYED_STATUSES = frozenset(
     {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}
+)
+_REBASE_DESTRUCTIVE_CONFLICT_TYPES = frozenset(
+    {
+        OperationType.cancel.value,
+        OperationType.stop.value,
+        OperationType.destroy.value,
+    }
 )
 _OPERATOR_API_SOURCE = "operator_api"
 _OPERATOR_CANCEL_REASON_CODE = "OPERATOR_CANCEL"
@@ -50,6 +58,7 @@ _OPERATOR_STOP_REASON_CODE = "OPERATOR_STOP"
 _OPERATOR_REMONITOR_REASON_CODE = "OPERATOR_REMONITOR"
 _OPERATOR_REFRESH_REASON_CODE = "OPERATOR_REFRESH"
 _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
+_OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
@@ -192,6 +201,53 @@ class WorkspaceValidateMissingPrUrlError(WorkspaceControlError):
             error_code="WORKSPACE_PR_URL_REQUIRED",
             message="Workspace validate requires an existing PR URL.",
             detail={"status": workspace.status},
+        )
+
+
+class WorkspaceRebaseMissingPrUrlError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_PR_URL_REQUIRED",
+            message="Workspace rebase requires an existing PR URL.",
+            detail={"status": workspace.status},
+        )
+
+
+class WorkspaceRebaseMissingCandidateError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="MERGE_CANDIDATE_NOT_FOUND",
+            message="Workspace rebase requires an open merge candidate.",
+            detail={"workspace_id": workspace.id, "pr_url": workspace.pr_url},
+        )
+
+
+class WorkspaceRebaseStateError(WorkspaceControlError):
+    def __init__(self, workspace: Workspace) -> None:
+        super().__init__(
+            error_code="WORKSPACE_STATE_NOT_REBASEABLE",
+            message="Workspace is not in a state eligible for rebase recovery.",
+            detail={
+                "status": workspace.status,
+                "eligible_statuses": [
+                    status.value for status in _REBASE_ELIGIBLE_STATUSES
+                ],
+            },
+        )
+
+
+class WorkspaceRebaseActiveConflictError(WorkspaceControlError):
+    def __init__(
+        self,
+        operation: Operation,
+        *,
+        error_code: str = "WORKSPACE_REBASE_CONFLICT",
+        message: str = "Workspace already has an active rebase operation.",
+    ) -> None:
+        super().__init__(
+            error_code=error_code,
+            message=message,
+            detail=_operation_conflict_detail(operation),
         )
 
 
@@ -611,6 +667,115 @@ class WorkspaceControlService:
         )
         return operation
 
+    async def request_rebase_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None,
+        idempotency_key: str | None = None,
+        expected_version: int | None = None,
+    ) -> Operation:
+        repo = WorkspaceRepository(self._session)
+        operations = OperationRepository(self._session)
+        base_payload = _operator_operation_payload(
+            reason=reason,
+            reason_code=_OPERATOR_REBASE_REASON_CODE,
+            requested_action=OperationType.rebase.value,
+            extra={"recovery_mode": "rebase_only"},
+        )
+        idempotency_payload = _operation_payload(
+            base_payload,
+            expected_version=expected_version,
+        )
+        workspace, replay = await self._prepare_operation(
+            repo,
+            operations,
+            workspace_id=workspace_id,
+            operation_type=OperationType.rebase,
+            payload=idempotency_payload,
+            idempotency_key=idempotency_key,
+            expected_version=expected_version,
+            active_payload_identity=base_payload,
+            idempotency_payload_identity=idempotency_payload,
+            idempotency_identity_keys=frozenset(
+                {*base_payload.keys(), "expected_version"}
+            ),
+        )
+        if replay is not None:
+            return replay
+
+        destructive_conflict = await _find_active_operation(
+            operations,
+            workspace_id=workspace_id,
+            operation_types=_REBASE_DESTRUCTIVE_CONFLICT_TYPES,
+        )
+        if destructive_conflict is not None:
+            raise WorkspaceRebaseActiveConflictError(
+                destructive_conflict,
+                error_code="WORKSPACE_OPERATION_CONFLICT",
+                message=(
+                    "Workspace rebase conflicts with an active destructive operation."
+                ),
+            )
+
+        active_rebase = await _find_active_operation(
+            operations,
+            workspace_id=workspace_id,
+            operation_types={OperationType.rebase.value},
+        )
+        if active_rebase is not None:
+            raise WorkspaceRebaseActiveConflictError(active_rebase)
+
+        current = WorkspaceStatus(workspace.status)
+        if current not in _REBASE_ELIGIBLE_STATUSES:
+            raise WorkspaceRebaseStateError(workspace)
+        if not workspace.pr_url:
+            raise WorkspaceRebaseMissingPrUrlError(workspace)
+
+        candidate = await MergeCandidateRepository(
+            self._session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
+        if candidate is None:
+            raise WorkspaceRebaseMissingCandidateError(workspace)
+
+        rebase_payload = _operation_payload(
+            {
+                **base_payload,
+                **_workspace_rebase_operation_context(workspace, candidate),
+            },
+            expected_version=expected_version,
+        )
+        operation = await operations.create(
+            workspace_id=workspace_id,
+            operation_type=OperationType.rebase,
+            status=OperationStatus.pending,
+            payload=rebase_payload,
+            idempotency_key=idempotency_key,
+        )
+        rebase_event_payload = _event_payload(
+            {
+                "source": _OPERATOR_API_SOURCE,
+                "reason": reason,
+                "operation_id": operation.id,
+                "recovery_mode": "rebase_only",
+                "candidate_id": candidate.id,
+            },
+            expected_version=expected_version,
+        )
+        await repo.add_event(
+            workspace,
+            event_type="workspace.rebase_requested",
+            reason_code=_OPERATOR_REBASE_REASON_CODE,
+            payload=rebase_event_payload,
+        )
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.ready,
+            reason_code=_OPERATOR_REBASE_REASON_CODE,
+            payload=rebase_event_payload,
+        )
+        return operation
+
     async def destroy_workspace(
         self,
         workspace_id: str,
@@ -789,15 +954,26 @@ class WorkspaceControlService:
         idempotency_key: str | None,
         expected_version: int | None,
         active_payload_identity: dict[str, object | None] | None = None,
+        idempotency_payload_identity: dict[str, object | None] | None = None,
+        idempotency_identity_keys: frozenset[str] | None = None,
     ) -> tuple[Workspace, Operation | None]:
         if idempotency_key is not None:
             await operations.acquire_idempotency_key_lock(idempotency_key)
             existing = await operations.get_by_idempotency_key(idempotency_key)
             if existing is not None:
+                payload_matches = (
+                    _payload_matches_idempotency_identity(
+                        existing.payload,
+                        identity=idempotency_payload_identity,
+                        identity_keys=idempotency_identity_keys,
+                    )
+                    if idempotency_payload_identity is not None
+                    else existing.payload == payload
+                )
                 if (
                     existing.workspace_id != workspace_id
                     or existing.type != operation_type.value
-                    or existing.payload != payload
+                    or not payload_matches
                 ):
                     raise IdempotencyConflictError()
                 workspace = await self._require_workspace(repo, workspace_id)
@@ -990,6 +1166,29 @@ def _workspace_pr_operation_context(workspace: Workspace) -> dict[str, object | 
     }
 
 
+def _workspace_rebase_operation_context(
+    workspace: Workspace,
+    candidate: object,
+) -> dict[str, object | None]:
+    candidate_head_sha = getattr(candidate, "head_sha", None)
+    candidate_base_sha = getattr(candidate, "base_sha", None)
+    return {
+        key: value
+        for key, value in {
+            "candidate_id": getattr(candidate, "id", None),
+            "attempt_id": getattr(candidate, "attempt_id", None),
+            "task_id": getattr(candidate, "task_id", None),
+            "pr_number": getattr(candidate, "pr_number", None) or workspace.pr_number,
+            "pr_url": getattr(candidate, "pr_url", None) or workspace.pr_url,
+            "source_head_sha": candidate_head_sha or workspace.monitor_last_commit_sha,
+            "source_base_sha": candidate_base_sha or workspace.base_commit,
+            "target_branch": workspace.branch_base,
+            "remote_branch": workspace.remote_push_branch or workspace.branch_name,
+        }.items()
+        if value is not None
+    }
+
+
 def _event_payload(
     payload: dict[str, object | None],
     *,
@@ -1038,6 +1237,55 @@ def _json_datetime(value: datetime | None) -> str | None:
     if value is None:
         return None
     return value.isoformat()
+
+
+async def _find_active_operation(
+    operations: OperationRepository,
+    *,
+    workspace_id: str,
+    operation_types: frozenset[str] | set[str],
+) -> Operation | None:
+    active: list[Operation] = []
+    for status in (OperationStatus.pending, OperationStatus.running):
+        active.extend(
+            await operations.list_for_workspace(
+                workspace_id,
+                status=status,
+                limit=100,
+            )
+        )
+    active.sort(key=lambda operation: (operation.created_at, operation.id))
+    for operation in active:
+        if operation.type in operation_types:
+            return operation
+    return None
+
+
+def _operation_conflict_detail(operation: Operation) -> dict[str, object]:
+    return {
+        "operation_id": operation.id,
+        "operation_type": operation.type,
+        "operation_status": operation.status,
+    }
+
+
+def _payload_matches_idempotency_identity(
+    payload: object,
+    *,
+    identity: dict[str, object | None] | None,
+    identity_keys: frozenset[str] | None,
+) -> bool:
+    if identity is None:
+        return True
+    if not isinstance(payload, dict):
+        return False
+    keys = identity_keys if identity_keys is not None else frozenset(identity)
+    for key in keys:
+        if key not in identity:
+            continue
+        if key not in payload or payload[key] != identity[key]:
+            return False
+    return True
 
 
 def _is_active(status_value: WorkspaceStatus) -> bool:
