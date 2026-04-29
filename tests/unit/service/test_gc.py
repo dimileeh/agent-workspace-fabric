@@ -261,6 +261,21 @@ async def test_plan_reports_requested_statuses_when_no_statuses_are_eligible(
 
 
 @pytest.mark.unit
+async def test_gc_secret_lease_revocation_skips_missing_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 4, 29, 12, tzinfo=UTC)
+
+    summaries = await gc._revoke_gc_secret_leases(
+        session_factory,
+        workspace_ids=["ws_missing"],
+        now=now,
+    )
+
+    assert summaries == {}
+
+
+@pytest.mark.unit
 async def test_plan_applies_min_age_filter_and_limit_oldest_first(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

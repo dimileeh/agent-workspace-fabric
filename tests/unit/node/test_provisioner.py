@@ -23,6 +23,7 @@ from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.stack_launcher import ComposeStackLauncher
+from awf.profiles.models import ProfileSecret, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError
 
 
@@ -85,6 +86,21 @@ async def _force_destroy_provisioning_workspace(
         await repo.transition(ws, to=WorkspaceStatus.destroying, reason_code="TEST_DESTROY")
         await repo.transition(ws, to=WorkspaceStatus.destroyed, reason_code="TEST_DESTROY")
         await s.commit()
+
+
+def _secret_profile() -> WorkspaceProfile:
+    return WorkspaceProfile(
+        name="provisioner-secret-edges",
+        secrets=[
+            ProfileSecret(
+                name="api-token",
+                kind="env",
+                target="API_TOKEN",
+                provider="env",
+                ref="env/API_TOKEN",
+            )
+        ],
+    )
 
 
 class TestSuccess:
@@ -852,6 +868,228 @@ class TestOperatorControlRaces:
                 "expected_status": WorkspaceStatus.provisioning.value,
                 "actual_status": WorkspaceStatus.destroyed.value,
             }
+
+    @pytest.mark.unit
+    async def test_destroy_after_secret_lease_issue_skips_stack_launch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingGit:
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                del repo_url, base_branch
+                return WorktreeLayout(
+                    mirror_path=tmp_path / "mirror.git",
+                    worktree_path=tmp_path / "worktrees" / workspace_id,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "d" * 40
+
+        class _RecordingStackLauncher:
+            def __init__(self) -> None:
+                self.requests: list[Any] = []
+
+            async def launch(self, request: Any) -> object:
+                self.requests.append(request)
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        class _DestroyingAfterIssueProvisioner(Provisioner):
+            async def _issue_secret_leases(
+                self,
+                workspace_id: str,
+                profile: WorkspaceProfile,
+            ) -> None:
+                await super()._issue_secret_leases(workspace_id, profile)
+                await _force_destroy_provisioning_workspace(session_factory, workspace_id)
+
+        launcher = _RecordingStackLauncher()
+        provisioner = _DestroyingAfterIssueProvisioner(
+            session_factory=session_factory,
+            git=_RecordingGit(),  # type: ignore[arg-type]
+            stack_launcher=launcher,
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=_secret_profile().model_dump(mode="json"),
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        assert launcher.requests == []
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value
+            leases = await SecretLeaseRepository(s).list_for_workspace(ws_id)
+            assert [lease.status for lease in leases] == ["issued"]
+            skip_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_action_skipped"
+            ]
+            assert skip_events[-1].payload == {
+                "action": "provision",
+                "expected_status": WorkspaceStatus.provisioning.value,
+                "actual_status": WorkspaceStatus.destroyed.value,
+            }
+
+    @pytest.mark.unit
+    async def test_destroy_after_stack_launch_skips_ready_transition(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _DestroyingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                await _force_destroy_provisioning_workspace(
+                    session_factory, request.workspace_id
+                )
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_launcher"),
+                    compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+                )
+
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_DestroyingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.destroyed.value
+            assert reloaded.node_id is None
+            skip_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_action_skipped"
+            ]
+            assert skip_events[-1].payload == {
+                "action": "provision",
+                "expected_status": WorkspaceStatus.provisioning.value,
+                "actual_status": WorkspaceStatus.destroyed.value,
+            }
+
+
+class TestSecretLeaseIssueEdges:
+    @pytest.mark.unit
+    async def test_issue_secret_leases_skips_missing_or_stale_workspace(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        await provisioner._issue_secret_leases("ws_missing", _secret_profile())
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            ws.status = WorkspaceStatus.ready.value
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner._issue_secret_leases(ws_id, _secret_profile())
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            leases = await SecretLeaseRepository(s).list_for_workspace(ws_id)
+            assert leases == []
+            skip_events = [
+                event
+                for event in reloaded.events
+                if event.event_type == "workspace.stale_action_skipped"
+            ]
+            assert skip_events[-1].payload == {
+                "action": "issue_secret_leases",
+                "expected_status": WorkspaceStatus.provisioning.value,
+                "actual_status": WorkspaceStatus.ready.value,
+            }
+
+    @pytest.mark.unit
+    async def test_issue_secret_leases_reraises_service_failure(
+        self,
+        provisioner: Provisioner,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _FailingSecretLeaseService:
+            def __init__(self, session: AsyncSession) -> None:
+                del session
+
+            async def issue_profile_secret_leases(
+                self,
+                workspace: Any,
+                profile: WorkspaceProfile,
+            ) -> object:
+                del workspace, profile
+                raise RuntimeError("lease repository unavailable")
+
+        monkeypatch.setattr(
+            "awf.node.provisioner.SecretLeaseService",
+            _FailingSecretLeaseService,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+            )
+            ws.status = WorkspaceStatus.provisioning.value
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(RuntimeError, match="lease repository unavailable"):
+            await provisioner._issue_secret_leases(ws_id, _secret_profile())
 
 
 class TestIdempotency:

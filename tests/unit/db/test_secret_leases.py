@@ -220,3 +220,67 @@ async def test_expire_due_leases_only_changes_due_active_rows(session: AsyncSess
         "db-password": "expired",
         "future-token": "issued",
     }
+
+
+@pytest.mark.unit
+async def test_issue_event_omits_empty_issue_metadata(session: AsyncSession) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    workspace = await _workspace(session)
+    repo = SecretLeaseRepository(session)
+
+    await repo.issue_declared_leases(
+        workspace,
+        leases=[
+            SecretLeaseIssue(
+                secret_name="metadata-free-token",
+                kind="env",
+                target="METADATA_FREE_TOKEN",
+                mode="ro",
+                required=True,
+                provider=None,
+                ref_digest=None,
+                expires_at=None,
+                issue_metadata={},
+            )
+        ],
+        now=now,
+    )
+
+    events = await _events(session, workspace.id)
+    payload = events[-1].payload
+    assert payload is not None
+    assert payload["reason_code"] == "SECRET_LEASE_ISSUED"
+    assert "issue_metadata" not in payload
+    assert await repo._workspaces_by_id(set()) == {}
+
+
+@pytest.mark.unit
+async def test_expire_due_leases_tolerates_orphaned_local_rows(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    orphan = WorkspaceSecretLease(
+        id="sl_orphaned_test_lease",
+        workspace_id="ws_missing",
+        secret_name="orphan-token",
+        kind="env",
+        target="ORPHAN_TOKEN",
+        mode="ro",
+        required=True,
+        provider=None,
+        ref_digest=None,
+        status="issued",
+        issued_at=now - timedelta(hours=2),
+        expires_at=now - timedelta(hours=1),
+        issue_metadata={},
+        mount_metadata={},
+    )
+    session.add(orphan)
+    await session.flush()
+
+    expired = await SecretLeaseRepository(session).expire_due_leases(now=now)
+
+    assert expired == [orphan]
+    assert orphan.status == "expired"
+    events = (await session.execute(select(WorkspaceEvent))).scalars().all()
+    assert events == []

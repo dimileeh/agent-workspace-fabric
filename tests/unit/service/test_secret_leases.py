@@ -99,6 +99,57 @@ async def test_issue_profile_secret_leases_sanitizes_profile_declarations(
 
 
 @pytest.mark.unit
+async def test_issue_profile_secret_leases_noops_for_profile_without_secrets(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session)
+    service = SecretLeaseService(session)
+    profile = WorkspaceProfile(name="no-secrets", secrets=[])
+
+    leases = await service.issue_profile_secret_leases(workspace, profile)
+
+    assert leases == []
+    assert await service.workspace_secret_lease_status(workspace.id) == []
+
+
+@pytest.mark.unit
+async def test_optional_ref_naive_now_and_status_sort_fallback(
+    session: AsyncSession,
+) -> None:
+    naive_now = datetime(2026, 4, 29, 11, 0)
+    workspace = await _workspace(session)
+    service = SecretLeaseService(session)
+    profile = WorkspaceProfile(
+        name="optional-ref",
+        secrets=[
+            ProfileSecret(
+                name="optional-token",
+                kind="env",
+                target="OPTIONAL_TOKEN",
+                provider=None,
+                ref=None,
+            )
+        ],
+    )
+
+    leases = await service.issue_profile_secret_leases(
+        workspace,
+        profile,
+        now=naive_now,
+        ttl_seconds=60,
+    )
+    leases[0].issue_metadata = {"declaration_index": "not-an-int"}
+    await session.flush()
+
+    status = await service.workspace_secret_lease_status(workspace.id)
+
+    assert leases[0].ref_digest is None
+    assert leases[0].issued_at == naive_now.replace(tzinfo=UTC)
+    assert status[0].issued_at == naive_now.replace(tzinfo=UTC)
+    assert status[0].ref_digest is None
+
+
+@pytest.mark.unit
 async def test_secret_values_do_not_appear_in_rows_events_status_or_repr(
     session: AsyncSession,
 ) -> None:
