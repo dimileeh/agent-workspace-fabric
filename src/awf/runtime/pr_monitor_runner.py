@@ -2576,22 +2576,21 @@ class PullRequestMonitorRunner:
                 repo_url=repo_url, branch=base_branch, workspace_id=workspace_id
             )
         except Exception as exc:
-            failure_payload = _target_reconcile_failure_payload(exc, error_limit=500)
-            failure_log_payload = {
-                **failure_payload,
-                "workspace_id": workspace_id,
-                "repo_url": repo_url,
-                "base_branch": base_branch,
-            }
-            _log.warning(
-                "monitor.target_branch_reconcile_failed",
-                **failure_log_payload,
-            )
             failure_event_payload = {
                 **_target_reconcile_failure_payload(exc, error_limit=1000),
                 "repo_url": repo_url,
                 "base_branch": base_branch,
             }
+            failure_log_payload = {
+                **_truncate_target_reconcile_failure_payload(
+                    failure_event_payload, error_limit=500
+                ),
+                "workspace_id": workspace_id,
+            }
+            _log.warning(
+                "monitor.target_branch_reconcile_failed",
+                **failure_log_payload,
+            )
             await self._append_workspace_events(
                 workspace_id=workspace_id,
                 events=[
@@ -3569,3 +3568,16 @@ def _target_reconcile_failure_payload(
     if isinstance(stdout, str) and stdout:
         payload["stdout"] = stdout[:error_limit]
     return payload
+
+
+def _truncate_target_reconcile_failure_payload(
+    payload: Mapping[str, object],
+    *,
+    error_limit: int,
+) -> dict[str, object]:
+    truncated = dict(payload)
+    for key in ("error", "stderr", "stdout"):
+        value = truncated.get(key)
+        if isinstance(value, str):
+            truncated[key] = value[:error_limit]
+    return truncated

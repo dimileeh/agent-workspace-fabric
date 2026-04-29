@@ -1450,6 +1450,70 @@ async def test_target_branch_reconcile_failure_appends_workspace_event(
 
 
 @pytest.mark.unit
+async def test_target_branch_reconcile_failure_reuses_exception_payload(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+
+    class _CountingResultError(Exception):
+        def __init__(self) -> None:
+            super().__init__("target branch locked " + ("x" * 1200))
+            self.result_accesses = 0
+            self._result = CommandResult(
+                returncode=128,
+                stdout="stdout " + ("o" * 1200),
+                stderr="stderr " + ("e" * 1200),
+                reason_code="GIT_FAILED",
+            )
+
+        @property
+        def result(self) -> CommandResult:
+            self.result_accesses += 1
+            return self._result
+
+    failure = _CountingResultError()
+
+    async def failing_reconciler(*, repo_url: str, branch: str, workspace_id: str) -> object:
+        del repo_url, branch, workspace_id
+        raise failure
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        post_merge_target_reconciler=failing_reconciler,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await runner._reconcile_target_branch_after_merge(
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            base_branch="development",
+        )
+
+    failure_log = next(
+        event
+        for event in captured
+        if event.get("event") == "monitor.target_branch_reconcile_failed"
+    )
+    assert failure.result_accesses == 1
+    assert len(failure_log["error"]) == 500
+    assert len(failure_log["stderr"]) == 500
+    assert len(failure_log["stdout"]) == 500
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        event_payload = ws.events[-1].payload
+        assert len(event_payload["error"]) == 1000
+        assert len(event_payload["stderr"]) == 1000
+        assert len(event_payload["stdout"]) == 1000
+
+
+@pytest.mark.unit
 def test_target_reconcile_failure_payload_uses_command_error_contract() -> None:
     result = CommandResult(
         returncode=128,
