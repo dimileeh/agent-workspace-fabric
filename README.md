@@ -831,9 +831,9 @@ export AWF_BACKUP="$HOME/.awf/service/backups/awf-control-plane-YYYYmmddTHHMMSSZ
 docker compose -f docker/compose/local-service.yml stop api worker
 docker compose -f docker/compose/local-service.yml up -d postgres
 docker compose -f docker/compose/local-service.yml exec -T postgres \
-  dropdb -U awf --if-exists awf
+  dropdb -U awf --maintenance-db=postgres --if-exists awf
 docker compose -f docker/compose/local-service.yml exec -T postgres \
-  createdb -U awf awf
+  createdb -U awf --maintenance-db=postgres awf
 docker compose -f docker/compose/local-service.yml exec -T postgres \
   pg_restore -U awf -d awf --no-owner < "$AWF_BACKUP"
 docker compose -f docker/compose/local-service.yml up --build --force-recreate migrate
