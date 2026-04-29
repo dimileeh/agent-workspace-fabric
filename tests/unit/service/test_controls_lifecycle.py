@@ -334,9 +334,11 @@ async def test_cancel_terminal_workspace_records_request_event_without_transitio
     assert response.status == WorkspaceStatus.completed
     assert stopper.calls == []
     assert workspace.status == WorkspaceStatus.completed.value
-    assert events[0].event_type == "workspace.cancel_requested"
-    assert events[0].reason_code == "OPERATOR_CANCEL"
-    assert events[0].payload == {"reason": None, "stop_stack": False}
+    cancel_event = next(
+        event for event in events if event.event_type == "workspace.cancel_requested"
+    )
+    assert cancel_event.reason_code == "OPERATOR_CANCEL"
+    assert cancel_event.payload == {"reason": None, "stop_stack": False}
 
 
 @pytest.mark.unit
@@ -430,8 +432,16 @@ async def test_terminal_cancel_stop_events_include_expected_version(
         reason="stop audit",
         expected_version=stop.version,
     )
-    cancel_event = (await _events(session, cancel.id))[0]
-    stop_event = (await _events(session, stop.id))[0]
+    cancel_event = next(
+        event
+        for event in await _events(session, cancel.id)
+        if event.event_type == "workspace.cancel_requested"
+    )
+    stop_event = next(
+        event
+        for event in await _events(session, stop.id)
+        if event.event_type == "workspace.stack_stopped"
+    )
 
     assert cancel_event.payload == {
         "reason": "cancel audit",
