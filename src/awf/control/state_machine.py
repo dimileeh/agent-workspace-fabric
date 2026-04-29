@@ -75,6 +75,14 @@ _TRANSITIONS: Final[MappingProxyType[WorkspaceStatus, frozenset[WorkspaceStatus]
 )
 
 _TERMINAL: Final[frozenset[WorkspaceStatus]] = frozenset({WorkspaceStatus.destroyed})
+_CALLBACK_TERMINAL: Final[frozenset[WorkspaceStatus]] = frozenset(
+    {
+        WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroyed,
+        WorkspaceStatus.failed,
+        WorkspaceStatus.completed,
+    }
+)
 
 
 class InvalidWorkspaceTransitionError(Exception):
@@ -119,6 +127,11 @@ class WorkspaceStateMachine:
     def is_terminal(state: WorkspaceStatus) -> bool:
         """Terminal states have no outgoing transitions; cleanup handlers key off this."""
         return state in _TERMINAL
+
+    @staticmethod
+    def is_callback_terminal(state: WorkspaceStatus) -> bool:
+        """States where stale async callbacks must not advance the workspace."""
+        return state in _CALLBACK_TERMINAL
 
     @staticmethod
     def allowed_next(state: WorkspaceStatus) -> set[WorkspaceStatus]:

@@ -201,3 +201,166 @@ def test_scan_treats_tokenize_errors_as_missing_escape_hatches(
     assert [(violation.path.name, violation.code, violation.line) for violation in violations] == [
         ("valid_empty.py", "EMPTY_TEST", 1),
     ]
+
+
+@pytest.mark.unit
+def test_scan_empty_path_list_returns_no_violations() -> None:
+    assert scan_test_quality([]) == []
+
+
+@pytest.mark.unit
+def test_scan_handles_non_call_skip_decorator_and_pre_test_escape_hatch(
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_skip_edges.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "# awf-test-quality: ignore[SKIP_ONLY_TEST] because platform probe exercises import guard",
+                "def test_suppressed_skip_only():",
+                "    pytest.skip('platform unavailable')",
+                "",
+                "@pytest.mark.skip",
+                "def test_plain_skip_marker():",
+                "    assert value == value",
+                "",
+                "@pytest.mark.skipif(condition=True, reason='always disabled')",
+                "def test_keyword_skipif_marker():",
+                "    assert value == value",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    violations = scan_test_quality([test_file])
+
+    assert [(violation.code, violation.line) for violation in violations] == [
+        ("SKIP_ONLY_TEST", 5),
+        ("SKIP_ONLY_TEST", 9),
+    ]
+
+
+@pytest.mark.unit
+def test_scan_ignores_non_skip_only_unconditional_branch(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_skip_branch_edges.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "def test_branch_has_more_than_skip():",
+                "    if True:",
+                "        pytest.skip('platform unavailable')",
+                "        print('diagnostic')",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert scan_test_quality([test_file]) == []
+
+
+@pytest.mark.unit
+def test_scan_handles_return_none_and_empty_ast_body(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_return_none.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "def test_return_none_is_empty():",
+                "    return",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    violations = scan_test_quality([test_file])
+
+    assert [(violation.code, violation.line) for violation in violations] == [
+        ("EMPTY_TEST", 1),
+    ]
+    assert guardrails._body_without_docstring([]) == []  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_scan_allows_broad_monkeypatch_when_other_entrypoint_is_exercised(
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_monkeypatch_other_entrypoint.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "def test_subject_uses_wrapper(monkeypatch):",
+                "    monkeypatch.setattr(module, 'subject', replacement)",
+                "    wrapper()",
+                "    subject()",
+                "",
+                "def test_empty_monkeypatch_call(monkeypatch):",
+                "    monkeypatch.setattr()",
+                "    wrapper()",
+                "",
+                "def test_one_arg_monkeypatch_call(monkeypatch):",
+                "    monkeypatch.setattr(module)",
+                "    wrapper()",
+                "",
+                "def test_non_string_attribute_name(monkeypatch):",
+                "    monkeypatch.setattr(module, attribute_name)",
+                "    wrapper()",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    assert scan_test_quality([test_file]) == []
+
+
+@pytest.mark.unit
+def test_escape_hatch_reports_malformed_unknown_and_prefixed_vague_reasons(
+    tmp_path: Path,
+) -> None:
+    test_file = tmp_path / "test_escape_hatch_edges.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "# awf-test-quality: ignore",
+                "def test_malformed_escape():",
+                "    pass",
+                "",
+                "# awf-test-quality: ignore[NOT_A_RULE] because generated fixture needs coverage",
+                "def test_unknown_code_escape():",
+                "    pass",
+                "",
+                "# awf-test-quality: ignore[EMPTY_TEST] because TODO after fixture migration",
+                "def test_prefixed_vague_reason():",
+                "    pass",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    violations = scan_test_quality([test_file])
+
+    assert [(violation.code, violation.line) for violation in violations] == [
+        ("INVALID_ESCAPE_HATCH", 1),
+        ("EMPTY_TEST", 2),
+        ("INVALID_ESCAPE_HATCH", 5),
+        ("EMPTY_TEST", 6),
+        ("INVALID_ESCAPE_HATCH", 9),
+        ("EMPTY_TEST", 10),
+    ]
+
+
+@pytest.mark.unit
+def test_exclusion_handles_paths_outside_scan_root(tmp_path: Path) -> None:
+    outside = tmp_path / "outside.py"
+
+    assert (
+        guardrails._is_excluded(  # noqa: SLF001
+            outside,
+            exclude_globs=("*/outside.py",),
+            scan_root=tmp_path / "nested",
+        )
+        is True
+    )

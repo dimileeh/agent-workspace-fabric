@@ -939,6 +939,40 @@ class WorkspaceControlService:
             )
         )
         cleanup_payload = cleanup_result.to_dict()
+        await self._session.refresh(workspace)
+        requested_status = (
+            WorkspaceStatus.failed
+            if not cleanup_result.ok
+            else WorkspaceStatus.destroyed
+        )
+        if (
+            workspace.status != WorkspaceStatus.destroying.value
+            and WorkspaceStateMachine.is_callback_terminal(WorkspaceStatus(workspace.status))
+        ):
+            ignored_event = await repo.record_ignored_stale_callback(
+                workspace,
+                callback_source="service.controls",
+                callback_action="destroy_cleanup",
+                expected_status=WorkspaceStatus.destroying,
+                requested_status=requested_status,
+                operation_id=operation.id,
+                reason_code="STALE_CALLBACK_IGNORED",
+            )
+            ignored_payload = dict(ignored_event.payload or {})
+            await operations.finish(
+                operation,
+                status=OperationStatus.cancelled,
+                result={
+                    "status": workspace.status,
+                    "cleanup": cleanup_payload,
+                    "ignored_callback": ignored_payload,
+                },
+            )
+            return _control_response(
+                workspace=workspace,
+                operation=operation,
+                message="workspace destroy callback ignored",
+            )
         cleanup_event_payload = _event_payload(
             {
                 **event_payload,
