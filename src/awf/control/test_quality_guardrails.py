@@ -211,11 +211,13 @@ def _scan_test_node(
                 test_end=end_line,
             )
         )
-    elif len(effective_body) == 1 and _is_pytest_skip_expr(effective_body[0]):
+    elif len(effective_body) == 1 and (
+        skip_line := _skip_only_statement_line(effective_body[0])
+    ):
         violations.append(
             _PendingViolation(
                 path=path,
-                line=effective_body[0].lineno,
+                line=skip_line,
                 code="SKIP_ONLY_TEST",
                 message="test only calls pytest.skip without exercising behavior",
                 test_start=start_line,
@@ -276,6 +278,27 @@ def _is_noop_statement(statement: ast.stmt) -> bool:
             isinstance(statement.value, ast.Constant) and statement.value.value is None
         )
     return False
+
+
+def _skip_only_statement_line(statement: ast.stmt) -> int | None:
+    if _is_pytest_skip_expr(statement):
+        return statement.lineno
+    if not isinstance(statement, ast.If) or not _is_constant_true(statement.test):
+        return None
+
+    effective_body = [
+        body_statement
+        for body_statement in statement.body
+        if not _is_noop_statement(body_statement)
+    ]
+    effective_else = [
+        else_statement
+        for else_statement in statement.orelse
+        if not _is_noop_statement(else_statement)
+    ]
+    if len(effective_body) != 1 or effective_else:
+        return None
+    return _skip_only_statement_line(effective_body[0])
 
 
 def _is_pytest_skip_expr(statement: ast.stmt) -> bool:

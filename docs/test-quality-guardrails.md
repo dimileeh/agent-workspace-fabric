@@ -26,8 +26,8 @@ helpers.
 
 `SKIP_ONLY_TEST`
 
-Flags tests that only call `pytest.skip(...)` and tests with unconditional skip
-markers:
+Flags tests that only call `pytest.skip(...)`, including through an
+unconditional branch wrapper, and tests with unconditional skip markers:
 
 ```python
 @pytest.mark.skip(reason="TODO")
@@ -36,6 +36,10 @@ def test_later():
 
 def test_later():
     pytest.skip("TODO")
+
+def test_later():
+    if True:
+        pytest.skip("TODO")
 ```
 
 Conditional skips are allowed when they preserve a real test body:

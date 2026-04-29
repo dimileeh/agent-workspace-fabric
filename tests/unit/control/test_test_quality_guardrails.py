@@ -43,6 +43,13 @@ def test_flags_unconditional_pytest_skip_only_test() -> None:
 
 
 @pytest.mark.unit
+def test_flags_unconditional_branch_pytest_skip_only_test() -> None:
+    assert _scan_fixture("case_skip_only_unconditional_branch.py") == [
+        ("SKIP_ONLY_TEST", 6),
+    ]
+
+
+@pytest.mark.unit
 def test_flags_unconditional_skip_decorator() -> None:
     assert _scan_fixture("case_skip_decorator.py") == [
         ("SKIP_ONLY_TEST", 4),
