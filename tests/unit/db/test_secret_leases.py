@@ -7,7 +7,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import event, select
 from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -154,6 +154,180 @@ async def test_issue_declared_leases_is_idempotent_for_workspace_profile_retry(
     rows = await repo.list_for_workspace(workspace.id)
     assert len(rows) == 2
     assert {lease.status for lease in rows} == {"issued"}
+
+
+@pytest.mark.unit
+async def test_issue_declared_leases_fetches_existing_workspace_rows_once(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    workspace = await _workspace(session)
+    repo = SecretLeaseRepository(session)
+    await repo.issue_declared_leases(workspace, leases=_lease_issues(now), now=now)
+
+    statements: list[str] = []
+    bind = session.get_bind()
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(bind, "before_cursor_execute", record_sql)
+    try:
+        await repo.issue_declared_leases(
+            workspace,
+            leases=_lease_issues(now + timedelta(minutes=5)),
+            now=now + timedelta(minutes=5),
+        )
+    finally:
+        event.remove(bind, "before_cursor_execute", record_sql)
+
+    lease_selects = [
+        statement
+        for statement in statements
+        if statement.startswith("select")
+        and "from workspace_secret_leases" in statement
+    ]
+    assert len(lease_selects) == 1
+    assert "where workspace_secret_leases.workspace_id = ?" in lease_selects[0]
+
+
+@pytest.mark.unit
+async def test_issue_declared_leases_reissues_revoked_rows_with_fresh_metadata(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    retry_now = now + timedelta(minutes=5)
+    workspace = await _workspace(session)
+    repo = SecretLeaseRepository(session)
+    first = await repo.issue_declared_leases(
+        workspace,
+        leases=[
+            SecretLeaseIssue(
+                secret_name="api-token",
+                kind="env",
+                target="API_TOKEN",
+                mode="ro",
+                required=True,
+                provider="env",
+                ref_digest="sha256:" + "a" * 64,
+                expires_at=now + timedelta(hours=1),
+                issue_metadata={"profile": "secure-local", "declaration_index": 0},
+            )
+        ],
+        now=now,
+    )
+    await repo.revoke_workspace_leases(
+        workspace,
+        now=now + timedelta(minutes=1),
+        reason_code="PROVISIONING_FAILED",
+    )
+
+    retried = await repo.issue_declared_leases(
+        workspace,
+        leases=[
+            SecretLeaseIssue(
+                secret_name="api-token",
+                kind="env",
+                target="API_TOKEN",
+                mode="rw",
+                required=False,
+                provider="vault",
+                ref_digest="sha256:" + "c" * 64,
+                expires_at=retry_now + timedelta(hours=2),
+                issue_metadata={"profile": "secure-local-v2", "declaration_index": 0},
+            )
+        ],
+        now=retry_now,
+    )
+
+    assert [lease.id for lease in retried] == [first[0].id]
+    lease = retried[0]
+    assert lease.status == "issued"
+    assert lease.issued_at == retry_now
+    assert lease.expires_at == retry_now + timedelta(hours=2)
+    assert lease.mounted_at is None
+    assert lease.revoked_at is None
+    assert lease.revoke_reason_code is None
+    assert lease.mode == "rw"
+    assert lease.required is False
+    assert lease.provider == "vault"
+    assert lease.ref_digest == "sha256:" + "c" * 64
+    assert lease.issue_metadata["profile"] == "secure-local-v2"
+
+    mounted = await repo.mark_issued_mounted(
+        workspace,
+        now=retry_now + timedelta(minutes=1),
+    )
+    assert mounted == [lease]
+    assert lease.status == "mounted"
+
+    events = await _events(session, workspace.id)
+    reason_codes = [event.reason_code for event in events]
+    assert reason_codes.count("SECRET_LEASE_ISSUED") == 2
+    assert reason_codes.count("SECRET_LEASE_REVOKED") == 1
+
+
+@pytest.mark.unit
+async def test_issue_declared_leases_reissues_active_rows_when_declaration_changes(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    retry_now = now + timedelta(minutes=5)
+    workspace = await _workspace(session)
+    repo = SecretLeaseRepository(session)
+    first = await repo.issue_declared_leases(
+        workspace,
+        leases=[
+            SecretLeaseIssue(
+                secret_name="api-token",
+                kind="env",
+                target="API_TOKEN",
+                mode="ro",
+                required=True,
+                provider="env",
+                ref_digest="sha256:" + "a" * 64,
+                expires_at=now + timedelta(hours=1),
+                issue_metadata={"profile": "secure-local", "declaration_index": 0},
+            )
+        ],
+        now=now,
+    )
+
+    retried = await repo.issue_declared_leases(
+        workspace,
+        leases=[
+            SecretLeaseIssue(
+                secret_name="api-token",
+                kind="env",
+                target="API_TOKEN",
+                mode="ro",
+                required=True,
+                provider="vault",
+                ref_digest="sha256:" + "d" * 64,
+                expires_at=retry_now + timedelta(hours=1),
+                issue_metadata={"profile": "secure-local", "declaration_index": 0},
+            )
+        ],
+        now=retry_now,
+    )
+
+    assert [lease.id for lease in retried] == [first[0].id]
+    lease = retried[0]
+    assert lease.status == "issued"
+    assert lease.issued_at == retry_now
+    assert lease.provider == "vault"
+    assert lease.ref_digest == "sha256:" + "d" * 64
+
+    events = await _events(session, workspace.id)
+    assert [event.reason_code for event in events].count("SECRET_LEASE_ISSUED") == 2
 
 
 @pytest.mark.unit

@@ -120,7 +120,7 @@ class WorkspaceEventCreate:
 @dataclass(frozen=True)
 class _IssuedSecretLease:
     lease: WorkspaceSecretLease
-    created: bool
+    issue_event_required: bool
 
 
 def validation_command_set_hash(commands: list[dict[str, Any]]) -> str:
@@ -1365,21 +1365,40 @@ class SecretLeaseRepository:
         leases: Iterable[SecretLeaseIssue],
         now: datetime,
     ) -> builtins.list[WorkspaceSecretLease]:
-        created: list[WorkspaceSecretLease] = []
+        issues = list(leases)
+        if not issues:
+            return []
+
+        existing_by_declaration = await self._leases_by_declaration_for_workspace(workspace.id)
+        issue_events: list[WorkspaceSecretLease] = []
         results: list[WorkspaceSecretLease] = []
-        for issue in leases:
+        for issue in issues:
+            declaration_key = _secret_lease_declaration_key(
+                issue.secret_name,
+                issue.kind,
+                issue.target,
+            )
+            existing = existing_by_declaration.get(declaration_key)
+            if existing is not None:
+                if _declared_lease_requires_reissue(existing, issue):
+                    _reissue_declared_lease(existing, issue=issue, now=now)
+                    issue_events.append(existing)
+                results.append(existing)
+                continue
+
             issued = await self._issue_declared_lease_if_absent(
                 workspace,
                 issue=issue,
                 now=now,
             )
+            existing_by_declaration[declaration_key] = issued.lease
             results.append(issued.lease)
-            if issued.created:
-                created.append(issued.lease)
-        if created:
+            if issued.issue_event_required:
+                issue_events.append(issued.lease)
+        if issue_events:
             await self._add_lease_events(
                 workspace,
-                leases=created,
+                leases=issue_events,
                 reason_code="SECRET_LEASE_ISSUED",
                 action="issue",
                 now=now,
@@ -1417,7 +1436,7 @@ class SecretLeaseRepository:
                 raise RuntimeError(f"inserted secret lease {inserted_id} was not visible")
             set_committed_value(lease, "issued_at", now)
             set_committed_value(lease, "expires_at", issue.expires_at)
-            return _IssuedSecretLease(lease=lease, created=True)
+            return _IssuedSecretLease(lease=lease, issue_event_required=True)
 
         existing = await self._get_for_declaration(
             workspace.id,
@@ -1426,7 +1445,10 @@ class SecretLeaseRepository:
             target=issue.target,
         )
         if existing is not None:
-            return _IssuedSecretLease(lease=existing, created=False)
+            if _declared_lease_requires_reissue(existing, issue):
+                _reissue_declared_lease(existing, issue=issue, now=now)
+                return _IssuedSecretLease(lease=existing, issue_event_required=True)
+            return _IssuedSecretLease(lease=existing, issue_event_required=False)
         if conflict_guarded:
             raise RuntimeError(
                 "secret lease insert hit a declaration conflict but no existing row was visible"
@@ -1435,7 +1457,7 @@ class SecretLeaseRepository:
         lease = WorkspaceSecretLease(**values)
         self._session.add(lease)
         await self._session.flush()
-        return _IssuedSecretLease(lease=lease, created=True)
+        return _IssuedSecretLease(lease=lease, issue_event_required=True)
 
     async def _insert_declared_lease_if_absent(
         self,
@@ -1554,6 +1576,17 @@ class SecretLeaseRepository:
         )
         return (await self._session.execute(stmt)).scalar_one_or_none()
 
+    async def _leases_by_declaration_for_workspace(
+        self,
+        workspace_id: str,
+    ) -> dict[tuple[str, str, str], WorkspaceSecretLease]:
+        stmt = select(WorkspaceSecretLease).where(WorkspaceSecretLease.workspace_id == workspace_id)
+        rows = (await self._session.execute(stmt)).scalars()
+        return {
+            _secret_lease_declaration_key(lease.secret_name, lease.kind, lease.target): lease
+            for lease in rows
+        }
+
     async def _list_for_workspace_statuses(
         self,
         workspace_id: str,
@@ -1605,6 +1638,51 @@ class SecretLeaseRepository:
 def _sanitize_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
     redacted = redact_audit_value(dict(metadata))
     return redacted if isinstance(redacted, dict) else {}
+
+
+def _secret_lease_declaration_key(
+    secret_name: str,
+    kind: str,
+    target: str,
+) -> tuple[str, str, str]:
+    return (secret_name, kind, target)
+
+
+def _declared_lease_requires_reissue(
+    lease: WorkspaceSecretLease,
+    issue: SecretLeaseIssue,
+) -> bool:
+    if lease.status not in _SECRET_LEASE_ACTIVE_STATUSES:
+        return True
+    return (
+        lease.attempt_id != issue.attempt_id
+        or lease.mode != issue.mode
+        or lease.required != issue.required
+        or lease.provider != issue.provider
+        or lease.ref_digest != issue.ref_digest
+        or lease.issue_metadata != _sanitize_metadata(issue.issue_metadata)
+    )
+
+
+def _reissue_declared_lease(
+    lease: WorkspaceSecretLease,
+    *,
+    issue: SecretLeaseIssue,
+    now: datetime,
+) -> None:
+    lease.attempt_id = issue.attempt_id
+    lease.mode = issue.mode
+    lease.required = issue.required
+    lease.provider = issue.provider
+    lease.ref_digest = issue.ref_digest
+    lease.status = SECRET_LEASE_STATUS_ISSUED
+    lease.issued_at = now
+    lease.expires_at = issue.expires_at
+    lease.mounted_at = None
+    lease.revoked_at = None
+    lease.revoke_reason_code = None
+    lease.issue_metadata = _sanitize_metadata(issue.issue_metadata)
+    lease.mount_metadata = {}
 
 
 def _lease_audit_payload(
