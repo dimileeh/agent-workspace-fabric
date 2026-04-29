@@ -2083,7 +2083,11 @@ class WorkspaceExecutor:
         source_head_sha: str | None,
         recovery_payload: Mapping[str, Any],
     ) -> MonitorOperationHandle | None:
-        async with self._session_factory() as session:
+        session_factory_obj: object = self._session_factory
+        if not callable(session_factory_obj):
+            return None
+        session_factory = cast(async_sessionmaker[AsyncSession], session_factory_obj)
+        async with session_factory() as session:
             workspace = await WorkspaceRepository(session).get(workspace_id)
             if workspace is None:  # pragma: no cover - destroyed mid-recovery
                 return None
@@ -2152,7 +2156,7 @@ class WorkspaceExecutor:
         branch_name: str,
         remote_branch: str,
         reason: str,
-        recovery_payload: Mapping[str, Any],
+        recovery_payload: Mapping[str, Any] | None = None,
     ) -> _RebaseRecoveryResult:
         """Rebase an already-open PR branch onto the latest target branch.
 
@@ -2177,18 +2181,19 @@ class WorkspaceExecutor:
                 ]
             )
 
-        source_base_sha = _str_or_none(recovery_payload.get("source_base_sha"))
-        source_head_sha = _str_or_none(recovery_payload.get("source_head_sha"))
+        resolved_recovery_payload = recovery_payload or {}
+        source_base_sha = _str_or_none(resolved_recovery_payload.get("source_base_sha"))
+        source_head_sha = _str_or_none(resolved_recovery_payload.get("source_head_sha"))
         operation = await self._begin_rebase_recovery_operation(
             workspace_id=workspace_id,
             base_branch=base_branch,
             remote_branch=remote_branch,
             reason=reason,
-            reason_code=_str_or_none(recovery_payload.get("reason_code"))
+            reason_code=_str_or_none(resolved_recovery_payload.get("reason_code"))
             or "MONITOR_REBASE_RECOVERY",
             source_base_sha=source_base_sha,
             source_head_sha=source_head_sha,
-            recovery_payload=recovery_payload,
+            recovery_payload=resolved_recovery_payload,
         )
         try:
             fetch = await git(["fetch", "origin", base_branch])

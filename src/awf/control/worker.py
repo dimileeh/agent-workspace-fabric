@@ -24,7 +24,7 @@ from functools import partial
 from time import monotonic
 from typing import Any, Protocol
 
-from sqlalchemy import or_, select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
@@ -33,6 +33,12 @@ from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.service.workspace_runtime_health import (
+    RUNTIME_STRANDED_EVENT_TYPE,
+    RuntimeWorkspace,
+    WorkspaceRuntimeFinding,
+    classify_runtime_snapshot,
+)
 
 _log = get_logger(__name__)
 
@@ -40,6 +46,15 @@ _ACTIVE_EXECUTION_STATUSES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.running,
     WorkspaceStatus.validating,
     WorkspaceStatus.pushing,
+)
+_RUNTIME_HEALTH_SCAN_STATUSES: tuple[WorkspaceStatus, ...] = (
+    WorkspaceStatus.requested,
+    WorkspaceStatus.provisioning,
+    WorkspaceStatus.ready,
+    WorkspaceStatus.running,
+    WorkspaceStatus.validating,
+    WorkspaceStatus.pushing,
+    WorkspaceStatus.monitoring_pr,
 )
 _STALE_ACTIVE_EXECUTION_REASON_CODE = "STALE_ACTIVE_EXECUTION"
 _STALE_ACTIVE_EXECUTION_EVENT_TYPE = "workspace.stale_active_execution_detected"
@@ -61,6 +76,8 @@ class _ActiveExecutionCandidate:
     workspace_id: str
     status: WorkspaceStatus
     compose_project_name: str | None
+    compose_file_path: str | None = None
+    pr_url: str | None = None
 
 
 class WorkspaceExecutorProtocol(Protocol):
@@ -307,13 +324,38 @@ class ControlWorker:
         *,
         exclude_ids: set[str],
     ) -> list[_ActiveExecutionCandidate]:
-        active_status_values = [status.value for status in _ACTIVE_EXECUTION_STATUSES]
+        active_status_values = [status.value for status in _RUNTIME_HEALTH_SCAN_STATUSES]
+        active_execution_values = [status.value for status in _ACTIVE_EXECUTION_STATUSES]
         claim_cutoff = datetime.now(UTC)
         stmt = (
-            select(Workspace.id, Workspace.status, Workspace.compose_project_name)
+            select(
+                Workspace.id,
+                Workspace.status,
+                Workspace.compose_project_name,
+                Workspace.compose_file_path,
+                Workspace.pr_url,
+            )
             .where(Workspace.status.in_(active_status_values))
             .where(Workspace.node_id == self._config.node_id)
-            .where(_stale_execution_claim_filter(claim_cutoff))
+            .where(
+                or_(
+                    Workspace.status.in_(
+                        [
+                            WorkspaceStatus.requested.value,
+                            WorkspaceStatus.provisioning.value,
+                            WorkspaceStatus.ready.value,
+                        ]
+                    ),
+                    and_(
+                        Workspace.status.in_(active_execution_values),
+                        _stale_execution_claim_filter(claim_cutoff),
+                    ),
+                    and_(
+                        Workspace.status == WorkspaceStatus.monitoring_pr.value,
+                        _stale_monitor_claim_filter(claim_cutoff),
+                    ),
+                )
+            )
             .order_by(Workspace.created_at.asc(), Workspace.id.asc())
         )
         if exclude_ids:
@@ -328,6 +370,8 @@ class ControlWorker:
                 workspace_id=row[0],
                 status=WorkspaceStatus(row[1]),
                 compose_project_name=row[2],
+                compose_file_path=row[3],
+                pr_url=row[4],
             )
             for row in rows
         ]
@@ -350,11 +394,29 @@ class ControlWorker:
                 reason=f"runtime inspection failed: {exc}",
             )
 
+        finding = classify_runtime_snapshot(_runtime_workspace(candidate), snapshot)
+        if finding is not None and finding.status == "unavailable":
+            _log.warning(
+                "worker.runtime_health_inspection_unavailable",
+                workspace_id=candidate.workspace_id,
+                status=candidate.status.value,
+                compose_project_name=candidate.compose_project_name,
+                runtime_reason=snapshot.reason,
+                reason_code=finding.reason_code,
+            )
+            return
+        if finding is not None and finding.decision == "fail_workspace":
+            await self._fail_stranded_workspace(candidate, snapshot, finding)
+            return
+        if finding is not None and finding.decision == "remonitor_workspace":
+            await self._record_recoverable_runtime_stranding(candidate, snapshot, finding)
+            return
         if candidate.compose_project_name and snapshot.stack_state == "running":
             await self._record_stale_active_execution_detected(candidate, snapshot)
             return
 
-        await self._fail_stale_active_execution(candidate, snapshot)
+        if finding is not None and finding.decision == "defer_retry_policy":
+            await self._record_recoverable_runtime_stranding(candidate, snapshot, finding)
 
     async def _record_stale_active_execution_detected(
         self,
@@ -441,6 +503,108 @@ class ControlWorker:
             runtime_reason=snapshot.reason,
             reason_code=_STALE_ACTIVE_EXECUTION_REASON_CODE,
         )
+
+    async def _fail_stranded_workspace(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        snapshot: RuntimeSnapshot,
+        finding: WorkspaceRuntimeFinding,
+    ) -> None:
+        message = _runtime_stranding_failure_message(candidate, finding)
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                candidate.workspace_id,
+                from_status=candidate.status,
+                to=WorkspaceStatus.failed,
+                reason_code=finding.reason_code,
+                extra_conditions=_claim_recheck_conditions(candidate.status),
+            )
+            if ws is None:
+                return
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.monitor_claimed_by = None
+            ws.monitor_claim_expires_at = None
+            ws.failure_reason = FailureReason.infrastructure_failure.value
+            ws.failure_message = message[:2048]
+            await repo.add_event(
+                ws,
+                event_type=RUNTIME_STRANDED_EVENT_TYPE,
+                reason_code=finding.reason_code,
+                payload=_runtime_stranding_event_payload(candidate, snapshot, finding),
+            )
+            await session.commit()
+
+        _log.error(
+            "worker.runtime_stranded_workspace_failed",
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            compose_project_name=candidate.compose_project_name,
+            runtime_state=snapshot.stack_state,
+            runtime_reason=snapshot.reason,
+            reason_code=finding.reason_code,
+        )
+
+    async def _record_recoverable_runtime_stranding(
+        self,
+        candidate: _ActiveExecutionCandidate,
+        snapshot: RuntimeSnapshot,
+        finding: WorkspaceRuntimeFinding,
+    ) -> None:
+        payload = _runtime_stranding_event_payload(candidate, snapshot, finding)
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(candidate.workspace_id)
+            if ws is None or ws.status != candidate.status.value:
+                return
+            if not _candidate_claim_is_stale(ws, candidate.status, datetime.now(UTC)):
+                return
+            if await self._has_runtime_stranding_event(
+                session,
+                candidate.workspace_id,
+                finding.reason_code,
+            ):
+                return
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = None
+            ws.monitor_claimed_by = None
+            ws.monitor_claim_expires_at = None
+            await repo.add_event(
+                ws,
+                event_type=RUNTIME_STRANDED_EVENT_TYPE,
+                reason_code=finding.reason_code,
+                payload=payload,
+            )
+            await session.commit()
+
+        _log.warning(
+            "worker.runtime_stranded_workspace_recoverable",
+            workspace_id=candidate.workspace_id,
+            status=candidate.status.value,
+            compose_project_name=candidate.compose_project_name,
+            runtime_state=snapshot.stack_state,
+            runtime_reason=snapshot.reason,
+            reason_code=finding.reason_code,
+            decision=finding.decision,
+        )
+
+    async def _has_runtime_stranding_event(
+        self,
+        session: AsyncSession,
+        workspace_id: str,
+        reason_code: str,
+    ) -> bool:
+        stmt = (
+            select(WorkspaceEvent.id)
+            .where(
+                WorkspaceEvent.workspace_id == workspace_id,
+                WorkspaceEvent.event_type == RUNTIME_STRANDED_EVENT_TYPE,
+                WorkspaceEvent.reason_code == reason_code,
+            )
+            .limit(1)
+        )
+        return (await session.execute(stmt)).scalar_one_or_none() is not None
 
     def _available_execution_slots(self) -> int:
         return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
@@ -673,6 +837,23 @@ def _stale_execution_claim_filter(claim_cutoff: datetime) -> Any:
     )
 
 
+def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
+    return or_(
+        Workspace.monitor_claimed_by.is_(None),
+        Workspace.monitor_claim_expires_at.is_(None),
+        Workspace.monitor_claim_expires_at <= claim_cutoff,
+    )
+
+
+def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:
+    now = datetime.now(UTC)
+    if status in _ACTIVE_EXECUTION_STATUSES:
+        return (_stale_execution_claim_filter(now),)
+    if status == WorkspaceStatus.monitoring_pr:
+        return (_stale_monitor_claim_filter(now),)
+    return ()
+
+
 def _execution_claim_is_stale(workspace: Workspace, claim_cutoff: datetime) -> bool:
     if workspace.execution_claimed_by is None or workspace.execution_claim_expires_at is None:
         return True
@@ -681,6 +862,38 @@ def _execution_claim_is_stale(workspace: Workspace, claim_cutoff: datetime) -> b
     if expires_at.tzinfo is None and claim_cutoff.tzinfo is not None:
         claim_cutoff = claim_cutoff.replace(tzinfo=None)
     return expires_at <= claim_cutoff
+
+
+def _monitor_claim_is_stale(workspace: Workspace, claim_cutoff: datetime) -> bool:
+    if workspace.monitor_claimed_by is None or workspace.monitor_claim_expires_at is None:
+        return True
+
+    expires_at = workspace.monitor_claim_expires_at
+    if expires_at.tzinfo is None and claim_cutoff.tzinfo is not None:
+        claim_cutoff = claim_cutoff.replace(tzinfo=None)
+    return expires_at <= claim_cutoff
+
+
+def _candidate_claim_is_stale(
+    workspace: Workspace,
+    status: WorkspaceStatus,
+    claim_cutoff: datetime,
+) -> bool:
+    if status in _ACTIVE_EXECUTION_STATUSES:
+        return _execution_claim_is_stale(workspace, claim_cutoff)
+    if status == WorkspaceStatus.monitoring_pr:
+        return _monitor_claim_is_stale(workspace, claim_cutoff)
+    return True
+
+
+def _runtime_workspace(candidate: _ActiveExecutionCandidate) -> RuntimeWorkspace:
+    return RuntimeWorkspace(
+        workspace_id=candidate.workspace_id,
+        status=candidate.status.value,
+        compose_project_name=candidate.compose_project_name,
+        compose_file_path=candidate.compose_file_path,
+        pr_url=candidate.pr_url,
+    )
 
 
 def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:
@@ -701,6 +914,36 @@ def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:
             for service in snapshot.services
         ],
     }
+
+
+def _runtime_stranding_event_payload(
+    candidate: _ActiveExecutionCandidate,
+    snapshot: RuntimeSnapshot,
+    finding: WorkspaceRuntimeFinding,
+) -> dict[str, Any]:
+    return {
+        "compose_project_name": candidate.compose_project_name,
+        "workspace_status": candidate.status.value,
+        "reason_code": finding.reason_code,
+        "decision": finding.decision,
+        "message": finding.message,
+        "runtime": _runtime_snapshot_payload(snapshot),
+    }
+
+
+def _runtime_stranding_failure_message(
+    candidate: _ActiveExecutionCandidate,
+    finding: WorkspaceRuntimeFinding,
+) -> str:
+    return (
+        f"{finding.reason_code}: {finding.message} "
+        "An active execution was lost after a service or Docker restart. "
+        f"The workspace is still marked {candidate.status.value!r}, but AWF detected "
+        "that its managed runtime is stranded. AWF marked the workspace failed without "
+        "cleanup; logs, the worktree, compose files, volumes, and surviving files were "
+        "preserved for inspection. Inspect the workspace, then retry or redispatch the "
+        "task when ready."
+    )
 
 
 def _stale_active_execution_failure_message(

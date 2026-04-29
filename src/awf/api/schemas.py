@@ -243,6 +243,19 @@ class WorkspaceRecoverySummaryResponse(BaseModel):
     payload: dict[str, Any] | None = None
 
 
+class WorkspaceRuntimeHealthResponse(BaseModel):
+    status: Literal["ok", "stranded", "unavailable"]
+    reason_code: str
+    decision: Literal[
+        "none",
+        "fail_workspace",
+        "remonitor_workspace",
+        "defer_retry_policy",
+    ]
+    message: str
+    services: list[dict[str, str]] = Field(default_factory=list)
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -298,6 +311,7 @@ class WorkspaceResponse(BaseModel):
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
     recovery: WorkspaceRecoverySummaryResponse | None = None
+    runtime_health: WorkspaceRuntimeHealthResponse | None = None
 
     created_at: datetime
     updated_at: datetime
@@ -650,6 +664,7 @@ class WorkspaceRuntimeResponse(BaseModel):
     logs_available: bool
     control_available: bool
     reason: str | None = None
+    runtime_health: WorkspaceRuntimeHealthResponse | None = None
 
 
 class WorkspaceLogStreamResponse(BaseModel):
