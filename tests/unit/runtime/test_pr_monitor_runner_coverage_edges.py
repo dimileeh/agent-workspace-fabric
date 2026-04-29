@@ -10,7 +10,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.base import Base
@@ -56,12 +56,17 @@ from awf.runtime.pr_monitor_runner import (
     _notify_human_reason,
     _redact_and_truncate_github_error,
     _stale_pending_check_warnings,
+    _target_reconcile_failure_payload,
     _target_reconcile_payload,
     _with_ci_failures,
 )
 from awf.service.alembic_resolver import AlembicResolveResult, AlembicResolveStatus
 from awf.service.merge_queue import MergeQueueBlocker
-from awf.service.target_branch_monitor import TargetBranchMonitorResult, TargetBranchMonitorStatus
+from awf.service.target_branch_monitor import (
+    TargetBranchMonitorError,
+    TargetBranchMonitorResult,
+    TargetBranchMonitorStatus,
+)
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -1442,6 +1447,39 @@ async def test_target_branch_reconcile_failure_appends_workspace_event(
         assert ws.events[-1].event_type == "target_branch.reconcile_failed"
         assert ws.events[-1].reason_code == "TARGET_BRANCH_RECONCILE_FAILED"
         assert ws.events[-1].payload["error"] == "target branch locked"
+
+
+@pytest.mark.unit
+def test_target_reconcile_failure_payload_uses_command_error_contract() -> None:
+    result = CommandResult(
+        returncode=128,
+        stdout="fatal stdout",
+        stderr="fatal stderr",
+        reason_code="GIT_FAILED",
+    )
+    exc = TargetBranchMonitorError(
+        operation="target_branch.git_fetch",
+        result=result,
+    )
+    exc.target_reconcile_payload = lambda: {  # type: ignore[attr-defined]
+        "status": "committed",
+        "resolver_results": [{"status": "resolved"}],
+        "commit_sha": "abc123",
+        "pushed": True,
+    }
+
+    payload = _target_reconcile_failure_payload(exc, error_limit=100)
+
+    assert payload["status"] == "failed"
+    assert "target_reconcile_status" not in payload
+    assert payload["resolver_results"] == []
+    assert payload["commit_sha"] is None
+    assert payload["pushed"] is False
+    assert payload["operation"] == "target_branch.git_fetch"
+    assert payload["returncode"] == 128
+    assert payload["command_reason_code"] == "GIT_FAILED"
+    assert payload["stderr"] == "fatal stderr"
+    assert payload["stdout"] == "fatal stdout"
 
 
 @pytest.mark.unit

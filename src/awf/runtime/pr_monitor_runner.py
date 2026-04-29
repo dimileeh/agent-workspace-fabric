@@ -3552,21 +3552,6 @@ def _target_reconcile_failure_payload(
         "policy_reason_code": None,
     }
 
-    partial = _target_reconcile_exception_payload(exc)
-    if partial is not None:
-        payload["target_reconcile_status"] = partial.get("status")
-        for key in (
-            "resolver_results",
-            "commit_sha",
-            "pushed",
-            "changed_paths",
-            "dry_run",
-            "commit_allowed",
-            "policy_reason_code",
-        ):
-            if key in partial:
-                payload[key] = partial[key]
-
     operation = getattr(exc, "operation", None)
     if isinstance(operation, str):
         payload["operation"] = operation
@@ -3584,16 +3569,3 @@ def _target_reconcile_failure_payload(
     if isinstance(stdout, str) and stdout:
         payload["stdout"] = stdout[:error_limit]
     return payload
-
-
-def _target_reconcile_exception_payload(exc: Exception) -> dict[str, object] | None:
-    payload = getattr(exc, "target_reconcile_payload", None)
-    if callable(payload):
-        payload = payload()
-    if isinstance(payload, Mapping):
-        return dict(payload)
-
-    result = getattr(exc, "target_reconcile_result", None)
-    if result is not None:
-        return _target_reconcile_payload(result)
-    return None
