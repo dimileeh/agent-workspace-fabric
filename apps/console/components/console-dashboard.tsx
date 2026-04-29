@@ -42,6 +42,7 @@ import {
   toneClass,
 } from "@/lib/format";
 import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "@/lib/agent-format";
+import { omitUndefined } from "@/lib/api-payload";
 import {
   formatRequiredNextAction,
   mergeQueueMergedAt,
@@ -3208,15 +3209,6 @@ function operatorIdempotencyKey(action: WorkspaceOperatorAction, workspaceId: st
       ? crypto.randomUUID()
       : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
   return `console:${action}:${workspaceId}:${suffix}`;
-}
-
-function omitUndefined(value: unknown): unknown {
-  if (!value || typeof value !== "object" || Array.isArray(value)) {
-    return value;
-  }
-  return Object.fromEntries(
-    Object.entries(value as Record<string, unknown>).filter(([, entryValue]) => entryValue !== undefined),
-  );
 }
 
 async function parseApiResponse<T>(response: Response): Promise<ApiEnvelope<T>> {
