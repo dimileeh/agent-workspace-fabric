@@ -13,21 +13,42 @@ cleanly when they show up alongside other MCP servers.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 from typing import Annotated, Any
 
+from fastapi import HTTPException
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
 from pydantic import Field
+from starlette.requests import Request
 
+from awf.api.routes import artifacts as artifact_routes
+from awf.api.routes import merge_queue as merge_queue_routes
+from awf.api.routes import metrics as metrics_routes
+from awf.api.routes import validation as validation_routes
+from awf.api.routes import workspaces as workspace_routes
 from awf.api.schemas import (
     ErrorResponse,
+    OperationListResponse,
+    OperationResponse,
     OwnedPath,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
+    WorkspaceOverlapGraphResponse,
 )
-from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
+from awf.common.config import Settings, get_settings
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.controls import WorkspaceControlError
+from awf.service.metrics import (
+    DEFAULT_FAILURE_EXAMPLE_LIMIT,
+    DEFAULT_SUMMARY_WINDOW_HOURS,
+    MAX_FAILURE_EXAMPLE_LIMIT,
+    MAX_SUMMARY_WINDOW_HOURS,
+    MIN_FAILURE_EXAMPLE_LIMIT,
+    MIN_SUMMARY_WINDOW_HOURS,
+)
+from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
 from awf.service.workspaces import WorkspaceService
 
 StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
@@ -40,6 +61,14 @@ def build_mcp_server(
     service: WorkspaceService,
     name: str = "awf",
     instructions: str | None = None,
+    settings: Settings | None = None,
+    disk_check_provider: metrics_routes.DiskCheckProvider | None = None,
+    orphan_resource_summary_provider: (
+        metrics_routes.OrphanResourceSummaryProvider | None
+    ) = None,
+    runtime_health_summary_provider: (
+        metrics_routes.RuntimeHealthSummaryProvider | None
+    ) = None,
 ) -> FastMCP:
     """Construct a FastMCP instance with AWF's tools bound to ``service``.
 
@@ -58,6 +87,9 @@ def build_mcp_server(
             "they are not shell access to workspace containers."
         ),
     )
+
+    def current_settings() -> Settings:
+        return settings or get_settings()
 
     @mcp.tool(name="awf_create_workspace")
     async def awf_create_workspace(
@@ -352,6 +384,223 @@ def build_mcp_server(
         rows = await service.list_logs(workspace_id)
         return [row.model_dump(mode="json") for row in rows] if rows is not None else None
 
+    @mcp.tool(name="awf_list_merge_queue")
+    async def awf_list_merge_queue(
+        repo_url: str | None = Field(default=None, min_length=1, max_length=512),
+        base_branch: str | None = Field(default=None, min_length=1, max_length=256),
+        workspace_status: WorkspaceStatus | None = Field(default=None),
+        limit: int = Field(default=50, ge=1, le=500),
+        cursor: str | None = Field(default=None, max_length=128),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list the REST merge queue envelope."""
+        async with service.session_factory() as session:
+            try:
+                response = await merge_queue_routes.list_merge_queue(
+                    repo_url=repo_url,
+                    base_branch=base_branch,
+                    workspace_status=workspace_status,
+                    limit=limit,
+                    cursor=cursor,
+                    session=session,
+                )
+            except HTTPException as exc:
+                return _http_exception_result(exc)
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_list_workspace_overview")
+    async def awf_list_workspace_overview(
+        workspace_status: WorkspaceStatus | None = Field(default=None),
+        agent: AgentRuntime | None = Field(default=None),
+        repo_url: str | None = Field(default=None, min_length=1, max_length=512),
+        limit: int = Field(default=50, ge=1, le=500),
+        cursor: str | None = Field(default=None, max_length=128),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list the REST workspace overview envelope."""
+        async with service.session_factory() as session:
+            try:
+                response = await workspace_routes.list_workspace_overview(
+                    workspace_status=workspace_status,
+                    agent=agent,
+                    repo_url=repo_url,
+                    limit=limit,
+                    cursor=cursor,
+                    session=session,
+                )
+            except HTTPException as exc:
+                return _http_exception_result(exc)
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_list_workspace_validation")
+    async def awf_list_workspace_validation(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list validation provenance for a workspace."""
+        async with service.session_factory() as session:
+            try:
+                response = await validation_routes.list_validation_provenance(
+                    workspace_id,
+                    session=session,
+                )
+            except HTTPException as exc:
+                return _http_exception_result(exc)
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_list_workspace_stale_reasons")
+    async def awf_list_workspace_stale_reasons(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+        include_resolved: bool = Field(default=False),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list structured workspace stale reasons."""
+        async with service.session_factory() as session:
+            try:
+                response = await workspace_routes.list_workspace_stale_reasons(
+                    workspace_id,
+                    include_resolved=include_resolved,
+                    session=session,
+                )
+            except HTTPException as exc:
+                return _http_exception_result(exc)
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_list_workspace_artifacts")
+    async def awf_list_workspace_artifacts(
+        workspace_id: str = Field(..., description="Workspace ID to inspect."),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list workspace artifact metadata only."""
+        async with service.session_factory() as session:
+            try:
+                response = await artifact_routes.list_workspace_artifacts(
+                    workspace_id,
+                    session=session,
+                )
+            except HTTPException as exc:
+                return _http_exception_result(exc)
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_get_failure_analysis_summary")
+    async def awf_get_failure_analysis_summary(
+        since_hours: int = Field(
+            default=DEFAULT_SUMMARY_WINDOW_HOURS,
+            ge=MIN_SUMMARY_WINDOW_HOURS,
+            le=MAX_SUMMARY_WINDOW_HOURS,
+        ),
+        limit: int = Field(
+            default=DEFAULT_FAILURE_EXAMPLE_LIMIT,
+            ge=MIN_FAILURE_EXAMPLE_LIMIT,
+            le=MAX_FAILURE_EXAMPLE_LIMIT,
+        ),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: summarize workspace failure analysis."""
+        async with service.session_factory() as session:
+            response = await metrics_routes.get_failure_analysis_summary(
+                since_hours=since_hours,
+                limit=limit,
+                session=session,
+            )
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_get_workspace_reliability_summary")
+    async def awf_get_workspace_reliability_summary(
+        since_hours: int = Field(
+            default=DEFAULT_SUMMARY_WINDOW_HOURS,
+            ge=MIN_SUMMARY_WINDOW_HOURS,
+            le=MAX_SUMMARY_WINDOW_HOURS,
+        ),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: summarize workspace reliability metrics."""
+        async with service.session_factory() as session:
+            response = await metrics_routes.get_workspace_reliability_summary(
+                since_hours=since_hours,
+                settings=current_settings(),
+                session=session,
+            )
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_get_resource_saturation_summary")
+    async def awf_get_resource_saturation_summary() -> StructuredToolResult:
+        """Read-only operator observability: summarize resource saturation and admission."""
+        async with service.session_factory() as session:
+            response = await metrics_routes.get_resource_saturation_summary(
+                request=_resource_saturation_request(
+                    disk_check_provider=disk_check_provider,
+                    orphan_resource_summary_provider=orphan_resource_summary_provider,
+                    runtime_health_summary_provider=runtime_health_summary_provider,
+                ),
+                settings=current_settings(),
+                session=session,
+            )
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_get_slo_metrics_summary")
+    async def awf_get_slo_metrics_summary(
+        since_hours: int = Field(
+            default=DEFAULT_SUMMARY_WINDOW_HOURS,
+            ge=MIN_SUMMARY_WINDOW_HOURS,
+            le=MAX_SUMMARY_WINDOW_HOURS,
+        ),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: summarize SLO metrics."""
+        async with service.session_factory() as session:
+            response = await metrics_routes.get_slo_metrics_summary(
+                since_hours=since_hours,
+                settings=current_settings(),
+                session=session,
+            )
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_list_operations")
+    async def awf_list_operations(
+        workspace_id: str | None = Field(default=None),
+        status: OperationStatus | None = Field(default=None),
+        operation_type: OperationType | None = Field(default=None),
+        limit: int = Field(default=50, ge=1, le=500),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list operations using the REST envelope."""
+        rows = await service.list_all_operations(
+            workspace_id=workspace_id,
+            status=status,
+            operation_type=operation_type,
+            limit=limit,
+        )
+        response = OperationListResponse(
+            items=[OperationResponse.model_validate(row) for row in rows],
+            next_cursor=None,
+            has_more=False,
+            limit=limit,
+            cursor=None,
+        )
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_get_operation")
+    async def awf_get_operation(
+        operation_id: str = Field(..., description="Operation ID to inspect."),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: fetch one operation by id."""
+        result = await service.get_operation(operation_id)
+        if result is None:
+            return _null_tool_result()
+        return _tool_result(result.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_get_overlap_graph")
+    async def awf_get_overlap_graph(
+        repo_url: str | None = Field(default=None, min_length=1, max_length=512),
+        base_branch: str | None = Field(default=None, min_length=1, max_length=256),
+        task_class: TaskClass | None = Field(default=None),
+        queue_state: OverlapGraphQueueState = Field(default="all"),
+        limit: int = Field(default=100, ge=1, le=500),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: return the advisory owned-path overlap graph."""
+        graph = await build_workspace_overlap_graph(
+            service.session_factory,
+            repo_url=repo_url,
+            base_branch=base_branch,
+            task_class=task_class,
+            queue_state=queue_state,
+            limit=limit,
+        )
+        response = WorkspaceOverlapGraphResponse.model_validate(graph)
+        return _tool_result(response.model_dump(mode="json"))
+
     @mcp.tool(name="awf_read_workspace_log")
     async def awf_read_workspace_log(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
@@ -378,6 +627,51 @@ def build_mcp_server(
 def _tool_error(exc: WorkspaceControlError) -> CallToolResult:
     error = ErrorResponse(error_code=exc.error_code, message=exc.message)
     return _tool_result(error.model_dump(mode="json"), is_error=True)
+
+
+def _http_exception_result(exc: HTTPException) -> CallToolResult:
+    detail: object = exc.detail
+    if isinstance(detail, dict):
+        error_code = str(detail.get("error_code") or "HTTP_ERROR")
+        if exc.status_code == 404 and error_code == "NOT_FOUND":
+            return _null_tool_result()
+        error = ErrorResponse(
+            error_code=error_code,
+            message=str(detail.get("message") or "HTTP request failed."),
+            detail=detail.get("detail") if isinstance(detail.get("detail"), dict) else None,
+        )
+    else:
+        error = ErrorResponse(error_code="HTTP_ERROR", message=str(detail))
+    return _tool_result(error.model_dump(mode="json"), is_error=True)
+
+
+def _null_tool_result() -> CallToolResult:
+    return CallToolResult(content=[], structuredContent=None)
+
+
+def _resource_saturation_request(
+    *,
+    disk_check_provider: metrics_routes.DiskCheckProvider | None,
+    orphan_resource_summary_provider: metrics_routes.OrphanResourceSummaryProvider | None,
+    runtime_health_summary_provider: metrics_routes.RuntimeHealthSummaryProvider | None,
+) -> Request:
+    state = SimpleNamespace()
+    if disk_check_provider is not None:
+        state.workspace_admission_disk_check = disk_check_provider
+    if orphan_resource_summary_provider is not None:
+        state.orphan_resource_summary_provider = orphan_resource_summary_provider
+    if runtime_health_summary_provider is not None:
+        state.runtime_health_summary_provider = runtime_health_summary_provider
+    app = SimpleNamespace(state=state)
+    return Request(
+        {
+            "type": "http",
+            "method": "GET",
+            "path": "/v1/metrics/resources/saturation",
+            "headers": [],
+            "app": app,
+        }
+    )
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:

@@ -72,6 +72,14 @@ async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
     return payload
 
 
+def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
+    any_of = schema.get("anyOf")
+    assert isinstance(any_of, list)
+    string_schema = next(item for item in any_of if isinstance(item, dict) and item.get("type") == "string")
+    assert isinstance(string_schema, dict)
+    return string_schema
+
+
 class TestToolRegistration:
     @pytest.mark.unit
     async def test_existing_and_observability_tools_registered(self, mcp) -> None:  # type: ignore[no-untyped-def]
@@ -95,6 +103,20 @@ class TestToolRegistration:
             "awf_cancel_workspace",
             "awf_stop_workspace",
             "awf_destroy_workspace",
+        } <= names
+        assert {
+            "awf_list_merge_queue",
+            "awf_list_workspace_overview",
+            "awf_list_workspace_validation",
+            "awf_list_workspace_stale_reasons",
+            "awf_list_workspace_artifacts",
+            "awf_get_failure_analysis_summary",
+            "awf_get_workspace_reliability_summary",
+            "awf_get_resource_saturation_summary",
+            "awf_get_slo_metrics_summary",
+            "awf_list_operations",
+            "awf_get_operation",
+            "awf_get_overlap_graph",
         } <= names
 
     @pytest.mark.unit
@@ -142,6 +164,33 @@ class TestToolRegistration:
             "minLength": 1,
             "type": "string",
         }
+
+    @pytest.mark.unit
+    async def test_operator_parity_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+        merge_props = tools["awf_list_merge_queue"].inputSchema["properties"]
+        repo_url_schema = _optional_string_schema(merge_props["repo_url"])
+        assert repo_url_schema["maxLength"] == 512
+        assert repo_url_schema["minLength"] == 1
+        base_branch_schema = _optional_string_schema(merge_props["base_branch"])
+        assert base_branch_schema["maxLength"] == 256
+        assert merge_props["limit"]["default"] == 50
+        assert merge_props["limit"]["minimum"] == 1
+        assert merge_props["limit"]["maximum"] == 500
+        assert _optional_string_schema(merge_props["cursor"])["maxLength"] == 128
+
+        overview_props = tools["awf_list_workspace_overview"].inputSchema["properties"]
+        assert overview_props["limit"]["default"] == 50
+        assert _optional_string_schema(overview_props["cursor"])["maxLength"] == 128
+
+        operations_props = tools["awf_list_operations"].inputSchema["properties"]
+        assert operations_props["limit"]["default"] == 50
+        assert operations_props["limit"]["maximum"] == 500
+
+        overlap_props = tools["awf_get_overlap_graph"].inputSchema["properties"]
+        assert overlap_props["limit"]["default"] == 100
+        assert overlap_props["limit"]["maximum"] == 500
 
 
 class TestCreateWorkspace:
