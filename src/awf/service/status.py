@@ -13,7 +13,6 @@ from typing import Any, Literal, Protocol, cast
 import httpx
 from sqlalchemy import select, text
 
-from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.service.config import ServiceSettings
@@ -391,15 +390,8 @@ def _runtime_workspaces_from_view(
         )
         for snapshot in workspace_view.snapshots
     }
-    for workspace_id in workspace_view.active_ids:
-        by_id.setdefault(
-            workspace_id,
-            RuntimeWorkspace(
-                workspace_id=workspace_id,
-                status=WorkspaceStatus.running.value,
-                compose_project_name=f"awf_{workspace_id}",
-            ),
-        )
+    # Runtime recovery decisions require lifecycle metadata such as status and
+    # PR URL; active_ids-only views are retained for orphan-resource checks.
     return tuple(by_id[workspace_id] for workspace_id in sorted(by_id))
 
 

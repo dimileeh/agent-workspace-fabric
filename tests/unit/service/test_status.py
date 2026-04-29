@@ -730,6 +730,39 @@ def test_service_status_recoverable_monitoring_pr_stranding_does_not_fail_servic
 
 
 @pytest.mark.unit
+def test_service_status_does_not_fail_active_id_without_lifecycle_snapshot(
+    tmp_path: Path,
+) -> None:
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset({"ws_monitor"}),
+            terminal_ids=frozenset(),
+            available=True,
+            snapshots=(),
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=""),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    assert status["status"] == "ok"
+    stranded = status["checks"]["stranded_workspaces"]
+    assert stranded["ok"] is True
+    assert stranded["status"] == "ok"
+    assert stranded["fail_candidate_count"] == 0
+    assert stranded["examples"] == []
+
+
+@pytest.mark.unit
 def test_orphan_check_treats_active_workspace_containers_as_expected(tmp_path: Path) -> None:
     payload = _docker_ps_payload(
         _container(
