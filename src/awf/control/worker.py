@@ -38,6 +38,7 @@ from awf.service.workspace_runtime_health import (
     RuntimeWorkspace,
     WorkspaceRuntimeFinding,
     classify_runtime_snapshot,
+    has_open_pr_for_remonitor,
     retry_policy_allows_runtime_recovery,
 )
 
@@ -405,7 +406,7 @@ class ControlWorker:
 
         finding = classify_runtime_snapshot(_runtime_workspace(candidate), snapshot)
         if finding is not None and finding.status == "unavailable":
-            if _candidate_has_open_pr_for_remonitor(candidate):
+            if has_open_pr_for_remonitor(candidate.status, candidate.pr_url):
                 recoverable_finding = WorkspaceRuntimeFinding(
                     workspace_id=finding.workspace_id,
                     workspace_status=finding.workspace_status,
@@ -1017,10 +1018,6 @@ def _candidate_claim_is_stale(
     if status == WorkspaceStatus.monitoring_pr:
         return _monitor_claim_is_stale(workspace, claim_cutoff)
     return True
-
-
-def _candidate_has_open_pr_for_remonitor(candidate: _ActiveExecutionCandidate) -> bool:
-    return candidate.status == WorkspaceStatus.monitoring_pr and bool(candidate.pr_url)
 
 
 def _runtime_workspace(candidate: _ActiveExecutionCandidate) -> RuntimeWorkspace:
