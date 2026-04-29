@@ -35,7 +35,7 @@ _RAW_SECRET_PREFIXES = (
     "glpat-",
     "hf_",
 )
-_REFERENCE_RE = re.compile(r"^[A-Za-z0-9_./:@+=,\-]+$")
+_REFERENCE_RE = re.compile(r"^[A-Za-z0-9_./:@+=,\-?*$]+$")
 _JWT_RE = re.compile(r"^[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}\.[A-Za-z0-9_-]{16,}$")
 _BROAD_SECRET_MOUNT_ROOTS = frozenset(
     (

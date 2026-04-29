@@ -132,6 +132,27 @@ def test_raw_looking_secret_ref_is_rejected_without_exposing_value() -> None:
 
 
 @pytest.mark.unit
+def test_long_provider_ref_with_common_cloud_identifier_chars_is_not_raw_secret() -> None:
+    cloud_ref = (
+        "arn:aws:secretsmanager:us-east-1:123456789012:secret:"
+        "prod/team/*/database/password?stage=$current/"
+        "very/long/reference/path/that/exceeds/the/raw-secret-length-threshold"
+    )
+    assert len(cloud_ref) > 128
+    profile = _profile_with_secret(
+        {
+            "name": "database-password",
+            "kind": "mount",
+            "target": "/run/awf/secrets/database-password",
+            "provider": "aws",
+            "ref": cloud_ref,
+        }
+    )
+
+    assert profile_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
 def test_resolver_rejects_profile_lint_errors_with_primary_reason_code() -> None:
     raw_secret = "github_pat_do-not-echo-this-value"
 
