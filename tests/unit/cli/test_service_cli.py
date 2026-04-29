@@ -514,9 +514,10 @@ def test_readme_documents_local_disaster_recovery() -> None:
 @pytest.mark.unit
 def test_readme_documents_run_awf_compatibility_status() -> None:
     readme = Path("README.md").read_text()
+    normalized_readme = " ".join(readme.split())
 
-    assert "scripts/run_awf.py is the compatibility dogfood runner" in readme
-    assert "SQLite DB under `--work-dir`" in readme
+    assert "`scripts/run_awf.py` is the compatibility dogfood runner" in normalized_readme
+    assert "SQLite DB under `--work-dir`" in normalized_readme
     assert "does not require the local Postgres control-plane database" in readme
     assert "service worker is the normal always-on executor" in readme
 
