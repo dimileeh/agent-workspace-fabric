@@ -10,6 +10,12 @@ const monitorTitles: Record<string, string> = {
   completed: "Monitor: completed",
 };
 
+const actionTitles: Record<string, string> = {
+  validate_only: "Validate-only recovery",
+  rebase_only: "Rebase recovery",
+  comment_repair: "Comment repair",
+};
+
 const operationTitles: Record<string, string> = {
   comment_repair: "Comment repair",
   ci_repair: "CI repair",
@@ -24,14 +30,8 @@ export function formatOperationTitle(operation: Operation): string {
   if (operation.type === "monitor_state" && action && monitorTitles[action]) {
     return monitorTitles[action];
   }
-  if (action === "validate_only") {
-    return "Validate-only recovery";
-  }
-  if (action === "rebase_only") {
-    return "Rebase recovery";
-  }
-  if (action === "comment_repair") {
-    return "Comment repair";
+  if (action && actionTitles[action]) {
+    return actionTitles[action];
   }
   if (operationTitles[operation.type]) {
     return operationTitles[operation.type];

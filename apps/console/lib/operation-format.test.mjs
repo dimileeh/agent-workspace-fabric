@@ -83,6 +83,15 @@ test("existing recovery operation types keep readable labels", () => {
     }),
     "Validate-only recovery",
   );
+  assert.equal(
+    formatOperationTitle({
+      ...baseOperation,
+      type: "rebase",
+      action: "rebase_only",
+      reason_code: "TARGET_ADVANCED",
+    }),
+    "Rebase recovery",
+  );
 });
 
 test("legacy operations without payload or action render fallback text", () => {
