@@ -340,3 +340,50 @@ def test_profile_services_rejects_symlink_escape_volume_sources(tmp_path: Path) 
 
     with pytest.raises(ValueError, match="escapes workspace root"):
         profile_services(profile, base_path=repo)
+
+
+@pytest.mark.unit
+def test_profile_services_rejects_host_home_auth_mounts_with_reason_code(
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-host-home-auth",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("${HOME}", "/home/agent")],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="HOST_HOME_AUTH_MOUNT_TOO_BROAD") as exc_info:
+        profile_services(profile, base_path=tmp_path / "repo")
+
+    assert exc_info.value.reason_code == "HOST_HOME_AUTH_MOUNT_TOO_BROAD"
+
+
+@pytest.mark.unit
+def test_profile_services_rejects_broad_host_home_auth_mounts_under_warn_policy(
+    tmp_path: Path,
+) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-host-home-auth-warn",
+            "security": {"host_home_auth_mounts": {"mode": "warn"}},
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("${HOME}", "/home/agent")],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="HOST_HOME_AUTH_MOUNT_TOO_BROAD") as exc_info:
+        profile_services(profile, base_path=tmp_path / "repo")
+
+    assert exc_info.value.reason_code == "HOST_HOME_AUTH_MOUNT_TOO_BROAD"

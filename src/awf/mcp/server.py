@@ -184,7 +184,11 @@ def build_mcp_server(
         try:
             ws = await service.create_v2(req)
         except ProfileResolutionError as exc:
-            error = ErrorResponse(error_code="INVALID_PROFILE", message=str(exc))
+            error = ErrorResponse(
+                error_code="INVALID_PROFILE",
+                message=str(exc),
+                detail=exc.detail,
+            )
             return _tool_result(error.model_dump(mode="json"), is_error=True)
         return _tool_result(ws.model_dump(mode="json"))
 
