@@ -693,13 +693,14 @@ async def test_stale_recovery_dispatch_ignores_terminal_workspace_race(
 
     assert ws.status == final_status.value
     assert operations == []
+    assert ignored_events[-1].reason_code == "STALE_CALLBACK_IGNORED"
     assert ignored_events[-1].payload == {
         "callback_source": "pr_monitor",
         "callback_action": "recovery_dispatch",
         "expected_status": WorkspaceStatus.monitoring_pr.value,
         "actual_status": final_status.value,
         "requested_status": WorkspaceStatus.ready.value,
-        "reason_code": "RECOVERY_DISPATCH",
+        "reason_code": "STALE_CALLBACK_IGNORED",
     }
 
 

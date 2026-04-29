@@ -1542,7 +1542,7 @@ class PullRequestMonitorRunner:
                         callback_action="recovery_dispatch",
                         expected_status=WorkspaceStatus.monitoring_pr,
                         requested_status=WorkspaceStatus.ready,
-                        reason_code="RECOVERY_DISPATCH",
+                        reason_code="STALE_CALLBACK_IGNORED",
                     )
                     await s.commit()
                     return True
@@ -1565,7 +1565,7 @@ class PullRequestMonitorRunner:
                         callback_action="recovery_dispatch",
                         expected_status=WorkspaceStatus.monitoring_pr,
                         requested_status=WorkspaceStatus.ready,
-                        reason_code="RECOVERY_DISPATCH",
+                        reason_code="STALE_CALLBACK_IGNORED",
                     )
                     await s.commit()
                     return True
