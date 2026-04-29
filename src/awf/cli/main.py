@@ -182,8 +182,8 @@ def service_status(
         [],
         "--provider",
         help=(
-            "Repeatable provider strictness check: github, claude_code, gemini, "
-            "or opencode."
+            "Repeatable provider strictness check: github, codex, claude_code, "
+            "gemini, opencode, or docker."
         ),
     ),
 ) -> None:
@@ -234,8 +234,8 @@ def service_bootstrap(
         [],
         "--provider",
         help=(
-            "Repeatable provider strictness check: github, claude_code, gemini, "
-            "or opencode."
+            "Repeatable provider strictness check: github, codex, claude_code, "
+            "gemini, opencode, or docker."
         ),
     ),
 ) -> None:
