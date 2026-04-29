@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import importlib.util
+import sys
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 
@@ -24,6 +27,45 @@ _COMPOSE_FILE = Path("/fake/compose.yml")
 def _load_profile() -> WorkspaceProfile:
     assert _FIXTURE.is_dir(), "python-postgres workspace-services fixture is missing"
     return ProfileResolver().resolve(worktree_path=_FIXTURE, profile_ref="auto").profile
+
+
+def _load_fixture_app_module() -> ModuleType:
+    spec = importlib.util.spec_from_file_location(
+        "python_postgres_fixture_app",
+        _FIXTURE / "app.py",
+    )
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.unit
+def test_python_postgres_fixture_uses_startup_tolerant_db_connect_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    connection = object()
+    calls: list[tuple[tuple[str], dict[str, object]]] = []
+
+    def connect(*args: str, **kwargs: object) -> object:
+        calls.append((args, kwargs))
+        return connection
+
+    psycopg = ModuleType("psycopg")
+    psycopg.__dict__["connect"] = connect
+    monkeypatch.setitem(sys.modules, "psycopg", psycopg)
+
+    app = _load_fixture_app_module()
+    monkeypatch.setenv("DATABASE_URL", "postgresql://awf@postgres/awf")
+
+    assert app._connect() is connection
+    assert calls == [
+        (
+            ("postgresql://awf@postgres/awf",),
+            {"autocommit": True, "connect_timeout": 10},
+        )
+    ]
 
 
 @pytest.mark.unit

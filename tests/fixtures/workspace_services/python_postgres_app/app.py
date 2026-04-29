@@ -19,7 +19,7 @@ def _database_url() -> str:
 
 
 def _connect() -> psycopg.Connection[tuple[object, ...]]:
-    return psycopg.connect(_database_url(), autocommit=True, connect_timeout=3)
+    return psycopg.connect(_database_url(), autocommit=True, connect_timeout=10)
 
 
 class Handler(BaseHTTPRequestHandler):
