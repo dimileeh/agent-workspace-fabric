@@ -51,10 +51,16 @@ def test_build_audit_payload_keeps_common_keys_and_safe_evidence_refs() -> None:
 
 @pytest.mark.unit
 def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usage() -> None:
+    github_app_jwt = (
+        "eyJhbGciOiJSUzI1NiJ9."
+        "eyJpc3MiOiJnaXRodWItYXBwIn0."
+        "c2lnbmF0dXJlX3Nob3VsZF9ub3RfcGVyc2lzdA"
+    )
     value = {
         "github_token": "ghp_should_not_persist",
         "authorization": "Bearer secret-secret-secret",
         "remote": "https://user:ghp_should_not_persist@github.com/org/repo",
+        "github_error": f"GitHub API rejected JWT {github_app_jwt}",
         "message": "GITHUB_TOKEN=ghp_should_not_persist " + ("x" * 1200),
         "usage": {
             "input_tokens": 100,
@@ -76,6 +82,7 @@ def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usa
     assert redacted["github_token"] == "[redacted]"
     assert redacted["authorization"] == "[redacted]"
     assert redacted["remote"] == "https://[redacted]@github.com/org/repo"
+    assert redacted["github_error"] == "GitHub API rejected JWT [redacted]"
     assert redacted["message"].startswith("GITHUB_TOKEN=[redacted] ")
     assert redacted["message"].endswith("...[truncated]")
     assert redacted["usage"] == {
@@ -92,4 +99,5 @@ def test_redact_audit_value_recursively_redacts_secrets_without_losing_token_usa
         }
     ]
     assert "ghp_should_not_persist" not in repr(redacted)
+    assert github_app_jwt not in repr(redacted)
     assert "secret-secret-secret" not in repr(redacted)
