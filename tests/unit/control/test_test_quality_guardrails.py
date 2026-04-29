@@ -103,6 +103,29 @@ def test_escape_hatch_allows_concise_specific_rationale() -> None:
 
 
 @pytest.mark.unit
+def test_escape_hatch_only_suppresses_adjacent_violation(tmp_path: Path) -> None:
+    test_file = tmp_path / "test_escape_hatch_scope.py"
+    test_file.write_text(
+        "\n".join(
+            [
+                "def test_multiple_fake_asserts():",
+                "    # awf-test-quality: ignore[FAKE_ASSERT] because legacy sentinel assertion",
+                "    assert True",
+                "    assert True",
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    violations = scan_test_quality([test_file])
+
+    assert [(violation.code, violation.line) for violation in violations] == [
+        ("FAKE_ASSERT", 4),
+    ]
+
+
+@pytest.mark.unit
 def test_exclude_globs_are_evaluated_from_repository_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

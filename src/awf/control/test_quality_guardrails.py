@@ -642,8 +642,6 @@ def _is_suppressed(violation: _PendingViolation, hatches: list[_EscapeHatch]) ->
             continue
         if hatch.line in {violation.line, violation.line - 1}:
             return True
-        if violation.test_start <= hatch.line <= violation.test_end:
-            return True
         if hatch.line == violation.test_start - 1:
             return True
     return False
