@@ -264,6 +264,71 @@ class TestEvaluateStaleness:
         assert overlap.severity == "blocking"
 
     @pytest.mark.unit
+    def test_owned_path_target_change_emits_structured_overlap_reason(self) -> None:
+        from awf.service.staleness import (
+            DEFAULT_STALE_POLICY,
+            CandidateSnapshot,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        candidate = CandidateSnapshot(
+            owned_paths=("src/awf/service/**",),
+            task_class="docs_task",
+            base_sha="a" * 40,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=("src/awf/service/staleness.py",),
+            advanced_commits=1,
+        )
+
+        findings = evaluate_staleness(
+            candidate=candidate,
+            target=target,
+            policy=DEFAULT_STALE_POLICY,
+        )
+
+        assert len(findings) == 1
+        overlap = findings[0]
+        assert overlap.reason_code == "STALE_OVERLAP"
+        assert overlap.trigger_type == "path_overlap"
+        assert overlap.trigger_ref == "src/awf/service/staleness.py"
+        assert overlap.severity == "blocking"
+        assert overlap.blocks_merge is True
+        assert "development" in overlap.explanation
+
+    @pytest.mark.unit
+    def test_non_overlapping_target_change_does_not_emit_overlap_reason(self) -> None:
+        from awf.service.staleness import (
+            DEFAULT_STALE_POLICY,
+            CandidateSnapshot,
+            TargetBranchState,
+            evaluate_staleness,
+        )
+
+        candidate = CandidateSnapshot(
+            owned_paths=("docs/**",),
+            task_class="docs_task",
+            base_sha="a" * 40,
+        )
+        target = TargetBranchState(
+            branch="development",
+            head_sha="b" * 40,
+            changed_paths=("src/awf/service/staleness.py",),
+            advanced_commits=1,
+        )
+
+        findings = evaluate_staleness(
+            candidate=candidate,
+            target=target,
+            policy=DEFAULT_STALE_POLICY,
+        )
+
+        assert findings == []
+
+    @pytest.mark.unit
     def test_plan_artifact_only_overlap_is_advisory_without_target_advanced(self) -> None:
         from awf.service.staleness import (
             DEFAULT_STALE_POLICY,
@@ -947,6 +1012,191 @@ class TestStalenessRefreshService:
         assert candidate.stale is True
         assert candidate.stale_reason == "validation_insufficient_tier"
         assert {r.reason_code for r in reasons} >= {"STALE_OVERLAP"}
+
+    @pytest.mark.unit
+    async def test_refresh_replaces_stale_validation_reason_with_active_overlap(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.db.repositories import StaleReasonRepository, ValidationRunRepository
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/api/**"],
+            task_class="refactor_task",
+        )
+
+        async with factory() as session:
+            validation_repo = ValidationRunRepository(session)
+            validation_run = await validation_repo.start(
+                workspace_id=workspace_id,
+                attempt_id=attempt_id,
+                tier=2,
+                commands=[],
+                base_commit="a" * 40,
+                base_sha="a" * 40,
+                workspace_head_sha="h" * 40,
+                target_branch="development",
+                target_head_sha="a" * 40,
+                log_stream_refs={},
+                started_at=datetime(2026, 4, 29, 12, 0),
+            )
+            await validation_repo.finish(
+                validation_run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                finished_at=datetime(2026, 4, 29, 12, 1),
+            )
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+            assert candidate is not None
+            candidate.stale = True
+            candidate.stale_reason = "validation_insufficient_tier"
+            await session.commit()
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("src/awf/api/routes/health.py",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+            reasons = await StaleReasonRepository(session).list_active_for_candidate(
+                candidate_id,
+            )
+
+        assert candidate is not None
+        assert candidate.stale is True
+        assert candidate.stale_reason == "STALE_OVERLAP"
+        assert [reason.reason_code for reason in reasons] == ["STALE_OVERLAP"]
+
+    @pytest.mark.unit
+    async def test_refresh_records_structured_overlap_reason_on_candidate(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        _workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/service/**"],
+            task_class="test_task",
+        )
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("src/awf/service/staleness.py",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+
+        assert candidate is not None
+        assert candidate.stale is True
+        assert candidate.stale_reason == "STALE_OVERLAP"
+
+    @pytest.mark.unit
+    async def test_refresh_prefers_overlap_as_primary_reason_when_schema_also_matches(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.db.repositories import ValidationRunRepository
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id, attempt_id, candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["migrations/**"],
+            task_class="migration_task",
+        )
+
+        async with factory() as session:
+            validation_repo = ValidationRunRepository(session)
+            validation_run = await validation_repo.start(
+                workspace_id=workspace_id,
+                attempt_id=attempt_id,
+                tier=3,
+                commands=[],
+                base_commit="a" * 40,
+                base_sha="a" * 40,
+                workspace_head_sha="h" * 40,
+                target_branch="development",
+                target_head_sha="a" * 40,
+                log_stream_refs={},
+                started_at=datetime(2026, 4, 29, 12, 0),
+            )
+            await validation_repo.finish(
+                validation_run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                finished_at=datetime(2026, 4, 29, 12, 1),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            result = await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="development",
+                    head_sha="b" * 40,
+                    changed_paths=("migrations/versions/zzz_unrelated.py",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        async with factory() as session:
+            from awf.db.repositories import StaleReasonRepository
+
+            candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                attempt_id,
+            )
+            reasons = await StaleReasonRepository(session).list_active_for_candidate(
+                candidate_id,
+            )
+
+        assert {finding.reason_code for finding in result.findings} == {
+            "STALE_SCHEMA",
+            "STALE_OVERLAP",
+        }
+        assert {reason.reason_code for reason in reasons} == {
+            "STALE_SCHEMA",
+            "STALE_OVERLAP",
+        }
+        assert candidate is not None
+        assert candidate.stale is True
+        assert candidate.stale_reason == "STALE_OVERLAP"
 
     @pytest.mark.unit
     async def test_refresh_clears_stale_when_findings_no_longer_apply(

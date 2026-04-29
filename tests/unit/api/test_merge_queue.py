@@ -699,6 +699,73 @@ class TestMergeQueueList:
         }
 
     @pytest.mark.unit
+    async def test_merge_queue_exposes_owned_path_overlap_stale_reason_without_shape_break(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        from awf.service.staleness import (
+            StalenessRefreshService,
+            TargetBranchState,
+        )
+
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Owned path overlap stale",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/24",
+            task_class="test_task",
+            owned_paths=["src/awf/service/**"],
+        )
+        candidate_id = await _candidate_id_for_workspace(engine, workspace_id)
+
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            service = StalenessRefreshService(session)
+            await service.refresh_candidate(
+                candidate_id,
+                target=TargetBranchState(
+                    branch="main",
+                    head_sha="b" * 40,
+                    changed_paths=("src/awf/service/staleness.py",),
+                    advanced_commits=1,
+                ),
+            )
+            await session.commit()
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(row for row in response.json()["items"] if row["workspace_id"] == workspace_id)
+        assert item["readiness"]["stale"] is True
+        assert item["readiness"]["stale_reason"] == "STALE_OVERLAP"
+        assert item["merge_blocker_reason"] == "stale"
+        assert item["required_next_action"] == "rebase"
+        reasons = item["stale_reasons"]
+        assert len(reasons) == 1
+        assert {
+            "id",
+            "workspace_id",
+            "candidate_id",
+            "attempt_id",
+            "task_id",
+            "trigger_type",
+            "trigger_ref",
+            "reason_code",
+            "explanation",
+            "status",
+            "severity",
+            "blocks_merge",
+            "detected_at",
+            "resolved_at",
+        } <= set(reasons[0])
+        assert reasons[0]["reason_code"] == "STALE_OVERLAP"
+        assert reasons[0]["trigger_type"] == "path_overlap"
+        assert reasons[0]["trigger_ref"] == "src/awf/service/staleness.py"
+        assert reasons[0]["severity"] == "blocking"
+        assert reasons[0]["blocks_merge"] is True
+
+    @pytest.mark.unit
     async def test_filters_by_repo_base_status_and_limit(
         self,
         client: AsyncClient,
