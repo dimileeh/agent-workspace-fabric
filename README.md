@@ -694,15 +694,28 @@ validation, PR creation, or PR monitoring; those stages run against the same
 workspace services and keep agent, validation, and monitor logs in the durable
 workspace log store.
 
-Start from a clean checkout:
+Start from a clean checkout with the repeatable bootstrap command:
 
 ```bash
 cp .env.example .env
+uv run --python 3.12 --extra dev awf service bootstrap
+uv run --python 3.12 --extra dev awf service status --format pretty
+```
+
+`awf service bootstrap` builds the configured agent runtime image, starts
+Postgres, reruns the Compose `migrate` service, starts the API and worker, and
+polls `awf service status` until the service is healthy. It is safe to re-run
+when containers and volumes already exist; the migration service is force
+recreated and Alembic upgrades are idempotent.
+
+The lower-level Compose workflow remains supported:
+
+```bash
 docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
 docker compose -f docker/compose/local-service.yml up --build
 ```
 
-Check the service from another terminal:
+Inspect the service and logs from another terminal:
 
 ```bash
 uv run --python 3.12 --extra dev awf service status
@@ -934,7 +947,7 @@ cp .env.example .env
 export AWF_GITHUB_TOKEN="$(gh auth token)"
 # Optional: mirror Compose-interpolated values into docker/compose/.env.
 printf 'AWF_GITHUB_TOKEN=%s\n' "$AWF_GITHUB_TOKEN" > docker/compose/.env
-docker compose -f docker/compose/local-service.yml up --build
+uv run --python 3.12 --extra dev awf service bootstrap
 ```
 
 For API-only throwaway development, SQLite remains supported:
@@ -1041,12 +1054,18 @@ unavailable. OpenCode model overrides use the `ollama/<model>` form, for example
 
 ### Database Migrations
 
-SQLite local API runs create tables automatically at startup. For Postgres,
-apply migrations before starting the API and worker. The Compose stack does
-this through its `migrate` service:
+SQLite local API runs create tables automatically at startup. For Postgres, the
+preferred bootstrap command runs migrations through the Compose `migrate`
+service before starting the API and worker:
 
 ```bash
-docker compose -f docker/compose/local-service.yml up migrate
+uv run --python 3.12 --extra dev awf service bootstrap
+```
+
+Manual Compose migration:
+
+```bash
+docker compose -f docker/compose/local-service.yml up --build --force-recreate migrate
 ```
 
 Manual Postgres migration:
@@ -1157,7 +1176,7 @@ Start the full local service stack, which sets `AWF_API_TOKEN=local-dev-token`
 by default:
 
 ```bash
-docker compose -f docker/compose/local-service.yml up --build
+uv run --python 3.12 --extra dev awf service bootstrap
 ```
 
 For API-only throwaway development, start the AWF API with a matching local
