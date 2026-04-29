@@ -175,7 +175,7 @@ async def run_service_bootstrap(
         options=resolved_options,
         compose_file=compose_file,
     ):
-        completed.append(_run_stage(stage, run_subprocess=runner))
+        completed.append(await asyncio.to_thread(_run_stage, stage, run_subprocess=runner))
 
     service_status = await _poll_status(
         settings,

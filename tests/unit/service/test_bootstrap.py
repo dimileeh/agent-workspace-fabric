@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import subprocess
+import threading
 from pathlib import Path
 
 import pytest
@@ -42,6 +44,60 @@ async def _ok_status_collector(
 
 async def _no_sleep(_delay: float) -> None:
     return None
+
+
+@pytest.mark.unit
+def test_bootstrap_stage_runner_does_not_block_event_loop(tmp_path: Path) -> None:
+    stage_started = threading.Event()
+    release_stage = threading.Event()
+    observed_event_loop_progress = False
+    calls = 0
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            stage_started.set()
+            if not release_stage.wait(timeout=0.5):
+                return subprocess.CompletedProcess(
+                    args,
+                    returncode=99,
+                    stdout="",
+                    stderr="event loop stalled while stage was running",
+                )
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _release_stage_after_loop_progress() -> None:
+        nonlocal observed_event_loop_progress
+        while not stage_started.is_set():
+            await asyncio.sleep(0)
+        observed_event_loop_progress = True
+        release_stage.set()
+
+    async def _exercise() -> None:
+        releaser = asyncio.create_task(_release_stage_after_loop_progress())
+        try:
+            await run_service_bootstrap(
+                _settings(tmp_path),
+                options=ServiceBootstrapOptions(
+                    timeout_seconds=1,
+                    poll_interval_seconds=0.1,
+                    skip_agent_runtime_build=True,
+                ),
+                run_subprocess=_run,
+                status_collector=_ok_status_collector,
+                sleep=_no_sleep,
+                monotonic=lambda: 0.0,
+            )
+        finally:
+            if not releaser.done():
+                releaser.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await releaser
+
+    asyncio.run(_exercise())
+
+    assert observed_event_loop_progress is True
 
 
 @pytest.mark.unit
