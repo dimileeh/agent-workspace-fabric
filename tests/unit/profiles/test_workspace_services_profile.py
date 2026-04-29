@@ -23,6 +23,12 @@ _NODE_BROWSER_FIXTURE = (
     / "workspace_services"
     / "node_next_browser_app"
 )
+_REDIS_WORKER_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "fixtures"
+    / "workspace_services"
+    / "redis_worker_app"
+)
 
 
 def _load_profile() -> WorkspaceProfile:
@@ -49,6 +55,19 @@ def _load_node_browser_profile() -> WorkspaceProfile:
     assert _NODE_BROWSER_FIXTURE.is_dir(), "node browser workspace-services fixture is missing"
     result = ProfileResolver().resolve(
         worktree_path=_NODE_BROWSER_FIXTURE,
+        profile_ref="auto",
+    )
+
+    assert result.reason == "repo-local .awf/workspace.yml profile"
+    assert result.candidates_considered[0] == "repo:.awf/workspace.yml"
+    assert result.profile.source == "repo:.awf/workspace.yml"
+    return result.profile
+
+
+def _load_redis_worker_profile() -> WorkspaceProfile:
+    assert _REDIS_WORKER_FIXTURE.is_dir(), "redis-worker workspace-services fixture is missing"
+    result = ProfileResolver().resolve(
+        worktree_path=_REDIS_WORKER_FIXTURE,
         profile_ref="auto",
     )
 
@@ -361,6 +380,116 @@ def test_node_next_browser_profile_services_resolves_worktree_paths_without_host
     assert browser.depends_on == ("app",)
     assert browser.ports == ()
     assert browser.volumes == ()
+
+
+@pytest.mark.unit
+def test_redis_worker_workspace_services_profile_resolves_repo_local_contract() -> None:
+    profile = _load_redis_worker_profile()
+
+    assert profile.name == "redis-worker-app"
+    assert profile.docker.mode is DockerMode.none
+    assert profile.runtime.environment == {
+        "APP_BASE_URL": "http://app:8080",
+        "REDIS_URL": "redis://redis:6379/0",
+        "WORKER_STATUS_URL": "http://app:8080/status",
+    }
+    assert profile.ports == {
+        "app": "http://app:8080",
+        "redis": "redis://redis:6379/0",
+        "worker": "redis-worker://worker",
+    }
+
+
+@pytest.mark.unit
+def test_redis_worker_workspace_services_profile_preserves_service_schema() -> None:
+    profile = _load_redis_worker_profile()
+
+    services = {service.name: service for service in profile.services}
+    assert set(services) == {"redis", "app", "worker"}
+
+    redis = services["redis"]
+    assert redis.image == "redis:7-alpine"
+    assert redis.environment == {}
+    assert redis.healthcheck_cmd == "redis-cli ping"
+    assert redis.volumes == [("redis_data", "/data")]
+    assert redis.ports == []
+    assert redis.depends_on == []
+
+    app = services["app"]
+    assert app.build_context == "."
+    assert app.dockerfile == "Dockerfile"
+    assert app.environment == {
+        "PORT": "8080",
+        "REDIS_URL": "redis://redis:6379/0",
+    }
+    assert app.depends_on == ["redis"]
+    assert app.healthcheck_cmd == "python /app/scripts/container_healthcheck.py app"
+    assert app.command == "python /app/app.py"
+    assert app.ports == []
+
+    worker = services["worker"]
+    assert worker.build_context == "."
+    assert worker.dockerfile == "Dockerfile"
+    assert worker.environment == {
+        "REDIS_URL": "redis://redis:6379/0",
+        "WORKER_ID": "redis-worker-fixture",
+    }
+    assert worker.depends_on == ["redis"]
+    assert worker.healthcheck_cmd == "python /app/scripts/container_healthcheck.py worker"
+    assert worker.command == "python /app/worker.py"
+    assert worker.ports == []
+
+    assert "aira" not in profile.model_dump_json().lower()
+    assert [(command.command, command.timeout_seconds) for command in profile.phases.setup] == [
+        ("python scripts/setup.py", 30)
+    ]
+    assert [
+        (command.command, command.timeout_seconds)
+        for command in profile.phases.validate_commands
+    ] == [("python scripts/validate.py", 30)]
+    assert [
+        (check.name, check.command, check.timeout_seconds, check.attempt_timeout_seconds)
+        for check in profile.validation.healthchecks
+    ] == [
+        ("redis", "python scripts/healthcheck.py redis", 30.0, 5.0),
+        ("app", "python scripts/healthcheck.py app", 30.0, 5.0),
+        ("worker", "python scripts/healthcheck.py worker", 30.0, 5.0),
+    ]
+
+
+@pytest.mark.unit
+def test_redis_worker_profile_services_resolves_worktree_paths_and_named_volume() -> None:
+    profile = _load_redis_worker_profile()
+
+    services = {
+        service.name: service
+        for service in profile_services(profile, base_path=_REDIS_WORKER_FIXTURE)
+    }
+
+    redis = services["redis"]
+    assert redis.image == "redis:7-alpine"
+    assert redis.healthcheck_cmd == "redis-cli ping"
+    assert redis.volumes == (("redis_data", "/data"),)
+
+    app = services["app"]
+    assert app.build_context == str(_REDIS_WORKER_FIXTURE.resolve())
+    assert app.dockerfile == "Dockerfile"
+    assert app.environment == (
+        ("PORT", "8080"),
+        ("REDIS_URL", "redis://redis:6379/0"),
+    )
+    assert app.depends_on == ("redis",)
+    assert app.volumes == ()
+
+    worker = services["worker"]
+    assert worker.build_context == str(_REDIS_WORKER_FIXTURE.resolve())
+    assert worker.dockerfile == "Dockerfile"
+    assert worker.environment == (
+        ("REDIS_URL", "redis://redis:6379/0"),
+        ("WORKER_ID", "redis-worker-fixture"),
+    )
+    assert worker.depends_on == ("redis",)
+    assert worker.volumes == ()
 
 
 @pytest.mark.unit

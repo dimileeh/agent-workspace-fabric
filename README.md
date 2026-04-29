@@ -1475,6 +1475,51 @@ awf:
 This Postgres service is workspace-local project data. It is distinct from the
 AWF control-plane Postgres database used by the API and worker.
 
+The same outer-stack service model also covers queue-backed applications. The
+generic fixture at `tests/fixtures/workspace_services/redis_worker_app` declares
+Redis, an HTTP app, and a worker sidecar with no host port requirements:
+
+```yaml
+name: redis-worker-app
+version: 1
+docker:
+  mode: none
+runtime:
+  environment:
+    APP_BASE_URL: http://app:8080
+    REDIS_URL: redis://redis:6379/0
+    WORKER_STATUS_URL: http://app:8080/status
+services:
+  - name: redis
+    image: redis:7-alpine
+    healthcheck_cmd: redis-cli ping
+    volumes:
+      - [redis_data, /data]
+  - name: app
+    build_context: .
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      PORT: "8080"
+    depends_on:
+      - redis
+    healthcheck_cmd: python /app/scripts/container_healthcheck.py app
+    command: python /app/app.py
+  - name: worker
+    build_context: .
+    environment:
+      REDIS_URL: redis://redis:6379/0
+      WORKER_ID: redis-worker-fixture
+    depends_on:
+      - redis
+    healthcheck_cmd: python /app/scripts/container_healthcheck.py worker
+    command: python /app/worker.py
+```
+
+The app, worker, and Redis talk by Compose service name on the per-workspace
+network. AWF renders the named Redis volume with a workspace-prefixed Docker
+volume name and owns teardown through `docker compose down -v`, so cleanup
+removes the app, worker, Redis container, network, and workspace-scoped volume.
+
 Frontend projects use the same profile-service model. A Node or Next-style app
 can run as one service, with browser validation isolated in a Playwright sidecar
 that the agent triggers over the workspace network. No host port is required,
