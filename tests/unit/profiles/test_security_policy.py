@@ -1,6 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
+from awf.profiles.lint import profile_lint_errors
 from awf.profiles.models import WorkspaceProfile
 
 
@@ -53,20 +54,45 @@ def test_valid_egress_mirrored_with_allowlist():
 
 @pytest.mark.unit
 def test_broad_secret_targets():
-    with pytest.raises(ValidationError, match="too broad"):
-        WorkspaceProfile.model_validate({"name": "test", "secrets": [{"name": "s1", "target": "/", "kind": "mount"}]})
+    profile = WorkspaceProfile.model_validate(
+        {"name": "test", "secrets": [{"name": "s1", "target": "/", "kind": "mount"}]}
+    )
+    assert profile_lint_errors(profile)[0].reason_code == "SECRET_TARGET_TOO_BROAD"
 
 @pytest.mark.unit
 def test_raw_looking_secret_values():
-    with pytest.raises(ValidationError, match="raw secret value"):
-        WorkspaceProfile.model_validate({"name": "test", "secrets": [{"name": "s1", "target": "/etc/s1", "provider": "aws", "ref": "sk-1234567890abcdef"}]})
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "test",
+            "secrets": [
+                {
+                    "name": "s1",
+                    "target": "/run/awf/secrets/s1",
+                    "provider": "aws",
+                    "ref": "sk-1234567890abcdef",
+                }
+            ],
+        }
+    )
+    assert profile_lint_errors(profile)[0].reason_code == "SECRET_REF_LOOKS_RAW"
 
 @pytest.mark.unit
 def test_missing_provider_or_ref():
-    with pytest.raises(ValidationError, match="secret 'ref' must be provided if 'provider' is specified"):
-        WorkspaceProfile.model_validate({"name": "test", "secrets": [{"name": "s1", "target": "/etc/s1", "provider": "aws"}]})
-    with pytest.raises(ValidationError, match="secret 'provider' must be provided if 'ref' is specified"):
-        WorkspaceProfile.model_validate({"name": "test", "secrets": [{"name": "s1", "target": "/etc/s1", "ref": "my-secret"}]})
+    provider_only = WorkspaceProfile.model_validate(
+        {
+            "name": "test",
+            "secrets": [{"name": "s1", "target": "/run/awf/secrets/s1", "provider": "aws"}],
+        }
+    )
+    ref_only = WorkspaceProfile.model_validate(
+        {
+            "name": "test",
+            "secrets": [{"name": "s1", "target": "/run/awf/secrets/s1", "ref": "my-secret"}],
+        }
+    )
+
+    assert profile_lint_errors(provider_only)[0].reason_code == "SECRET_PROVIDER_REF_MISMATCH"
+    assert profile_lint_errors(ref_only)[0].reason_code == "SECRET_PROVIDER_REF_MISMATCH"
 
 @pytest.mark.unit
 def test_profile_security_serialization():

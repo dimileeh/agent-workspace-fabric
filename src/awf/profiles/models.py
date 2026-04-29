@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -265,52 +265,6 @@ class ProfileSecret(BaseModel):
     provider: str | None = Field(default=None, max_length=128)
     ref: str | None = Field(default=None, max_length=512)
 
-    @model_validator(mode="after")
-    def _validate_secret(self) -> ProfileSecret:
-        # Broad targets check
-        if self.kind == "mount":
-            target_norm = self.target.rstrip("/")
-            if target_norm in (
-                "",
-                "/tmp",
-                "/var",
-                "/etc",
-                "/root",
-                "/home",
-                "/dev",
-                "/proc",
-                "/sys",
-            ):
-                raise ValueError(f"secret target '{self.target}' is too broad")
-        elif self.kind == "env":
-            if self.target in ("PATH", "HOME", "USER", ""):
-                raise ValueError(f"secret target '{self.target}' is too broad or invalid")
-
-        # Missing provider/ref on required secrets check
-        if self.provider and not self.ref:
-            raise ValueError("secret 'ref' must be provided if 'provider' is specified")
-        if self.ref and not self.provider:
-            raise ValueError("secret 'provider' must be provided if 'ref' is specified")
-
-        # If required and it's not a legacy 'secrets' declaration, we might enforce both,
-        # but for compatibility, we only require they be symmetric right now.
-
-        # Raw looking values
-        def _looks_like_raw_secret(value: str | None) -> bool:
-            if not value:
-                return False
-            # Check for generic high-entropy strings or common token prefixes
-            if value.startswith(("sk-", "xoxb-", "xoxp-", "AIza")):
-                return True
-            # Check length to prevent embedding large JWTs or keys in 'ref'
-            # Overly long strings not looking like a simple path or ARN
-            return len(value) > 128 and not bool(re.match(r"^[a-zA-Z0-9_\-./:@]+$", value))
-
-        if _looks_like_raw_secret(self.ref):
-            raise ValueError("secret 'ref' appears to contain a raw secret value")
-
-        return self
-
 
 class EgressMode(StrEnum):
     open = "open"
@@ -340,12 +294,49 @@ class ProfileEgress(BaseModel):
         return self
 
 
+class ProfileLintSeverity(StrEnum):
+    """Severity for structured profile lint findings."""
+
+    warning = "warning"
+    error = "error"
+
+
+class ProfileLintFinding(BaseModel):
+    """Structured profile validation finding for API/console consumers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason_code: Annotated[str, Field(min_length=1, max_length=128)]
+    message: Annotated[str, Field(min_length=1, max_length=512)]
+    path: str | None = Field(default=None, max_length=512)
+    severity: ProfileLintSeverity = ProfileLintSeverity.error
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class HostHomeAuthMountMode(StrEnum):
+    """How profile-declared host-home auth mounts are treated."""
+
+    block = "block"
+    warn = "warn"
+
+
+class HostHomeAuthMountPolicy(BaseModel):
+    """Compatibility policy for local host-home credential mounts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: HostHomeAuthMountMode = HostHomeAuthMountMode.block
+
+
 class ProfileSecurity(BaseModel):
     """Security and policy declarations for the workspace."""
 
     model_config = ConfigDict(extra="forbid")
 
     egress: ProfileEgress = Field(default_factory=ProfileEgress)
+    host_home_auth_mounts: HostHomeAuthMountPolicy = Field(
+        default_factory=HostHomeAuthMountPolicy
+    )
 
 
 class WorkspaceProfile(BaseModel):
@@ -392,3 +383,4 @@ class ProfileResolution(BaseModel):
     profile: WorkspaceProfile
     reason: str
     candidates_considered: list[str] = Field(default_factory=list)
+    lint_findings: list[ProfileLintFinding] = Field(default_factory=list)

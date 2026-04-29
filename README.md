@@ -179,7 +179,7 @@ A `WorkspaceProfile` can describe:
 - `validation`: health checks, artifact paths, timeout and tier hints.
 - `monitor`: PR-monitor policy such as initial review grace.
 - `secrets`: named mounts or env leases.
-- `security`: local egress policy and related security declarations.
+- `security`: local egress policy, related security declarations, and profile lint policy for credential mounts.
 - `ports`: endpoint names exposed to agents or tests.
 
 Resolution order:
@@ -1218,6 +1218,15 @@ the worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
 launching the workspace stack. AWF does not copy `~/.ollama/models`; workspace
 OpenCode runs talk to the host Ollama daemon through `host.docker.internal`.
 
+Profiles should prefer declared `secrets` over host-home bind mounts. Profile
+lint blocks profile-declared service volumes that mount `${HOME}`,
+`${AWF_HOST_HOME}`, `~`, `/home/<user>`, or `/Users/<user>` into broad auth
+locations such as `/home/agent` or `/root`. The only local-development
+compatibility exception is the credential path list above, mounted read-only;
+set `security.host_home_auth_mounts.mode: warn` to allow those narrow mounts
+with a structured warning. Writable host-home credential mounts are rejected;
+seed writable auth into AWF's per-workspace auth directory instead.
+
 Readiness checks use the same service-visible signals without reading secret
 file contents:
 
@@ -1379,6 +1388,62 @@ awf:
       - command: docker compose down -v --remove-orphans
         timeout_seconds: 300
 ```
+
+For DB-backed projects that do not need nested Docker, declare the app and
+database as profile services in AWF's outer workspace stack. The agent reaches
+them by Compose service name on `awf_net`; no host port is required.
+
+Example repo-local Python/Postgres profile:
+
+```yaml
+awf:
+  name: my-db-backed-app
+  version: 1
+  docker:
+    mode: none
+  runtime:
+    environment:
+      APP_BASE_URL: http://app:8080
+      DATABASE_URL: postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf
+  services:
+    - name: postgres
+      image: postgres:16-alpine
+      environment:
+        POSTGRES_DB: awf
+        POSTGRES_PASSWORD: ${AWF_POSTGRES_PASSWORD}
+        POSTGRES_USER: awf
+      healthcheck_cmd: pg_isready -U awf -d awf
+      volumes:
+        - [postgres_data, /var/lib/postgresql/data]
+    - name: app
+      build_context: .
+      dockerfile: Dockerfile
+      environment:
+        DATABASE_URL: postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf
+        PORT: "8080"
+      depends_on:
+        - postgres
+      healthcheck_cmd: python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).read()"
+      command: python /app/app.py
+  phases:
+    setup:
+      - command: python -c "import os, urllib.request; urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', timeout=10).read()"
+        timeout_seconds: 30
+    validate:
+      - command: python -c "import os, urllib.request; urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/validate', timeout=10).read()"
+        timeout_seconds: 30
+  validation:
+    healthchecks:
+      - name: app
+        command: python -c "import os, urllib.request; urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/healthz', timeout=10).read()"
+        timeout_seconds: 30
+  ports:
+    app: http://app:8080
+    postgres: postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf
+```
+
+This Postgres service is workspace-local project data. It is distinct from the
+AWF control-plane Postgres database used by the API and worker.
 
 ## Observability
 

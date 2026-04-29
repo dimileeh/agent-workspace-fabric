@@ -710,6 +710,40 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert response.json()["error_code"] == "INVALID_PROFILE"
 
     @pytest.mark.unit
+    async def test_v2_invalid_inline_profile_returns_profile_lint_detail_without_secret(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        raw_secret = "sk-live-do-not-echo-from-api"
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "workspace": {
+                "profile_ref": "auto",
+                "profile": {
+                    "name": "bad-inline",
+                    "secrets": [
+                        {
+                            "name": "api-token",
+                            "kind": "env",
+                            "target": "API_TOKEN",
+                            "provider": "inline",
+                            "ref": raw_secret,
+                        }
+                    ],
+                },
+            },
+        }
+
+        response = await client.post("/v2/workspaces", json=payload)
+        body = response.json()
+
+        assert response.status_code == 422
+        assert body["error_code"] == "INVALID_PROFILE"
+        assert body["detail"]["reason_code"] == "SECRET_REF_LOOKS_RAW"
+        assert body["detail"]["findings"][0]["reason_code"] == "SECRET_REF_LOOKS_RAW"
+        assert raw_secret not in json.dumps(body)
+
+    @pytest.mark.unit
     async def test_direct_v2_create_success_returns_accepted_response(
         self,
         engine: AsyncEngine,
