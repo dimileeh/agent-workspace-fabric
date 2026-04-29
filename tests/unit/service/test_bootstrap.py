@@ -169,6 +169,91 @@ def test_bootstrap_polls_status_until_ok(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_bootstrap_retries_status_collector_exceptions_until_ok(tmp_path: Path) -> None:
+    attempts = 0
+    sleeps: list[float] = []
+
+    async def _collect(
+        _settings: ServiceSettings,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise ConnectionRefusedError("api is still starting")
+        return {"status": "ok", "checks": {"api": {"ok": True}}}
+
+    async def _sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(timeout_seconds=5, poll_interval_seconds=0.5),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert attempts == 2
+    assert sleeps == [0.5]
+
+
+@pytest.mark.unit
+def test_bootstrap_times_out_after_repeated_status_collector_exceptions(
+    tmp_path: Path,
+) -> None:
+    clock = 0.0
+    attempts = 0
+    sleeps: list[float] = []
+
+    def _monotonic() -> float:
+        return clock
+
+    async def _sleep(delay: float) -> None:
+        nonlocal clock
+        sleeps.append(delay)
+        clock += delay
+
+    async def _collect(
+        _settings: ServiceSettings,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        nonlocal attempts
+        attempts += 1
+        raise ConnectionRefusedError("api is still starting")
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    with pytest.raises(ServiceBootstrapError) as exc_info:
+        asyncio.run(
+            run_service_bootstrap(
+                _settings(tmp_path),
+                options=ServiceBootstrapOptions(timeout_seconds=2, poll_interval_seconds=1),
+                run_subprocess=_run,
+                status_collector=_collect,
+                sleep=_sleep,
+                monotonic=_monotonic,
+            )
+        )
+
+    assert attempts == 3
+    assert sleeps == [1, 1]
+    assert exc_info.value.reason_code == "SERVICE_BOOTSTRAP_TIMEOUT"
+    assert exc_info.value.last_status is not None
+    collector_check = exc_info.value.last_status["checks"]["status_collector"]
+    assert collector_check["reason"] == "STATUS_COLLECTION_FAILED"
+    assert collector_check["detail"] == "ConnectionRefusedError: api is still starting"
+
+
+@pytest.mark.unit
 def test_bootstrap_timeout_reports_last_status(tmp_path: Path) -> None:
     clock = 0.0
     last_status = {"status": "fail", "checks": {"api": {"reason": "API_UNREACHABLE"}}}

@@ -300,6 +300,7 @@ async def _poll_status(
     poll_interval_seconds = max(0.01, options.poll_interval_seconds)
     deadline = monotonic() + timeout_seconds
     last_status: dict[str, object] | None = None
+    last_error: Exception | None = None
 
     while True:
         try:
@@ -308,23 +309,43 @@ async def _poll_status(
                 strict_providers=options.strict_providers,
                 provider_environ=provider_environ,
             )
+            last_error = None
         except Exception as exc:
-            raise ServiceBootstrapError(
-                reason_code="SERVICE_BOOTSTRAP_STATUS_FAILED",
-                message=f"service status collection failed: {type(exc).__name__}: {exc}",
-            ) from exc
+            last_error = exc
+            last_status = _status_collection_failed_status(settings, exc)
 
         if last_status.get("status") == "ok":
             return last_status
 
         remaining = deadline - monotonic()
         if remaining <= 0:
-            raise ServiceBootstrapError(
+            error = ServiceBootstrapError(
                 reason_code="SERVICE_BOOTSTRAP_TIMEOUT",
                 message="timed out waiting for local service readiness",
                 last_status=last_status,
             )
+            if last_error is not None:
+                raise error from last_error
+            raise error
         await sleep(min(poll_interval_seconds, remaining))
+
+
+def _status_collection_failed_status(
+    settings: ServiceSettings,
+    exc: Exception,
+) -> dict[str, object]:
+    return {
+        "service": settings.service_name,
+        "status": "fail",
+        "checks": {
+            "status_collector": {
+                "ok": False,
+                "status": "fail",
+                "reason": "STATUS_COLLECTION_FAILED",
+                "detail": f"{type(exc).__name__}: {exc}",
+            }
+        },
+    }
 
 
 def _run_subprocess(
