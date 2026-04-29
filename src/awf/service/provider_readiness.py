@@ -72,17 +72,17 @@ _OPENAI_TOKEN_PATTERNS = (
     r"sk-proj-[A-Za-z0-9_-]{8,}",
 )
 _ANTHROPIC_TOKEN_PATTERNS = (r"sk-ant-[A-Za-z0-9_-]{8,}",)
-_GENERIC_SK_TOKEN_PATTERNS = (
-    r"sk-[A-Za-z0-9_-]{8,}",
+_LEGACY_OPENAI_TOKEN_PATTERNS = (
+    r"sk-[A-Za-z0-9]{20,}",
 )
 _GOOGLE_TOKEN_PATTERNS = (r"AIza[A-Za-z0-9_-]{12,}",)
 _SLACK_TOKEN_PATTERNS = (r"xox[baprs]-[A-Za-z0-9-]{8,}",)
-# Keep provider-specific sk-* families before the generic sk-* fallback.
+# Keep provider-specific sk-* families before the legacy sk-* fallback.
 _KNOWN_TOKEN_PATTERNS = (
     *_GITHUB_TOKEN_PATTERNS,
     *_OPENAI_TOKEN_PATTERNS,
     *_ANTHROPIC_TOKEN_PATTERNS,
-    *_GENERIC_SK_TOKEN_PATTERNS,
+    *_LEGACY_OPENAI_TOKEN_PATTERNS,
     *_GOOGLE_TOKEN_PATTERNS,
     *_SLACK_TOKEN_PATTERNS,
 )

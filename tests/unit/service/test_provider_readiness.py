@@ -811,13 +811,21 @@ def test_provider_readiness_default_subprocess_and_http_wrappers(
         "github_pat_providerreadinesssecret",
         "sk-proj-provider-readiness-secret",
         "sk-ant-provider-readiness-secret",
-        "sk-provider-readiness-secret",
+        "sk-providerReadinessSecret1234567890",
         "AIzaProviderReadinessSecret",
         "xoxb-provider-readiness-secret",
     ],
 )
 def test_provider_readiness_redacts_known_token_patterns(secret: str) -> None:
     assert provider_readiness._redact(f"token {secret}", frozenset()) == "token <redacted>"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("identifier", ["sk-live-abc12345", "sk-test-abc12345"])
+def test_provider_readiness_preserves_non_secret_sk_identifiers(identifier: str) -> None:
+    assert provider_readiness._redact(f"diagnostic {identifier}", frozenset()) == (
+        f"diagnostic {identifier}"
+    )
 
 
 @pytest.mark.unit
