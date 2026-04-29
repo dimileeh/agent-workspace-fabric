@@ -135,6 +135,7 @@ def test_detects_python_postgres_template(tmp_path: Path) -> None:
     assert [service.name for service in profile.services] == ["postgres"]
     assert profile.runtime.environment["DATABASE_URL"].startswith("postgresql+psycopg://")
     assert "${POSTGRES_PASSWORD}" in profile.runtime.environment["DATABASE_URL"]
+    assert profile.ports == {}
     assert all(secret.ref is None for secret in profile.secrets)
     assert [secret.target for secret in profile.secrets] == ["POSTGRES_PASSWORD"]
     assert profile.validation.healthchecks[0].name == "postgres"

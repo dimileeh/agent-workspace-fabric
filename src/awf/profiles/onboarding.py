@@ -366,7 +366,6 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
                     kind="env",
                 )
             ],
-            ports={"postgres": database_url},
         )
     if template in {"docker-compose", "multi-service"}:
         return WorkspaceProfile(
