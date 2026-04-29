@@ -24,6 +24,7 @@ def _settings(
     tmp_path: Path,
     *,
     github_token: str | None = None,
+    docker_host: str | None = None,
     host_home: str | None = None,
 ) -> ServiceSettings:
     return ServiceSettings(
@@ -31,7 +32,7 @@ def _settings(
         env="local",
         api_base_url="http://localhost:8000",
         database_url="sqlite+aiosqlite:///:memory:",
-        docker_host=f"unix://{tmp_path / 'docker.sock'}",
+        docker_host=f"unix://{tmp_path / 'docker.sock'}" if docker_host is None else docker_host,
         agent_runtime_image="awf-agent-runtime:latest",
         work_dir=str(tmp_path / "work"),
         api_token=None,
@@ -186,6 +187,46 @@ def test_provider_readiness_codex_isolated_file_auth_reports_least_privilege(
         "log-secret",
     ):
         assert secret not in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_codex_rules_directory_is_reported(tmp_path: Path) -> None:
+    codex_home = tmp_path / "home" / ".codex"
+    (codex_home / "rules").mkdir(parents=True)
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    codex = payload["providers"]["codex"]
+    assert codex["reason"] == "CODEX_FILE_AUTH_PRESENT"
+    assert "~/.codex/rules" in {
+        source["signal"] for source in codex["credential_sources"]
+    }
+
+
+@pytest.mark.unit
+def test_provider_readiness_codex_empty_directory_is_reported(tmp_path: Path) -> None:
+    (tmp_path / "home" / ".codex").mkdir(parents=True)
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    codex = payload["providers"]["codex"]
+    assert codex["reason"] == "CODEX_FILE_AUTH_PRESENT"
+    assert codex["credential_sources"] == [
+        {
+            "type": "path",
+            "signal": "~/.codex",
+            "credential_scope": "isolated_workspace",
+            "isolation": "per_workspace_copy",
+        }
+    ]
 
 
 @pytest.mark.unit
@@ -392,6 +433,23 @@ def test_provider_readiness_docker_reports_missing_auth_without_host_signal(
     assert result["status"] == "fail"
     assert result["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
     assert result["credential_scope"] == "not_observed"
+    assert result["isolation"] == "none"
+
+
+@pytest.mark.unit
+def test_provider_readiness_docker_without_host_or_registry_warns(tmp_path: Path) -> None:
+    payload = collect_agent_readiness(
+        _settings(tmp_path, docker_host=""),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    docker = payload["providers"]["docker"]
+    assert docker["ok"] is False
+    assert docker["status"] == "warn"
+    assert docker["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
+    assert docker["credential_scope"] == "not_observed"
+    assert docker["isolation"] == "none"
 
 
 @pytest.mark.unit
@@ -415,7 +473,40 @@ def test_provider_readiness_docker_config_path_is_reported_without_reading_secre
     assert result["status"] == "ok"
     assert result["reason"] == "DOCKER_REGISTRY_AUTH_PRESENT"
     assert result["credential_scope"] == "read_only_host_path"
+    assert result["isolation"] == "read_only_bind"
     assert "docker_config_secret" not in json.dumps(result, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_provider_readiness_docker_config_path_reports_registry_auth(
+    tmp_path: Path,
+) -> None:
+    docker_config = tmp_path / "docker-config"
+    docker_config.mkdir()
+    (docker_config / "config.json").write_text(
+        '{"auths":{"registry.example":{"auth":"docker_config_secret"}}}'
+    )
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path, docker_host=""),
+        environ={"DOCKER_CONFIG": str(docker_config)},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    docker = payload["providers"]["docker"]
+    assert docker["ok"] is True
+    assert docker["reason"] == "DOCKER_REGISTRY_AUTH_PRESENT"
+    assert docker["credential_scope"] == "read_only_host_path"
+    assert docker["isolation"] == "read_only_bind"
+    assert docker["credential_sources"] == [
+        {
+            "type": "path",
+            "signal": "DOCKER_CONFIG/config.json",
+            "credential_scope": "read_only_host_path",
+            "isolation": "read_only_bind",
+        }
+    ]
+    assert "docker_config_secret" not in json.dumps(payload, sort_keys=True)
 
 
 @pytest.mark.unit
@@ -438,6 +529,23 @@ def test_provider_readiness_docker_config_env_does_not_fall_back_to_home(
     assert result["status"] == "warn"
     assert result["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
     assert "home_docker_secret" not in json.dumps(result, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_provider_readiness_docker_config_without_file_is_not_auth(
+    tmp_path: Path,
+) -> None:
+    docker_config = tmp_path / "missing-docker-config"
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path, docker_host=""),
+        environ={"DOCKER_CONFIG": str(docker_config)},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    docker = payload["providers"]["docker"]
+    assert docker["ok"] is False
+    assert docker["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
 
 
 @pytest.mark.unit
@@ -1011,3 +1119,33 @@ def test_provider_readiness_preserves_long_diagnostic_ids_in_details(
     assert image_digest in detail
     assert container_id in detail
     assert error_payload_id in detail
+
+
+@pytest.mark.unit
+def test_provider_readiness_helper_fallbacks_handle_unknown_shapes() -> None:
+    assert provider_readiness._primary_credential_scope(
+        [{"credential_scope": "custom_scope"}]
+    ) == "not_observed"
+    assert provider_readiness._primary_isolation([{"isolation": "custom_isolation"}]) == "none"
+    assert provider_readiness._provider_warning_values({"warnings": "not-a-list"}) == []
+
+    summary = provider_readiness._security_summary(
+        {
+            "github": {"status": "warn", "reason": "GITHUB_TOKEN_ENV_MISSING"},
+            "codex": {"status": "ok", "warnings": ["ignored"]},
+            "docker": {
+                "status": "ok",
+                "warnings": [
+                    {"reason": "DOCKER_HOST_BROAD_CONTROL", "severity": "warning"}
+                ],
+            },
+        }
+    )
+
+    assert summary["status"] == "warning"
+    assert summary["warning_count"] == 1
+    assert summary["providers_with_warnings"] == ["github", "codex", "docker"]
+    assert summary["reason_codes"] == [
+        "DOCKER_HOST_BROAD_CONTROL",
+        "GITHUB_TOKEN_ENV_MISSING",
+    ]
