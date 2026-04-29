@@ -1015,6 +1015,13 @@ def _docker_registry_sources(
     return sources
 
 
+def _provider_warning_values(provider: Mapping[str, Any]) -> list[Any]:
+    provider_warnings = provider.get("warnings")
+    if not isinstance(provider_warnings, list):
+        return []
+    return provider_warnings
+
+
 def _security_summary(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
     warning_entries: list[dict[str, str]] = []
     providers_with_warnings: list[str] = []
@@ -1024,8 +1031,8 @@ def _security_summary(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, A
         provider = providers.get(provider_name)
         if provider is None:
             continue
-        provider_warnings = provider.get("warnings")
-        if isinstance(provider_warnings, list) and provider_warnings:
+        provider_warnings = _provider_warning_values(provider)
+        if provider_warnings:
             providers_with_warnings.append(provider_name)
             for raw_warning in provider_warnings:
                 if not isinstance(raw_warning, Mapping):
