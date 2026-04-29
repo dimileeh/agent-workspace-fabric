@@ -1019,7 +1019,7 @@ async def test_validate_same_key_with_different_requested_tier_conflicts(
 
 
 @pytest.mark.unit
-async def test_rebase_monitoring_pr_creates_rebase_operation_and_coalesces(
+async def test_rebase_monitoring_pr_creates_rebase_operation_and_replays_exact_key(
     session: AsyncSession,
 ) -> None:
     workspace, candidate = await _workspace_with_candidate(session)
@@ -1034,8 +1034,15 @@ async def test_rebase_monitoring_pr_creates_rebase_operation_and_coalesces(
     replay = await service.request_rebase_workspace(
         workspace.id,
         reason="base branch advanced",
-        idempotency_key="rebase-fresh-key",
+        idempotency_key="rebase-first",
+        expected_version=1,
     )
+    with pytest.raises(WorkspaceRebaseStateError) as fresh_key_error:
+        await service.request_rebase_workspace(
+            workspace.id,
+            reason="base branch advanced",
+            idempotency_key="rebase-fresh-key",
+        )
     operations = await _operations(session, workspace.id)
     events = await _events(session, workspace.id)
     rebase_event = next(
@@ -1049,6 +1056,10 @@ async def test_rebase_monitoring_pr_creates_rebase_operation_and_coalesces(
     )
 
     assert replay.id == operation.id
+    assert fresh_key_error.value.detail == {
+        "status": WorkspaceStatus.ready.value,
+        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+    }
     assert workspace.status == WorkspaceStatus.ready.value
     assert workspace.version == 2
     assert [row.id for row in operations] == [operation.id]

@@ -15,7 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 import awf.api.routes.controls as controls_route
 from awf.api.schemas import WorkspaceOperationRequest
 from awf.common.config import get_settings
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import OperationStatus, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -183,6 +183,27 @@ async def _counts(engine: AsyncEngine, workspace_id: str) -> tuple[int, int]:
     return operation_count, event_count
 
 
+async def _mark_operation_and_workspace_terminal(
+    engine: AsyncEngine,
+    *,
+    workspace_id: str,
+    operation_id: str,
+    operation_status: OperationStatus,
+    workspace_status: WorkspaceStatus,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        operation = await session.get(Operation, operation_id)
+        workspace = await session.get(Workspace, workspace_id)
+        assert operation is not None
+        assert workspace is not None
+        operation.status = operation_status.value
+        operation.result = {"status": workspace_status.value}
+        operation.finished_at = datetime.now(UTC)
+        workspace.status = workspace_status.value
+        await session.commit()
+
+
 async def _count_rows(session: AsyncSession, statement: Any) -> int:
     return int((await session.execute(statement)).scalar_one())
 
@@ -261,7 +282,11 @@ async def test_replay_same_key_returns_same_operation_without_duplicate_rows(
 
     assert first.status_code == 200
     assert replay.status_code == 200
-    assert replay.json()["operation_id"] == first.json()["operation_id"]
+    first_payload = first.json()
+    replay_payload = replay.json()
+    assert replay_payload["operation_id"] == first_payload["operation_id"]
+    assert first_payload["operation_status"] == OperationStatus.succeeded.value
+    assert replay_payload["operation_status"] == OperationStatus.succeeded.value
     assert after_counts == before_counts
     if action in {"cancel", "stop"}:
         assert len(stop_calls) == 1
@@ -273,16 +298,23 @@ async def test_replay_same_key_returns_same_operation_without_duplicate_rows(
 @pytest.mark.parametrize("action", ["cancel", "stop", "destroy"])
 async def test_same_key_with_different_payload_returns_idempotency_conflict(
     client: AsyncClient,
+    engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
     action: str,
 ) -> None:
     workspace_id = await _create_workspace(client)
-    monkeypatch.setattr(controls_route, "_stop_project", _noop_stop)
+    stop_calls: list[str | None] = []
+
+    async def fake_stop(compose_project_name: str | None) -> None:
+        stop_calls.append(compose_project_name)
+
+    monkeypatch.setattr(controls_route, "_stop_project", fake_stop)
     cleaner_calls: list[dict[str, object]] = []
     monkeypatch.setattr(controls_route, "_cleaner", _fake_cleaner_factory(cleaner_calls))
     headers = {**_auth(monkeypatch), "Idempotency-Key": f"{action}-conflict-key"}
 
     first = await _call_control(client, workspace_id, action, headers=headers)
+    before_counts = await _counts(engine, workspace_id)
     conflict = await _call_control(
         client,
         workspace_id,
@@ -290,10 +322,16 @@ async def test_same_key_with_different_payload_returns_idempotency_conflict(
         headers=headers,
         variant="different-payload",
     )
+    after_counts = await _counts(engine, workspace_id)
 
     assert first.status_code == 200
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+    assert after_counts == before_counts
+    if action in {"cancel", "stop"}:
+        assert len(stop_calls) == 1
+    if action == "destroy":
+        assert len(cleaner_calls) == 1
 
 
 @pytest.mark.unit
@@ -415,6 +453,15 @@ async def test_remonitor_replay_same_key_returns_same_operation_without_duplicat
         json={"reason": "operator recovery"},
         headers=headers,
     )
+    assert first.status_code == 200
+    first_payload = first.json()
+    await _mark_operation_and_workspace_terminal(
+        engine,
+        workspace_id=workspace_id,
+        operation_id=first_payload["operation_id"],
+        operation_status=OperationStatus.succeeded,
+        workspace_status=WorkspaceStatus.completed,
+    )
     before_counts = await _counts(engine, workspace_id)
     replay = await client.post(
         f"/v1/workspaces/{workspace_id}/remonitor",
@@ -423,9 +470,12 @@ async def test_remonitor_replay_same_key_returns_same_operation_without_duplicat
     )
     after_counts = await _counts(engine, workspace_id)
 
-    assert first.status_code == 200
     assert replay.status_code == 200
-    assert replay.json()["operation_id"] == first.json()["operation_id"]
+    replay_payload = replay.json()
+    assert replay_payload["operation_id"] == first_payload["operation_id"]
+    assert first_payload["operation_status"] == OperationStatus.succeeded.value
+    assert replay_payload["operation_status"] == OperationStatus.succeeded.value
+    assert replay_payload["status"] == WorkspaceStatus.completed.value
     assert after_counts == before_counts
 
 
@@ -455,6 +505,7 @@ async def test_remonitor_resets_only_claims_and_records_audit_rows(
     payload = response.json()
     assert payload["workspace_id"] == workspace_id
     assert payload["status"] == WorkspaceStatus.monitoring_pr.value
+    assert payload["operation_status"] == OperationStatus.succeeded.value
     assert payload["message"] == "workspace PR monitor recovery requested"
 
     factory = make_session_factory(engine)
@@ -541,15 +592,18 @@ async def test_remonitor_same_key_with_different_reason_returns_idempotency_conf
         json={"reason": "operator recovery"},
         headers=headers,
     )
+    before_counts = await _counts(engine, workspace_id)
     conflict = await client.post(
         f"/v1/workspaces/{workspace_id}/remonitor",
         json={"reason": "different recovery reason"},
         headers=headers,
     )
+    after_counts = await _counts(engine, workspace_id)
 
     assert first.status_code == 200
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+    assert after_counts == before_counts
 
 
 @pytest.mark.unit
@@ -570,15 +624,18 @@ async def test_remonitor_same_key_with_different_if_match_returns_idempotency_co
         json={"reason": "operator recovery"},
         headers=headers,
     )
+    before_counts = await _counts(engine, workspace_id)
     conflict = await client.post(
         f"/v1/workspaces/{workspace_id}/remonitor",
         json={"reason": "operator recovery"},
         headers={**headers, "If-Match": "8"},
     )
+    after_counts = await _counts(engine, workspace_id)
 
     assert first.status_code == 200
     assert conflict.status_code == 409
     assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+    assert after_counts == before_counts
 
 
 @pytest.mark.unit
@@ -836,6 +893,94 @@ async def test_recovery_operations_require_idempotency_key(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    (
+        "action",
+        "first_status",
+        "with_open_candidate",
+        "terminal_operation_status",
+        "terminal_workspace_status",
+        "body",
+    ),
+    [
+        (
+            "refresh",
+            WorkspaceStatus.ready,
+            False,
+            OperationStatus.succeeded,
+            WorkspaceStatus.destroyed,
+            {"reason": "stale policy"},
+        ),
+        (
+            "validate",
+            WorkspaceStatus.monitoring_pr,
+            False,
+            OperationStatus.failed,
+            WorkspaceStatus.completed,
+            {"reason": "rerun required validation", "requested_tier": 2},
+        ),
+        (
+            "rebase",
+            WorkspaceStatus.monitoring_pr,
+            True,
+            OperationStatus.succeeded,
+            WorkspaceStatus.completed,
+            {"reason": "base branch advanced"},
+        ),
+    ],
+)
+async def test_recovery_exact_key_replays_terminal_operation_after_workspace_moves(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    action: str,
+    first_status: WorkspaceStatus,
+    with_open_candidate: bool,
+    terminal_operation_status: OperationStatus,
+    terminal_workspace_status: WorkspaceStatus,
+    body: dict[str, object],
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        final_status=first_status,
+        with_open_candidate=with_open_candidate,
+    )
+    headers = {
+        **_auth(monkeypatch),
+        "Idempotency-Key": f"{action}-terminal-replay",
+    }
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=body,
+        headers=headers,
+    )
+    assert first.status_code == 202
+    original_payload = first.json()
+    await _mark_operation_and_workspace_terminal(
+        engine,
+        workspace_id=workspace_id,
+        operation_id=original_payload["id"],
+        operation_status=terminal_operation_status,
+        workspace_status=terminal_workspace_status,
+    )
+    before_counts = await _counts(engine, workspace_id)
+
+    replay = await client.post(
+        f"/v1/workspaces/{workspace_id}/{action}",
+        json=body,
+        headers=headers,
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert replay.status_code == 202
+    replay_payload = replay.json()
+    assert replay_payload["id"] == original_payload["id"]
+    assert replay_payload["status"] == terminal_operation_status.value
+    assert after_counts == before_counts
+
+
+@pytest.mark.unit
 async def test_refresh_endpoint_returns_operation_response_and_coalesces_active_request(
     client: AsyncClient,
     engine: AsyncEngine,
@@ -983,7 +1128,7 @@ async def test_validate_endpoint_returns_operation_response_and_coalesces_active
 
 
 @pytest.mark.unit
-async def test_rebase_endpoint_returns_operation_response_and_coalesces_active_request(
+async def test_rebase_endpoint_returns_operation_response_and_replays_exact_key(
     client: AsyncClient,
     engine: AsyncEngine,
     monkeypatch: pytest.MonkeyPatch,
@@ -1005,6 +1150,15 @@ async def test_rebase_endpoint_returns_operation_response_and_coalesces_active_r
     replay = await client.post(
         f"/v1/workspaces/{workspace_id}/rebase",
         json={"reason": "base branch advanced"},
+        headers={
+            **_auth(monkeypatch),
+            "Idempotency-Key": "rebase-first",
+            "If-Match": "7",
+        },
+    )
+    fresh_key = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
         headers={**_auth(monkeypatch), "Idempotency-Key": "rebase-second"},
     )
 
@@ -1012,6 +1166,15 @@ async def test_rebase_endpoint_returns_operation_response_and_coalesces_active_r
     assert replay.status_code == 202
     payload = first.json()
     assert replay.json()["id"] == payload["id"]
+    assert fresh_key.status_code == 409
+    assert fresh_key.json()["detail"] == {
+        "error_code": "WORKSPACE_STATE_NOT_REBASEABLE",
+        "message": "Workspace is not in a state eligible for rebase recovery.",
+        "detail": {
+            "status": WorkspaceStatus.ready.value,
+            "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+        },
+    }
     assert payload["workspace_id"] == workspace_id
     assert payload["type"] == "rebase"
     assert payload["status"] == "pending"
