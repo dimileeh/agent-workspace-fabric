@@ -133,6 +133,8 @@ export interface MergeCandidateReadiness {
 export type ValidationTier = 1 | 2 | 3;
 
 export type ValidationProvenanceStatus = "running" | "succeeded" | "failed" | "unknown";
+export type ValidationFreshnessStatus = "fresh" | "stale" | "unknown" | "unavailable";
+export type ValidationIdentitySource = "persisted" | "legacy_fallback";
 
 export interface ValidationRunSummary {
   validation_run_id: string;
@@ -140,21 +142,41 @@ export interface ValidationRunSummary {
   tier: ValidationTier;
   command_set_hash: string;
   base_commit: string | null;
+  base_sha: string | null;
+  workspace_head_sha: string | null;
   target_branch: string | null;
   target_head_sha: string | null;
   current_target_head_sha: string | null;
+  profile_name: string | null;
+  profile_version: number | null;
+  profile_source: string | null;
+  resolved_profile_digest: string | null;
+  environment_identity_digest: string | null;
+  environment_identity_inputs: Record<string, unknown>;
+  identity_source: ValidationIdentitySource;
   status: ValidationProvenanceStatus;
   reason_code: string | null;
   started_at: string;
   finished_at: string | null;
   log_stream_refs: Record<string, unknown>;
   fresh_for_target: boolean | null;
+  freshness_status: ValidationFreshnessStatus;
+  freshness_reason_code: string | null;
   retry_count: number;
   coverage_percent: number | null;
   coverage_minimum_percent: number | null;
   coverage_status: string | null;
   coverage_reason_code: string | null;
   coverage_gaps: Record<string, unknown>[];
+}
+
+export interface ValidationFreshnessSummary {
+  required_tier: ValidationTier | null;
+  latest_satisfied_tier: ValidationTier | null;
+  freshness_status: ValidationFreshnessStatus;
+  reason_code: string | null;
+  current_target_head_sha: string | null;
+  latest_validation: ValidationRunSummary | null;
 }
 
 export type StaleReasonCode =
@@ -250,6 +272,8 @@ export interface MergeQueueItem {
   required_next_action: string | null;
   required_validation_tier?: ValidationTier | null;
   latest_satisfied_validation_tier?: ValidationTier | null;
+  validation_freshness_status?: ValidationFreshnessStatus;
+  validation_reason_code?: string | null;
   readiness: MergeCandidateReadiness | null;
   canonical: boolean;
   queue_blockers: MergeQueueBlocker[];
@@ -269,6 +293,11 @@ export interface Workspace {
   task_title: string;
   task_prompt: string;
   task_external_id: string | null;
+  task_class: string | null;
+  owned_paths: string[];
+  task_policy: Record<string, unknown>;
+  auto_merge: boolean;
+  initial_review_grace_period_seconds: number | null;
   agent: AgentRuntime;
   agent_model: string | null;
   agent_effort: string | null;
@@ -277,6 +306,7 @@ export interface Workspace {
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
   recovery?: WorkspaceRecoverySummary | null;
+  validation_provenance: ValidationFreshnessSummary;
   env_profile: string | null;
   profile_ref: string | null;
   requested_profile: Record<string, unknown> | null;
@@ -285,6 +315,7 @@ export interface Workspace {
   requires_database: boolean;
   node_id: string | null;
   compose_project_name: string | null;
+  compose_file_path: string | null;
   pr_url: string | null;
   failure_reason: string | null;
   failure_message: string | null;

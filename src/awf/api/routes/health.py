@@ -434,6 +434,18 @@ async def readyz(
     daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_docker_daemon(runner)
     )
+    orphan_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_orphan_resources_with_concurrent_scans(
+            runner=runner,
+            factory=factory,
+            work_dir=settings.work_dir,
+            db_check_task=db_check_task,
+            docker_check_task=daemon_check_task,
+        )
+    )
+    # Let the orphan task create its nested read-only scan tasks before peer
+    # Docker checks that may block briefly while proving overlap in tests.
+    await asyncio.sleep(0)
     compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_docker_compose(runner)
     )
@@ -445,15 +457,6 @@ async def readyz(
             collect_agent_readiness,
             service_settings,
             validated_strict_providers=strict_providers,
-        )
-    )
-    orphan_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
-        _check_orphan_resources_with_concurrent_scans(
-            runner=runner,
-            factory=factory,
-            work_dir=settings.work_dir,
-            db_check_task=db_check_task,
-            docker_check_task=daemon_check_task,
         )
     )
     await asyncio.gather(

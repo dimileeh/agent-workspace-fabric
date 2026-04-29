@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from awf.api.schemas import (
+    ValidationFreshnessStatus,
     ValidationProvenanceStatus,
     ValidationRunSummaryResponse,
     ValidationTier,
@@ -21,6 +22,15 @@ def validation_run_summary(
 ) -> ValidationRunSummaryResponse:
     status = _validation_status(run.status)
     identity_fields = validation_identity_fields(run)
+    fresh = fresh_for_target(
+        validation_target_head_sha=run.target_head_sha,
+        current_target_head_sha=current_target_head_sha,
+    )
+    freshness_status, freshness_reason_code = validation_freshness_status(
+        validation_target_head_sha=run.target_head_sha,
+        current_target_head_sha=current_target_head_sha,
+        fresh_for_target=fresh,
+    )
     return ValidationRunSummaryResponse(
         validation_run_id=run.id,
         attempt_id=run.attempt_id,
@@ -36,10 +46,9 @@ def validation_run_summary(
         started_at=_ensure_utc(run.started_at),
         finished_at=_ensure_utc(run.finished_at) if run.finished_at is not None else None,
         log_stream_refs=_json_dict(run.log_stream_refs),
-        fresh_for_target=fresh_for_target(
-            validation_target_head_sha=run.target_head_sha,
-            current_target_head_sha=current_target_head_sha,
-        ),
+        fresh_for_target=fresh,
+        freshness_status=freshness_status,
+        freshness_reason_code=freshness_reason_code,
         retry_count=run.retry_count,
         **validation_coverage_fields(run),
     )
@@ -53,6 +62,21 @@ def fresh_for_target(
     if not validation_target_head_sha or not current_target_head_sha:
         return None
     return validation_target_head_sha == current_target_head_sha
+
+
+def validation_freshness_status(
+    *,
+    validation_target_head_sha: str | None,
+    current_target_head_sha: str | None,
+    fresh_for_target: bool | None,
+) -> tuple[ValidationFreshnessStatus, str]:
+    if fresh_for_target is True:
+        return "fresh", "validation_fresh"
+    if fresh_for_target is False:
+        return "stale", "validation_target_stale"
+    if not validation_target_head_sha or not current_target_head_sha:
+        return "unknown", "validation_target_unknown"
+    return "unknown", "validation_target_unknown"
 
 
 def _validation_status(value: str) -> ValidationProvenanceStatus:

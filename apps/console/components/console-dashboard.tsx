@@ -50,6 +50,7 @@ import {
   summarizeRecovery,
   summarizeStaleReasons,
   summarizeValidation,
+  summarizeValidationProvenance,
 } from "@/lib/merge-queue-format";
 import {
   formatRecoveryBadge,
@@ -1187,7 +1188,7 @@ function WorkspaceSummary({
           <Fact label="Operation" value={overview.active_operation ?? "none"} />
           <Fact label="Updated" value={formatDateTime(overview.updated_at)} />
         </div>
-        <WorkspaceRecoveryBlock item={mergeQueueItem} />
+        <WorkspaceRecoveryBlock item={mergeQueueItem} workspace={workspace} overview={overview} />
         <UsageSummaryBlock usage={workspace?.llm_usage ?? overview.llm_usage} />
         {recovery ? <RecoveryCallout recovery={recovery} status={overview.status} /> : null}
         {overview.failure_reason || overview.failure_message ? (
@@ -1214,12 +1215,55 @@ function WorkspaceSummary({
   );
 }
 
-function WorkspaceRecoveryBlock({ item }: { item: MergeQueueItem | null }) {
+function WorkspaceRecoveryBlock({
+  item,
+  workspace,
+  overview,
+}: {
+  item: MergeQueueItem | null;
+  workspace: Workspace | null;
+  overview: WorkspaceOverview;
+}) {
   if (!item) {
+    const validation = summarizeValidationProvenance(workspace?.validation_provenance);
     return (
-      <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
-        <div className="font-semibold text-slate-900">Validation freshness</div>
-        <div className="mt-1 text-slate-600">Workspace is not in the current merge queue snapshot.</div>
+      <div className="grid gap-2 rounded-md border border-slate-200 bg-white p-2 text-xs">
+        <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+          <div className="min-w-0">
+            <div className="font-semibold text-slate-900">Validation freshness</div>
+            <div className="mono mt-0.5 truncate text-[11px] text-slate-500">
+              {workspace?.branch_name ?? overview.branch_name ?? "no branch"} / {overview.base_branch}
+            </div>
+          </div>
+          <Badge value={overview.status} />
+        </div>
+        <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3">
+          <QueueChip label="Required" value={validation.requiredTierLabel} />
+          <QueueChip
+            label="Satisfied"
+            value={validation.latestSatisfiedTierLabel}
+            detail={validation.latestSatisfiedTierDetail}
+            tone={satisfiedTierTone(validation.latestSatisfiedTierLabel)}
+          />
+          <QueueChip
+            label="Freshness"
+            value={validation.freshnessLabel}
+            detail={validation.targetRangeLabel}
+            tone={freshnessTone(validation.freshnessLabel)}
+          />
+          <QueueChip label="Reason" value={validation.validationReasonLabel} mono />
+          <QueueChip label="Command" value={validation.commandHashLabel} mono />
+          <QueueChip label="Profile" value={validation.profileLabel} />
+          <QueueChip label="Env" value={validation.environmentLabel} mono />
+          <QueueChip label="Base" value={validation.baseShaLabel} mono />
+          <QueueChip label="Workspace head" value={validation.workspaceHeadShaLabel} mono />
+          <QueueChip
+            label="Targets"
+            value={validation.targetRangeLabel}
+            detail={`${validation.validatedTargetShaLabel} / ${validation.currentTargetShaLabel}`}
+            mono
+          />
+        </div>
       </div>
     );
   }
@@ -1267,6 +1311,11 @@ function WorkspaceRecoveryBlock({ item }: { item: MergeQueueItem | null }) {
           detail={item.latest_validation?.target_branch ?? item.base_branch}
           mono
         />
+        <QueueChip label="Workspace head" value={recovery.workspaceHeadShaLabel} mono />
+        <QueueChip label="Reason" value={recovery.validationReasonLabel} mono />
+        <QueueChip label="Command" value={recovery.commandHashLabel} mono />
+        <QueueChip label="Profile" value={recovery.profileLabel} />
+        <QueueChip label="Env" value={recovery.environmentLabel} mono />
         <QueueChip
           label="Targets"
           value={recovery.targetRangeLabel}
@@ -1694,9 +1743,14 @@ function MergeQueueRow({
             <QueueDatum label="Validation" value={validation.label} tone={validationTone(item)} />
             <QueueDatum label="Freshness" value={recovery.freshnessLabel} tone={freshnessTone(recovery.freshnessLabel)} />
             <QueueDatum label="Base SHA" value={recovery.baseShaLabel} mono />
+            <QueueDatum label="Workspace head" value={recovery.workspaceHeadShaLabel} mono />
             <QueueDatum label="Validated target" value={recovery.validatedTargetShaLabel} mono />
             <QueueDatum label="Current target" value={recovery.currentTargetShaLabel} mono />
             <QueueDatum label="Validation heads" value={recovery.targetRangeLabel} mono />
+            <QueueDatum label="Reason" value={recovery.validationReasonLabel} mono />
+            <QueueDatum label="Command hash" value={recovery.commandHashLabel} mono />
+            <QueueDatum label="Profile" value={recovery.profileLabel} />
+            <QueueDatum label="Env identity" value={recovery.environmentLabel} mono />
             <QueueDatum label="Coverage" value={validation.coverageLabel} mono />
           </div>
           <div className="grid gap-1 text-[11px] text-slate-500 sm:grid-cols-2">
