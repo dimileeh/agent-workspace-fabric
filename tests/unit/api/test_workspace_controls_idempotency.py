@@ -1820,10 +1820,10 @@ async def _call_control(
     variant: str = "base",
 ) -> Response:
     if action == "cancel":
-        stop_stack = variant == "base"
+        reason = "operator requested" if variant == "base" else "changed reason"
         return await client.post(
             f"/v1/workspaces/{workspace_id}/cancel",
-            json={"reason": "operator requested", "stop_stack": stop_stack},
+            json={"reason": reason, "stop_stack": True},
             headers=headers,
         )
     if action == "stop":
