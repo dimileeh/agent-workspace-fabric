@@ -17,6 +17,8 @@ from awf.profiles.models import EgressMode, ProfileEgress
 class LocalEgressPlan:
     """Local Compose network settings derived from a profile egress policy."""
 
+    __hash__ = None  # type: ignore[assignment]
+
     mode: EgressMode
     network_internal: bool
     host_gateway_enabled: bool
