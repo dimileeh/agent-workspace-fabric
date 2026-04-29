@@ -119,6 +119,14 @@ _RECOVERY_ACTIVE_OPERATION_STATUSES = {
 }
 _VALIDATE_ONLY_RECOVERY_SOURCES = {"pr_monitor", "operator_api"}
 _VALIDATE_ONLY_RECOVERY_MODES = {"validate_only", "rebase_only"}
+_REBASE_RECOVERY_OPERATION_IDENTITY_KEYS = (
+    "source",
+    "recovery_mode",
+    "reason_code",
+    "pr_number",
+    "source_head_sha",
+    "source_base_sha",
+)
 
 
 @dataclass(frozen=True)
@@ -168,6 +176,24 @@ def _is_validate_only_recovery_payload(payload: object) -> bool:
     return (
         payload.get("source") in _VALIDATE_ONLY_RECOVERY_SOURCES
         and payload.get("recovery_mode") in _VALIDATE_ONLY_RECOVERY_MODES
+    )
+
+
+def _rebase_recovery_operation_payload_matches(
+    operation_payload: Mapping[str, Any],
+    recovery_payload: Mapping[str, Any],
+) -> bool:
+    recovery_payload_dict = dict(recovery_payload)
+    identity = {
+        key: recovery_payload_dict[key]
+        for key in _REBASE_RECOVERY_OPERATION_IDENTITY_KEYS
+        if key in recovery_payload_dict
+    }
+    if len(identity) != len(_REBASE_RECOVERY_OPERATION_IDENTITY_KEYS):
+        return operation_payload == recovery_payload_dict
+    return all(
+        key in operation_payload and operation_payload[key] == value
+        for key, value in identity.items()
     )
 
 
@@ -2165,7 +2191,11 @@ class WorkspaceExecutor:
             for operation in operations:
                 if not _is_validate_only_recovery_payload(operation.payload):
                     continue
-                if operation.payload == dict(recovery_payload):
+                operation_payload = cast(Mapping[str, Any], operation.payload)
+                if _rebase_recovery_operation_payload_matches(
+                    operation_payload,
+                    recovery_payload,
+                ):
                     return operation
         return None
 

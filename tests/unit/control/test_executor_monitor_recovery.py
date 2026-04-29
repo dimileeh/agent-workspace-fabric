@@ -25,6 +25,7 @@ from awf.control.executor import (
     ExecutorConfig,
     WorkspaceExecutor,
     _get_active_recovery_payload,
+    _MonitorRebaseRecoveryError,
 )
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
@@ -933,6 +934,65 @@ async def test_operator_rebase_operation_is_reused_and_failed_when_rebase_fails(
         "source_base_sha": "a" * 40,
         "source_head_sha": "d" * 40,
     }
+
+
+@pytest.mark.unit
+async def test_rebase_recovery_reuses_active_operation_with_extra_payload_context(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        recovery_mode="rebase_only",
+        source="operator_api",
+        operation_type=OperationType.rebase,
+    )
+
+    async with factory() as s:
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+        rebase_op = next(op for op in ops if op.type == OperationType.rebase.value)
+        rebase_op.payload = {
+            **dict(rebase_op.payload or {}),
+            "candidate_id": "candidate-1",
+            "log_stream_refs": {"monitor": "monitor.log"},
+        }
+        rebase_op_id = rebase_op.id
+        await s.commit()
+
+    fake.queue_result(returncode=0)  # git fetch origin <base>
+    fake.queue_result(returncode=0)  # git switch <branch>
+    fake.queue_result(returncode=1)  # git merge-base --is-ancestor origin/<base> HEAD
+    fake.queue_result(returncode=1, stderr="conflict on README.md")  # git rebase
+    fake.queue_result(returncode=0)  # git rebase --abort
+
+    with pytest.raises(_MonitorRebaseRecoveryError):
+        await executor._run_monitor_rebase_recovery(
+            workspace_id=ws_id,
+            worktree_path=_test_worktrees_root(factory) / ws_id,
+            base_branch="development",
+            branch_name=f"awf/{ws_id}",
+            remote_branch=f"awf/{ws_id}",
+            reason="validation_insufficient_tier",
+            recovery_payload={
+                "source": "operator_api",
+                "recovery_mode": "rebase_only",
+                "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                "pr_number": 1,
+                "source_base_sha": "a" * 40,
+                "source_head_sha": "d" * 40,
+            },
+        )
+
+    async with factory() as s:
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+    rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
+    assert [op.id for op in rebase_ops] == [rebase_op_id]
+    assert rebase_ops[0].status == OperationStatus.failed.value
+    assert rebase_ops[0].payload is not None
+    assert rebase_ops[0].payload["candidate_id"] == "candidate-1"
+    assert rebase_ops[0].payload["log_stream_refs"] == {"monitor": "monitor.log"}
 
 
 @pytest.mark.unit
