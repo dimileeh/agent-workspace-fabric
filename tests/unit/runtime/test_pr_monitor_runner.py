@@ -28,6 +28,7 @@ from awf.db.repositories import (
     OperationRepository,
     StaleReasonCreate,
     StaleReasonRepository,
+    TaskAttemptRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
@@ -59,6 +60,7 @@ from awf.runtime.pr_monitor_runner import (
     _initial_review_grace_wall_started_value_from_datetime,
     _is_pending_check,
     _merge_rejection_reason,
+    _non_check_reviewer_settle_started_key,
     _notify_human_reason,
     _parse_verdict,
     _stale_pending_check_warning_key,
@@ -70,6 +72,7 @@ from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
     make_runner,
+    pr_payload,
     seed_monitoring_workspace,
 )
 from tests.unit.runtime.test_pr_monitor import _status
@@ -107,6 +110,10 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
         base_behind_count=0,
         merge_state_status=MergeStateStatus.CLEAN,
     )
+
+
+def _gh_pr_merge_calls(cmd: FakeCommandRunner) -> list[list[str]]:
+    return [call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "merge"]]
 
 
 async def _mark_refactor_task(
@@ -232,6 +239,356 @@ async def test_advisory_plan_artifact_stale_reason_does_not_dispatch_recovery(
     ]
     assert operations == []
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+
+
+@pytest.mark.unit
+async def test_auto_merge_waits_for_initial_review_grace_before_merge(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=900,
+    )
+    state = MonitorState()
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_status(),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert state.threads_addressed_ids[_initial_review_grace_started_key(42)]
+    assert _gh_pr_merge_calls(cmd) == []
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_auto_merge_dispatches_validation_recovery_before_merge(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 81
+    head_sha = "b" * 40
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    await _mark_refactor_task(factory, workspace_id)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=pr_number,
+        status=_green_status(pr_number=pr_number, head_sha=head_sha),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert terminal is True
+    assert _gh_pr_merge_calls(cmd) == []
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert len(operations) == 1
+    assert operations[0].type == "validate"
+    assert operations[0].status == OperationStatus.pending.value
+    assert operations[0].payload["action"] == "validate_only"
+    assert operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
+    assert operations[0].payload["source_head_sha"] == head_sha
+
+
+@pytest.mark.unit
+async def test_auto_merge_dispatches_active_stale_recovery_before_merge(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 82
+    head_sha = "c" * 40
+    cmd = FakeCommandRunner()
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    async with factory() as session:
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
+        assert candidate is not None
+        await StaleReasonRepository(session).replace_active_findings(
+            workspace_id=workspace_id,
+            candidate_id=candidate.id,
+            attempt_id=candidate.attempt_id,
+            task_id=candidate.task_id,
+            findings=[
+                StaleReasonCreate(
+                    reason_code="STALE_TARGET_ADVANCED",
+                    trigger_type="target_advanced",
+                    trigger_ref="d" * 40,
+                    explanation="Target branch advanced past this candidate.",
+                )
+            ],
+        )
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=pr_number,
+        status=_green_status(pr_number=pr_number, head_sha=head_sha),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert terminal is True
+    assert _gh_pr_merge_calls(cmd) == []
+    assert candidate is not None
+    assert candidate.stale is True
+    assert candidate.stale_reason == "STALE_TARGET_ADVANCED"
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert len(operations) == 1
+    assert operations[0].payload["action"] == "rebase_only"
+    assert operations[0].payload["reason_code"] == "STALE_TARGET_ADVANCED"
+
+
+@pytest.mark.unit
+async def test_auto_merge_waits_for_non_check_reviewer_settle_before_merge(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 83
+    head_sha = "head-without-visible-reviewer"
+    cmd = FakeCommandRunner()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=head_sha,
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        non_check_reviewer_settle_seconds=180,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+    state = MonitorState(started_at=0.0)
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=pr_number,
+        status=_green_status(pr_number=pr_number, head_sha=head_sha),
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+
+    assert terminal is False
+    assert sleep_fn.calls == [60]
+    assert (
+        state.threads_addressed_ids[
+            _non_check_reviewer_settle_started_key(
+                pr_number=pr_number,
+                head_sha=head_sha,
+            )
+        ]
+    )
+    assert _gh_pr_merge_calls(cmd) == []
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_pre_merge_recheck_blocks_when_check_becomes_pending(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # git fetch origin development
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload(check_state="PENDING"))
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+        pre_merge_settle_seconds=5,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=_green_status(),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+
+    assert terminal is False
+    assert sleep_fn.calls == [5, 60]
+    assert _gh_pr_merge_calls(cmd) == []
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.monitoring_pr.value
+
+
+@pytest.mark.unit
+async def test_clean_pr_merges_only_after_pre_merge_recheck_passes(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # git fetch origin development
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(returncode=0, stdout=pr_payload())  # final clean PR snapshot
+    cmd.queue_result(returncode=0)  # gh pr merge
+    cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge commit lookup
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=900,
+        pre_merge_settle_seconds=5,
+        non_check_reviewer_settle_seconds=180,
+        non_check_reviewer_logins=("greptile-apps",),
+    )
+    state = MonitorState(
+        started_at=0.0,
+        threads_addressed_ids={_initial_review_grace_done_key(42): "elapsed"},
+    )
+    status = replace(
+        _green_status(),
+        checks=(CheckTiming(name="Greptile", status="COMPLETED", conclusion="SUCCESS"),),
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+        assert attempt is not None
+        candidate = await MergeCandidateRepository(session).get_by_attempt_id(attempt.id)
+
+    graphql_index = next(
+        index for index, call in enumerate(cmd.calls) if call.args[:3] == ["gh", "api", "graphql"]
+    )
+    merge_index = next(
+        index for index, call in enumerate(cmd.calls) if call.args[:3] == ["gh", "pr", "merge"]
+    )
+    assert terminal is True
+    assert sleep_fn.calls == [5]
+    assert graphql_index < merge_index
+    assert len(_gh_pr_merge_calls(cmd)) == 1
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.completed.value
+    assert workspace.pr_merge_sha == "MERGESHA"
+    assert candidate is not None
+    assert candidate.status == "merged"
 
 
 class TestParseVerdict:
