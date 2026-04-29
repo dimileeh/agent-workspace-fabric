@@ -81,19 +81,29 @@ class ProjectInspection:
 class PreviewDiagnostics:
     """Missing project-profile sections that require human or agent review."""
 
-    missing_services: list[str]
-    missing_secrets: list[str]
-    missing_ports: list[str]
-    missing_validation_commands: list[str]
-    missing_healthchecks: list[str]
+    missing_services: tuple[str, ...]
+    missing_secrets: tuple[str, ...]
+    missing_ports: tuple[str, ...]
+    missing_validation_commands: tuple[str, ...]
+    missing_healthchecks: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        for field_name in (
+            "missing_services",
+            "missing_secrets",
+            "missing_ports",
+            "missing_validation_commands",
+            "missing_healthchecks",
+        ):
+            object.__setattr__(self, field_name, tuple(getattr(self, field_name)))
 
     def to_dict(self) -> dict[str, list[str]]:
         return {
-            "missing_services": self.missing_services,
-            "missing_secrets": self.missing_secrets,
-            "missing_ports": self.missing_ports,
-            "missing_validation_commands": self.missing_validation_commands,
-            "missing_healthchecks": self.missing_healthchecks,
+            "missing_services": list(self.missing_services),
+            "missing_secrets": list(self.missing_secrets),
+            "missing_ports": list(self.missing_ports),
+            "missing_validation_commands": list(self.missing_validation_commands),
+            "missing_healthchecks": list(self.missing_healthchecks),
         }
 
 
@@ -467,9 +477,9 @@ def _diagnostics_for(
 
     return PreviewDiagnostics(
         missing_services=_dedupe_sorted(missing_services),
-        missing_secrets=missing_secrets,
+        missing_secrets=tuple(missing_secrets),
         missing_ports=_dedupe_sorted(missing_ports),
-        missing_validation_commands=missing_validation_commands,
+        missing_validation_commands=tuple(missing_validation_commands),
         missing_healthchecks=_dedupe_sorted(missing_healthchecks),
     )
 
@@ -770,5 +780,5 @@ def _playwright_configs() -> tuple[str, ...]:
     )
 
 
-def _dedupe_sorted(values: list[str]) -> list[str]:
-    return sorted(set(values))
+def _dedupe_sorted(values: list[str]) -> tuple[str, ...]:
+    return tuple(sorted(set(values)))

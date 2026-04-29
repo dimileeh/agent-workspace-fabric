@@ -10,6 +10,7 @@ import yaml
 
 from awf.profiles.models import DockerMode, WorkspaceProfile
 from awf.profiles.onboarding import (
+    PreviewDiagnostics,
     ProjectInspection,
     _diagnostics_for,
     _profile_for_template,
@@ -64,9 +65,9 @@ def test_compose_diagnostics_are_silent_for_non_dind_profile(
     assert preview.inspection.compose_services
     assert preview.draft.template == "python"
     assert preview.draft.profile.docker.mode == DockerMode.none
-    assert preview.diagnostics.missing_secrets == []
-    assert preview.diagnostics.missing_ports == []
-    assert preview.diagnostics.missing_healthchecks == []
+    assert preview.diagnostics.missing_secrets == ()
+    assert preview.diagnostics.missing_ports == ()
+    assert preview.diagnostics.missing_healthchecks == ()
 
 
 @pytest.mark.unit
@@ -217,7 +218,7 @@ def test_compose_port_draft_omits_non_web_endpoints(tmp_path: Path) -> None:
         "web": "http://web:8080",
         "secure": "https://secure:443",
     }
-    assert preview.diagnostics.missing_ports == ["db"]
+    assert preview.diagnostics.missing_ports == ("db",)
 
 
 @pytest.mark.unit
@@ -232,11 +233,32 @@ def test_preview_reports_missing_sections(tmp_path: Path) -> None:
         "missing_validation_commands",
         "missing_healthchecks",
     }
-    assert isinstance(preview.diagnostics.missing_services, list)
-    assert isinstance(preview.diagnostics.missing_secrets, list)
-    assert isinstance(preview.diagnostics.missing_ports, list)
-    assert isinstance(preview.diagnostics.missing_validation_commands, list)
-    assert isinstance(preview.diagnostics.missing_healthchecks, list)
+    assert isinstance(preview.diagnostics.missing_services, tuple)
+    assert isinstance(preview.diagnostics.missing_secrets, tuple)
+    assert isinstance(preview.diagnostics.missing_ports, tuple)
+    assert isinstance(preview.diagnostics.missing_validation_commands, tuple)
+    assert isinstance(preview.diagnostics.missing_healthchecks, tuple)
+    assert isinstance(payload["diagnostics"]["missing_services"], list)
+    assert isinstance(payload["diagnostics"]["missing_validation_commands"], list)
+    with pytest.raises(AttributeError):
+        preview.diagnostics.missing_validation_commands.append("corrupt")  # type: ignore[attr-defined]
+
+
+@pytest.mark.unit
+def test_preview_diagnostics_normalizes_constructor_lists_to_tuples() -> None:
+    missing_services = ["api"]
+
+    diagnostics = PreviewDiagnostics(
+        missing_services=missing_services,
+        missing_secrets=[],
+        missing_ports=[],
+        missing_validation_commands=[],
+        missing_healthchecks=[],
+    )
+    missing_services.append("worker")
+
+    assert diagnostics.missing_services == ("api",)
+    assert diagnostics.to_dict()["missing_services"] == ["api"]
 
 
 @pytest.mark.unit
@@ -413,7 +435,7 @@ def test_multi_service_template_from_service_directories_without_compose(
 
     assert preview.draft.template == "multi-service"
     assert preview.draft.profile.docker.compose_files == []
-    assert preview.diagnostics.missing_services == ["apps", "services"]
+    assert preview.diagnostics.missing_services == ("apps", "services")
 
 
 @pytest.mark.unit
@@ -457,15 +479,15 @@ def test_compose_parser_handles_long_form_ports_and_secret_shapes(
 
     assert preview.draft.template == "multi-service"
     assert preview.draft.profile.ports == {"web": "http://web:8080"}
-    assert preview.diagnostics.missing_secrets == [
+    assert preview.diagnostics.missing_secrets == (
         "ACCESS_KEY",
         "API_TOKEN",
         "CREDENTIAL_FILE",
         "PASSWORD",
         "PRIVATE_KEY_FILE",
         "SERVICE_TOKEN",
-    ]
-    assert preview.diagnostics.missing_healthchecks == ["worker"]
+    )
+    assert preview.diagnostics.missing_healthchecks == ("worker",)
 
 
 @pytest.mark.unit
@@ -574,5 +596,5 @@ def test_node_playwright_diagnostics_do_not_report_app_when_declared(
     assert "app" in diagnostics.missing_healthchecks
 
     declared = _diagnostics_for(inspection, profile=profile, template="node-playwright")
-    assert declared.missing_ports == []
-    assert declared.missing_healthchecks == []
+    assert declared.missing_ports == ()
+    assert declared.missing_healthchecks == ()
