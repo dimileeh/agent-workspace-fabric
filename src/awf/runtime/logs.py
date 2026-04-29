@@ -73,7 +73,7 @@ class LogBroadcaster:
         data: str,
     ) -> None:
         redacted_data = await asyncio.to_thread(redact_secrets, data)
-        self._publish_redacted(
+        self.publish_redacted(
             workspace_id=workspace_id,
             stream_id=stream_id,
             source=source,
@@ -82,7 +82,7 @@ class LogBroadcaster:
             data=redacted_data,
         )
 
-    def _publish_redacted(
+    def publish_redacted(
         self,
         *,
         workspace_id: str,
@@ -92,6 +92,7 @@ class LogBroadcaster:
         offset: int,
         data: str,
     ) -> None:
+        """Publish data that has already passed through redact_secrets."""
         frame = LogFrame(
             seq=next(self._seq),
             workspace_id=workspace_id,
@@ -370,7 +371,7 @@ class WorkspaceLogSink:
 
     async def _publish_frame(self, frame: tuple[int, str]) -> None:
         offset, redacted_data = frame
-        self.broadcaster._publish_redacted(
+        self.broadcaster.publish_redacted(
             workspace_id=self.workspace_id,
             stream_id=self.stream_id,
             source=self.source,

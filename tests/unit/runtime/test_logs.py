@@ -278,6 +278,40 @@ async def test_workspace_log_sink_redacts_persisted_data_live_frames_and_metadat
 
 
 @pytest.mark.unit
+async def test_workspace_log_sink_does_not_redact_live_frame_after_persisting(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    redaction_inputs: list[str] = []
+
+    def fake_redact_secrets(data: str) -> str:
+        redaction_inputs.append(data)
+        return data.replace("token", "token<redaction-pass>")
+
+    monkeypatch.setattr(logs_module, "redact_secrets", fake_redact_secrets)
+    path = tmp_path / "workspace.log"
+    broadcaster = LogBroadcaster()
+    sink = WorkspaceLogSink(
+        workspace_id="ws_single_redact",
+        stream_id="agent.stdout",
+        source="agent",
+        fd="stdout",
+        path=path,
+        session_factory=None,
+        broadcaster=broadcaster,
+    )
+
+    async with broadcaster.subscribe("ws_single_redact") as queue:
+        await sink.write("live token\n")
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    persisted = path.read_text(encoding="utf-8")
+    assert redaction_inputs == ["live token\n"]
+    assert persisted == "live token<redaction-pass>\n"
+    assert frame.data == persisted
+
+
+@pytest.mark.unit
 async def test_workspace_log_sink_redacts_tokens_split_across_write_boundaries(
     tmp_path: Path,
 ) -> None:
