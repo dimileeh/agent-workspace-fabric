@@ -49,6 +49,10 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Security, Secrets, And Egress Policy | Profile lint for unsafe secret mounts | `ws_d14e2177bdc24746b552918b` | _pending_ | running | Codex/gpt-5.5, auto-merge enabled; reject/warn unsafe secret targets and broad host-home auth mounts. |
+| P1 Security, Secrets, And Egress Policy | Local egress policy enforcement | `ws_830a162773f845adb14caed9` | _pending_ | running | Codex/gpt-5.5, auto-merge enabled; enforce profile egress policy in local Docker mode. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Operator-visible advisory overlap graph | `ws_0bb96ca3f38142288e51ef2f` | _pending_ | running | Codex/gpt-5.5, auto-merge enabled; expose overlap visibility without blocking workspace launch. |
+| P1 API Contract Completion | Normalized list pagination envelopes | `ws_49f61dfb52e74dc9836aad50` | _pending_ | running | Codex/gpt-5.5, auto-merge enabled; make list API envelopes consistent and backward-compatible. |
 | P1 Local Packaging And Upgrade Path | Local backup, upgrade, and recovery runbook | `ws_f3145b63327c482aaaa37c10` | _pending_ | running | Documents local image versioning, Postgres backup/restore, rollback, disaster recovery, and `scripts/run_awf.py` compatibility with README contract tests. |
 
 ### Completed Slices
