@@ -980,7 +980,7 @@ Example runtime and operation observability calls:
 
 ## Local Dogfood Runner
 
-scripts/run_awf.py is the compatibility dogfood runner for exercising the same
+`scripts/run_awf.py` is the compatibility dogfood runner for exercising the same
 building blocks outside the always-on service. It stores its SQLite DB under
 `--work-dir`, does not require the local Postgres control-plane database,
 provisions workspaces, launches Docker Compose, runs the agent, creates a PR,
