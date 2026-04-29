@@ -149,6 +149,7 @@ class TestAllowedFromState:
     def test_allowed_next_from_requested(self) -> None:
         assert WorkspaceStateMachine.allowed_next(WorkspaceStatus.requested) == {
             WorkspaceStatus.provisioning,
+            WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
         }
 

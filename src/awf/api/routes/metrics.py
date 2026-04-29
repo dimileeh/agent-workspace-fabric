@@ -36,12 +36,22 @@ from awf.service.orphan_resources import (
     unavailable_workspace_view,
     workspace_id_view_from_session,
 )
+from awf.service.workspace_runtime_health import (
+    WorkspaceRuntimeHealthSummary,
+    runtime_resource_from_detected,
+    runtime_workspaces_from_session,
+    summarize_runtime_health,
+)
 
 router = APIRouter(prefix="/v1/metrics", tags=["metrics"])
 DiskCheckProvider = Callable[[Settings], DiskCheck]
 OrphanResourceSummaryProvider = Callable[
     [Settings, AsyncSession],
     OrphanResourceSummary | Awaitable[OrphanResourceSummary],
+]
+RuntimeHealthSummaryProvider = Callable[
+    [Settings, AsyncSession, OrphanResourceSummary],
+    WorkspaceRuntimeHealthSummary | Awaitable[WorkspaceRuntimeHealthSummary],
 ]
 
 
@@ -299,6 +309,18 @@ class OrphanResourceSummaryResponse(BaseModel):
     examples: list[dict[str, Any]]
 
 
+class RuntimeHealthSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    scanner_available: bool
+    scanner_reason: str | None = None
+    scanner_detail: str | None = None
+    stranded_count: int
+    fail_candidate_count: int
+    recoverable_count: int
+    reason_counts: dict[str, int]
+
+
 class ResourceSaturationSummaryResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -323,6 +345,9 @@ class ResourceSaturationSummaryResponse(BaseModel):
     )
     orphan_resources: OrphanResourceSummaryResponse = Field(
         description="Read-only orphan AWF Docker resource and worktree cleanup readiness.",
+    )
+    runtime_health: RuntimeHealthSummaryResponse = Field(
+        description="Read-only active workspace runtime health and recovery-decision counts.",
     )
     admission: AdmissionSummaryResponse = Field(
         description="Actionable summary explaining whether new workspace admission is blocked.",
@@ -397,11 +422,18 @@ async def get_resource_saturation_summary(
         settings,
         session,
     )
+    runtime_health = await _resource_saturation_runtime_health(
+        request,
+        settings,
+        session,
+        orphan_resources,
+    )
     summary = await summarize_resource_saturation_for_session(
         session,
         settings=settings,
         disk_check=disk_check,
         orphan_resources=orphan_resources,
+        runtime_health=runtime_health,
     )
     return ResourceSaturationSummaryResponse.model_validate(summary)
 
@@ -458,6 +490,38 @@ async def _resource_saturation_orphan_resources(
             return await result
         return result
     return await _default_orphan_resource_summary(settings, session)
+
+
+async def _resource_saturation_runtime_health(
+    request: Request,
+    settings: Settings,
+    session: AsyncSession,
+    orphan_resources: OrphanResourceSummary,
+) -> WorkspaceRuntimeHealthSummary:
+    provider = cast(
+        RuntimeHealthSummaryProvider | None,
+        getattr(request.app.state, "runtime_health_summary_provider", None),
+    )
+    if provider is not None:
+        result = provider(settings, session, orphan_resources)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+
+    workspaces = await runtime_workspaces_from_session(session)
+    docker_scan = orphan_resources.scanners.get("docker", {})
+    scanner_available = bool(docker_scan.get("ok", True))
+    return summarize_runtime_health(
+        workspaces=workspaces,
+        resources=(
+            runtime_resource_from_detected(record.resource)
+            for record in orphan_resources.records
+            if record.resource.kind == "container"
+        ),
+        scanner_available=scanner_available,
+        scanner_reason=str(docker_scan.get("reason") or "RUNTIME_INSPECTION_UNAVAILABLE"),
+        scanner_detail=cast(str | None, docker_scan.get("detail")),
+    )
 
 
 async def _default_orphan_resource_summary(

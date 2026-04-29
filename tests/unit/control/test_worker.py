@@ -13,11 +13,19 @@ import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.control.worker import ControlWorker, WorkerConfig
+from awf.control.worker import (
+    ControlWorker,
+    WorkerConfig,
+    _ActiveExecutionCandidate,
+    _candidate_claim_is_stale,
+    _claim_recheck_conditions,
+    _stale_active_execution_failure_message,
+)
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
@@ -26,6 +34,7 @@ from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.controls import WorkspaceControlService
+from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
 
 
 def _git(args: list[str], cwd: Path) -> None:
@@ -117,6 +126,7 @@ async def _create_monitoring_pr(
     title: str,
     *,
     pr_number: int = 123,
+    with_pr_url: bool = True,
 ) -> str:
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -138,8 +148,9 @@ async def _create_monitoring_pr(
         await repo.transition(ws, to=WorkspaceStatus.running, reason_code="SEED")
         await repo.transition(ws, to=WorkspaceStatus.validating, reason_code="SEED")
         await repo.transition(ws, to=WorkspaceStatus.pushing, reason_code="SEED")
-        ws.pr_url = f"https://github.com/example/repo/pull/{pr_number}"
-        ws.pr_number = pr_number
+        if with_pr_url:
+            ws.pr_url = f"https://github.com/example/repo/pull/{pr_number}"
+            ws.pr_number = pr_number
         await repo.transition(ws, to=WorkspaceStatus.monitoring_pr, reason_code="SEED")
         await s.commit()
         return ws.id
@@ -154,6 +165,7 @@ async def _create_active_execution(
     compose_project_name: str | None = None,
     node_id: str | None = None,
     persist_compose_project: bool = True,
+    task_policy: dict[str, object] | None = None,
 ) -> str:
     assert status in {
         WorkspaceStatus.running,
@@ -169,6 +181,7 @@ async def _create_active_execution(
             task_prompt="p",
             agent="codex",
             test_commands=[],
+            task_policy=task_policy,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = f"awf/{ws.id}"
@@ -1168,13 +1181,243 @@ class TestRunOnceStaleActiveExecutionRecovery:
             events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
             assert any(
                 event.event_type == "workspace.state_changed"
-                and event.reason_code == "STALE_ACTIVE_EXECUTION"
+                and event.reason_code == "STRANDED_WORKSPACE"
+                for event in events
+            )
+            assert any(
+                event.event_type == "workspace.runtime_stranded_detected"
+                and event.reason_code == "STRANDED_WORKSPACE"
                 for event in events
             )
         assert inspector.calls == [None]
 
     @pytest.mark.unit
-    async def test_stale_validating_with_unavailable_docker_fails(
+    async def test_stale_running_with_missing_agent_container_fails_with_structured_reason(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "missing-agent",
+            WorkspaceStatus.running,
+            compose_project_name="awf_missing_agent",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_missing_agent": RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="postgres",
+                            container_id="pg",
+                            image="postgres:16",
+                            state="running",
+                        )
+                    ],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "AGENT_CONTAINER_MISSING" in ws.failure_message
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+            runtime_events = [
+                event
+                for event in events
+                if event.event_type == "workspace.runtime_stranded_detected"
+            ]
+            assert len(runtime_events) == 1
+            assert runtime_events[0].reason_code == "AGENT_CONTAINER_MISSING"
+            assert runtime_events[0].payload is not None
+            assert runtime_events[0].payload["decision"] == "fail_workspace"
+            assert runtime_events[0].payload["runtime"]["services"][0]["name"] == "postgres"
+
+    @pytest.mark.unit
+    async def test_stale_running_with_exited_agent_container_fails_with_structured_reason(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "exited-agent",
+            WorkspaceStatus.running,
+            compose_project_name="awf_exited_agent",
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_exited_agent": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="agent",
+                            image="awf-agent:latest",
+                            state="exited",
+                            status="Exited (1) 2 minutes ago",
+                        )
+                    ],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "AGENT_CONTAINER_EXITED" in ws.failure_message
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+            assert any(
+                event.event_type == "workspace.runtime_stranded_detected"
+                and event.reason_code == "AGENT_CONTAINER_EXITED"
+                for event in events
+            )
+
+    @pytest.mark.unit
+    async def test_pre_pr_stranding_with_retry_policy_defers_recovery(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "retry-policy-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_retry_policy_running",
+            task_policy={"runtime_recovery": {"stranded_workspace": "retry"}},
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_retry_policy_running": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(events) == 1
+            assert events[0].reason_code == "STRANDED_WORKSPACE"
+            assert events[0].payload is not None
+            assert events[0].payload["decision"] == "defer_retry_policy"
+        assert inspector.calls == ["awf_retry_policy_running"]
+
+    @pytest.mark.unit
+    async def test_running_stack_with_exited_agent_and_retry_policy_defers_recovery(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "retry-policy-exited-agent",
+            WorkspaceStatus.running,
+            compose_project_name="awf_retry_policy_exited_agent",
+            task_policy={"runtime_recovery": {"stranded_workspace": "retry"}},
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_retry_policy_exited_agent": RuntimeSnapshot(
+                    stack_state="running",
+                    services=[
+                        RuntimeService(
+                            name="agent",
+                            container_id="agent",
+                            image="awf-agent:latest",
+                            state="exited",
+                            status="Exited (1) 2 minutes ago",
+                        ),
+                        RuntimeService(
+                            name="postgres",
+                            container_id="pg",
+                            image="postgres:16",
+                            state="running",
+                        ),
+                    ],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            runtime_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(runtime_events) == 1
+            assert runtime_events[0].reason_code == "AGENT_CONTAINER_EXITED"
+            assert runtime_events[0].payload is not None
+            assert runtime_events[0].payload["decision"] == "defer_retry_policy"
+            stale_events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.stale_active_execution_detected",
+            )
+            assert stale_events == []
+        assert inspector.calls == ["awf_retry_policy_exited_agent"]
+
+    @pytest.mark.unit
+    async def test_stale_validating_with_unavailable_docker_defers_recovery(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1207,12 +1450,175 @@ class TestRunOnceStaleActiveExecutionRecovery:
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
             assert ws is not None
+            assert ws.status == WorkspaceStatus.validating.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+            assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+
+    @pytest.mark.unit
+    async def test_stale_active_execution_failure_marks_workspace_failed(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stale-running-fail",
+            WorkspaceStatus.running,
+            compose_project_name="awf_stale_running_fail",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        await worker._fail_stale_active_execution(
+            _ActiveExecutionCandidate(
+                workspace_id=workspace_id,
+                status=WorkspaceStatus.running,
+                compose_project_name="awf_stale_running_fail",
+            ),
+            RuntimeSnapshot(
+                stack_state="running",
+                reason="worker process exited before releasing its claim",
+            ),
+        )
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
             assert ws.failure_reason == "infrastructure_failure"
             assert ws.failure_message is not None
-            assert "Cannot connect to the Docker daemon" in ws.failure_message
+            assert "compose runtime state is running" in ws.failure_message
+            assert "worker process exited before releasing its claim" in ws.failure_message
             events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
-            assert any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+            assert any(
+                event.event_type == "workspace.state_changed"
+                and event.reason_code == "STALE_ACTIVE_EXECUTION"
+                for event in events
+            )
+
+    @pytest.mark.unit
+    async def test_recoverable_runtime_stranding_skips_stale_rows_and_fresh_claims(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        status_mismatch_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "stranding-status-mismatch",
+            WorkspaceStatus.running,
+            compose_project_name="awf_status_mismatch",
+        )
+        fresh_claim_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "stranding-fresh-claim",
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(fresh_claim_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "healthy-monitor"
+            ws.monitor_claim_expires_at = datetime.now(UTC) + timedelta(minutes=5)
+            await s.commit()
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        finding = WorkspaceRuntimeFinding(
+            workspace_id="ws",
+            workspace_status=WorkspaceStatus.monitoring_pr.value,
+            status="stranded",
+            reason_code="STRANDED_WORKSPACE",
+            decision="remonitor_workspace",
+            message="runtime is stranded",
+        )
+        snapshot = RuntimeSnapshot(stack_state="stopped", reason="no containers")
+
+        await worker._record_recoverable_runtime_stranding(
+            _ActiveExecutionCandidate(
+                workspace_id=status_mismatch_id,
+                status=WorkspaceStatus.validating,
+                compose_project_name="awf_status_mismatch",
+            ),
+            snapshot,
+            finding,
+        )
+        await worker._record_recoverable_runtime_stranding(
+            _ActiveExecutionCandidate(
+                workspace_id=fresh_claim_id,
+                status=WorkspaceStatus.monitoring_pr,
+                compose_project_name=f"awf_{fresh_claim_id}",
+                pr_url="https://github.com/example/repo/pull/123",
+            ),
+            snapshot,
+            finding,
+        )
+
+        async with session_factory() as s:
+            for workspace_id in (status_mismatch_id, fresh_claim_id):
+                events = await WorkspaceEventRepository(s).list(
+                    workspace_id=workspace_id,
+                    event_type="workspace.runtime_stranded_detected",
+                )
+                assert events == []
+
+    @pytest.mark.unit
+    async def test_runtime_failure_helpers_ignore_rows_that_changed_status(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "changed-status-recovery",
+            WorkspaceStatus.running,
+            compose_project_name="awf_changed_status",
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+        snapshot = RuntimeSnapshot(stack_state="stopped", reason="no containers")
+        candidate = _ActiveExecutionCandidate(
+            workspace_id=workspace_id,
+            status=WorkspaceStatus.validating,
+            compose_project_name="awf_changed_status",
+        )
+        finding = WorkspaceRuntimeFinding(
+            workspace_id=workspace_id,
+            workspace_status=WorkspaceStatus.validating.value,
+            status="stranded",
+            reason_code="STRANDED_WORKSPACE",
+            decision="fail_workspace",
+            message="runtime is stranded",
+        )
+
+        await worker._fail_stale_active_execution(candidate, snapshot)
+        await worker._fail_stranded_workspace(candidate, snapshot, finding)
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.failure_reason is None
+            events = await WorkspaceEventRepository(s).list(workspace_id=workspace_id)
+            assert not any(event.reason_code == "STALE_ACTIVE_EXECUTION" for event in events)
+            assert not any(event.reason_code == "STRANDED_WORKSPACE" for event in events)
 
     @pytest.mark.unit
     async def test_stale_pushing_with_running_stack_is_preserved_and_evented(
@@ -1463,8 +1869,8 @@ class TestRunOnceStaleActiveExecutionRecovery:
         inspector = _RecordingRuntimeInspector(
             {
                 "awf_expired_claim_running": RuntimeSnapshot(
-                    stack_state="unavailable",
-                    reason="docker unavailable",
+                    stack_state="stopped",
+                    services=[],
                 )
             }
         )
@@ -1573,8 +1979,8 @@ class TestRunOnceStaleActiveExecutionRecovery:
         inspector = _RecordingRuntimeInspector(
             {
                 "awf_local_running": RuntimeSnapshot(
-                    stack_state="unavailable",
-                    reason="docker unavailable",
+                    stack_state="stopped",
+                    services=[],
                 )
             }
         )
@@ -1603,7 +2009,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert inspector.calls == ["awf_local_running"]
 
     @pytest.mark.unit
-    async def test_monitoring_pr_is_not_touched_by_stale_active_execution_scan(
+    async def test_monitoring_pr_with_open_pr_records_recoverable_runtime_stranding(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1613,7 +2019,14 @@ class TestRunOnceStaleActiveExecutionRecovery:
             origin_repo,
             "monitoring-pr",
         )
-        inspector = _RecordingRuntimeInspector({})
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{workspace_id}": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[],
+                )
+            }
+        )
         executor = _RecordingExecutor()
         worker = ControlWorker(
             session_factory=session_factory,
@@ -1630,8 +2043,119 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert ws is not None
             assert ws.status == WorkspaceStatus.monitoring_pr.value
             assert ws.failure_reason is None
-        assert inspector.calls == []
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(events) == 1
+            assert events[0].reason_code == "STRANDED_WORKSPACE"
+            assert events[0].payload is not None
+            assert events[0].payload["decision"] == "remonitor_workspace"
+        assert inspector.calls == [f"awf_{workspace_id}"]
         assert executor.resume_calls == []
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_runtime_stranding_clears_expired_claim_and_resumes(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "claimed-monitoring-pr",
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            ws.monitor_claimed_by = "dead-monitor-worker"
+            ws.monitor_claim_expires_at = datetime.now(UTC) - timedelta(seconds=1)
+            await s.commit()
+
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{workspace_id}": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[],
+                )
+            }
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        await worker._recover_stale_active_executions()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by is None
+            assert ws.monitor_claim_expires_at is None
+            assert ws.failure_reason is None
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(events) == 1
+            assert events[0].reason_code == "STRANDED_WORKSPACE"
+            assert events[0].payload is not None
+            assert events[0].payload["decision"] == "remonitor_workspace"
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_claimed_by is None
+            assert ws.monitor_claim_expires_at is None
+        assert executor.resume_calls == [workspace_id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_without_pr_url_follows_failure_path(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitoring-pr-without-url",
+            with_pr_url=False,
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                f"awf_{workspace_id}": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=0),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "STRANDED_WORKSPACE" in ws.failure_message
+        assert inspector.calls == [f"awf_{workspace_id}"]
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -1671,3 +2195,28 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert ws is not None
             assert ws.status == status.value
         assert inspector.calls == []
+
+
+@pytest.mark.unit
+def test_stale_execution_helper_defaults_for_non_runtime_statuses() -> None:
+    now = datetime(2026, 4, 27, 23, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        execution_claimed_by="worker",
+        execution_claim_expires_at=now + timedelta(minutes=5),
+        monitor_claimed_by="monitor",
+        monitor_claim_expires_at=now + timedelta(minutes=5),
+    )
+
+    assert _claim_recheck_conditions(WorkspaceStatus.ready) == ()
+    assert _candidate_claim_is_stale(workspace, WorkspaceStatus.ready, now) is True
+
+    message = _stale_active_execution_failure_message(
+        _ActiveExecutionCandidate(
+            workspace_id="ws_missing_compose",
+            status=WorkspaceStatus.running,
+            compose_project_name=None,
+        ),
+        RuntimeSnapshot(stack_state="unknown"),
+    )
+
+    assert "no compose project is persisted for the workspace" in message

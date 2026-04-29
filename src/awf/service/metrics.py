@@ -14,6 +14,7 @@ from awf.db.enums import FailureReason, OperationStatus, OperationType, Workspac
 from awf.db.models import Operation, ResourceReservation, Workspace
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
+from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
 MIN_SUMMARY_WINDOW_HOURS = 1
@@ -226,6 +227,7 @@ class ResourceSaturationSummary:
     concurrency: ResourceConcurrency
     disk: DiskCheck
     orphan_resources: OrphanResourceSummary
+    runtime_health: WorkspaceRuntimeHealthSummary
     admission: AdmissionSummary
 
 
@@ -485,6 +487,7 @@ async def summarize_resource_saturation(
     disk_check: DiskCheck | None = None,
     disk_usage: DiskUsage | None = None,
     orphan_resources: OrphanResourceSummary | None = None,
+    runtime_health: WorkspaceRuntimeHealthSummary | None = None,
     now: datetime | None = None,
 ) -> ResourceSaturationSummary:
     """Summarize local resource saturation using deterministic backend inputs."""
@@ -496,6 +499,7 @@ async def summarize_resource_saturation(
             disk_check=disk_check,
             disk_usage=disk_usage,
             orphan_resources=orphan_resources,
+            runtime_health=runtime_health,
             now=now,
         )
 
@@ -507,6 +511,7 @@ async def summarize_resource_saturation_for_session(
     disk_check: DiskCheck | None = None,
     disk_usage: DiskUsage | None = None,
     orphan_resources: OrphanResourceSummary | None = None,
+    runtime_health: WorkspaceRuntimeHealthSummary | None = None,
     now: datetime | None = None,
 ) -> ResourceSaturationSummary:
     """Build the resource saturation payload for local console capacity views."""
@@ -543,6 +548,11 @@ async def summarize_resource_saturation_for_session(
         concurrency=concurrency,
     )
     resolved_orphan_resources = orphan_resources or summary_not_collected()
+    resolved_runtime_health = runtime_health or WorkspaceRuntimeHealthSummary(
+        scanner_available=False,
+        scanner_reason="RUNTIME_HEALTH_NOT_COLLECTED",
+        scanner_detail="Runtime health inventory was not collected for this summary.",
+    )
 
     return ResourceSaturationSummary(
         generated_at=generated_at,
@@ -553,6 +563,7 @@ async def summarize_resource_saturation_for_session(
         concurrency=concurrency,
         disk=resolved_disk_check,
         orphan_resources=resolved_orphan_resources,
+        runtime_health=resolved_runtime_health,
         admission=admission,
     )
 
