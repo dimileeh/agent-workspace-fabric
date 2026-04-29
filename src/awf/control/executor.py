@@ -179,21 +179,21 @@ def _is_validate_only_recovery_payload(payload: object) -> bool:
     )
 
 
-def _rebase_recovery_operation_payload_matches(
-    operation_payload: Mapping[str, Any],
+def _rebase_recovery_operation_payload_identities(
     recovery_payload: Mapping[str, Any],
-) -> bool:
+) -> tuple[dict[str, Any], ...]:
     recovery_payload_dict = dict(recovery_payload)
-    identity = {
+    identity: dict[str, Any] = {
         key: recovery_payload_dict[key]
         for key in _REBASE_RECOVERY_OPERATION_IDENTITY_KEYS
         if key in recovery_payload_dict
     }
-    if len(identity) != len(_REBASE_RECOVERY_OPERATION_IDENTITY_KEYS):
-        return operation_payload == recovery_payload_dict
-    return all(
-        key in operation_payload and operation_payload[key] == value
-        for key, value in identity.items()
+    identity.setdefault("recovery_mode", "rebase_only")
+    if "source" in identity:
+        return (identity,)
+    return tuple(
+        {**identity, "source": source}
+        for source in sorted(_VALIDATE_ONLY_RECOVERY_SOURCES)
     )
 
 
@@ -2181,22 +2181,18 @@ class WorkspaceExecutor:
         workspace_id: str,
         recovery_payload: Mapping[str, Any],
     ) -> Operation | None:
-        for status in (OperationStatus.pending, OperationStatus.running):
-            operations = await repo.list_for_workspace(
-                workspace_id,
+        for payload_identity in _rebase_recovery_operation_payload_identities(
+            recovery_payload
+        ):
+            operation = await repo.find_active_matching_payload(
+                workspace_id=workspace_id,
                 operation_type=OperationType.rebase,
-                status=status,
-                limit=100,
+                payload_identity=payload_identity,
             )
-            for operation in operations:
-                if not _is_validate_only_recovery_payload(operation.payload):
-                    continue
-                operation_payload = cast(Mapping[str, Any], operation.payload)
-                if _rebase_recovery_operation_payload_matches(
-                    operation_payload,
-                    recovery_payload,
-                ):
-                    return operation
+            if operation is not None and _is_validate_only_recovery_payload(
+                operation.payload
+            ):
+                return operation
         return None
 
     async def _finish_rebase_recovery_operation(
