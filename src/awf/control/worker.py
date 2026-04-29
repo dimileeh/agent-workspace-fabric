@@ -33,6 +33,7 @@ from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.service.secret_leases import SecretLeaseService
 from awf.service.workspace_runtime_health import (
     RUNTIME_STRANDED_EVENT_TYPE,
     RuntimeWorkspace,
@@ -74,6 +75,7 @@ class WorkerConfig:
     monitor_claim_lease_seconds: float = 300.0
     execution_claim_lease_seconds: float = 300.0
     stale_active_execution_scan_interval_seconds: float = 300.0
+    secret_lease_expiration_scan_interval_seconds: float = 60.0
     node_id: str | None = None
 
 
@@ -131,6 +133,7 @@ class ControlWorker:
         self._monitor_recovery_operation_ids: dict[str, str] = {}
         self._worker_id = f"control-worker-{uuid.uuid4().hex}"
         self._next_stale_active_execution_scan_at = 0.0
+        self._next_secret_lease_expiration_scan_at = 0.0
 
     def request_stop(self) -> None:
         """Signal ``run_forever`` to exit after the current batch."""
@@ -144,6 +147,8 @@ class ControlWorker:
         and should immediately loop again.
         """
         dispatched_ids: set[str] = set()
+
+        await self._maybe_expire_due_secret_leases()
 
         if self._executor is not None:
             await self._maybe_recover_stale_active_executions()
@@ -319,6 +324,38 @@ class ControlWorker:
         await self._recover_stale_active_executions()
         interval = max(0.0, self._config.stale_active_execution_scan_interval_seconds)
         self._next_stale_active_execution_scan_at = monotonic() + interval
+
+    async def _maybe_expire_due_secret_leases(self) -> None:
+        now = monotonic()
+        if now < self._next_secret_lease_expiration_scan_at:
+            return
+
+        try:
+            await self._expire_due_secret_leases()
+        except Exception:
+            _log.exception(
+                "worker.secret_lease_expiration_failed",
+                reason_code="SECRET_LEASE_EXPIRATION_FAILED",
+            )
+            raise
+
+        interval = max(0.0, self._config.secret_lease_expiration_scan_interval_seconds)
+        self._next_secret_lease_expiration_scan_at = monotonic() + interval
+
+    async def _expire_due_secret_leases(self) -> None:
+        async with self._session_factory() as session:
+            expired = await SecretLeaseService(session).expire_due_secret_leases()
+            expired_count = len(expired)
+            workspace_ids = sorted({lease.workspace_id for lease in expired})
+            await session.commit()
+
+        if expired_count:
+            _log.info(
+                "worker.secret_leases_expired",
+                reason_code="SECRET_LEASES_EXPIRED",
+                expired_count=expired_count,
+                workspace_ids=workspace_ids,
+            )
 
     async def _recover_stale_active_executions(self) -> None:
         candidates = await self._list_stale_active_execution_candidates(

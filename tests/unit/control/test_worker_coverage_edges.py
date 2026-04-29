@@ -22,7 +22,12 @@ from awf.control.worker import (
 )
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    SecretLeaseIssue,
+    SecretLeaseRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.inspection import RuntimeSnapshot
 
@@ -380,6 +385,44 @@ async def test_safely_execute_and_resume_noop_without_executor(
     await worker._safely_resume_pr_monitor("ws_missing")
 
     assert worker._execution_tasks == {}
+
+
+@pytest.mark.unit
+async def test_run_once_expires_due_secret_leases(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _seed_status(factory, WorkspaceStatus.running, title="secret-expiry")
+    issued_at = datetime.now(UTC) - timedelta(hours=2)
+    async with factory() as s:
+        workspace = await WorkspaceRepository(s).get(workspace_id)
+        assert workspace is not None
+        await SecretLeaseRepository(s).issue_declared_leases(
+            workspace,
+            leases=[
+                SecretLeaseIssue(
+                    secret_name="api-token",
+                    kind="env",
+                    target="API_TOKEN",
+                    mode="ro",
+                    required=True,
+                    provider="env",
+                    ref_digest="sha256:" + "a" * 64,
+                    expires_at=issued_at + timedelta(hours=1),
+                    issue_metadata={"profile": "local"},
+                )
+            ],
+            now=issued_at,
+        )
+        await s.commit()
+
+    worker = _worker(factory)
+
+    assert await worker.run_once() == 0
+
+    async with factory() as s:
+        leases = await SecretLeaseRepository(s).list_for_workspace(workspace_id)
+
+    assert [lease.status for lease in leases] == ["expired"]
 
 
 @pytest.mark.unit
