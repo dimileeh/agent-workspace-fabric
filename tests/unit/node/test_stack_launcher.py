@@ -123,6 +123,60 @@ async def test_compose_stack_launcher_builds_profile_driven_spec() -> None:
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_resolves_profile_services_in_thread(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[Callable[..., object], tuple[object, ...], dict[str, object]]] = []
+
+    async def fake_to_thread(
+        func: Callable[..., object],
+        /,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        calls.append((func, args, kwargs))
+        return func(*args, **kwargs)
+
+    monkeypatch.setattr(stack_launcher_mod.asyncio, "to_thread", fake_to_thread)
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    layout = WorktreeLayout(
+        mirror_path=Path("/host/awf/git/mirrors/repo.git"),
+        worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
+        branch_name="awf/ws_launcher",
+    )
+    profile = WorkspaceProfile(
+        name="serviceful",
+        services=[
+            ProfileService(
+                name="sidecar",
+                build_context="services/sidecar",
+            )
+        ],
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=profile,
+        )
+    )
+
+    assert calls == [
+        (
+            stack_launcher_mod.profile_services,
+            (profile,),
+            {"base_path": layout.worktree_path},
+        )
+    ]
+    assert compose.specs[0].services[0].name == "sidecar"
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_passes_github_token_placeholders(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -378,16 +432,19 @@ async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
         branch_name="awf/ws_launcher",
     )
 
-    await launcher.launch(
-        WorkspaceStackLaunchRequest(
-            workspace_id="ws_launcher",
-            layout=layout,
-            profile=WorkspaceProfile(name="generic"),
-        )
+    request = WorkspaceStackLaunchRequest(
+        workspace_id="ws_launcher",
+        layout=layout,
+        profile=WorkspaceProfile(name="generic"),
     )
+    await launcher.launch(request)
 
-    assert len(calls) == 1
+    assert len(calls) == 2
     func, args, kwargs = calls[0]
     assert func == auth_mount_resolver.resolve
     assert args == ()
     assert kwargs == {"workspace_id": "ws_launcher"}
+    func, args, kwargs = calls[1]
+    assert func == stack_launcher_mod.profile_services
+    assert args == (request.profile,)
+    assert kwargs == {"base_path": layout.worktree_path}

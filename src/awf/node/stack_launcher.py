@@ -70,6 +70,11 @@ class ComposeStackLauncher:
                     workspace_id=request.workspace_id,
                 )
             )
+        services = await asyncio.to_thread(
+            profile_services,
+            profile,
+            base_path=layout.worktree_path,
+        )
         spec = WorkspaceComposeSpec(
             workspace_id=request.workspace_id,
             worktree_host_path=layout.worktree_path,
@@ -78,7 +83,7 @@ class ComposeStackLauncher:
                 profile_agent_environment(profile)
             ),
             docker_mode=profile.docker.mode.value,
-            services=profile_services(profile),
+            services=services,
             auth_mounts=tuple(auth_mounts),
             git_name=DEFAULT_GIT_AUTHOR_NAME,
             git_email=DEFAULT_GIT_AUTHOR_EMAIL,
