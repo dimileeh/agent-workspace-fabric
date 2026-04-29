@@ -2041,6 +2041,83 @@ class TestExecutorCoverageEdges:
         }
 
     @pytest.mark.unit
+    async def test_resume_pr_monitor_compose_failure_continues_when_warning_record_fails(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_calls: list[str] = []
+
+        class _OneShotFailingSessionFactory:
+            def __init__(self, inner: async_sessionmaker[AsyncSession]) -> None:
+                self._inner = inner
+                self.fail_next = False
+
+            def __call__(self) -> AsyncSession:
+                if self.fail_next:
+                    self.fail_next = False
+                    raise RuntimeError("session pool exhausted")
+                return self._inner()
+
+        session_factory = _OneShotFailingSessionFactory(factory)
+
+        class _FailingCompose:
+            async def ensure_project_up(
+                self,
+                *,
+                project_name: str,
+                compose_file: Path,
+                workspace_id: str,
+                wait: bool = True,
+            ) -> None:
+                del project_name, compose_file, workspace_id, wait
+                session_factory.fail_next = True
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=1,
+                    stdout="",
+                    stderr="network unavailable",
+                    reason_code="COMPOSE_UP_FAILED",
+                )
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                del compose_project, compose_file
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_monitoring_pr(factory)
+        executor = _make_executor(
+            fake,
+            session_factory,
+            tmp_path,
+            compose=_FailingCompose(),
+            pr_monitor_factory=lambda *_args: _Monitor(),
+        )
+
+        with structlog.testing.capture_logs() as captured:
+            await executor.resume_pr_monitor(ws_id)
+
+        assert monitor_calls == [ws_id]
+        assert any(
+            entry["event"] == "executor.monitor_runtime_restart_failed_record_failed"
+            for entry in captured
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            assert not [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.monitor_runtime_restart_failed"
+            ]
+
+    @pytest.mark.unit
     async def test_resume_pr_monitor_never_recreates_pr_or_runs_feature_agent(
         self,
         fake: FakeCommandRunner,

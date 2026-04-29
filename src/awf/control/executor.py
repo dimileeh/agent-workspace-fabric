@@ -1582,25 +1582,34 @@ class WorkspaceExecutor:
         compose_file_path: str,
         error: ComposeOperationError,
     ) -> None:
-        async with self._session_factory() as session:
-            repo = WorkspaceRepository(session)
-            ws = await repo.get(workspace_id)
-            if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
-                return
-            await repo.add_event(
-                ws,
-                event_type="workspace.monitor_runtime_restart_failed",
-                reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
-                payload={
-                    "compose_project_name": compose_project,
-                    "compose_file_path": compose_file_path,
-                    "operation": error.operation,
-                    "returncode": error.returncode,
-                    "stderr": error.stderr[:1000],
-                    "reason_code": error.reason_code,
-                },
+        try:
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.get(workspace_id)
+                if ws is None or ws.status != WorkspaceStatus.monitoring_pr.value:
+                    return
+                await repo.add_event(
+                    ws,
+                    event_type="workspace.monitor_runtime_restart_failed",
+                    reason_code="MONITOR_RECOVERY_COMPOSE_FAILED",
+                    payload={
+                        "compose_project_name": compose_project,
+                        "compose_file_path": compose_file_path,
+                        "operation": error.operation,
+                        "returncode": error.returncode,
+                        "stderr": error.stderr[:1000],
+                        "reason_code": error.reason_code,
+                    },
+                )
+                await session.commit()
+        except Exception:
+            _log.exception(
+                "executor.monitor_runtime_restart_failed_record_failed",
+                workspace_id=workspace_id,
+                compose_project_name=compose_project,
+                compose_file_path=compose_file_path,
+                reason_code=error.reason_code,
             )
-            await session.commit()
 
     async def _load_workspace(self, workspace_id: str) -> Workspace | None:
         async with self._session_factory() as session:
