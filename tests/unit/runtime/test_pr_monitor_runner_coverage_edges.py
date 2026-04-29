@@ -1415,11 +1415,26 @@ async def test_target_branch_reconcile_failure_appends_workspace_event(
         post_merge_target_reconciler=failing_reconciler,
     )
 
-    await runner._reconcile_target_branch_after_merge(
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        base_branch="development",
+    with structlog.testing.capture_logs() as captured:
+        await runner._reconcile_target_branch_after_merge(
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            base_branch="development",
+        )
+
+    failure_log = next(
+        event
+        for event in captured
+        if event.get("event") == "monitor.target_branch_reconcile_failed"
     )
+    assert failure_log["status"] == "failed"
+    assert failure_log["reason_code"] == "TARGET_BRANCH_RECONCILE_FAILED"
+    assert failure_log["error_type"] == "RuntimeError"
+    assert failure_log["resolver_results"] == []
+    assert failure_log["commit_sha"] is None
+    assert failure_log["pushed"] is False
+    assert failure_log["dry_run"] is None
+    assert failure_log["commit_allowed"] is None
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
@@ -1507,10 +1522,33 @@ async def test_target_branch_reconcile_event_preserves_resolver_operator_details
         post_merge_target_reconciler=reconciler,
     )
 
-    await runner._reconcile_target_branch_after_merge(
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        base_branch="development",
+    with structlog.testing.capture_logs() as captured:
+        await runner._reconcile_target_branch_after_merge(
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            base_branch="development",
+        )
+
+    reconciled_log = next(
+        event
+        for event in captured
+        if event.get("event") == "monitor.target_branch_reconciled"
+    )
+    assert reconciled_log["status"] == "committed"
+    assert reconciled_log["commit_sha"] == "abc123"
+    assert reconciled_log["pushed"] is True
+    assert reconciled_log["dry_run"] is False
+    assert reconciled_log["commit_allowed"] is True
+    assert reconciled_log["policy_reason_code"] is None
+    assert reconciled_log["changed_paths"] == [
+        "migrations/versions/merge001_merge_alembic_heads.py"
+    ]
+    logged_resolver = reconciled_log["resolver_results"][0]
+    assert logged_resolver["reason_code"] == "ALEMBIC_HEADS_MERGED"
+    assert logged_resolver["heads"] == ["left001", "right001"]
+    assert logged_resolver["generated_revision"] == "merge001"
+    assert logged_resolver["generated_path_relative"] == (
+        "migrations/versions/merge001_merge_alembic_heads.py"
     )
 
     async with factory() as s:

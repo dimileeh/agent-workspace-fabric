@@ -2576,36 +2576,43 @@ class PullRequestMonitorRunner:
                 repo_url=repo_url, branch=base_branch, workspace_id=workspace_id
             )
         except Exception as exc:
+            failure_payload = _target_reconcile_failure_payload(exc, error_limit=500)
+            failure_log_payload = {
+                **failure_payload,
+                "workspace_id": workspace_id,
+                "repo_url": repo_url,
+                "base_branch": base_branch,
+            }
             _log.warning(
                 "monitor.target_branch_reconcile_failed",
-                workspace_id=workspace_id,
-                repo_url=repo_url,
-                base_branch=base_branch,
-                error=str(exc)[:500],
+                **failure_log_payload,
             )
+            failure_event_payload = {
+                **_target_reconcile_failure_payload(exc, error_limit=1000),
+                "repo_url": repo_url,
+                "base_branch": base_branch,
+            }
             await self._append_workspace_events(
                 workspace_id=workspace_id,
                 events=[
                     WorkspaceEventCreate(
                         event_type="target_branch.reconcile_failed",
                         reason_code="TARGET_BRANCH_RECONCILE_FAILED",
-                        payload={
-                            "repo_url": repo_url,
-                            "base_branch": base_branch,
-                            "error": str(exc)[:1000],
-                        },
+                        payload=failure_event_payload,
                     )
                 ],
             )
             return
 
         payload = _target_reconcile_payload(result)
+        log_payload = {
+            **_target_reconcile_log_fields(payload),
+            "workspace_id": workspace_id,
+            "base_branch": base_branch,
+        }
         _log.info(
             "monitor.target_branch_reconciled",
-            workspace_id=workspace_id,
-            repo_url=repo_url,
-            base_branch=base_branch,
-            status=payload.get("status"),
+            **log_payload,
         )
         await self._append_workspace_events(
             workspace_id=workspace_id,
@@ -3512,3 +3519,81 @@ def _target_reconcile_payload(result: object) -> dict[str, object]:
         if isinstance(payload, dict):
             return dict(payload)
     return {"result": str(result)}
+
+
+def _target_reconcile_log_fields(payload: Mapping[str, object]) -> dict[str, object]:
+    fields = dict(payload)
+    fields.setdefault("resolver_results", [])
+    fields.setdefault("commit_sha", None)
+    fields.setdefault("pushed", False)
+    fields.setdefault("changed_paths", [])
+    fields.setdefault("dry_run", None)
+    fields.setdefault("commit_allowed", None)
+    fields.setdefault("policy_reason_code", None)
+    return fields
+
+
+def _target_reconcile_failure_payload(
+    exc: Exception,
+    *,
+    error_limit: int,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "status": "failed",
+        "reason_code": "TARGET_BRANCH_RECONCILE_FAILED",
+        "error": str(exc)[:error_limit],
+        "error_type": type(exc).__name__,
+        "resolver_results": [],
+        "commit_sha": None,
+        "pushed": False,
+        "changed_paths": [],
+        "dry_run": None,
+        "commit_allowed": None,
+        "policy_reason_code": None,
+    }
+
+    partial = _target_reconcile_exception_payload(exc)
+    if partial is not None:
+        payload["target_reconcile_status"] = partial.get("status")
+        for key in (
+            "resolver_results",
+            "commit_sha",
+            "pushed",
+            "changed_paths",
+            "dry_run",
+            "commit_allowed",
+            "policy_reason_code",
+        ):
+            if key in partial:
+                payload[key] = partial[key]
+
+    operation = getattr(exc, "operation", None)
+    if isinstance(operation, str):
+        payload["operation"] = operation
+    result = getattr(exc, "result", None)
+    returncode = getattr(result, "returncode", None)
+    if isinstance(returncode, int):
+        payload["returncode"] = returncode
+    reason_code = getattr(result, "reason_code", None)
+    if isinstance(reason_code, str):
+        payload["command_reason_code"] = reason_code
+    stderr = getattr(result, "stderr", None)
+    if isinstance(stderr, str) and stderr:
+        payload["stderr"] = stderr[:error_limit]
+    stdout = getattr(result, "stdout", None)
+    if isinstance(stdout, str) and stdout:
+        payload["stdout"] = stdout[:error_limit]
+    return payload
+
+
+def _target_reconcile_exception_payload(exc: Exception) -> dict[str, object] | None:
+    payload = getattr(exc, "target_reconcile_payload", None)
+    if callable(payload):
+        payload = payload()
+    if isinstance(payload, Mapping):
+        return dict(payload)
+
+    result = getattr(exc, "target_reconcile_result", None)
+    if result is not None:
+        return _target_reconcile_payload(result)
+    return None
