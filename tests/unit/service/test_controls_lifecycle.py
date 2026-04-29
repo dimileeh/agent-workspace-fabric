@@ -1462,6 +1462,81 @@ async def test_destroy_rejects_active_workspace_without_force_before_cleanup(
 
 
 @pytest.mark.unit
+async def test_destroy_already_cancelled_workspace_runs_cleanup_and_records_destroy_contract(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.cancelled)
+    cleaner = RecordingCleaner()
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.destroy_workspace(
+        workspace.id,
+        force=False,
+        remove_volumes=True,
+        remove_worktree=False,
+        idempotency_key="destroy-cancelled",
+    )
+    operations = await _operations(session, workspace.id)
+    events = await _events(session, workspace.id)
+    state_events = [
+        event for event in events if event.event_type == "workspace.state_changed"
+    ]
+
+    assert response.operation_id == operations[0].id
+    assert response.status == WorkspaceStatus.destroyed
+    assert response.message == "workspace destroyed"
+    assert workspace.status == WorkspaceStatus.destroyed.value
+    assert len(cleaner.calls) == 1
+    assert cleaner.calls[0] == CleanupCall(
+        workspace_id=workspace.id,
+        repo_url=workspace.repo_url,
+        compose_project_name=workspace.compose_project_name,
+        compose_file_path=Path(workspace.compose_file_path),
+        worktree_host_path=None,
+        remove_volumes=True,
+        remove_worktree=False,
+    )
+    assert operations[0].type == OperationType.destroy.value
+    assert operations[0].status == OperationStatus.succeeded.value
+    assert operations[0].payload == {
+        "owner": "operator_api",
+        "source": "operator_api",
+        "reason": None,
+        "reason_code": "OPERATOR_DESTROY",
+        "requested_action": "destroy",
+        "force": False,
+        "remove_volumes": True,
+        "remove_worktree": False,
+    }
+    assert operations[0].result == {
+        "status": WorkspaceStatus.destroyed.value,
+        "cleanup": {
+            "status": "succeeded",
+            "reason_code": "CLEANUP_SUCCEEDED",
+            "steps": [],
+            "failed_steps": [],
+            "completed_steps": [],
+        },
+    }
+    assert [event.new_state for event in state_events] == [
+        WorkspaceStatus.destroyed.value,
+        WorkspaceStatus.destroying.value,
+    ]
+    assert state_events[1].old_state == WorkspaceStatus.cancelled.value
+    assert state_events[1].payload == {
+        "force": False,
+        "remove_volumes": True,
+        "remove_worktree": False,
+    }
+    assert state_events[0].old_state == WorkspaceStatus.destroying.value
+    assert state_events[0].payload is not None
+    assert state_events[0].payload["cleanup"] == operations[0].result["cleanup"]
+    assert not any(
+        event.event_type == "workspace.stale_callback_ignored" for event in events
+    )
+
+
+@pytest.mark.unit
 async def test_force_destroy_active_workspace_runs_cleanup_and_marks_destroyed(
     session: AsyncSession,
 ) -> None:

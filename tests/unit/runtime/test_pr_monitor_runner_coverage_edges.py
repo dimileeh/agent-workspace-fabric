@@ -2245,6 +2245,7 @@ async def test_missing_workspace_terminal_helpers_return_without_side_effects(
     "operator_status",
     [
         WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroying,
         WorkspaceStatus.destroyed,
         WorkspaceStatus.completed,
         WorkspaceStatus.failed,
@@ -2300,6 +2301,22 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+    reconcile_calls: list[tuple[str, str, str]] = []
+    gc_calls: list[str] = []
+
+    async def _record_reconcile_call(
+        *,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+    ) -> None:
+        reconcile_calls.append((workspace_id, repo_url, base_branch))
+
+    async def _record_gc_call(workspace_id: str) -> None:
+        gc_calls.append(workspace_id)
+
+    runner._reconcile_target_branch_after_merge = _record_reconcile_call  # type: ignore[method-assign]
+    runner._gc_completed_workspace_filesystem = _record_gc_call  # type: ignore[method-assign]
 
     if callback == "completed":
         await runner._terminate_completed(
@@ -2331,6 +2348,8 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
     assert workspace.failure_reason is None
     assert workspace.failure_message is None
     assert cmd.calls == []
+    assert reconcile_calls == []
+    assert gc_calls == []
     assert ignored_events[-1].payload == {
         "callback_source": "pr_monitor",
         "callback_action": "terminal_completed" if callback == "completed" else "terminal_failed",
