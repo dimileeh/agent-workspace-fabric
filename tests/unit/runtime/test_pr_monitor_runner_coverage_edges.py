@@ -2342,6 +2342,11 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
             for event in workspace.events
             if event.event_type == "workspace.stale_callback_ignored"
         ]
+        monitor_terminal_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.monitor_terminal_ignored"
+        ]
 
     assert workspace.status == operator_status.value
     assert workspace.pr_merge_sha is None
@@ -2350,6 +2355,7 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
     assert cmd.calls == []
     assert reconcile_calls == []
     assert gc_calls == []
+    assert monitor_terminal_events == []
     assert ignored_events[-1].payload == {
         "callback_source": "pr_monitor",
         "callback_action": "terminal_completed" if callback == "completed" else "terminal_failed",

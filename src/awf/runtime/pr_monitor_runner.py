@@ -2821,16 +2821,6 @@ async def _record_ignored_monitor_terminal_callback(
         requested_status=requested_status,
         reason_code=reason_code,
     )
-    await repo.add_event(
-        workspace,
-        event_type="workspace.monitor_terminal_ignored",
-        reason_code="STALE_MONITOR_TERMINAL_CALLBACK",
-        payload={
-            "current_status": workspace.status,
-            "requested_status": requested_status.value,
-            "reason_code": reason_code,
-        },
-    )
 
 
 _VERDICT_FALSE_POSITIVE = re.compile(r"\bFALSE\s+POSITIVE\s*:", re.IGNORECASE)
