@@ -6,7 +6,11 @@ import json
 
 import pytest
 
-from awf.profiles.lint import lint_workspace_profile, profile_lint_errors
+from awf.profiles.lint import (
+    lint_workspace_profile,
+    profile_lint_errors,
+    profile_service_volume_lint_errors,
+)
 from awf.profiles.models import ProfileLintSeverity, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
 
@@ -129,6 +133,75 @@ def test_raw_looking_secret_ref_is_rejected_without_exposing_value() -> None:
 
     assert [finding.reason_code for finding in errors] == ["SECRET_REF_LOOKS_RAW"]
     assert raw_secret not in json.dumps([finding.model_dump(mode="json") for finding in errors])
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "raw_secret",
+    [
+        "line-one\nline-two",
+        "aaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbb.cccccccccccccccc",
+    ],
+)
+def test_multiline_and_jwt_like_secret_refs_are_rejected(raw_secret: str) -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "api-token",
+            "kind": "env",
+            "target": "API_TOKEN",
+            "provider": "inline",
+            "ref": raw_secret,
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert [finding.reason_code for finding in errors] == ["SECRET_REF_LOOKS_RAW"]
+    assert raw_secret not in json.dumps([finding.model_dump(mode="json") for finding in errors])
+
+
+@pytest.mark.unit
+def test_blank_secret_ref_is_not_treated_as_raw_secret_material() -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "api-token",
+            "kind": "env",
+            "target": "API_TOKEN",
+            "provider": "vault",
+            "ref": " ",
+        }
+    )
+
+    assert profile_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
+def test_secret_without_provider_or_ref_is_allowed() -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "api-token",
+            "kind": "env",
+            "target": "API_TOKEN",
+        }
+    )
+
+    assert profile_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
+def test_secret_provider_ref_mismatch_is_rejected() -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "api-token",
+            "kind": "env",
+            "target": "API_TOKEN",
+            "provider": "vault",
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert [finding.reason_code for finding in errors] == ["SECRET_PROVIDER_REF_MISMATCH"]
 
 
 @pytest.mark.unit
@@ -346,3 +419,142 @@ def test_volume_target_flags_without_access_mode_preserve_auth_target() -> None:
     assert len(errors) == 1
     assert errors[0].reason_code == "HOST_HOME_AUTH_MOUNT_WRITABLE"
     assert errors[0].severity is ProfileLintSeverity.error
+
+
+@pytest.mark.unit
+def test_relative_secret_mount_target_is_rejected_as_too_broad() -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "api-token",
+            "kind": "mount",
+            "target": "relative/path",
+            "provider": "vault",
+            "ref": "kv/data/api-token",
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert [finding.reason_code for finding in errors] == ["SECRET_TARGET_TOO_BROAD"]
+
+
+@pytest.mark.unit
+def test_host_home_mount_with_relative_container_target_is_ignored() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "relative-target",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("${HOME}/.config/gh", "relative/target")],
+                }
+            ],
+        }
+    )
+
+    assert profile_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
+def test_non_host_home_service_volume_is_ignored() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "ordinary-volume",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("/var/cache/app", "/cache")],
+                }
+            ],
+        }
+    )
+
+    assert lint_workspace_profile(profile) == ()
+    assert profile_service_volume_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
+def test_host_home_mount_with_relative_mode_target_is_ignored() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "relative-mode-target",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("${HOME}/.config/gh", "relative/target:ro")],
+                }
+            ],
+        }
+    )
+
+    assert profile_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
+def test_host_home_mount_to_non_auth_workspace_path_is_allowed() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "workspace-cache",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("${HOME}/projects", "/workspace/projects")],
+                }
+            ],
+        }
+    )
+
+    assert profile_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
+def test_tilde_prefixed_known_local_credential_mount_warns_under_compatibility_policy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "tilde-local-compat",
+            "security": {"host_home_auth_mounts": {"mode": "warn"}},
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [("~/.config/gh", "/home/agent/.config/gh:ro")],
+                }
+            ],
+        }
+    )
+
+    findings = lint_workspace_profile(profile)
+
+    assert len(findings) == 1
+    assert findings[0].reason_code == "HOST_HOME_AUTH_MOUNT_COMPATIBILITY"
+    assert findings[0].severity is ProfileLintSeverity.warning
+
+
+@pytest.mark.unit
+def test_host_home_mount_to_auth_like_or_root_target_is_blocked() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "auth-like-targets",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [
+                        ("${HOME}/projects", "/workspace/.ssh"),
+                        ("${HOME}/projects", "/root/.config"),
+                    ],
+                }
+            ],
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert [finding.reason_code for finding in errors] == [
+        "HOST_HOME_AUTH_MOUNT_TOO_BROAD",
+        "HOST_HOME_AUTH_MOUNT_TOO_BROAD",
+    ]
