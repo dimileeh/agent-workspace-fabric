@@ -1154,8 +1154,16 @@ async def test_monitor_rebase_recovery_reports_git_failures(
     async def skip_finish_operation(*_args: object, **_kwargs: object) -> None:
         return None
 
-    monkeypatch.setattr(executor, "_begin_rebase_recovery_operation", skip_begin_operation)
-    monkeypatch.setattr(executor, "_finish_rebase_recovery_operation", skip_finish_operation)
+    monkeypatch.setattr(
+        executor,
+        "_begin_rebase_recovery_operation",
+        skip_begin_operation,
+    )
+    monkeypatch.setattr(
+        executor,
+        "_finish_rebase_recovery_operation",
+        skip_finish_operation,
+    )
 
     with pytest.raises(_MonitorRebaseRecoveryError, match=message):
         await executor._run_monitor_rebase_recovery(

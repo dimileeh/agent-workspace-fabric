@@ -13,20 +13,25 @@ from __future__ import annotations
 import hashlib
 import json
 import re
-from collections.abc import Callable, Sequence
+from collections import Counter
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
+from typing import Literal
 
 from alembic.config import Config
 from alembic.script import ScriptDirectory
+from alembic.script.base import Script
+from alembic.script.revision import ResolutionError, RevisionError, RevisionMap
 
 
 class AlembicResolveStatus(StrEnum):
     """Alembic resolver outcome."""
 
     unsupported = "unsupported"
+    refused = "refused"
     not_needed = "not_needed"
     resolved = "resolved"
 
@@ -40,7 +45,9 @@ class AlembicResolveResult:
     heads: tuple[str, ...]
     generated_revision: str | None = None
     generated_path: Path | None = None
+    generated_path_relative: str | None = None
     message: str | None = None
+    details: Mapping[str, object] | None = None
 
     @property
     def changed(self) -> bool:
@@ -53,11 +60,14 @@ class AlembicResolveResult:
             "heads": list(self.heads),
             "generated_revision": self.generated_revision,
             "generated_path": str(self.generated_path) if self.generated_path is not None else None,
+            "generated_path_relative": self.generated_path_relative,
             "message": self.message,
+            "details": dict(self.details or {}),
         }
 
 
 RevisionIdFactory = Callable[[Sequence[str]], str]
+RevisionReferenceType = Literal["down_revision", "dependencies"]
 
 
 class AlembicMergeResolver:
@@ -86,15 +96,10 @@ class AlembicMergeResolver:
             )
 
         script, version_dir = loaded
-        try:
-            heads = tuple(sorted(script.get_heads()))
-        except Exception as exc:
-            return AlembicResolveResult(
-                status=AlembicResolveStatus.unsupported,
-                reason_code="ALEMBIC_GRAPH_UNREADABLE",
-                heads=(),
-                message=str(exc),
-            )
+        graph_result = _safe_heads(script)
+        if isinstance(graph_result, AlembicResolveResult):
+            return graph_result
+        heads = graph_result
 
         if len(heads) <= 1:
             return AlembicResolveResult(
@@ -120,6 +125,7 @@ class AlembicMergeResolver:
             heads=heads,
             generated_revision=revision,
             generated_path=generated_path,
+            generated_path_relative=_relative_path(generated_path, repo_path),
             message=f"Generated Alembic merge revision for {len(heads)} heads.",
         )
 
@@ -145,6 +151,168 @@ def _load_script_directory(repo_path: Path) -> tuple[ScriptDirectory, Path] | No
         version_dir = script_path / version_dir
     version_dir.mkdir(parents=True, exist_ok=True)
     return script, version_dir
+
+
+def _safe_heads(script: ScriptDirectory) -> tuple[str, ...] | AlembicResolveResult:
+    try:
+        # Preflight the loaded scripts directly so duplicate/missing graph
+        # detection does not depend on Alembic warning message text.
+        revisions = tuple(script._load_revisions())
+        graph_result = _unsafe_loaded_revision_graph(revisions)
+        if graph_result is not None:
+            return graph_result
+
+        revision_map = RevisionMap(lambda: revisions)
+        heads = tuple(sorted(revision_map.heads))
+        tuple(
+            revision_map.iterate_revisions(
+                "heads",
+                "base",
+                inclusive=True,
+                assert_relative_length=False,
+            )
+        )
+    except SyntaxError as exc:
+        return _refused_graph_result(
+            reason_code="ALEMBIC_GRAPH_MALFORMED",
+            message="Alembic revision graph contains malformed Python.",
+            exc=exc,
+        )
+    except (KeyError, ResolutionError, RevisionError) as exc:
+        return _refused_graph_result(
+            reason_code="ALEMBIC_GRAPH_UNSAFE",
+            message="Alembic revision graph is unsafe to merge automatically.",
+            exc=exc,
+        )
+    except Exception as exc:
+        return _refused_graph_result(
+            reason_code="ALEMBIC_GRAPH_UNREADABLE",
+            message="Alembic revision graph could not be read safely.",
+            exc=exc,
+        )
+
+    return heads
+
+
+def _unsafe_loaded_revision_graph(
+    revisions: Sequence[Script],
+) -> AlembicResolveResult | None:
+    revision_ids = tuple(revision.revision for revision in revisions)
+    duplicate_revisions = sorted(
+        revision for revision, count in Counter(revision_ids).items() if count > 1
+    )
+    branch_labels = {
+        branch_label
+        for revision in revisions
+        for branch_label in revision.branch_labels
+    }
+    known_targets = set(revision_ids) | branch_labels
+    missing_down_revisions = _missing_revision_references(
+        revisions=revisions,
+        known_targets=known_targets,
+        reference_type="down_revision",
+    )
+    missing_dependencies = _missing_revision_references(
+        revisions=revisions,
+        known_targets=known_targets,
+        reference_type="dependencies",
+    )
+    details: dict[str, object] = {}
+    if duplicate_revisions:
+        details["duplicate_revisions"] = duplicate_revisions
+    if missing_down_revisions:
+        details["missing_down_revisions"] = missing_down_revisions
+    if missing_dependencies:
+        details["missing_dependencies"] = missing_dependencies
+
+    if details:
+        return AlembicResolveResult(
+            status=AlembicResolveStatus.refused,
+            reason_code="ALEMBIC_GRAPH_UNSAFE",
+            heads=_loaded_revision_heads(revisions),
+            message="Alembic revision graph is unsafe to merge automatically.",
+            details=details,
+        )
+
+    return None
+
+
+def _missing_revision_references(
+    *,
+    revisions: Sequence[Script],
+    known_targets: set[str],
+    reference_type: RevisionReferenceType,
+) -> list[str]:
+    missing = {
+        reference
+        for revision in revisions
+        for reference in _revision_references(revision, reference_type=reference_type)
+        if reference not in known_targets
+    }
+    return sorted(missing)
+
+
+def _loaded_revision_heads(revisions: Sequence[Script]) -> tuple[str, ...]:
+    branch_label_targets = {
+        branch_label: revision.revision
+        for revision in revisions
+        for branch_label in revision.branch_labels
+    }
+    referenced = {
+        branch_label_targets.get(reference, reference)
+        for revision in revisions
+        for reference in _revision_references(revision, reference_type="down_revision")
+    }
+    return tuple(
+        sorted(
+            revision.revision
+            for revision in revisions
+            if revision.revision not in referenced
+        )
+    )
+
+
+def _revision_references(
+    revision: Script,
+    *,
+    reference_type: RevisionReferenceType,
+) -> tuple[str, ...]:
+    if reference_type == "down_revision":
+        return _as_revision_tuple(revision.down_revision)
+    return _as_revision_tuple(revision.dependencies)
+
+
+def _as_revision_tuple(value: str | Sequence[str] | None) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, str):
+        return (value,)
+    return tuple(value)
+
+
+def _refused_graph_result(
+    *,
+    reason_code: str,
+    message: str,
+    exc: Exception,
+) -> AlembicResolveResult:
+    return AlembicResolveResult(
+        status=AlembicResolveStatus.refused,
+        reason_code=reason_code,
+        heads=(),
+        message=message,
+        details={
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        },
+    )
+
+
+def _relative_path(path: Path, root: Path) -> str | None:
+    try:
+        return str(path.relative_to(root))
+    except ValueError:
+        return None
 
 
 def _render_merge_revision(
@@ -173,9 +341,8 @@ def _render_merge_revision(
 
 
 def _default_revision_id(heads: Sequence[str]) -> str:
-    now = datetime.now(UTC).strftime("%Y%m%d%H%M%S%f")
-    digest = hashlib.sha1(",".join(sorted(heads)).encode("utf-8")).hexdigest()[:8]
-    return _sanitize_revision_id(f"awf_{now}_{digest}")
+    digest = hashlib.sha1(",".join(sorted(heads)).encode("utf-8")).hexdigest()[:12]
+    return _sanitize_revision_id(f"awf_merge_{digest}")
 
 
 _REVISION_ID_RE = re.compile(r"[^a-zA-Z0-9_]+")
