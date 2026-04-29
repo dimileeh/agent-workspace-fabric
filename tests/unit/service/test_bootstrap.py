@@ -1,0 +1,307 @@
+"""Local service bootstrap orchestration tests."""
+
+from __future__ import annotations
+
+import asyncio
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from awf.service.bootstrap import (
+    ServiceBootstrapError,
+    ServiceBootstrapOptions,
+    run_service_bootstrap,
+)
+from awf.service.config import ServiceSettings
+
+
+def _settings(tmp_path: Path) -> ServiceSettings:
+    return ServiceSettings(
+        service_name="awf",
+        env="local",
+        api_base_url="http://localhost:8000",
+        database_url="postgresql+asyncpg://awf:pw@localhost:5433/awf",
+        docker_host=f"unix://{tmp_path / 'docker.sock'}",
+        agent_runtime_image="awf-agent-runtime:latest",
+        work_dir=str(tmp_path / "work"),
+        api_token=None,
+        github_token=None,
+        worker_poll_interval_seconds=0.1,
+        worker_max_concurrent_provisions=1,
+        host_home=str(tmp_path / "home"),
+    )
+
+
+async def _ok_status_collector(
+    settings: ServiceSettings,
+    **kwargs: object,
+) -> dict[str, object]:
+    return {"service": settings.service_name, "status": "ok", "checks": {}}
+
+
+async def _no_sleep(_delay: float) -> None:
+    return None
+
+
+@pytest.mark.unit
+def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        assert kwargs == {"check": False, "capture_output": True, "text": True}
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert calls == [
+        [
+            "docker",
+            "build",
+            "-t",
+            "awf-agent-runtime:latest",
+            "-f",
+            "docker/agent-runtime.Dockerfile",
+            ".",
+        ],
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker/compose/local-service.yml",
+            "up",
+            "-d",
+            "--build",
+            "postgres",
+        ],
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker/compose/local-service.yml",
+            "up",
+            "--build",
+            "--force-recreate",
+            "migrate",
+        ],
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker/compose/local-service.yml",
+            "up",
+            "-d",
+            "--build",
+            "api",
+            "worker",
+        ],
+    ]
+
+
+@pytest.mark.unit
+def test_bootstrap_reruns_migrate_with_force_recreate(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    migrate = calls[2]
+    assert migrate[-3:] == ["--build", "--force-recreate", "migrate"]
+
+
+@pytest.mark.unit
+def test_bootstrap_polls_status_until_ok(tmp_path: Path) -> None:
+    statuses = [
+        {"status": "fail", "checks": {"api": {"ok": False}}},
+        {"status": "ok", "checks": {"api": {"ok": True}}},
+    ]
+    sleeps: list[float] = []
+
+    async def _collect(
+        _settings: ServiceSettings,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        return statuses.pop(0)
+
+    async def _sleep(delay: float) -> None:
+        sleeps.append(delay)
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(timeout_seconds=5, poll_interval_seconds=0.5),
+            run_subprocess=_run,
+            status_collector=_collect,
+            sleep=_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert sleeps == [0.5]
+    assert statuses == []
+
+
+@pytest.mark.unit
+def test_bootstrap_timeout_reports_last_status(tmp_path: Path) -> None:
+    clock = 0.0
+    last_status = {"status": "fail", "checks": {"api": {"reason": "API_UNREACHABLE"}}}
+
+    def _monotonic() -> float:
+        return clock
+
+    async def _sleep(delay: float) -> None:
+        nonlocal clock
+        clock += delay
+
+    async def _collect(
+        _settings: ServiceSettings,
+        **_kwargs: object,
+    ) -> dict[str, object]:
+        return dict(last_status)
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    with pytest.raises(ServiceBootstrapError) as exc_info:
+        asyncio.run(
+            run_service_bootstrap(
+                _settings(tmp_path),
+                options=ServiceBootstrapOptions(timeout_seconds=2, poll_interval_seconds=1),
+                run_subprocess=_run,
+                status_collector=_collect,
+                sleep=_sleep,
+                monotonic=_monotonic,
+            )
+        )
+
+    assert exc_info.value.reason_code == "SERVICE_BOOTSTRAP_TIMEOUT"
+    assert exc_info.value.last_status == last_status
+    assert exc_info.value.to_dict()["last_status"] == last_status
+
+
+@pytest.mark.unit
+def test_bootstrap_compose_failure_stops_with_stage_context(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+    status_calls = 0
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        if args[-1] == "migrate":
+            return subprocess.CompletedProcess(
+                args,
+                returncode=17,
+                stdout="migration stdout",
+                stderr="migration failed",
+            )
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    async def _collect(_settings: ServiceSettings, **_kwargs: object) -> dict[str, object]:
+        nonlocal status_calls
+        status_calls += 1
+        return {"status": "ok"}
+
+    with pytest.raises(ServiceBootstrapError) as exc_info:
+        asyncio.run(
+            run_service_bootstrap(
+                _settings(tmp_path),
+                options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+                run_subprocess=_run,
+                status_collector=_collect,
+                sleep=_no_sleep,
+                monotonic=lambda: 0.0,
+            )
+        )
+
+    assert [call[-1] for call in calls] == [".", "postgres", "migrate"]
+    assert status_calls == 0
+    assert exc_info.value.reason_code == "SERVICE_BOOTSTRAP_STAGE_FAILED"
+    assert exc_info.value.stage == "migrate"
+    assert exc_info.value.returncode == 17
+    assert exc_info.value.stdout == "migration stdout"
+    assert exc_info.value.stderr == "migration failed"
+
+
+@pytest.mark.unit
+def test_bootstrap_skip_agent_runtime_build_omits_build_command(tmp_path: Path) -> None:
+    calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append(args)
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(
+                timeout_seconds=1,
+                poll_interval_seconds=0.1,
+                skip_agent_runtime_build=True,
+            ),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    assert result.service_status["status"] == "ok"
+    assert calls == [
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker/compose/local-service.yml",
+            "up",
+            "-d",
+            "--build",
+            "postgres",
+        ],
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker/compose/local-service.yml",
+            "up",
+            "--build",
+            "--force-recreate",
+            "migrate",
+        ],
+        [
+            "docker",
+            "compose",
+            "-f",
+            "docker/compose/local-service.yml",
+            "up",
+            "-d",
+            "--build",
+            "api",
+            "worker",
+        ],
+    ]

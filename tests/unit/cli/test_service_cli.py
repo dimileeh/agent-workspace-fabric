@@ -252,6 +252,142 @@ def test_service_logs_docker_compose_failure_is_clean_typer_error(
 
 
 @pytest.mark.unit
+def test_service_bootstrap_cli_invokes_helper_and_emits_json(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import config as config_mod
+    from awf.service.bootstrap import ServiceBootstrapResult
+
+    settings = object()
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+
+    async def _bootstrap(received: object, **kwargs: object) -> ServiceBootstrapResult:
+        captured["settings"] = received
+        captured.update(kwargs)
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={"service": "awf", "status": "ok", "checks": {}},
+        )
+
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(app, ["service", "bootstrap"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["service_status"]["status"] == "ok"
+    assert captured["settings"] is settings
+    options = captured["options"]
+    assert options.timeout_seconds == 180
+    assert options.poll_interval_seconds == 2
+    assert options.skip_agent_runtime_build is False
+    assert options.strict_providers == frozenset()
+
+
+@pytest.mark.unit
+def test_service_bootstrap_cli_pretty_output_uses_existing_emitter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import config as config_mod
+    from awf.service.bootstrap import ServiceBootstrapResult
+
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+
+    async def _bootstrap(_settings: object, **_kwargs: object) -> ServiceBootstrapResult:
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={"service": "awf", "status": "ok", "checks": {}},
+        )
+
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(app, ["service", "bootstrap", "--format", "pretty"])
+
+    assert result.exit_code == 0, result.output
+    assert "status: ok" in result.stdout
+    assert "service_status.status: ok" in result.stdout
+
+
+@pytest.mark.unit
+def test_service_bootstrap_cli_passes_strict_provider_options(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import config as config_mod
+    from awf.service.bootstrap import ServiceBootstrapResult
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+
+    async def _bootstrap(_settings: object, **kwargs: object) -> ServiceBootstrapResult:
+        captured.update(kwargs)
+        return ServiceBootstrapResult(
+            stages=(),
+            service_status={"service": "awf", "status": "ok", "checks": {}},
+        )
+
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(
+        app,
+        [
+            "service",
+            "bootstrap",
+            "--provider",
+            "github",
+            "--provider",
+            "opencode",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["options"].strict_providers == frozenset({"github", "opencode"})
+
+
+@pytest.mark.unit
+def test_service_bootstrap_cli_helper_failures_exit_without_traceback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import config as config_mod
+    from awf.service.bootstrap import ServiceBootstrapError
+
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+
+    async def _bootstrap(_settings: object, **_kwargs: object) -> object:
+        raise ServiceBootstrapError(
+            reason_code="SERVICE_BOOTSTRAP_TIMEOUT",
+            message="timed out waiting for service readiness",
+            last_status={"status": "fail", "checks": {"api": {"reason": "API_UNREACHABLE"}}},
+        )
+
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(app, ["service", "bootstrap"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "SERVICE_BOOTSTRAP_TIMEOUT"
+    assert payload["last_status"]["status"] == "fail"
+    assert "Traceback" not in _combined_output(result)
+
+
+@pytest.mark.unit
+def test_service_bootstrap_cli_rejects_unknown_provider_without_traceback() -> None:
+    result = _runner.invoke(app, ["service", "bootstrap", "--provider", "bogus"])
+
+    output = _combined_output(result)
+    assert result.exit_code == 2
+    assert "error: unknown provider(s): bogus" in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.unit
 def test_service_reconcile_target_invokes_target_branch_monitor(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -307,6 +443,17 @@ def test_readme_documents_service_logs_command() -> None:
     assert "--tail" in readme
     assert "--service worker" in readme
     assert "--follow" in readme
+
+
+@pytest.mark.unit
+def test_readme_documents_service_bootstrap_command() -> None:
+    readme = Path("README.md").read_text()
+
+    assert "awf service bootstrap" in readme
+    assert "uv run --python 3.12 --extra dev awf service bootstrap" in readme
+    assert "uv run --python 3.12 --extra dev awf service status --format pretty" in readme
+    assert "docker compose -f docker/compose/local-service.yml up --build" in readme
+    assert "safe to re-run" in readme
 
 
 @pytest.mark.unit
