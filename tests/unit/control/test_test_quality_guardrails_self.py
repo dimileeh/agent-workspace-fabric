@@ -15,7 +15,6 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 def test_awf_test_suite_has_no_test_quality_guardrail_violations() -> None:
     violations = scan_test_quality(
         [REPO_ROOT / "tests" / "unit", REPO_ROOT / "tests" / "integration"],
-        exclude_globs=("tests/fixtures/**",),
     )
 
     assert violations == [], "\n".join(
