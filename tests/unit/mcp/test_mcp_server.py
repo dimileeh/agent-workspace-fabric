@@ -18,10 +18,12 @@ from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import OperationResponse, WorkspaceControlResponse
+from awf.common.config import Settings
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.mcp import server as mcp_server
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
@@ -43,6 +45,38 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
 def mcp(factory: async_sessionmaker[AsyncSession]):  # type: ignore[no-untyped-def]
     service = WorkspaceService(factory)
     return build_mcp_server(service=service)
+
+
+@pytest.mark.unit
+async def test_build_mcp_server_captures_default_settings_once(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(_env_file=None, work_dir=str(tmp_path / "awf-state"))
+    calls = 0
+
+    def fake_get_settings() -> Settings:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("MCP tools should reuse settings captured at build time")
+        return settings
+
+    monkeypatch.setattr(mcp_server, "get_settings", fake_get_settings)
+    mcp = build_mcp_server(service=WorkspaceService(factory))
+
+    assert calls == 1
+
+    for _ in range(2):
+        result = await mcp.call_tool(
+            "awf_list_workspace_artifacts",
+            {"workspace_id": "ws_missing"},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.structuredContent is None
+
+    assert calls == 1
 
 
 _CREATE_ARGS: dict[str, object] = {

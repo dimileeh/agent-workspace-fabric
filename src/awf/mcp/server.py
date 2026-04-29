@@ -73,6 +73,11 @@ RuntimeHealthSummaryProvider = Callable[
     WorkspaceRuntimeHealthSummary | Awaitable[WorkspaceRuntimeHealthSummary],
 ]
 
+
+def _resolve_settings(settings: Settings | None) -> Settings:
+    return settings or get_settings()
+
+
 # ── MCP tool registration ─────────────────────────────────────────────────
 
 
@@ -103,9 +108,7 @@ def build_mcp_server(
             "they are not shell access to workspace containers."
         ),
     )
-
-    def current_settings() -> Settings:
-        return settings or get_settings()
+    settings_value = _resolve_settings(settings)
 
     @mcp.tool(name="awf_create_workspace")
     async def awf_create_workspace(
@@ -485,7 +488,7 @@ def build_mcp_server(
             response = await list_workspace_artifacts_metadata(
                 session,
                 workspace_id=workspace_id,
-                work_dir=current_settings().work_dir,
+                work_dir=settings_value.work_dir,
             )
             if response is None:
                 return _null_tool_result()
@@ -526,7 +529,7 @@ def build_mcp_server(
         async with service.session_factory() as session:
             summary = await summarize_workspace_reliability_for_session(
                 session,
-                settings=current_settings(),
+                settings=settings_value,
                 since_hours=since_hours,
             )
         response = metrics_routes.WorkspaceReliabilitySummaryResponse.model_validate(summary)
@@ -536,7 +539,6 @@ def build_mcp_server(
     async def awf_get_resource_saturation_summary() -> StructuredToolResult:
         """Read-only operator observability: summarize resource saturation and admission."""
         async with service.session_factory() as session:
-            settings_value = current_settings()
             disk_check = await _provided_disk_check(
                 disk_check_provider=disk_check_provider,
                 settings=settings_value,
@@ -574,7 +576,7 @@ def build_mcp_server(
         async with service.session_factory() as session:
             summary = await summarize_slo_metrics_for_session(
                 session,
-                settings=current_settings(),
+                settings=settings_value,
                 since_hours=since_hours,
             )
         response = metrics_routes.SloMetricsSummaryResponse.model_validate(summary)
