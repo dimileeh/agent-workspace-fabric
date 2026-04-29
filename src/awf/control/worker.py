@@ -38,6 +38,7 @@ from awf.service.workspace_runtime_health import (
     RuntimeWorkspace,
     WorkspaceRuntimeFinding,
     classify_runtime_snapshot,
+    retry_policy_allows_runtime_recovery,
 )
 
 _log = get_logger(__name__)
@@ -78,6 +79,7 @@ class _ActiveExecutionCandidate:
     compose_project_name: str | None
     compose_file_path: str | None = None
     pr_url: str | None = None
+    task_policy: dict[str, Any] | None = None
 
 
 class WorkspaceExecutorProtocol(Protocol):
@@ -334,6 +336,7 @@ class ControlWorker:
                 Workspace.compose_project_name,
                 Workspace.compose_file_path,
                 Workspace.pr_url,
+                Workspace.task_policy,
             )
             .where(Workspace.status.in_(active_status_values))
             .where(Workspace.node_id == self._config.node_id)
@@ -372,6 +375,7 @@ class ControlWorker:
                 compose_project_name=row[2],
                 compose_file_path=row[3],
                 pr_url=row[4],
+                task_policy=row[5],
             )
             for row in rows
         ]
@@ -893,6 +897,9 @@ def _runtime_workspace(candidate: _ActiveExecutionCandidate) -> RuntimeWorkspace
         compose_project_name=candidate.compose_project_name,
         compose_file_path=candidate.compose_file_path,
         pr_url=candidate.pr_url,
+        retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(
+            candidate.task_policy
+        ),
     )
 
 

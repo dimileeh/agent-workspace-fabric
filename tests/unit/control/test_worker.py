@@ -156,6 +156,7 @@ async def _create_active_execution(
     compose_project_name: str | None = None,
     node_id: str | None = None,
     persist_compose_project: bool = True,
+    task_policy: dict[str, object] | None = None,
 ) -> str:
     assert status in {
         WorkspaceStatus.running,
@@ -171,6 +172,7 @@ async def _create_active_execution(
             task_prompt="p",
             agent="codex",
             test_commands=[],
+            task_policy=task_policy,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = f"awf/{ws.id}"
@@ -1289,6 +1291,54 @@ class TestRunOnceStaleActiveExecutionRecovery:
                 and event.reason_code == "AGENT_CONTAINER_EXITED"
                 for event in events
             )
+
+    @pytest.mark.unit
+    async def test_pre_pr_stranding_with_retry_policy_defers_recovery(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        workspace_id = await _create_active_execution(
+            session_factory,
+            origin_repo,
+            "retry-policy-running",
+            WorkspaceStatus.running,
+            compose_project_name="awf_retry_policy_running",
+            task_policy={"runtime_recovery": {"stranded_workspace": "retry"}},
+        )
+        inspector = _RecordingRuntimeInspector(
+            {
+                "awf_retry_policy_running": RuntimeSnapshot(
+                    stack_state="stopped",
+                    services=[],
+                )
+            }
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=inspector,
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.running.value
+            assert ws.failure_reason is None
+            assert ws.failure_message is None
+            events = await WorkspaceEventRepository(s).list(
+                workspace_id=workspace_id,
+                event_type="workspace.runtime_stranded_detected",
+            )
+            assert len(events) == 1
+            assert events[0].reason_code == "STRANDED_WORKSPACE"
+            assert events[0].payload is not None
+            assert events[0].payload["decision"] == "defer_retry_policy"
+        assert inspector.calls == ["awf_retry_policy_running"]
 
     @pytest.mark.unit
     async def test_stale_validating_with_unavailable_docker_defers_recovery(

@@ -185,7 +185,9 @@ def runtime_workspace_from_workspace(workspace: Workspace) -> RuntimeWorkspace:
         compose_project_name=workspace.compose_project_name,
         compose_file_path=workspace.compose_file_path,
         pr_url=workspace.pr_url,
-        retry_policy_allows_recovery=_retry_policy_allows_recovery(workspace.task_policy),
+        retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(
+            workspace.task_policy
+        ),
     )
 
 
@@ -212,7 +214,9 @@ async def runtime_workspaces_from_session(session: AsyncSession) -> tuple[Runtim
                 str(row.compose_file_path) if row.compose_file_path is not None else None
             ),
             pr_url=str(row.pr_url) if row.pr_url is not None else None,
-            retry_policy_allows_recovery=_retry_policy_allows_recovery(row.task_policy),
+            retry_policy_allows_recovery=retry_policy_allows_runtime_recovery(
+                row.task_policy
+            ),
         )
         for row in rows
     )
@@ -474,7 +478,9 @@ def _resource_matches_workspace(
     )
 
 
-def _retry_policy_allows_recovery(task_policy: Mapping[str, Any] | None) -> bool:
+def retry_policy_allows_runtime_recovery(
+    task_policy: Mapping[str, Any] | None,
+) -> bool:
     if not task_policy:
         return False
     runtime_policy = task_policy.get("runtime_recovery")
