@@ -61,7 +61,13 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
                 _healthcheck_identity(healthcheck)
                 for healthcheck in sorted(
                     profile.validation.healthchecks,
-                    key=lambda item: (item.name, item.command, item.timeout_seconds),
+                    key=lambda item: (
+                        item.name,
+                        item.kind or "",
+                        item.command or "",
+                        item.url or "",
+                        item.timeout_seconds,
+                    ),
                 )
             ],
             "artifact_paths": sorted(profile.validation.artifact_paths),
@@ -132,8 +138,14 @@ def _service_identity(service: ProfileService) -> dict[str, Any]:
 def _healthcheck_identity(healthcheck: ProfileHealthCheck) -> dict[str, Any]:
     return {
         "name": healthcheck.name,
+        "kind": healthcheck.kind,
         "command": healthcheck.command,
+        "url": healthcheck.url,
+        "method": healthcheck.method,
+        "expected_status": healthcheck.expected_status,
         "timeout_seconds": healthcheck.timeout_seconds,
+        "interval_seconds": healthcheck.interval_seconds,
+        "attempt_timeout_seconds": healthcheck.attempt_timeout_seconds,
     }
 
 

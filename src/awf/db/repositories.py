@@ -1818,6 +1818,7 @@ class WorkspaceRepository:
                 updated_at=Workspace.updated_at,
             )
             .returning(Workspace.id)
+            .execution_options(synchronize_session=False)
         )
         return result.scalar_one_or_none() is not None
 
