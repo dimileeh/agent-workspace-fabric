@@ -749,6 +749,46 @@ def profile_preview(
     _emit(resolution.model_dump(mode="json", by_alias=True), fmt)
 
 
+@profile_app.command("init")
+def profile_init(
+    path: Path = typer.Argument(..., help="Path to the repository to inspect."),
+    template: str = typer.Option("auto", "--template", help="Template override or auto."),
+    write: bool = typer.Option(
+        False,
+        "--write",
+        help="Write .awf/workspace.yml. Defaults to preview only.",
+    ),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing profile."),
+    include_smoke_request: bool = typer.Option(
+        False,
+        "--include-smoke-request",
+        help="Include an example v2 workspace request body without launching it.",
+    ),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Inspect a project and preview or create a draft .awf/workspace.yml."""
+    from awf.profiles.onboarding import preview_project_onboarding, write_workspace_profile
+
+    try:
+        preview = preview_project_onboarding(
+            path.expanduser().resolve(),
+            template=template,
+            include_smoke_request=include_smoke_request,
+        )
+        payload = preview.to_dict()
+        if write:
+            written_path = write_workspace_profile(preview, force=force)
+            payload["written_path"] = str(written_path)
+    except FileExistsError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=1) from None
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from None
+
+    _emit(payload, fmt)
+
+
 if __name__ == "__main__":  # pragma: no cover - entry point
     app(prog_name="awf")
     sys.exit(0)
