@@ -25,6 +25,24 @@ def _mock_proc(returncode: int = 0, stdout: bytes = b"", stderr: bytes = b"") ->
 
 
 @pytest.mark.unit
+def test_idempotency_identity_matching_ignores_identity_keys_absent_from_identity() -> None:
+    assert controls._payload_matches_idempotency_identity(
+        {
+            "reason": "base branch advanced",
+            "reason_code": "operator_rebase_requested",
+            "expected_version": 7,
+        },
+        identity={"reason": "base branch advanced"},
+        identity_keys=frozenset({"reason", "reason_code", "expected_version"}),
+    )
+    assert not controls._payload_matches_idempotency_identity(
+        {"reason_code": "operator_rebase_requested", "expected_version": 7},
+        identity={"reason": "base branch advanced"},
+        identity_keys=frozenset({"reason", "reason_code", "expected_version"}),
+    )
+
+
+@pytest.mark.unit
 async def test_stop_project_containers_is_noop_without_project_name() -> None:
     with patch("awf.service.controls.asyncio.create_subprocess_exec") as mock_exec:
         await stop_project_containers(None)
