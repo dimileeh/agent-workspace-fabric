@@ -164,6 +164,11 @@ _TRANSIENT_GITHUB_ERROR_MARKERS = (
     "something went wrong",
 )
 _GITHUB_TRANSIENT_RETRY_REASON = "GITHUB_TRANSIENT_RETRY"
+_PR_MONITOR_AUDIT_ACTOR = "pr_monitor"
+_AUDIT_GIT_PUSH_EVENT = "workspace.audit.git_push"
+_AUDIT_MERGE_ATTEMPT_EVENT = "workspace.audit.merge_attempt"
+_AUDIT_MERGE_RESULT_EVENT = "workspace.audit.merge_result"
+_AUDIT_COMMENT_RESOLUTION_EVENT = "workspace.audit.comment_resolution"
 _REDACTION = "<redacted>"
 _URL_CREDENTIAL_RE = re.compile(r"(https?://)([^/\s:@]+(?::[^/\s@]+)?@)")
 _AUTHORIZATION_BEARER_RE = re.compile(
@@ -570,6 +575,54 @@ class PullRequestMonitorRunner:
             await repo.add_events(ws, events=events)
             await s.commit()
 
+    async def _record_pr_monitor_audit_event(
+        self,
+        *,
+        workspace_id: str,
+        event_type: str,
+        action: str,
+        outcome: str,
+        reason_code: str,
+        pr_number: int,
+        status: PRStatus | None,
+        base_branch: str,
+        remote_branch: str | None,
+        operation_id: str | None = None,
+        operation_type: str | None = None,
+        monitor_log: WorkspaceLogSink | None = None,
+        source_head_sha: str | None = None,
+        source_base_sha: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
+    ) -> None:
+        audit_evidence = dict(evidence or {})
+        if monitor_log is not None:
+            audit_evidence.setdefault("log_stream_refs", {"monitor": monitor_log.stream_id})
+        async with self._deps.session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - destroyed mid-monitor
+                return
+            await repo.add_audit_event(
+                ws,
+                event_type=event_type,
+                actor=_PR_MONITOR_AUDIT_ACTOR,
+                source=_PR_MONITOR_AUDIT_ACTOR,
+                action=action,
+                outcome=outcome,
+                reason_code=reason_code,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                pr_number=pr_number,
+                pr_url=ws.pr_url,
+                source_head_sha=source_head_sha or (status.head_sha if status else None),
+                source_base_sha=source_base_sha or ws.base_commit,
+                target_branch=base_branch,
+                remote_branch=remote_branch,
+                branch_name=ws.branch_name,
+                evidence=audit_evidence or None,
+            )
+            await s.commit()
+
     # ── Entry point ────────────────────────────────────────────────────────
 
     async def run(self, *, workspace_id: str, compose_project: str, compose_file: Path) -> None:
@@ -933,6 +986,20 @@ class PullRequestMonitorRunner:
                     "pushed": True,
                 },
             )
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_GIT_PUSH_EVENT,
+                action="sync_base_push",
+                outcome="succeeded",
+                reason_code="SYNC_BASE",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                operation_id=operation.operation_id if operation is not None else None,
+                operation_type=OperationType.sync_base.value,
+                monitor_log=monitor_log,
+            )
             state.iter_count += 1
             return False
 
@@ -997,6 +1064,20 @@ class PullRequestMonitorRunner:
                     "pushed": True,
                 },
             )
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_GIT_PUSH_EVENT,
+                action="ci_repair_push",
+                outcome="succeeded",
+                reason_code="CI_REPAIR",
+                pr_number=pr_number,
+                status=status,
+                base_branch=base_branch,
+                remote_branch=remote_branch,
+                operation_id=operation.operation_id if operation is not None else None,
+                operation_type=OperationType.ci_repair.value,
+                monitor_log=monitor_log,
+            )
             state.iter_count += 1
             return False
 
@@ -1034,10 +1115,13 @@ class PullRequestMonitorRunner:
                     initial_threads=action.threads,
                     initial_reviews=action.review_comments,
                     state=state,
+                    base_branch=base_branch,
                     remote_branch=remote_branch,
                     compose_project=compose_project,
                     compose_file=compose_file,
                     monitor_log=monitor_log,
+                    operation_id=operation.operation_id if operation is not None else None,
+                    operation_type=OperationType.comment_repair.value,
                 )
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
@@ -1297,6 +1381,24 @@ class PullRequestMonitorRunner:
                             remote_branch=remote_branch,
                             monitor_log=monitor_log,
                         )
+                        await self._record_pr_monitor_audit_event(
+                            workspace_id=workspace_id,
+                            event_type=_AUDIT_MERGE_ATTEMPT_EVENT,
+                            action="merge",
+                            outcome="attempted",
+                            reason_code="MERGE",
+                            pr_number=pr_number,
+                            status=merge_status,
+                            base_branch=base_branch,
+                            remote_branch=remote_branch,
+                            operation_id=(
+                                merge_operation.operation_id
+                                if merge_operation is not None
+                                else None
+                            ),
+                            operation_type=OperationType.monitor_state.value,
+                            monitor_log=monitor_log,
+                        )
                         try:
                             merge_sha = await self._deps.gh.merge_pr(repo=repo, pr_number=pr_number)
                         except GitHubClientError as exc:
@@ -1312,6 +1414,28 @@ class PullRequestMonitorRunner:
                                 error_code="GITHUB_MERGE_FAILED",
                                 error_message=str(exc),
                             )
+                            await self._record_pr_monitor_audit_event(
+                                workspace_id=workspace_id,
+                                event_type=_AUDIT_MERGE_RESULT_EVENT,
+                                action="merge",
+                                outcome="failed",
+                                reason_code="GITHUB_MERGE_FAILED",
+                                pr_number=pr_number,
+                                status=merge_status,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                operation_id=(
+                                    merge_operation.operation_id
+                                    if merge_operation is not None
+                                    else None
+                                ),
+                                operation_type=OperationType.monitor_state.value,
+                                monitor_log=monitor_log,
+                                evidence={
+                                    "operation": "merge_pr",
+                                    "error_message": str(exc),
+                                },
+                            )
                         else:
                             await self._finish_monitor_operation(
                                 merge_operation,
@@ -1321,6 +1445,25 @@ class PullRequestMonitorRunner:
                                     "outcome": "merged",
                                     "merge_sha": merge_sha,
                                 },
+                            )
+                            await self._record_pr_monitor_audit_event(
+                                workspace_id=workspace_id,
+                                event_type=_AUDIT_MERGE_RESULT_EVENT,
+                                action="merge",
+                                outcome="succeeded",
+                                reason_code="MERGE",
+                                pr_number=pr_number,
+                                status=merge_status,
+                                base_branch=base_branch,
+                                remote_branch=remote_branch,
+                                operation_id=(
+                                    merge_operation.operation_id
+                                    if merge_operation is not None
+                                    else None
+                                ),
+                                operation_type=OperationType.monitor_state.value,
+                                monitor_log=monitor_log,
+                                evidence={"merge_sha": merge_sha},
                             )
 
             if queue_blockers_after_lock:
@@ -2160,6 +2303,9 @@ class PullRequestMonitorRunner:
         compose_project: str,
         compose_file: Path,
         monitor_log: WorkspaceLogSink | None = None,
+        base_branch: str | None = None,
+        operation_id: str | None = None,
+        operation_type: str | None = None,
     ) -> None:
         """Implements the commit-then-push-on-settle behaviour from the plan.
 
@@ -2235,6 +2381,7 @@ class PullRequestMonitorRunner:
         # 3) Push everything we committed.
         worktree_path = self._worktrees_root / workspace_id
         pushed = await self._git_push(worktree_path=worktree_path, remote_branch=remote_branch)
+        pushed_head_sha: str | None = None
         if not pushed:
             # No local commits — CLI returned "false_positive" for
             # everything or "defer" for everything. We still want to
@@ -2245,8 +2392,23 @@ class PullRequestMonitorRunner:
         # pushed commit is local git state; a transient GraphQL resolve
         # failure should not affect the monitor's push bookkeeping.
         if pushed:
-            head_sha = await self._rev_parse_head(worktree_path)
-            state.last_push_sha = head_sha
+            pushed_head_sha = await self._rev_parse_head(worktree_path)
+            state.last_push_sha = pushed_head_sha
+            await self._record_pr_monitor_audit_event(
+                workspace_id=workspace_id,
+                event_type=_AUDIT_GIT_PUSH_EVENT,
+                action="comment_repair_push",
+                outcome="succeeded",
+                reason_code="COMMENT_REPAIR",
+                pr_number=pr_number,
+                status=None,
+                base_branch=base_branch or "",
+                remote_branch=remote_branch,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                monitor_log=monitor_log,
+                source_head_sha=pushed_head_sha,
+            )
 
         # 4) Resolve threads on GitHub. Only inline threads have IDs we can
         # resolve via the GraphQL mutation; review-level comments are
@@ -2264,6 +2426,27 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                 ):
                     state.threads_addressed_ids.pop(tid, None)
+                    await self._record_pr_monitor_audit_event(
+                        workspace_id=workspace_id,
+                        event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                        action="resolve_thread",
+                        outcome="requeued",
+                        reason_code=_GITHUB_TRANSIENT_RETRY_REASON,
+                        pr_number=pr_number,
+                        status=None,
+                        base_branch=base_branch or "",
+                        remote_branch=remote_branch,
+                        operation_id=operation_id,
+                        operation_type=operation_type,
+                        monitor_log=monitor_log,
+                        source_head_sha=pushed_head_sha,
+                        evidence={
+                            "thread_ids": [tid],
+                            "resolved_thread_count": 0,
+                            "requeued_thread_count": 1,
+                            "error_message": str(exc),
+                        },
+                    )
                     continue
                 _log.warning(
                     "monitor.resolve_thread_failed",
@@ -2276,6 +2459,47 @@ class PullRequestMonitorRunner:
                 # failed resolve would make the next poll treat an open
                 # GitHub thread as handled forever.
                 state.threads_addressed_ids.pop(tid, None)
+                await self._record_pr_monitor_audit_event(
+                    workspace_id=workspace_id,
+                    event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                    action="resolve_thread",
+                    outcome="failed",
+                    reason_code="COMMENT_RESOLUTION_FAILED",
+                    pr_number=pr_number,
+                    status=None,
+                    base_branch=base_branch or "",
+                    remote_branch=remote_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
+                    source_head_sha=pushed_head_sha,
+                    evidence={
+                        "thread_ids": [tid],
+                        "resolved_thread_count": 0,
+                        "failed_thread_count": 1,
+                        "error_message": str(exc),
+                    },
+                )
+            else:
+                await self._record_pr_monitor_audit_event(
+                    workspace_id=workspace_id,
+                    event_type=_AUDIT_COMMENT_RESOLUTION_EVENT,
+                    action="resolve_thread",
+                    outcome="succeeded",
+                    reason_code="COMMENT_REPAIR",
+                    pr_number=pr_number,
+                    status=None,
+                    base_branch=base_branch or "",
+                    remote_branch=remote_branch,
+                    operation_id=operation_id,
+                    operation_type=operation_type,
+                    monitor_log=monitor_log,
+                    source_head_sha=pushed_head_sha,
+                    evidence={
+                        "thread_ids": [tid],
+                        "resolved_thread_count": 1,
+                    },
+                )
 
     async def _address_thread(
         self,
