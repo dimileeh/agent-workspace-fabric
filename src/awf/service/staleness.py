@@ -531,8 +531,8 @@ class StalenessRefreshService:
         next_stale = stale or validation_reason is not None
         next_stale_reason = (
             validation_reason
-            or (existing_validation_reason if stale else None)
             or (stale_reason if stale else None)
+            or (existing_validation_reason if stale else None)
             or ("stale" if stale else None)
         )
         if candidate.stale != next_stale or candidate.stale_reason != next_stale_reason:
