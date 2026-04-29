@@ -1736,6 +1736,14 @@ class WorkspaceRepository:
     async def get(self, workspace_id: str) -> Workspace | None:
         return await self._session.get(Workspace, workspace_id)
 
+    async def get_with_secret_leases(self, workspace_id: str) -> Workspace | None:
+        stmt = (
+            select(Workspace)
+            .where(Workspace.id == workspace_id)
+            .options(selectinload(Workspace.secret_leases))
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
     async def get_with_operations(self, workspace_id: str) -> Workspace | None:
         stmt = (
             select(Workspace)

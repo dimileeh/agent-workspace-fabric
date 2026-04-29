@@ -292,7 +292,7 @@ class Workspace(Base):
     secret_leases: Mapped[list[WorkspaceSecretLease]] = relationship(
         back_populates="workspace",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="raise",
         order_by="WorkspaceSecretLease.issued_at",
     )
 
@@ -457,7 +457,7 @@ class TaskAttempt(Base):
     )
     secret_leases: Mapped[list[WorkspaceSecretLease]] = relationship(
         back_populates="attempt",
-        lazy="selectin",
+        lazy="raise",
         order_by="WorkspaceSecretLease.issued_at",
     )
 

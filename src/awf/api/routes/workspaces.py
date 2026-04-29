@@ -348,7 +348,7 @@ async def get_workspace(
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceResponse:
     repo = WorkspaceRepository(session)
-    ws = await repo.get(workspace_id)
+    ws = await repo.get_with_secret_leases(workspace_id)
     if ws is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
