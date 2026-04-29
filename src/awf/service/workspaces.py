@@ -32,7 +32,7 @@ from awf.api.schemas import (
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Task, TaskAttempt, Workspace
+from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceSecretLease
 from awf.db.repositories import (
     OperationRepository,
     OwnedPathOverlap,
@@ -718,7 +718,7 @@ def workspace_response(
     )
 
 
-def _loaded_secret_leases(workspace: Workspace) -> list[Any]:
+def _loaded_secret_leases(workspace: Workspace) -> list[WorkspaceSecretLease]:
     try:
         state = sa_inspect(workspace)
     except NoInspectionAvailable:
