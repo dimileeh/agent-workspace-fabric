@@ -25,6 +25,7 @@ from awf.runtime.pr_monitor_runner import _initial_review_grace_started_key
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
+    issue_comment_node,
     make_runner,
     pr_payload,
     review_node,
@@ -49,6 +50,20 @@ async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSessi
 def _disabled_review_boilerplate() -> dict:
     return review_node(
         cid=7801,
+        author="coderabbitai",
+        body=(
+            "> [!IMPORTANT]\n"
+            "> ## Review skipped\n\n"
+            "Auto reviews are disabled on base/target branches other than "
+            "the configured development branch.\n\n"
+            "- [ ] Trigger review"
+        ),
+    )
+
+
+def _disabled_issue_comment_boilerplate() -> dict:
+    return issue_comment_node(
+        cid=7803,
         author="coderabbitai",
         body=(
             "> [!IMPORTANT]\n"
@@ -96,6 +111,50 @@ async def test_only_non_actionable_bot_review_body_does_not_trigger_human_wait(
     cmd.queue_result(
         returncode=0,
         stdout=pr_payload(reviews=[_disabled_review_boilerplate()]),
+    )
+    cmd.queue_result(returncode=0)  # gh pr merge
+    cmd.queue_result(returncode=0, stdout="merge-sha\n")  # merge commit lookup
+    cmd.queue_result(returncode=0)  # docker compose down
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+        artifacts_root=tmp_path / "artifacts",
+        initial_review_grace_period_seconds=0,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await runner.run(
+            workspace_id=workspace_id,
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
+
+    actions = [entry["action"] for entry in _action_entries(captured)]
+    assert actions == ["Merge"]
+    assert adapter.calls == []
+    assert not any(call.args[:3] == ["gh", "pr", "comment"] for call in cmd.calls)
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    assert not any(operation.type == OperationType.human_wait.value for operation in operations)
+
+
+@pytest.mark.unit
+async def test_only_non_actionable_bot_issue_comment_does_not_trigger_human_wait(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    sleep_fn = RecordedSleep()
+    cmd.queue_result(returncode=0)  # git fetch origin <base>
+    cmd.queue_result(returncode=0, stdout="0\n")  # base-behind
+    cmd.queue_result(
+        returncode=0,
+        stdout=pr_payload(comments=[_disabled_issue_comment_boilerplate()]),
     )
     cmd.queue_result(returncode=0)  # gh pr merge
     cmd.queue_result(returncode=0, stdout="merge-sha\n")  # merge commit lookup
