@@ -1534,8 +1534,7 @@ class PullRequestMonitorRunner:
                 _ws = await workspace_repo.get(workspace_id)
                 if _ws is None:  # pragma: no cover - defensive invariant
                     return True
-                current_status = WorkspaceStatus(_ws.status)
-                if WorkspaceStateMachine.is_callback_terminal(current_status):
+                if _is_callback_terminal_workspace_status(_ws.status):
                     await workspace_repo.record_ignored_stale_callback(
                         _ws,
                         callback_source="pr_monitor",
@@ -2821,6 +2820,14 @@ async def _record_ignored_monitor_terminal_callback(
         requested_status=requested_status,
         reason_code=reason_code,
     )
+
+
+def _is_callback_terminal_workspace_status(status: str) -> bool:
+    try:
+        workspace_status = WorkspaceStatus(status)
+    except ValueError:  # pragma: no cover - defensive for legacy bad rows
+        return False
+    return WorkspaceStateMachine.is_callback_terminal(workspace_status)
 
 
 _VERDICT_FALSE_POSITIVE = re.compile(r"\bFALSE\s+POSITIVE\s*:", re.IGNORECASE)

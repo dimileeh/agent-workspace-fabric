@@ -705,6 +705,73 @@ async def test_stale_recovery_dispatch_ignores_terminal_workspace_race(
 
 
 @pytest.mark.unit
+async def test_stale_recovery_dispatch_ignores_legacy_invalid_workspace_status(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    original_gate = runner._merge_gate_for_workspace
+
+    async def _gate_then_legacy_status(
+        workspace_id_arg: str,
+        *,
+        check_policy: bool = False,
+    ) -> object:
+        gate = await original_gate(workspace_id_arg, check_policy=check_policy)
+        await _update_workspace(
+            factory,
+            workspace_id_arg,
+            status="legacy-invalid-status",
+        )
+        return gate
+
+    runner._merge_gate_for_workspace = _gate_then_legacy_status  # type: ignore[method-assign]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        ignored_events = [
+            event
+            for event in ws.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert ws.status == "legacy-invalid-status"
+    assert operations == []
+    assert ignored_events[-1].reason_code == "STALE_CALLBACK_IGNORED"
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "recovery_dispatch",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": "legacy-invalid-status",
+        "requested_status": WorkspaceStatus.ready.value,
+        "reason_code": "STALE_CALLBACK_IGNORED",
+    }
+
+
+@pytest.mark.unit
 async def test_pre_merge_recheck_github_error_fails_workspace(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
