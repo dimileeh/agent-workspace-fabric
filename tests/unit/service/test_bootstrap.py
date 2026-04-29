@@ -166,6 +166,34 @@ def test_bootstrap_runs_expected_command_sequence(tmp_path: Path) -> None:
 
 
 @pytest.mark.unit
+def test_bootstrap_success_payload_includes_stage_output(tmp_path: Path) -> None:
+    def _run(args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        if args[-1] == "migrate":
+            return subprocess.CompletedProcess(
+                args,
+                returncode=0,
+                stdout="alembic applied pending migrations\n",
+                stderr="migration warning\n",
+            )
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    result = asyncio.run(
+        run_service_bootstrap(
+            _settings(tmp_path),
+            options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+            run_subprocess=_run,
+            status_collector=_ok_status_collector,
+            sleep=_no_sleep,
+            monotonic=lambda: 0.0,
+        )
+    )
+
+    migrate_stage = result.to_dict()["stages"][2]
+    assert migrate_stage["stdout"] == "alembic applied pending migrations\n"
+    assert migrate_stage["stderr"] == "migration warning\n"
+
+
+@pytest.mark.unit
 def test_bootstrap_reruns_migrate_with_force_recreate(tmp_path: Path) -> None:
     calls: list[list[str]] = []
 

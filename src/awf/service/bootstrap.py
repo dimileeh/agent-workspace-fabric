@@ -81,6 +81,8 @@ class ServiceBootstrapStageResult:
             "stage": self.stage,
             "command": list(self.command),
             "returncode": self.returncode,
+            "stdout": self.stdout,
+            "stderr": self.stderr,
         }
 
 
