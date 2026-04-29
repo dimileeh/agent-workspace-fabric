@@ -73,7 +73,9 @@ class RedisClient:
             with sock.makefile("rb") as reader:
                 if self._db:
                     sock.sendall(_encode_command(("SELECT", str(self._db))))
-                    _read_response(reader)
+                    select_response = _read_response(reader)
+                    if select_response != "OK":
+                        raise RedisError(f"unexpected SELECT response: {select_response!r}")
                 sock.sendall(_encode_command(parts))
                 return _read_response(reader)
 

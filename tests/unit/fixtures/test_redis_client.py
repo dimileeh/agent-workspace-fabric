@@ -80,3 +80,26 @@ def test_execute_closes_reader_created_from_socket_makefile(
     assert fake_socket.timeout == 1.5
     assert fake_socket.closed
     assert reader.closed
+
+
+def test_execute_requires_select_ok_response(monkeypatch: pytest.MonkeyPatch) -> None:
+    redis_client = _load_redis_client_module()
+    reader = io.BytesIO(b"+QUEUED\r\n+PONG\r\n")
+    fake_socket = _FakeSocket(reader)
+
+    def create_connection(address: tuple[str, int], timeout: float) -> _FakeSocket:
+        assert address == ("redis", 6379)
+        assert timeout == 5.0
+        return fake_socket
+
+    monkeypatch.setattr(redis_client.socket, "create_connection", create_connection)
+
+    client = redis_client.RedisClient("redis", 6379, db=2)
+    with pytest.raises(redis_client.RedisError, match="unexpected SELECT response"):
+        client.execute("PING")
+
+    assert fake_socket.sent == [
+        b"*2\r\n$6\r\nSELECT\r\n$1\r\n2\r\n",
+    ]
+    assert fake_socket.closed
+    assert reader.closed
