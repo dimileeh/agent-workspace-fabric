@@ -79,7 +79,7 @@ async def test_list_workspace_logs_direct() -> None:
     assert [item.stream_id for item in response.items] == ["agent.stdout", "agent.stderr"]
     assert response.next_cursor is None
     assert response.has_more is False
-    assert response.limit == 50
+    assert response.limit == 2
     assert response.cursor is None
 
 

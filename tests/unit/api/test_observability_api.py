@@ -367,6 +367,7 @@ class TestLogs:
         assert listed.status_code == 200
         assert listed.json()["items"][0]["stream_id"] == "agent.stdout"
         assert listed.json()["items"][0]["byte_count"] == len("alpha\nbeta\n")
+        assert listed.json()["limit"] == 1
 
         read = await client.get(
             f"/v1/workspaces/{workspace_id}/logs/agent.stdout",
