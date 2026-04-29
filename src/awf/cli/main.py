@@ -210,6 +210,72 @@ def service_status(
         raise typer.Exit(code=1)
 
 
+@service_app.command("bootstrap")
+def service_bootstrap(
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+    timeout_seconds: float = typer.Option(
+        180.0,
+        "--timeout-seconds",
+        min=0.0,
+        help="Maximum time to wait for final service readiness.",
+    ),
+    poll_interval_seconds: float = typer.Option(
+        2.0,
+        "--poll-interval-seconds",
+        min=0.01,
+        help="Seconds between readiness polls.",
+    ),
+    skip_agent_runtime_build: bool = typer.Option(
+        False,
+        "--skip-agent-runtime-build",
+        help="Skip building the configured AWF agent runtime image.",
+    ),
+    provider: list[str] = typer.Option(
+        [],
+        "--provider",
+        help=(
+            "Repeatable provider strictness check: github, claude_code, gemini, "
+            "or opencode."
+        ),
+    ),
+) -> None:
+    """Start local Postgres, migrations, API, worker, and verify readiness."""
+    from awf.service.bootstrap import (
+        ServiceBootstrapError,
+        ServiceBootstrapOptions,
+        run_service_bootstrap,
+    )
+    from awf.service.config import resolve_service_settings
+    from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    options = ServiceBootstrapOptions(
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        skip_agent_runtime_build=skip_agent_runtime_build,
+        strict_providers=frozenset(strict_providers),
+    )
+    try:
+        result = asyncio.run(
+            run_service_bootstrap(
+                resolve_service_settings(),
+                options=options,
+            )
+        )
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
+    except ServiceBootstrapError as exc:
+        _emit(exc.to_dict(), fmt)
+        raise typer.Exit(code=1) from None
+
+    _emit(result.to_dict(), fmt)
+
+
 @service_app.command("config")
 def service_config(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
