@@ -28,6 +28,8 @@ from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
+    SecretLeaseIssue,
+    SecretLeaseRepository,
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceRepository,
@@ -978,6 +980,70 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert reservation["dind_slots"] == 1
         assert reservation["phase"] == "workspace_lifecycle"
         assert reservation["released_at"] is None
+
+    @pytest.mark.unit
+    async def test_workspace_detail_and_secret_lease_route_expose_sanitized_status(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        create = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+        assert create.status_code == 202
+        ws_id = create.json()["workspace_id"]
+        raw_ref = "sk-live-do-not-appear-in-api"
+        now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+            await SecretLeaseRepository(session).issue_declared_leases(
+                workspace,
+                leases=[
+                    SecretLeaseIssue(
+                        secret_name="api-token",
+                        kind="env",
+                        target="API_TOKEN",
+                        mode="ro",
+                        required=True,
+                        provider="vault",
+                        ref_digest="sha256:" + "7" * 64,
+                        expires_at=now + timedelta(hours=1),
+                        issue_metadata={
+                            "profile": "api",
+                            "declaration_index": 0,
+                            "raw_ref": raw_ref,
+                        },
+                    )
+                ],
+                now=now,
+            )
+            await session.commit()
+
+        detail = await client.get(f"/v1/workspaces/{ws_id}")
+        route = await client.get(f"/v1/workspaces/{ws_id}/secret-leases")
+
+        assert detail.status_code == 200
+        assert route.status_code == 200
+        detail_body = detail.json()
+        route_body = route.json()
+        assert detail_body["secret_leases"][0]["lease_id"].startswith("sl_")
+        assert detail_body["secret_leases"][0]["secret_name"] == "api-token"
+        assert route_body["items"] == detail_body["secret_leases"]
+        assert raw_ref not in json.dumps(detail_body)
+        assert raw_ref not in json.dumps(route_body)
+
+    @pytest.mark.unit
+    async def test_secret_lease_route_missing_workspace_matches_child_route_404(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        response = await client.get("/v1/workspaces/ws_missing/secret-leases")
+
+        assert response.status_code == 404
+        assert response.json()["detail"] == {
+            "error_code": "NOT_FOUND",
+            "message": "No workspace with id ws_missing",
+        }
 
     @pytest.mark.unit
     async def test_rejects_zero_disk_reservation(self, client: AsyncClient) -> None:

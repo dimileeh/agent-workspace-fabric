@@ -17,6 +17,8 @@ from awf.db.models import MergeCandidate, Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    SecretLeaseIssue,
+    SecretLeaseRepository,
     TaskAttemptRepository,
     TaskRepository,
     WorkspaceEventRepository,
@@ -245,6 +247,32 @@ def _service(
         ),
         stopper,
         cleaner,
+    )
+
+
+async def _issue_control_secret_lease(
+    session: AsyncSession,
+    workspace: Workspace,
+    *,
+    now: datetime | None = None,
+) -> None:
+    issued_at = now or datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    await SecretLeaseRepository(session).issue_declared_leases(
+        workspace,
+        leases=[
+            SecretLeaseIssue(
+                secret_name="api-token",
+                kind="env",
+                target="API_TOKEN",
+                mode="ro",
+                required=True,
+                provider="env",
+                ref_digest="sha256:" + "d" * 64,
+                expires_at=issued_at + timedelta(hours=1),
+                issue_metadata={"profile": "control-lifecycle", "declaration_index": 0},
+            )
+        ],
+        now=issued_at,
     )
 
 
@@ -1681,6 +1709,103 @@ async def test_force_destroy_active_workspace_runs_cleanup_and_marks_destroyed(
         "remove_worktree": True,
         "evidence": {"cleanup": operations[0].result["cleanup"]},
     }
+
+
+@pytest.mark.unit
+async def test_destroy_workspace_revokes_active_secret_leases_before_cleanup(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    await _issue_control_secret_lease(session, workspace)
+    cleanup_seen_statuses: list[list[str]] = []
+
+    class LeaseCheckingCleaner(RecordingCleaner):
+        async def cleanup(
+            self,
+            *,
+            workspace_id: str,
+            repo_url: str,
+            compose_project_name: str | None = None,
+            compose_file_path: Path | None = None,
+            worktree_host_path: Path | None = None,
+            remove_volumes: bool = True,
+            remove_worktree: bool = True,
+        ) -> list[str]:
+            leases = await SecretLeaseRepository(session).list_for_workspace(workspace_id)
+            cleanup_seen_statuses.append([lease.status for lease in leases])
+            return await super().cleanup(
+                workspace_id=workspace_id,
+                repo_url=repo_url,
+                compose_project_name=compose_project_name,
+                compose_file_path=compose_file_path,
+                worktree_host_path=worktree_host_path,
+                remove_volumes=remove_volumes,
+                remove_worktree=remove_worktree,
+            )
+
+    cleaner = LeaseCheckingCleaner()
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    response = await service.destroy_workspace(
+        workspace.id,
+        force=True,
+        remove_volumes=True,
+        remove_worktree=True,
+        idempotency_key="destroy-with-secret-lease",
+    )
+    operations = await _operations(session, workspace.id)
+    leases = await SecretLeaseRepository(session).list_for_workspace(workspace.id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
+
+    assert response.status == WorkspaceStatus.destroyed
+    assert cleanup_seen_statuses == [["revoked"]]
+    assert leases[0].status == "revoked"
+    assert leases[0].revoke_reason_code == "TERMINAL_CLEANUP"
+    assert operations[0].result is not None
+    assert operations[0].result["secret_leases"] == {
+        "revoked_count": 1,
+        "reason_code": "TERMINAL_CLEANUP",
+    }
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["evidence"]["lease_revocations"] == {
+        "revoked_count": 1,
+        "reason_code": "TERMINAL_CLEANUP",
+    }
+
+
+@pytest.mark.unit
+async def test_destroy_workspace_replay_keeps_secret_lease_revocation_idempotent(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    await _issue_control_secret_lease(session, workspace)
+    service, _stopper, _cleaner = _service(session)
+
+    first = await service.destroy_workspace(
+        workspace.id,
+        force=True,
+        remove_volumes=True,
+        remove_worktree=True,
+        idempotency_key="destroy-secret-replay",
+    )
+    replay = await service.destroy_workspace(
+        workspace.id,
+        force=True,
+        remove_volumes=True,
+        remove_worktree=True,
+        idempotency_key="destroy-secret-replay",
+    )
+    leases = await SecretLeaseRepository(session).list_for_workspace(workspace.id)
+    events = await _events(session, workspace.id)
+
+    assert replay.operation_id == first.operation_id
+    assert leases[0].status == "revoked"
+    assert leases[0].revoke_reason_code == "TERMINAL_CLEANUP"
+    assert [event.reason_code for event in events].count("SECRET_LEASE_REVOKED") == 1
 
 
 @pytest.mark.unit

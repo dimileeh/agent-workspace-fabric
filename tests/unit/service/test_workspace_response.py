@@ -186,6 +186,68 @@ def test_workspace_response_includes_recovery_summary_with_single_validation(
 
 
 @pytest.mark.unit
+def test_workspace_response_includes_compact_secret_lease_status() -> None:
+    now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_secret_status",
+        status=WorkspaceStatus.ready.value,
+        version=2,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws_secret_status",
+        base_commit="abc123",
+        task_title="Expose secret lease status",
+        task_prompt="Exercise workspace_response secret lease projection.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref=None,
+        requested_profile=None,
+        resolved_profile=None,
+        test_commands=[],
+        requires_database=False,
+        node_id="local",
+        compose_project_name="awf_ws_secret_status",
+        compose_file_path="/tmp/compose.yml",
+        pr_url=None,
+        failure_reason=None,
+        failure_message=None,
+        active_policy_findings=[],
+        operations=[],
+        events=[],
+        secret_leases=[
+            SimpleNamespace(
+                id="sl_abc",
+                secret_name="api-token",
+                kind="env",
+                target="API_TOKEN",
+                status="mounted",
+                provider="env",
+                ref_digest="sha256:" + "1" * 64,
+                issued_at=now,
+                mounted_at=now + timedelta(seconds=1),
+                expires_at=now + timedelta(hours=1),
+                revoked_at=None,
+            )
+        ],
+        created_at=now,
+        updated_at=now,
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.secret_leases[0].lease_id == "sl_abc"
+    assert response.secret_leases[0].secret_name == "api-token"
+    assert response.secret_leases[0].status == "mounted"
+    assert response.secret_leases[0].ref_digest == "sha256:" + "1" * 64
+
+
+@pytest.mark.unit
 def test_workspace_validation_summary_ignores_other_attempt_runs() -> None:
     now = datetime(2026, 4, 27, 14, 0, tzinfo=UTC)
     workspace = SimpleNamespace(

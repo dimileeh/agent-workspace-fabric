@@ -27,6 +27,8 @@ from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 from awf.db.repositories import (
+    SecretLeaseIssue,
+    SecretLeaseRepository,
     TaskAttemptRepository,
     TaskRepository,
     ValidationRunRepository,
@@ -166,6 +168,84 @@ class TestCreate:
 
 
 class TestRelationshipLoading:
+    @pytest.mark.unit
+    async def test_list_does_not_eager_load_secret_leases(self) -> None:
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        factory = make_session_factory(engine)
+        async with factory() as s:
+            workspace = await WorkspaceRepository(s).create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="main",
+                task_title="secret lease loading",
+                task_prompt="avoid unrelated lease queries",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            task = await TaskRepository(s).create_or_get(
+                repo_url=workspace.repo_url,
+                base_branch=workspace.branch_base,
+                title=workspace.task_title,
+                prompt=workspace.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=None,
+                owned_paths=[],
+            )
+            attempt = await TaskAttemptRepository(s).create_for_workspace(
+                task=task,
+                workspace=workspace,
+            )
+            await SecretLeaseRepository(s).issue_declared_leases(
+                workspace,
+                leases=[
+                    SecretLeaseIssue(
+                        secret_name="api-token",
+                        kind="env",
+                        target="API_TOKEN",
+                        mode="ro",
+                        required=True,
+                        provider="env",
+                        ref_digest="sha256:" + "a" * 64,
+                        expires_at=None,
+                        issue_metadata={},
+                        attempt_id=attempt.id,
+                    )
+                ],
+                now=datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+            )
+            await s.commit()
+
+        statements: list[str] = []
+
+        def record_sql(
+            conn: object,
+            cursor: object,
+            statement: str,
+            parameters: object,
+            context: object,
+            executemany: bool,
+        ) -> None:
+            del conn, cursor, parameters, context, executemany
+            statements.append(" ".join(statement.lower().split()))
+
+        event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
+        try:
+            async with factory() as s:
+                rows = await WorkspaceRepository(s).list()
+        finally:
+            event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
+            await engine.dispose()
+
+        assert len(rows) == 1
+        assert not [
+            statement
+            for statement in statements
+            if "from workspace_secret_leases" in statement
+        ]
+
     @pytest.mark.unit
     async def test_list_does_not_eager_load_validation_runs(self) -> None:
         engine = make_engine("sqlite+aiosqlite:///:memory:")

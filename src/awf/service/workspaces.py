@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from sqlalchemy import inspect as sa_inspect
+from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import (
@@ -30,7 +32,7 @@ from awf.api.schemas import (
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Task, TaskAttempt, Workspace
+from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceSecretLease
 from awf.db.repositories import (
     OperationRepository,
     OwnedPathOverlap,
@@ -60,6 +62,7 @@ from awf.service.resource_capacity import (
     WorkspaceResourceDefaults,
     resource_capacity_summary,
 )
+from awf.service.secret_leases import workspace_secret_lease_response
 from awf.service.validation_observability import (
     latest_merge_candidate,
     validation_freshness_summary,
@@ -756,9 +759,22 @@ def workspace_response(
         else validation_provenance_unavailable(workspace)
     )
     computed_fields["runtime_health"] = _workspace_runtime_health_from_events(workspace)
+    computed_fields["secret_leases"] = [
+        workspace_secret_lease_response(lease) for lease in _loaded_secret_leases(workspace)
+    ]
     return WorkspaceResponse.model_validate(
         _WorkspaceResponseSource(workspace, computed_fields)
     )
+
+
+def _loaded_secret_leases(workspace: Workspace) -> list[WorkspaceSecretLease]:
+    try:
+        state = sa_inspect(workspace)
+    except NoInspectionAvailable:
+        return list(getattr(workspace, "secret_leases", []))
+    if "secret_leases" in state.unloaded:
+        return []
+    return list(getattr(workspace, "secret_leases", []))
 
 
 def _workspace_runtime_health_from_events(

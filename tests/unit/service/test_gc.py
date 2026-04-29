@@ -15,6 +15,8 @@ import awf.service.gc as gc
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
+    SecretLeaseIssue,
+    SecretLeaseRepository,
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
@@ -69,6 +71,35 @@ async def _workspace(
             workspace.pr_merge_sha = pr_merge_sha
         await session.commit()
         return workspace.id
+
+
+async def _issue_gc_secret_lease(
+    session_factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    now: datetime,
+) -> None:
+    async with session_factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        await SecretLeaseRepository(session).issue_declared_leases(
+            workspace,
+            leases=[
+                SecretLeaseIssue(
+                    secret_name="api-token",
+                    kind="env",
+                    target="API_TOKEN",
+                    mode="ro",
+                    required=True,
+                    provider="env",
+                    ref_digest="sha256:" + "e" * 64,
+                    expires_at=now + timedelta(hours=1),
+                    issue_metadata={"profile": "gc", "declaration_index": 0},
+                )
+            ],
+            now=now,
+        )
+        await session.commit()
 
 
 def _write(path: Path, content: str) -> None:
@@ -227,6 +258,21 @@ async def test_plan_reports_requested_statuses_when_no_statuses_are_eligible(
     assert plan.candidates == []
     assert plan.to_dict()["include_statuses"] == [WorkspaceStatus.running.value]
     assert plan.to_dict()["exclude_statuses"] == [WorkspaceStatus.completed.value]
+
+
+@pytest.mark.unit
+async def test_gc_secret_lease_revocation_skips_missing_workspace(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    now = datetime(2026, 4, 29, 12, tzinfo=UTC)
+
+    summaries = await gc._revoke_gc_secret_leases(
+        session_factory,
+        workspace_ids=["ws_missing"],
+        now=now,
+    )
+
+    assert summaries == {}
 
 
 @pytest.mark.unit
@@ -736,6 +782,113 @@ async def test_single_workspace_gc_deletes_only_requested_completed_workspace_af
         workspace = await session.get(Workspace, target_id)
         assert workspace is not None
         assert workspace.status == WorkspaceStatus.completed.value
+
+
+@pytest.mark.unit
+async def test_single_workspace_gc_revokes_active_secret_leases_before_auth_cleanup(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+    )
+    await _issue_gc_secret_lease(session_factory, workspace_id, now=now)
+    auth = work_dir / "auth" / workspace_id
+    _write(auth / "codex" / "auth.json", "auth")
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert not auth.exists()
+    assert result.to_dict()["secret_leases"] == {
+        workspace_id: {"revoked_count": 1, "reason_code": "TERMINAL_GC"}
+    }
+    async with session_factory() as session:
+        leases = await SecretLeaseRepository(session).list_for_workspace(workspace_id)
+        events = await WorkspaceEventRepository(session).list(
+            workspace_id=workspace_id,
+            event_type="workspace.secret_lease",
+            limit=10,
+        )
+
+    assert leases[0].status == "revoked"
+    assert leases[0].revoke_reason_code == "TERMINAL_GC"
+    assert {event.reason_code for event in events} == {
+        "SECRET_LEASE_ISSUED",
+        "SECRET_LEASE_REVOKED",
+    }
+
+
+@pytest.mark.unit
+async def test_batch_terminal_gc_revokes_each_candidate_and_is_retry_safe(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    first_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+    )
+    second_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=210),
+        pr=True,
+    )
+    await _issue_gc_secret_lease(session_factory, first_id, now=now)
+    await _issue_gc_secret_lease(session_factory, second_id, now=now)
+    first_auth = work_dir / "auth" / first_id
+    second_auth = work_dir / "auth" / second_id
+    _write(first_auth / "codex" / "auth.json", "auth")
+    _write(second_auth / "codex" / "auth.json", "auth")
+    first_worktree = work_dir / "git" / "worktrees" / first_id
+    first_worktree.parent.mkdir(parents=True, exist_ok=True)
+    first_worktree.write_text("not a directory", encoding="utf-8")
+
+    first = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+    )
+    second = await run_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert first.status == "partial"
+    assert first.to_dict()["secret_leases"] == {
+        first_id: {"revoked_count": 1, "reason_code": "TERMINAL_GC"},
+        second_id: {"revoked_count": 1, "reason_code": "TERMINAL_GC"},
+    }
+    assert second.to_dict()["secret_leases"] == {
+        first_id: {"revoked_count": 0, "reason_code": "TERMINAL_GC"},
+        second_id: {"revoked_count": 0, "reason_code": "TERMINAL_GC"},
+    }
+    async with session_factory() as session:
+        first_leases = await SecretLeaseRepository(session).list_for_workspace(first_id)
+        second_leases = await SecretLeaseRepository(session).list_for_workspace(second_id)
+
+    assert first_leases[0].status == "revoked"
+    assert second_leases[0].status == "revoked"
 
 
 @pytest.mark.unit

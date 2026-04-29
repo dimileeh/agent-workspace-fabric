@@ -22,6 +22,12 @@ from sqlalchemy.sql.elements import ColumnElement
 
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
+from awf.db.repositories import WorkspaceRepository
+from awf.service.secret_leases import (
+    TERMINAL_GC_REVOKE_REASON,
+    SecretLeaseService,
+    secret_lease_revocation_summary,
+)
 
 DEFAULT_MIN_AGE_HOURS = 168
 
@@ -331,6 +337,7 @@ class WorkspaceGCResult:
     delete_errors: list[WorkspaceGCDeleteError]
     path_outcomes: list[WorkspaceGCPathOutcome]
     compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult]
+    secret_lease_revocations: dict[str, dict[str, object]]
     status: WorkspaceCleanupExecutionStatus
     reason_code: str
 
@@ -349,6 +356,7 @@ class WorkspaceGCResult:
                 "deleted_paths": [str(path) for path in self.deleted_paths],
                 "deleted_path_count": len(self.deleted_paths),
                 "delete_errors": [error.to_dict() for error in self.delete_errors],
+                "secret_leases": self.secret_lease_revocations,
             }
         )
         payload["candidates"] = [
@@ -577,6 +585,7 @@ async def run_terminal_workspace_gc(
 ) -> WorkspaceGCResult:
     """Plan terminal workspace GC and optionally delete selected directories."""
 
+    current_time = _to_utc(now or datetime.now(UTC))
     plan = await plan_terminal_workspace_gc(
         session_factory,
         work_dir=work_dir,
@@ -585,7 +594,7 @@ async def run_terminal_workspace_gc(
         include_statuses=include_statuses,
         exclude_statuses=exclude_statuses,
         cleanup_enabled=cleanup_enabled,
-        now=now,
+        now=current_time,
     )
     if not execute:
         return _gc_result(
@@ -597,6 +606,11 @@ async def run_terminal_workspace_gc(
             compose_teardowns={},
         )
 
+    secret_lease_revocations = await _revoke_gc_secret_leases(
+        session_factory,
+        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        now=current_time,
+    )
     deleted_paths, delete_errors, path_outcomes, compose_teardowns = await _delete_gc_plan_paths(
         plan,
         compose_teardown=compose_teardown,
@@ -608,6 +622,7 @@ async def run_terminal_workspace_gc(
         delete_errors=delete_errors,
         path_outcomes=path_outcomes,
         compose_teardowns=compose_teardowns,
+        secret_lease_revocations=secret_lease_revocations,
     )
 
 
@@ -675,6 +690,11 @@ async def run_workspace_filesystem_gc(
             compose_teardowns={},
         )
 
+    secret_lease_revocations = await _revoke_gc_secret_leases(
+        session_factory,
+        workspace_ids=[candidate.workspace_id for candidate in plan.candidates],
+        now=current_time,
+    )
     deleted_paths, delete_errors, path_outcomes, compose_teardowns = await _delete_gc_plan_paths(
         plan,
         compose_teardown=compose_teardown,
@@ -686,7 +706,37 @@ async def run_workspace_filesystem_gc(
         delete_errors=delete_errors,
         path_outcomes=path_outcomes,
         compose_teardowns=compose_teardowns,
+        secret_lease_revocations=secret_lease_revocations,
     )
+
+
+async def _revoke_gc_secret_leases(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    workspace_ids: list[str],
+    now: datetime,
+) -> dict[str, dict[str, object]]:
+    summaries: dict[str, dict[str, object]] = {}
+    if not workspace_ids:
+        return summaries
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        service = SecretLeaseService(session)
+        for workspace_id in workspace_ids:
+            workspace = await repo.get(workspace_id)
+            if workspace is None:
+                continue
+            revoked = await service.revoke_workspace_secret_leases(
+                workspace,
+                now=now,
+                reason_code=TERMINAL_GC_REVOKE_REASON,
+            )
+            summaries[workspace_id] = secret_lease_revocation_summary(
+                revoked,
+                reason_code=TERMINAL_GC_REVOKE_REASON,
+            )
+        await session.commit()
+    return summaries
 
 
 async def _delete_gc_plan_paths(
@@ -810,7 +860,9 @@ def _gc_result(
     delete_errors: list[WorkspaceGCDeleteError],
     path_outcomes: list[WorkspaceGCPathOutcome],
     compose_teardowns: dict[str, WorkspaceGCComposeTeardownResult],
+    secret_lease_revocations: dict[str, dict[str, object]] | None = None,
 ) -> WorkspaceGCResult:
+    lease_revocations = secret_lease_revocations or {}
     if dry_run:
         return WorkspaceGCResult(
             plan=plan,
@@ -819,6 +871,7 @@ def _gc_result(
             delete_errors=delete_errors,
             path_outcomes=path_outcomes,
             compose_teardowns=compose_teardowns,
+            secret_lease_revocations=lease_revocations,
             status="dry_run",
             reason_code=CLEANUP_DRY_RUN,
         )
@@ -832,6 +885,7 @@ def _gc_result(
         delete_errors=delete_errors,
         path_outcomes=path_outcomes,
         compose_teardowns=compose_teardowns,
+        secret_lease_revocations=lease_revocations,
         status=status,
         reason_code=(
             CLEANUP_EXECUTION_PARTIAL if delete_errors else CLEANUP_EXECUTION_SUCCEEDED

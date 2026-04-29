@@ -20,7 +20,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["6a7b8c9d0e1f"]
+    assert script.get_heads() == ["7b8c9d0e1f2a"]
 
 
 @pytest.mark.unit
@@ -67,6 +67,12 @@ def test_alembic_upgrade_head_creates_scheduler_record_tables(
         }
         validation_run_columns = {
             row[1] for row in conn.execute("PRAGMA table_info(validation_runs)")
+        }
+        secret_lease_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(workspace_secret_leases)")
+        }
+        secret_lease_indexes = {
+            row[1] for row in conn.execute("PRAGMA index_list(workspace_secret_leases)")
         }
 
     assert {"queue_decisions", "resource_reservations", "policy_findings"} <= tables
@@ -120,3 +126,28 @@ def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "environment_identity_digest",
         "environment_identity_inputs",
     } <= validation_run_columns
+    assert "workspace_secret_leases" in tables
+    assert {
+        "id",
+        "workspace_id",
+        "attempt_id",
+        "secret_name",
+        "kind",
+        "target",
+        "mode",
+        "required",
+        "provider",
+        "ref_digest",
+        "status",
+        "issued_at",
+        "mounted_at",
+        "expires_at",
+        "revoked_at",
+        "issue_metadata",
+        "mount_metadata",
+        "revoke_reason_code",
+    } <= secret_lease_columns
+    assert {
+        "ix_workspace_secret_leases_workspace_status",
+        "ix_workspace_secret_leases_status_expires",
+    } <= secret_lease_indexes
