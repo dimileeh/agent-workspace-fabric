@@ -135,9 +135,6 @@ async def build_workspace_overlap_graph_for_session(
     queue_state: OverlapGraphQueueState = "all",
     limit: int = 100,
 ) -> WorkspaceOverlapGraph:
-    if limit < 1:
-        raise ValueError("overlap graph limit must be positive")
-
     stmt = select(Workspace).where(
         Workspace.status.in_(_status_values_for_queue_state(queue_state))
     )
