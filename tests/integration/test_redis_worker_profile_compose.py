@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import os
 import shutil
 import subprocess
@@ -48,8 +49,9 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _run(cmd: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+async def _run(cmd: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    return await asyncio.to_thread(
+        subprocess.run,
         cmd,
         check=True,
         capture_output=True,
@@ -130,7 +132,7 @@ async def test_redis_worker_profile_runs_setup_health_validate_and_cleans_up(
     finally:
         await manager.down(spec)
 
-    ps = _run(
+    ps = await _run(
         [
             "docker",
             "ps",
@@ -143,7 +145,7 @@ async def test_redis_worker_profile_runs_setup_health_validate_and_cleans_up(
     )
     assert ps.stdout.strip() == ""
 
-    volumes = _run(
+    volumes = await _run(
         [
             "docker",
             "volume",
