@@ -2,10 +2,26 @@
 
 from __future__ import annotations
 
+import base64
+import json
+
 import pytest
 from httpx import AsyncClient
 
 _ENVELOPE_KEYS = {"items", "next_cursor", "has_more", "limit", "cursor"}
+
+
+def _overview_cursor() -> str:
+    payload = {
+        "created_at": "2026-04-29T00:00:00+00:00",
+        "workspace_id": "ws_envelope_cursor",
+    }
+    return base64.urlsafe_b64encode(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8")
+    ).decode("ascii")
+
+
+_OVERVIEW_CURSOR = _overview_cursor()
 
 
 def _assert_standard_envelope(
@@ -31,7 +47,12 @@ def _assert_standard_envelope(
         ("/v1/operations", {"limit": 7}, 7, None),
         ("/v1/merge-queue", {"limit": 7}, 7, None),
         ("/v1/locks", {"limit": 7}, 7, None),
-        ("/v1/workspaces/overview", {"limit": 7, "cursor": "opaque"}, 7, "opaque"),
+        (
+            "/v1/workspaces/overview",
+            {"limit": 7, "cursor": _OVERVIEW_CURSOR},
+            7,
+            _OVERVIEW_CURSOR,
+        ),
     ],
 )
 async def test_enveloped_list_endpoints_expose_standard_pagination_metadata(
