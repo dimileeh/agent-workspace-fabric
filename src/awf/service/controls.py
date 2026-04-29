@@ -69,6 +69,7 @@ _OPERATOR_REFRESH_REASON_CODE = "OPERATOR_REFRESH"
 _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
+_AUDIT_CONTROL_OPERATION_EVENT = "workspace.audit.control_operation"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
 
 
@@ -370,6 +371,18 @@ class WorkspaceControlService:
             status=OperationStatus.succeeded,
             result={"status": workspace.status},
         )
+        await _add_control_audit_event(
+            repo,
+            workspace,
+            operation=operation,
+            action=OperationType.cancel.value,
+            outcome="succeeded",
+            reason_code=_OPERATOR_CANCEL_REASON_CODE,
+            extra={
+                "stop_stack": stop_stack,
+                "expected_version": expected_version,
+            },
+        )
         return _control_response(
             workspace=workspace,
             operation=operation,
@@ -453,6 +466,15 @@ class WorkspaceControlService:
             operation,
             status=OperationStatus.succeeded,
             result={"status": workspace.status},
+        )
+        await _add_control_audit_event(
+            repo,
+            workspace,
+            operation=operation,
+            action=OperationType.stop.value,
+            outcome="succeeded",
+            reason_code=_OPERATOR_STOP_REASON_CODE,
+            extra={"expected_version": expected_version},
         )
         return _control_response(
             workspace=workspace,
@@ -891,13 +913,29 @@ class WorkspaceControlService:
             cleanup_result = WorkspaceCleanupResult.skipped(
                 reason_code="WORKSPACE_ALREADY_DESTROYED"
             )
+            cleanup_payload = cleanup_result.to_dict()
             await operations.finish(
                 operation,
                 status=OperationStatus.succeeded,
                 result={
                     "status": WorkspaceStatus.destroyed.value,
-                    "cleanup": cleanup_result.to_dict(),
+                    "cleanup": cleanup_payload,
                 },
+            )
+            await _add_control_audit_event(
+                repo,
+                workspace,
+                operation=operation,
+                action=OperationType.destroy.value,
+                outcome="skipped",
+                reason_code=_OPERATOR_DESTROY_REASON_CODE,
+                extra={
+                    "force": force,
+                    "remove_volumes": remove_volumes,
+                    "remove_worktree": remove_worktree,
+                    "expected_version": expected_version,
+                },
+                evidence={"cleanup": cleanup_payload},
             )
             return _control_response(
                 workspace=workspace,
@@ -968,6 +1006,24 @@ class WorkspaceControlService:
                     "ignored_callback": ignored_payload,
                 },
             )
+            await _add_control_audit_event(
+                repo,
+                workspace,
+                operation=operation,
+                action=OperationType.destroy.value,
+                outcome="skipped",
+                reason_code="STALE_CALLBACK_IGNORED",
+                extra={
+                    "force": force,
+                    "remove_volumes": remove_volumes,
+                    "remove_worktree": remove_worktree,
+                    "expected_version": expected_version,
+                },
+                evidence={
+                    "cleanup": cleanup_payload,
+                    "ignored_callback": ignored_payload,
+                },
+            )
             return _control_response(
                 workspace=workspace,
                 operation=operation,
@@ -1001,6 +1057,24 @@ class WorkspaceControlService:
                 error_message=bounded_cleanup_message,
                 result={"status": workspace.status, "cleanup": cleanup_payload},
             )
+            await _add_control_audit_event(
+                repo,
+                workspace,
+                operation=operation,
+                action=OperationType.destroy.value,
+                outcome="failed",
+                reason_code="CLEANUP_FAILED",
+                extra={
+                    "force": force,
+                    "remove_volumes": remove_volumes,
+                    "remove_worktree": remove_worktree,
+                    "expected_version": expected_version,
+                },
+                evidence={
+                    "cleanup": cleanup_payload,
+                    "error_message": bounded_cleanup_message,
+                },
+            )
             message = "workspace cleanup failed"
         else:
             if WorkspaceStateMachine.can_transition(
@@ -1016,6 +1090,21 @@ class WorkspaceControlService:
                 operation,
                 status=OperationStatus.succeeded,
                 result={"status": workspace.status, "cleanup": cleanup_payload},
+            )
+            await _add_control_audit_event(
+                repo,
+                workspace,
+                operation=operation,
+                action=OperationType.destroy.value,
+                outcome="succeeded",
+                reason_code=_OPERATOR_DESTROY_REASON_CODE,
+                extra={
+                    "force": force,
+                    "remove_volumes": remove_volumes,
+                    "remove_worktree": remove_worktree,
+                    "expected_version": expected_version,
+                },
+                evidence={"cleanup": cleanup_payload},
             )
             message = "workspace destroyed"
 
@@ -1430,6 +1519,8 @@ async def _finish_stack_stop_failed_operation(
     workspace: Workspace,
     exc: WorkspaceStackStopError,
 ) -> None:
+    repo = WorkspaceRepository(session)
+    operation_payload = operation.payload if isinstance(operation.payload, dict) else {}
     await operations.finish(
         operation,
         status=OperationStatus.failed,
@@ -1437,11 +1528,54 @@ async def _finish_stack_stop_failed_operation(
         error_code=exc.error_code,
         error_message=_bounded_operation_error_message(exc.message),
     )
+    await _add_control_audit_event(
+        repo,
+        workspace,
+        operation=operation,
+        action=operation.type,
+        outcome="failed",
+        reason_code=exc.error_code,
+        extra={
+            "stop_stack": operation_payload.get("stop_stack"),
+            "expected_version": operation_payload.get("expected_version"),
+        },
+        evidence={
+            "operation": f"docker {exc.operation}",
+            "returncode": exc.returncode,
+            "error_message": _bounded_operation_error_message(exc.message),
+        },
+    )
     await session.commit()
 
 
 def _bounded_operation_error_message(message: str) -> str:
     return message[:_OPERATION_ERROR_MESSAGE_MAX_LENGTH]
+
+
+async def _add_control_audit_event(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    *,
+    operation: Operation,
+    action: str,
+    outcome: str,
+    reason_code: str,
+    extra: Mapping[str, object | None] | None = None,
+    evidence: Mapping[str, object | None] | None = None,
+) -> None:
+    await repo.add_audit_event(
+        workspace,
+        event_type=_AUDIT_CONTROL_OPERATION_EVENT,
+        actor=_OPERATOR_API_SOURCE,
+        source=_OPERATOR_API_SOURCE,
+        action=action,
+        outcome=outcome,
+        reason_code=reason_code,
+        operation_id=operation.id,
+        operation_type=operation.type,
+        extra=extra,
+        evidence=evidence,
+    )
 
 
 def _claim_reset_snapshot(workspace: Workspace) -> dict[str, str | None]:

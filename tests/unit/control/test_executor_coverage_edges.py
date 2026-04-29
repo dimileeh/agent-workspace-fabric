@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -1239,6 +1240,11 @@ async def test_monitor_rebase_recovery_reports_git_failures(
         "_finish_rebase_recovery_operation",
         skip_finish_operation,
     )
+    monkeypatch.setattr(
+        executor,
+        "_record_executor_pr_audit_event",
+        AsyncMock(),
+    )
 
     with pytest.raises(_MonitorRebaseRecoveryError, match=message):
         await executor._run_monitor_rebase_recovery(
@@ -1452,6 +1458,7 @@ async def test_record_rebase_recovery_success_updates_candidate_and_operation(
     monkeypatch.setattr(executor_mod, "finish_monitor_operation", finish_operation)
     executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
     executor._session_factory = lambda: session  # type: ignore[method-assign]
+    monkeypatch.setattr(executor, "_add_executor_pr_audit_event", AsyncMock())
 
     await executor._record_rebase_recovery_success(
         workspace_id=workspace.id,
