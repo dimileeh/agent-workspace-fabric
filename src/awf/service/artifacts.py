@@ -1,0 +1,189 @@
+"""Safe filesystem access for workspace artifacts."""
+
+from __future__ import annotations
+
+import mimetypes
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from hashlib import sha256
+from os import stat_result
+from pathlib import Path
+
+
+class ArtifactPathError(ValueError):
+    """Raised when a client-supplied artifact path is not a safe relative path."""
+
+
+class ArtifactNotFoundError(FileNotFoundError):
+    """Raised when an artifact cannot be safely read from managed storage."""
+
+
+@dataclass(frozen=True, slots=True)
+class ArtifactMetadata:
+    artifact_id: str
+    workspace_id: str
+    name: str
+    relative_path: str
+    path: Path
+    kind: str
+    size_bytes: int
+    modified_at: datetime
+    content_type: str
+
+
+@dataclass(frozen=True, slots=True)
+class DownloadableArtifact:
+    workspace_id: str
+    name: str
+    relative_path: str
+    path: Path
+    size_bytes: int
+    modified_at: datetime
+    content_type: str
+    stat_result: stat_result
+
+
+def workspace_artifact_dir(work_dir: str | Path, workspace_id: str) -> Path:
+    """Return the managed artifact root for a workspace."""
+    return Path(work_dir) / "artifacts" / workspace_id
+
+
+def list_artifacts(workspace_id: str, artifact_dir: Path) -> list[ArtifactMetadata]:
+    """List regular, non-symlink files below a managed artifact root."""
+    try:
+        root = _resolve_artifact_root(artifact_dir)
+    except ArtifactNotFoundError:
+        return []
+
+    items: list[ArtifactMetadata] = []
+    try:
+        walker = artifact_dir.walk(follow_symlinks=False)
+    except OSError:
+        return []
+
+    for directory, dirnames, filenames in walker:
+        dirnames[:] = [
+            dirname
+            for dirname in sorted(dirnames)
+            if not _is_symlink(directory / dirname)
+        ]
+        for filename in sorted(filenames):
+            candidate = directory / filename
+            try:
+                if candidate.is_symlink():
+                    continue
+                resolved = candidate.resolve(strict=True)
+                if not resolved.is_relative_to(root) or not resolved.is_file():
+                    continue
+                stat = resolved.stat()
+            except OSError:
+                continue
+            relative_path = candidate.relative_to(artifact_dir).as_posix()
+            items.append(_metadata_from_stat(workspace_id, relative_path, resolved, stat))
+    return sorted(items, key=lambda item: item.relative_path)
+
+
+def get_downloadable_artifact(
+    *,
+    workspace_id: str,
+    artifact_dir: Path,
+    relative_path: str,
+) -> DownloadableArtifact:
+    """Resolve a client artifact path to a regular file below the managed root."""
+    parts = _safe_relative_path_parts(relative_path)
+    root = _resolve_artifact_root(artifact_dir)
+    candidate = _join_without_symlink_components(artifact_dir, parts)
+    try:
+        resolved = candidate.resolve(strict=True)
+        if not resolved.is_relative_to(root) or not resolved.is_file():
+            raise ArtifactNotFoundError(relative_path)
+        stat = resolved.stat()
+    except OSError as exc:
+        raise ArtifactNotFoundError(relative_path) from exc
+
+    return DownloadableArtifact(
+        workspace_id=workspace_id,
+        name=resolved.name,
+        relative_path="/".join(parts),
+        path=resolved,
+        size_bytes=stat.st_size,
+        modified_at=datetime.fromtimestamp(stat.st_mtime, UTC),
+        content_type=content_type_for(resolved),
+        stat_result=stat,
+    )
+
+
+def artifact_id(workspace_id: str, relative_path: str) -> str:
+    digest = sha256(f"{workspace_id}\0{relative_path}".encode()).hexdigest()[:24]
+    return f"art_{digest}"
+
+
+def artifact_kind(path: Path) -> str:
+    suffix = path.suffix.lower().lstrip(".")
+    return suffix or "file"
+
+
+def content_type_for(path: Path) -> str:
+    content_type, _ = mimetypes.guess_type(path.name)
+    return content_type or "application/octet-stream"
+
+
+def _metadata_from_stat(
+    workspace_id: str,
+    relative_path: str,
+    resolved: Path,
+    stat: stat_result,
+) -> ArtifactMetadata:
+    return ArtifactMetadata(
+        artifact_id=artifact_id(workspace_id, relative_path),
+        workspace_id=workspace_id,
+        name=resolved.name,
+        relative_path=relative_path,
+        path=resolved,
+        kind=artifact_kind(resolved),
+        size_bytes=stat.st_size,
+        modified_at=datetime.fromtimestamp(stat.st_mtime, UTC),
+        content_type=content_type_for(resolved),
+    )
+
+
+def _resolve_artifact_root(artifact_dir: Path) -> Path:
+    try:
+        if not artifact_dir.is_dir() or artifact_dir.is_symlink():
+            raise ArtifactNotFoundError(str(artifact_dir))
+        root = artifact_dir.resolve(strict=True)
+        if not root.is_dir():
+            raise ArtifactNotFoundError(str(artifact_dir))
+    except OSError as exc:
+        raise ArtifactNotFoundError(str(artifact_dir)) from exc
+    return root
+
+
+def _safe_relative_path_parts(relative_path: str) -> tuple[str, ...]:
+    if not relative_path or "\x00" in relative_path or "\\" in relative_path:
+        raise ArtifactPathError(relative_path)
+    if relative_path.startswith("/"):
+        raise ArtifactPathError(relative_path)
+    parts = tuple(relative_path.split("/"))
+    if any(part in {"", ".", ".."} for part in parts):
+        raise ArtifactPathError(relative_path)
+    return parts
+
+
+def _join_without_symlink_components(artifact_dir: Path, parts: tuple[str, ...]) -> Path:
+    current = artifact_dir
+    for part in parts:
+        current = current / part
+        try:
+            if current.is_symlink():
+                raise ArtifactNotFoundError("/".join(parts))
+        except OSError as exc:
+            raise ArtifactNotFoundError("/".join(parts)) from exc
+    return current
+
+
+def _is_symlink(path: Path) -> bool:
+    try:
+        return path.is_symlink()
+    except OSError:
+        return True
