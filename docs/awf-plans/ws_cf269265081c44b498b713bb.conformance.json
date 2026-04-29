@@ -1,0 +1,7 @@
+{
+  "status": "needs_iteration",
+  "summary": "The resolver, target-branch monitor, temp-git integration slice, structured refusal results, commit policy controls, event/result payloads, conventional local commit, and requested validation commands are in place and passing. The remaining gap is operator log visibility for the structured reconciliation details required by the saved plan.",
+  "gaps": [
+    "Emit and test structured resolver details in reconciliation logs, not only result/event payloads: monitor.target_branch_reconciled currently logs just status with repo/workspace context, and monitor.target_branch_reconcile_failed logs only the exception text, so operators reading logs do not get resolver reason_code, heads, generated revision/path, commit_sha, pushed/dry_run, or policy decision fields."
+  ]
+}
