@@ -32,7 +32,12 @@ from awf.common.compose_exec import (
     cleanup_compose_exec_invocation_after_cancellation,
 )
 from awf.common.logging import get_logger
-from awf.profiles.models import ProfileCommand, ProfileCoverage, WorkspaceProfile
+from awf.profiles.models import (
+    ProfileCommand,
+    ProfileCoverage,
+    ProfileHealthCheck,
+    WorkspaceProfile,
+)
 from awf.runtime.logs import LogStore
 
 _log = get_logger(__name__)
@@ -50,6 +55,29 @@ _COVERAGE_FILE_LINE_RE = re.compile(
     r"^(?P<file>\S.*?)\s+(?P<stmts>\d+)\s+(?P<miss>\d+)\s+(?P<cover>\d+)%\s*(?P<missing>.*?)\s*$"
 )
 _COVERAGE_HEADER_RE = re.compile(r"(?i)Name\s+Stmts\s+Miss\s+Cover")
+HEALTHCHECK_OK = "HEALTHCHECK_OK"
+HEALTHCHECK_TIMEOUT = "HEALTHCHECK_TIMEOUT"
+HEALTHCHECK_COMMAND_FAILED = "HEALTHCHECK_COMMAND_FAILED"
+HEALTHCHECK_HTTP_STATUS_MISMATCH = "HEALTHCHECK_HTTP_STATUS_MISMATCH"
+HEALTHCHECK_INVALID_CONFIGURATION = "HEALTHCHECK_INVALID_CONFIGURATION"
+
+_HTTP_HEALTHCHECK_SCRIPT = (
+    "import sys, urllib.error, urllib.request\n"
+    "method, url, expected_raw, timeout_raw = sys.argv[1:5]\n"
+    "expected = int(expected_raw)\n"
+    "timeout = float(timeout_raw)\n"
+    "request = urllib.request.Request(url, method=method)\n"
+    "try:\n"
+    "    with urllib.request.urlopen(request, timeout=timeout) as response:\n"
+    "        status = response.getcode()\n"
+    "except urllib.error.HTTPError as exc:\n"
+    "    status = exc.code\n"
+    "except Exception as exc:\n"
+    "    print(f'healthcheck request failed: {type(exc).__name__}: {exc}', file=sys.stderr)\n"
+    "    sys.exit(2)\n"
+    "print(f'http status {status} expected {expected}')\n"
+    "sys.exit(0 if status == expected else 1)\n"
+)
 
 
 @dataclass(frozen=True)
@@ -66,6 +94,7 @@ class ValidationCommandResult:
     stream_ids: dict[str, str | None] = field(default_factory=dict)
     retry_count: int = 0
     policy_failed: bool = False
+    metadata: dict[str, object] = field(default_factory=dict)
 
     @property
     def ok(self) -> bool:
@@ -202,13 +231,7 @@ class ValidationRunner:
             compose_project=compose_project,
             compose_file=compose_file,
             commands=profile.phases.commands_for(phase_names),
-            healthchecks=[
-                (
-                    "healthcheck",
-                    ProfileCommand(command=h.command, timeout_seconds=h.timeout_seconds),
-                )
-                for h in healthchecks
-            ],
+            healthchecks=list(healthchecks),
             legacy_command_labels=False,
             retry_budget=profile.validation.retry_budget,
             coverage=coverage,
@@ -247,7 +270,7 @@ class ValidationRunner:
         compose_project: str,
         compose_file: Path,
         commands: list[tuple[str, ProfileCommand]],
-        healthchecks: list[tuple[str, ProfileCommand]],
+        healthchecks: list[ProfileHealthCheck],
         legacy_command_labels: bool,
         retry_budget: int = 0,
         coverage: ProfileCoverage | None,
@@ -256,9 +279,33 @@ class ValidationRunner:
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
 
         results: list[ValidationCommandResult] = []
-        ordered = [*healthchecks, *commands]
         phase_indices: dict[str, int] = {}
-        for index, (phase, command) in enumerate(ordered, start=1):
+        for healthcheck in healthchecks:
+            phase = "healthcheck"
+            phase_indices[phase] = phase_indices.get(phase, 0) + 1
+            label = f"{phase_indices[phase]:02d}_{phase}"
+            result = await self._wait_for_healthcheck(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                healthcheck=healthcheck,
+                label=label,
+                artifacts_dir=workspace_artifacts,
+            )
+            results.append(result)
+            if not result.ok:
+                _log.info(
+                    "validation.healthcheck_failed",
+                    workspace_id=workspace_id,
+                    healthcheck_name=healthcheck.name,
+                    healthcheck_kind=healthcheck.kind,
+                    target=healthcheck.target(),
+                    returncode=result.returncode,
+                    reason_code=result.reason_code,
+                )
+                return ValidationResult(commands=results)
+
+        for index, (phase, command) in enumerate(commands, start=1):
             if legacy_command_labels:
                 label = f"cmd_{index:02d}"
             else:
@@ -362,6 +409,129 @@ class ValidationRunner:
 
         return ValidationResult(commands=results, coverage=coverage_result)
 
+    async def _wait_for_healthcheck(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        healthcheck: ProfileHealthCheck,
+        label: str,
+        artifacts_dir: Path,
+    ) -> ValidationCommandResult:
+        started = time.monotonic()
+        deadline = started + healthcheck.timeout_seconds
+        attempts = 0
+        latest: ValidationCommandResult | None = None
+
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 and latest is not None:
+                break
+            attempts += 1
+            remaining_before_attempt = remaining
+            attempt_timeout = _healthcheck_attempt_timeout(healthcheck, remaining)
+            result = await self._exec(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                cli_args=_healthcheck_cli_args(healthcheck),
+                label=label,
+                artifacts_dir=artifacts_dir,
+                phase="healthcheck",
+                timeout_seconds=attempt_timeout,
+                is_retry=(attempts > 1),
+                output_prefix=_healthcheck_attempt_prefix(
+                    attempt=attempts,
+                    elapsed_seconds=time.monotonic() - started,
+                ),
+            )
+            latest = result
+            if result.ok:
+                final = replace(
+                    result,
+                    command=healthcheck.display_command(),
+                    reason_code=HEALTHCHECK_OK,
+                    retry_count=attempts - 1,
+                    metadata=_healthcheck_metadata(
+                        healthcheck=healthcheck,
+                        attempts=attempts,
+                        result=result,
+                        reason_code=HEALTHCHECK_OK,
+                    ),
+                )
+                _log.info(
+                    "validation.healthcheck_ready",
+                    workspace_id=workspace_id,
+                    healthcheck_name=healthcheck.name,
+                    healthcheck_kind=healthcheck.kind,
+                    attempts=attempts,
+                    timeout_seconds=healthcheck.timeout_seconds,
+                )
+                return final
+
+            if result.reason_code == "PHASE_TIMEOUT":
+                remaining = deadline - time.monotonic()
+                if remaining <= 0 or attempt_timeout >= remaining_before_attempt:
+                    break
+
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            await asyncio.sleep(min(healthcheck.interval_seconds, remaining))
+
+        if latest is None:  # pragma: no cover - impossible with positive timeout_seconds.
+            raise RuntimeError("healthcheck wait loop ended before first attempt")
+
+        reason_code = _healthcheck_failure_reason(healthcheck, latest)
+        diagnostic = _healthcheck_failure_diagnostic(
+            healthcheck=healthcheck,
+            attempts=attempts,
+            reason_code=reason_code,
+        )
+        await self._append_healthcheck_stderr(
+            workspace_id=workspace_id,
+            result=latest,
+            diagnostic=diagnostic,
+        )
+        return replace(
+            latest,
+            command=healthcheck.display_command(),
+            reason_code=reason_code,
+            retry_count=max(0, attempts - 1),
+            metadata=_healthcheck_metadata(
+                healthcheck=healthcheck,
+                attempts=attempts,
+                result=latest,
+                reason_code=reason_code,
+            ),
+        )
+
+    async def _append_healthcheck_stderr(
+        self,
+        *,
+        workspace_id: str,
+        result: ValidationCommandResult,
+        diagnostic: str,
+    ) -> None:
+        with result.stderr_path.open("a", encoding="utf-8") as handle:
+            handle.write(diagnostic)
+        if self._log_store is None:
+            return
+        stderr_stream_id = result.stream_ids.get("stderr")
+        if not isinstance(stderr_stream_id, str) or not stderr_stream_id.endswith(".stderr"):
+            return
+        base_stream_id = stderr_stream_id[: -len(".stderr")]
+        sinks = await self._log_store.open_command_streams(
+            workspace_id=workspace_id,
+            base_stream_id=base_stream_id,
+            source="validation",
+            name=f"{result.phase} {base_stream_id.removeprefix('validation.')}",
+        )
+        try:
+            await sinks.write_stderr(diagnostic)
+        finally:
+            await sinks.close()
+
     async def _collect_coverage(
         self,
         *,
@@ -448,8 +618,9 @@ class ValidationRunner:
         label: str,
         artifacts_dir: Path,
         phase: str = "validate",
-        timeout_seconds: int | None = None,
+        timeout_seconds: float | None = None,
         is_retry: bool = False,
+        output_prefix: str | None = None,
     ) -> ValidationCommandResult:
         invocation = build_tracked_compose_exec(
             compose_project=compose_project,
@@ -476,6 +647,9 @@ class ValidationRunner:
                 name=f"{phase} {label}",
             )
         try:
+            if output_prefix is not None and sinks is not None:
+                await sinks.write_stdout(output_prefix)
+                await sinks.write_stderr(output_prefix)
             run_streaming = getattr(self._runner, "run_streaming", None)
             try:
                 if timeout_seconds is None:
@@ -539,8 +713,12 @@ class ValidationRunner:
         stderr_path = artifacts_dir / f"{label}.stderr"
         mode = "a" if is_retry else "w"
         with stdout_path.open(mode, encoding="utf-8") as f:
+            if output_prefix is not None:
+                f.write(output_prefix)
             f.write(result.stdout)
         with stderr_path.open(mode, encoding="utf-8") as f:
+            if output_prefix is not None:
+                f.write(output_prefix)
             f.write(result.stderr)
 
         display = _display_command(cli_args)
@@ -567,6 +745,102 @@ def _display_command(cli_args: list[str]) -> str:
             shell_cmd = shell_cmd[len(_VENV_ACTIVATE_PREAMBLE) :]
         return shell_cmd
     return " ".join(shlex.quote(a) for a in cli_args)
+
+
+def _healthcheck_cli_args(healthcheck: ProfileHealthCheck) -> list[str]:
+    if healthcheck.command is not None:
+        return ["sh", "-lc", _VENV_ACTIVATE_PREAMBLE + healthcheck.command]
+    if healthcheck.url is None:
+        return [
+            "python",
+            "-c",
+            "import sys; print('invalid healthcheck configuration', file=sys.stderr); sys.exit(2)",
+        ]
+    return [
+        "python",
+        "-c",
+        _HTTP_HEALTHCHECK_SCRIPT,
+        healthcheck.method,
+        healthcheck.url,
+        str(healthcheck.expected_status),
+        str(float(healthcheck.attempt_timeout_seconds or healthcheck.timeout_seconds)),
+    ]
+
+
+def _healthcheck_attempt_timeout(
+    healthcheck: ProfileHealthCheck,
+    remaining_seconds: float,
+) -> float:
+    if remaining_seconds <= 0:
+        return 0.001
+    if healthcheck.attempt_timeout_seconds is None:
+        return max(0.001, remaining_seconds)
+    return max(0.001, min(healthcheck.attempt_timeout_seconds, remaining_seconds))
+
+
+def _healthcheck_attempt_prefix(*, attempt: int, elapsed_seconds: float) -> str:
+    return f"[healthcheck attempt {attempt} elapsed {_format_seconds(elapsed_seconds)}s]\n"
+
+
+def _healthcheck_failure_reason(
+    healthcheck: ProfileHealthCheck,
+    latest: ValidationCommandResult,
+) -> str:
+    if latest.reason_code == "PHASE_TIMEOUT" or latest.returncode == 124:
+        return HEALTHCHECK_TIMEOUT
+    if healthcheck.url is not None:
+        return HEALTHCHECK_HTTP_STATUS_MISMATCH
+    if healthcheck.command is not None:
+        return HEALTHCHECK_COMMAND_FAILED
+    return HEALTHCHECK_INVALID_CONFIGURATION
+
+
+def _healthcheck_failure_diagnostic(
+    *,
+    healthcheck: ProfileHealthCheck,
+    attempts: int,
+    reason_code: str,
+) -> str:
+    timeout = _format_seconds(healthcheck.timeout_seconds)
+    if reason_code == HEALTHCHECK_TIMEOUT:
+        summary = f"health check {healthcheck.name} timed out after {timeout}s"
+    else:
+        summary = f"health check {healthcheck.name} failed after {attempts} attempt(s)"
+    return (
+        "\n"
+        f"{summary}; target={healthcheck.target()}; "
+        f"reason_code={reason_code}; attempts={attempts}\n"
+    )
+
+
+def _healthcheck_metadata(
+    *,
+    healthcheck: ProfileHealthCheck,
+    attempts: int,
+    result: ValidationCommandResult,
+    reason_code: str,
+) -> dict[str, object]:
+    metadata: dict[str, object] = {
+        "healthcheck_name": healthcheck.name,
+        "healthcheck_kind": healthcheck.kind or ("http" if healthcheck.url else "command"),
+        "target": healthcheck.target(),
+        "attempts": attempts,
+        "timeout_seconds": healthcheck.timeout_seconds,
+        "interval_seconds": healthcheck.interval_seconds,
+        "reason_code": reason_code,
+        "returncode": result.returncode,
+        "stream_ids": dict(result.stream_ids),
+    }
+    if healthcheck.attempt_timeout_seconds is not None:
+        metadata["attempt_timeout_seconds"] = healthcheck.attempt_timeout_seconds
+    if healthcheck.url is not None:
+        metadata["method"] = healthcheck.method
+        metadata["expected_status"] = healthcheck.expected_status
+    return metadata
+
+
+def _format_seconds(value: float) -> str:
+    return f"{value:g}"
 
 
 

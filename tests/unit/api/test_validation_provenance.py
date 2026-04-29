@@ -814,6 +814,53 @@ async def test_validation_provenance_resolves_profile_commands_by_phase_index(
 
 
 @pytest.mark.unit
+async def test_validation_provenance_displays_http_healthcheck_target(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v2_workspace_with_body(
+        client,
+        {
+            **_V2_PROFILE_BODY,
+            "workspace": {
+                "profile_ref": "auto",
+                "profile": {
+                    "name": "api-provenance-http-healthcheck-test",
+                    "phases": {"validate": ["pytest -q"]},
+                    "validation": {
+                        "healthchecks": [
+                            {
+                                "name": "api",
+                                "url": "http://api:8080/healthz",
+                                "expected_status": 204,
+                            }
+                        ]
+                    },
+                },
+            },
+            "validation": {"commands": [], "requested_tier": 1},
+        },
+    )
+    await _create_stream_pair(
+        engine,
+        workspace_id=workspace_id,
+        base_stream_id="validation.01_healthcheck",
+        phase="healthcheck",
+        stdout_bytes=1,
+        stdout_lines=1,
+        stderr_bytes=0,
+        stderr_lines=0,
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    assert [
+        (item["phase"], item["command_index"], item["command"]) for item in response.json()["items"]
+    ] == [("healthcheck", 1, "GET http://api:8080/healthz expected 204")]
+
+
+@pytest.mark.unit
 async def test_validation_provenance_resolves_coverage_command_from_profile(
     client: AsyncClient,
     engine: AsyncEngine,

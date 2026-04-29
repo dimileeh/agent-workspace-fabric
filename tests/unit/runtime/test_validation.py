@@ -206,6 +206,38 @@ def test_environment_identity_digest_changes_for_runtime_toolchain_inputs(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "healthcheck",
+    [
+        {
+            "name": "api",
+            "command": "curl -fsS http://api:8000/health",
+            "timeout_seconds": 30,
+        },
+        {
+            "name": "api",
+            "command": "curl -fsS http://api:8000/health",
+            "timeout_seconds": 20,
+            "interval_seconds": 0.5,
+        },
+        {
+            "name": "api",
+            "url": "http://api:8000/health",
+            "expected_status": 204,
+            "interval_seconds": 0.5,
+            "attempt_timeout_seconds": 2,
+        },
+    ],
+)
+def test_environment_identity_digest_changes_for_healthcheck_wait_policy(
+    healthcheck: dict[str, object],
+) -> None:
+    assert environment_identity_digest(_identity_profile()) != environment_identity_digest(
+        _identity_profile(validation={"healthchecks": [healthcheck]})
+    )
+
+
+@pytest.mark.unit
 def test_environment_identity_digest_excludes_non_validation_profile_metadata() -> None:
     baseline = _identity_profile()
     changed_metadata = baseline.model_copy(
@@ -373,6 +405,214 @@ class TestHappyPath:
             "01_post_agent.stdout",
             "01_validate.stdout",
         ]
+
+
+class TestProfileHealthChecks:
+    @pytest.mark.unit
+    async def test_validation_waits_until_healthcheck_succeeds(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=1, stderr="connection refused")
+        fake.queue_result(returncode=1, stderr="still starting")
+        fake.queue_result(returncode=0, stdout="ready")
+        fake.queue_result(returncode=0, stdout="tests ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "health-wait",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 1,
+                            "interval_seconds": 0.001,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_health_wait",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert result.all_passed
+        assert [(command.phase, command.reason_code) for command in result.commands] == [
+            ("healthcheck", "HEALTHCHECK_OK"),
+            ("validate", "COMMAND_FAILED"),
+        ]
+        health = result.commands[0]
+        assert health.metadata["healthcheck_name"] == "api"
+        assert health.metadata["healthcheck_kind"] == "command"
+        assert health.metadata["attempts"] == 3
+        assert health.stdout_path.name == "01_healthcheck.stdout"
+        assert "attempt 1" in health.stdout_path.read_text(encoding="utf-8")
+        assert "ready" in health.stdout_path.read_text(encoding="utf-8")
+        assert "pytest -q" in fake.calls[-1].args[-1]
+        assert all("pytest -q" not in call.args[-1] for call in fake.calls[:-1])
+
+    @pytest.mark.unit
+    async def test_healthcheck_attempt_timeout_blocks_validation_and_writes_diagnostic(
+        self, tmp_path: Path
+    ) -> None:
+        sleeping = _SleepingRunner()
+        val = ValidationRunner(runner=sleeping, artifacts_dir=tmp_path / "artifacts")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "health-timeout",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 0.01,
+                            "interval_seconds": 0.001,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_health_timeout",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert not result.all_passed
+        assert result.first_failure is not None
+        assert result.first_failure.phase == "healthcheck"
+        assert result.first_failure.reason_code == "HEALTHCHECK_TIMEOUT"
+        assert result.first_failure.metadata["attempts"] == 1
+        stderr = result.first_failure.stderr_path.read_text(encoding="utf-8")
+        assert "command timed out after" in stderr
+        assert "health check api timed out after 0.01s" in stderr
+        assert not any("pytest -q" in call[-1] for call in sleeping.calls)
+
+    @pytest.mark.unit
+    async def test_healthcheck_command_failure_preserves_latest_output_and_metadata(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=7, stderr="connection refused")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "health-command-failure",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 0.001,
+                            "interval_seconds": 0.001,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_health_command_failure",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert not result.all_passed
+        assert len(fake.calls) == 1
+        assert result.first_failure is not None
+        assert result.first_failure.reason_code == "HEALTHCHECK_COMMAND_FAILED"
+        assert result.first_failure.metadata["target"] == "curl -fsS http://api:8000/healthz"
+        assert "connection refused" in result.first_failure.stderr_path.read_text(
+            encoding="utf-8"
+        )
+        assert "pytest -q" not in fake.calls[0].args[-1]
+
+    @pytest.mark.unit
+    async def test_http_style_healthcheck_uses_fixed_python_urllib_command(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="http status 200")
+        fake.queue_result(returncode=0, stdout="tests ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "http-health",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "url": "http://api:8080/healthz",
+                            "expected_status": 200,
+                            "timeout_seconds": 1,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_http_health",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert result.all_passed
+        health_args = fake.calls[0].args
+        exec_index = health_args.index("awf-exec")
+        cli_args = health_args[exec_index + 2 :]
+        assert cli_args[:2] == ["python", "-c"]
+        assert "urllib.request" in cli_args[2]
+        assert cli_args[3:] == ["GET", "http://api:8080/healthz", "200", "1.0"]
+        assert "http://api:8080/healthz" in result.commands[0].command
+        assert result.commands[0].metadata["healthcheck_kind"] == "http"
+
+    @pytest.mark.unit
+    async def test_run_healthchecks_without_declared_checks_preserves_command_order(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="tests ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "no-healthchecks",
+                "phases": {"validate": ["pytest -q"]},
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_no_healthchecks",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert result.all_passed
+        assert [(command.phase, command.command) for command in result.commands] == [
+            ("validate", "pytest -q")
+        ]
+        assert result.commands[0].stdout_path.name == "01_validate.stdout"
+        assert len(fake.calls) == 1
 
 
 class TestFailureStopsEarly:
@@ -819,6 +1059,9 @@ class TestDockerInvocation:
 
 
 class _SleepingRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
     async def run(
         self,
         args: list[str],
@@ -827,6 +1070,7 @@ class _SleepingRunner:
         cwd: str | None = None,
     ) -> CommandResult:
         del input_bytes, cwd
+        self.calls.append(list(args))
 
         if "awf-cleanup" in args:
             return CommandResult(returncode=0, stdout="cleanup ok", stderr="")

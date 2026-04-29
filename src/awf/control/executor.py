@@ -91,7 +91,12 @@ from awf.runtime.pr_monitor_operations import (
     finish_monitor_operation,
     monitor_operation_idempotency_key,
 )
-from awf.runtime.validation import ValidationCoverageResult, ValidationResult, ValidationRunner
+from awf.runtime.validation import (
+    ValidationCommandResult,
+    ValidationCoverageResult,
+    ValidationResult,
+    ValidationRunner,
+)
 from awf.runtime.validation_identity import (
     environment_identity_digest,
     environment_identity_inputs,
@@ -219,6 +224,21 @@ def _str_or_none(value: object) -> str | None:
 
 def _int_or_none(value: object) -> int | None:
     return value if isinstance(value, int) else None
+
+
+def _metadata_str(metadata: Mapping[str, object], key: str) -> str | None:
+    value = metadata.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _metadata_int(metadata: Mapping[str, object], key: str) -> int | None:
+    value = metadata.get(key)
+    return value if isinstance(value, int) else None
+
+
+def _metadata_number(metadata: Mapping[str, object], key: str) -> int | float | None:
+    value = metadata.get(key)
+    return value if isinstance(value, int | float) else None
 
 
 @dataclass(frozen=True)
@@ -1033,6 +1053,11 @@ class WorkspaceExecutor:
                     ),
                     error_message=last_failure_message,
                 )
+                if first_fail is not None and first_fail.phase == "healthcheck":
+                    await self._record_health_check_failed_event(
+                        workspace_id=workspace_id,
+                        failure=first_fail,
+                    )
                 await self._mark_failed(
                     workspace_id=workspace_id,
                     from_status=WorkspaceStatus.validating,
@@ -1041,6 +1066,7 @@ class WorkspaceExecutor:
                         last_failure_message
                         + (f" (after {max_fix_passes} fix attempts)" if max_fix_passes > 0 else "")
                     )[:2000],
+                    reason_code=_validation_run_reason_code(val_result),
                 )
                 return
 
@@ -2175,6 +2201,34 @@ class WorkspaceExecutor:
             },
         )
 
+    async def _record_health_check_failed_event(
+        self,
+        *,
+        workspace_id: str,
+        failure: ValidationCommandResult,
+    ) -> None:
+        metadata = failure.metadata
+        stream_ids = metadata.get("stream_ids")
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None or ws.status != WorkspaceStatus.validating.value:
+                return
+            await repo.add_event(
+                ws,
+                event_type="workspace.health_check_failed",
+                reason_code=failure.reason_code,
+                payload={
+                    "healthcheck_name": _metadata_str(metadata, "healthcheck_name"),
+                    "healthcheck_kind": _metadata_str(metadata, "healthcheck_kind"),
+                    "target": _metadata_str(metadata, "target") or failure.command,
+                    "attempts": _metadata_int(metadata, "attempts"),
+                    "timeout_seconds": _metadata_number(metadata, "timeout_seconds"),
+                    "stream_ids": dict(stream_ids) if isinstance(stream_ids, dict) else {},
+                },
+            )
+            await session.commit()
+
     async def _mark_failed(
         self,
         *,
@@ -3123,34 +3177,43 @@ def _validation_run_command_records(
     phase_names: tuple[str, ...],
     run_healthchecks: bool,
 ) -> list[dict[str, Any]]:
-    ordered: list[tuple[str, str]] = []
+    ordered: list[dict[str, Any]] = []
     if run_healthchecks:
         ordered.extend(
-            ("healthcheck", healthcheck.command) for healthcheck in profile.validation.healthchecks
+            {
+                "phase": "healthcheck",
+                "command": healthcheck.display_command(),
+                "healthcheck_name": healthcheck.name,
+                "healthcheck_kind": healthcheck.kind or ("http" if healthcheck.url else "command"),
+                "target": healthcheck.target(),
+            }
+            for healthcheck in profile.validation.healthchecks
         )
     ordered.extend(
-        (phase, command.command) for phase, command in profile.phases.commands_for(phase_names)
+        {"phase": phase, "command": command.command}
+        for phase, command in profile.phases.commands_for(phase_names)
     )
     if "validate" in phase_names and profile.validation.coverage.command is not None:
-        ordered.append(("coverage", profile.validation.coverage.command.command))
+        ordered.append({"phase": "coverage", "command": profile.validation.coverage.command.command})
 
     records: list[dict[str, Any]] = []
     phase_indices: dict[str, int] = {}
-    for phase, command in ordered:
+    for item in ordered:
+        phase = str(item["phase"])
         phase_indices[phase] = phase_indices.get(phase, 0) + 1
         command_index = phase_indices[phase]
         label = f"{command_index:02d}_{phase}"
-        records.append(
+        record = dict(item)
+        record.update(
             {
-                "phase": phase,
                 "command_index": command_index,
-                "command": command,
                 "stream_ids": {
                     "stdout": f"validation.{label}.stdout",
                     "stderr": f"validation.{label}.stderr",
                 },
             }
         )
+        records.append(record)
     return records
 
 
@@ -3336,8 +3399,37 @@ def _validation_failure_message(
             return f"validation failed: unsupported coverage provider {coverage.provider}"
 
     first_fail = result.first_failure
+    if first_fail is not None and first_fail.phase == "healthcheck":
+        metadata = first_fail.metadata
+        name = metadata.get("healthcheck_name")
+        kind = metadata.get("healthcheck_kind")
+        target = metadata.get("target") or first_fail.command
+        attempts = metadata.get("attempts")
+        timeout = metadata.get("timeout_seconds")
+        stream_ids = first_fail.stream_ids
+        stdout_stream = stream_ids.get("stdout")
+        stderr_stream = stream_ids.get("stderr")
+        log_hint = ", ".join(
+            stream for stream in (stdout_stream, stderr_stream) if isinstance(stream, str)
+        )
+        details = (
+            f"validation failed: health check {name if isinstance(name, str) else first_fail.command}"
+            f" ({kind if isinstance(kind, str) else 'unknown'} target={target}) "
+            f"failed with {first_fail.reason_code}"
+        )
+        if isinstance(timeout, int | float):
+            details += f" after {_format_duration_for_message(timeout)}s"
+        if isinstance(attempts, int):
+            details += f" across {attempts} attempt(s)"
+        if log_hint:
+            details += f"; logs: {log_hint}"
+        return details
     return f"validation failed: {first_fail.command}" if first_fail else "validation failed"
 
 
 def _git_name_lines(output: str) -> list[str]:
     return [line.strip() for line in output.splitlines() if line.strip()]
+
+
+def _format_duration_for_message(value: int | float) -> str:
+    return f"{value:g}"
