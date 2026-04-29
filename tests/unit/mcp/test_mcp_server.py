@@ -212,6 +212,52 @@ class TestToolRegistration:
 
 class TestOperationTools:
     @pytest.mark.unit
+    async def test_list_operations_reports_has_more_when_limit_truncates(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe operations",
+                task_prompt="List operations.",
+                agent="codex",
+                test_commands=[],
+            )
+            repo = OperationRepository(session)
+            create = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.create,
+                status=OperationStatus.succeeded,
+            )
+            validate = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+            )
+            stop = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.stop,
+                status=OperationStatus.pending,
+            )
+            create.created_at = base
+            validate.created_at = base + timedelta(seconds=1)
+            stop.created_at = base + timedelta(seconds=2)
+            await session.commit()
+
+        payload = await _call(mcp, "awf_list_operations", {"limit": 2})
+
+        assert isinstance(payload, dict)
+        assert [item["id"] for item in payload["items"]] == [stop.id, validate.id]
+        assert payload["has_more"] is True
+        assert payload["next_cursor"] is None
+        assert payload["limit"] == 2
+        assert payload["cursor"] is None
+
+    @pytest.mark.unit
     async def test_list_operations_uses_prevalidated_service_responses(
         self,
         monkeypatch: pytest.MonkeyPatch,

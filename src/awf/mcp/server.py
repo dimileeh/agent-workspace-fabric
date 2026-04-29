@@ -26,6 +26,7 @@ from awf.api.routes import metrics as metrics_routes
 from awf.api.schemas import (
     ErrorResponse,
     OperationListResponse,
+    OperationResponse,
     OwnedPath,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
@@ -591,15 +592,9 @@ def build_mcp_server(
             workspace_id=workspace_id,
             status=status,
             operation_type=operation_type,
-            limit=limit,
+            limit=limit + 1,
         )
-        response = OperationListResponse(
-            items=rows,
-            next_cursor=None,
-            has_more=False,
-            limit=limit,
-            cursor=None,
-        )
+        response = _operation_list_response(rows, limit=limit)
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_operation")
@@ -663,6 +658,21 @@ def _tool_error(exc: WorkspaceControlError) -> CallToolResult:
 def _error_result(error_code: str, message: str) -> CallToolResult:
     error = ErrorResponse(error_code=error_code, message=message)
     return _tool_result(error.model_dump(mode="json"), is_error=True)
+
+
+def _operation_list_response(
+    rows: list[OperationResponse],
+    *,
+    limit: int,
+) -> OperationListResponse:
+    page_rows = rows[:limit]
+    return OperationListResponse(
+        items=page_rows,
+        next_cursor=None,
+        has_more=len(rows) > limit,
+        limit=limit,
+        cursor=None,
+    )
 
 
 def _null_tool_result() -> CallToolResult:

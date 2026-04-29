@@ -110,6 +110,40 @@ async def test_list_operations_global(client: AsyncClient, sample_data):
 
 
 @pytest.mark.unit
+async def test_list_operations_reports_has_more_when_limit_truncates(
+    client: AsyncClient,
+    sample_data,
+) -> None:
+    response = await client.get("/v1/operations?limit=2")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) == 2
+    assert body["has_more"] is True
+    assert body["next_cursor"] is None
+    assert body["limit"] == 2
+    assert body["cursor"] is None
+
+
+@pytest.mark.unit
+async def test_list_workspace_operations_reports_has_more_when_limit_truncates(
+    client: AsyncClient,
+    sample_data,
+) -> None:
+    ws1, _ws2 = sample_data
+
+    response = await client.get(f"/v1/workspaces/{ws1.id}/operations?limit=1")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert len(body["items"]) == 1
+    assert body["has_more"] is True
+    assert body["next_cursor"] is None
+    assert body["limit"] == 1
+    assert body["cursor"] is None
+
+
+@pytest.mark.unit
 async def test_list_operations_uses_prevalidated_service_responses(
     client: AsyncClient,
     monkeypatch: pytest.MonkeyPatch,
