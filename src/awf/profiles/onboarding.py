@@ -649,7 +649,7 @@ def _has_postgres_signal(root: Path) -> bool:
             continue
         try:
             text = path.read_text(encoding="utf-8").lower()
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             continue
         if any(signal in text for signal in ("psycopg", "asyncpg", "postgres", "database_url")):
             return True

@@ -487,6 +487,16 @@ def test_postgres_signal_ignores_unreadable_file_and_uses_env_signal(
 
 
 @pytest.mark.unit
+def test_postgres_signal_ignores_non_utf8_config_file(tmp_path: Path) -> None:
+    (tmp_path / "pyproject.toml").write_bytes(b"\xff")
+    (tmp_path / ".env.example").write_text("DATABASE_URL=postgres://example\n", encoding="utf-8")
+
+    preview = preview_project_onboarding(tmp_path)
+
+    assert preview.draft.template == "python-postgres"
+
+
+@pytest.mark.unit
 def test_node_playwright_diagnostics_do_not_report_app_when_declared(
     tmp_path: Path,
 ) -> None:
