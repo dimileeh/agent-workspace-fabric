@@ -46,6 +46,7 @@ class TargetBranchMonitorStatus(StrEnum):
 
     clean = "clean"
     would_commit = "would_commit"
+    policy_blocked = "policy_blocked"
     committed = "committed"
 
 
@@ -60,6 +61,10 @@ class TargetBranchMonitorResult:
     resolver_results: tuple[AlembicResolveResult, ...]
     commit_sha: str | None = None
     pushed: bool = False
+    changed_paths: tuple[str, ...] = ()
+    dry_run: bool = False
+    commit_allowed: bool = True
+    policy_reason_code: str | None = None
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -70,6 +75,10 @@ class TargetBranchMonitorResult:
             "resolver_results": [result.to_dict() for result in self.resolver_results],
             "commit_sha": self.commit_sha,
             "pushed": self.pushed,
+            "changed_paths": list(self.changed_paths),
+            "dry_run": self.dry_run,
+            "commit_allowed": self.commit_allowed,
+            "policy_reason_code": self.policy_reason_code,
         }
 
 
@@ -130,12 +139,14 @@ class TargetBranchReconcileMonitor:
         runner: AsyncCommandRunner,
         work_dir: Path,
         resolvers: Sequence[BranchResolver] | None = None,
+        allow_commits: bool = True,
     ) -> None:
         self._runner = runner
         self._work_dir = work_dir.expanduser().resolve()
         self._resolvers: tuple[BranchResolver, ...] = (
             tuple(resolvers) if resolvers is not None else (AlembicMergeResolver(),)
         )
+        self._allow_commits = allow_commits
 
     async def reconcile(
         self,
@@ -155,9 +166,9 @@ class TargetBranchReconcileMonitor:
 
         resolver_results = tuple(resolver.resolve(checkout_path) for resolver in self._resolvers)
         changed_paths = tuple(
-            result.generated_path
+            _generated_relative_path(result, checkout_path)
             for result in resolver_results
-            if result.changed and result.generated_path is not None
+            if result.changed
         )
         if not changed_paths:
             return TargetBranchMonitorResult(
@@ -166,6 +177,8 @@ class TargetBranchReconcileMonitor:
                 checkout_path=checkout_path,
                 status=TargetBranchMonitorStatus.clean,
                 resolver_results=resolver_results,
+                dry_run=dry_run,
+                commit_allowed=self._allow_commits,
             )
         if dry_run:
             return TargetBranchMonitorResult(
@@ -174,10 +187,25 @@ class TargetBranchReconcileMonitor:
                 checkout_path=checkout_path,
                 status=TargetBranchMonitorStatus.would_commit,
                 resolver_results=resolver_results,
+                changed_paths=changed_paths,
+                dry_run=True,
+                commit_allowed=self._allow_commits,
+                policy_reason_code="TARGET_BRANCH_DRY_RUN",
+            )
+        if not self._allow_commits:
+            return TargetBranchMonitorResult(
+                repo_url=repo_url,
+                branch=branch,
+                checkout_path=checkout_path,
+                status=TargetBranchMonitorStatus.policy_blocked,
+                resolver_results=resolver_results,
+                changed_paths=changed_paths,
+                commit_allowed=False,
+                policy_reason_code="TARGET_BRANCH_COMMIT_POLICY_DENIED",
             )
 
         await self._git(
-            ["add", "--", *(str(path.relative_to(checkout_path)) for path in changed_paths)],
+            ["add", "--", *changed_paths],
             cwd=checkout_path,
             operation="target_branch.git_add",
         )
@@ -191,6 +219,8 @@ class TargetBranchReconcileMonitor:
                 checkout_path=checkout_path,
                 status=TargetBranchMonitorStatus.clean,
                 resolver_results=resolver_results,
+                changed_paths=changed_paths,
+                commit_allowed=self._allow_commits,
             )
         if staged.returncode != 1:
             raise TargetBranchMonitorError(
@@ -230,6 +260,8 @@ class TargetBranchReconcileMonitor:
             resolver_results=resolver_results,
             commit_sha=commit.stdout.strip() or None,
             pushed=True,
+            changed_paths=changed_paths,
+            commit_allowed=self._allow_commits,
         )
 
     async def _prepare_checkout(
@@ -488,11 +520,24 @@ async def run_target_branch_reconcile_once(
     repo_url: str,
     branch: str,
     dry_run: bool = False,
+    allow_commits: bool = True,
 ) -> TargetBranchMonitorResult:
     """Convenience entry point for CLIs and service hooks."""
 
-    monitor = TargetBranchReconcileMonitor(runner=runner, work_dir=work_dir)
+    monitor = TargetBranchReconcileMonitor(
+        runner=runner,
+        work_dir=work_dir,
+        allow_commits=allow_commits,
+    )
     return await monitor.reconcile(repo_url=repo_url, branch=branch, dry_run=dry_run)
+
+
+def _generated_relative_path(result: AlembicResolveResult, checkout_path: Path) -> str:
+    if result.generated_path_relative is not None:
+        return result.generated_path_relative
+    if result.generated_path is None:
+        raise RuntimeError("resolver result changed without a generated path")
+    return str(result.generated_path.relative_to(checkout_path))
 
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")

@@ -6,6 +6,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
+from alembic import util as alembic_util
 from alembic.config import Config
 from alembic.script import ScriptDirectory
 
@@ -115,6 +116,7 @@ def test_resolver_result_serializes_paths_and_change_status(tmp_path: Path) -> N
         heads=("left", "right"),
         generated_revision="merge",
         generated_path=generated,
+        generated_path_relative="migrations/versions/merge.py",
         message="merged",
     )
     unsupported = AlembicResolveResult(
@@ -130,7 +132,9 @@ def test_resolver_result_serializes_paths_and_change_status(tmp_path: Path) -> N
         "heads": ["left", "right"],
         "generated_revision": "merge",
         "generated_path": str(generated),
+        "generated_path_relative": "migrations/versions/merge.py",
         "message": "merged",
+        "details": {},
     }
     assert unsupported.changed is False
     assert unsupported.to_dict()["generated_path"] is None
@@ -194,10 +198,74 @@ def test_resolver_reports_unreadable_graph_without_escaping(tmp_path: Path) -> N
 
     result = AlembicMergeResolver().resolve(tmp_path)
 
-    assert result.status == AlembicResolveStatus.unsupported
-    assert result.reason_code == "ALEMBIC_GRAPH_UNREADABLE"
+    assert result.status == AlembicResolveStatus.refused
+    assert result.reason_code == "ALEMBIC_GRAPH_MALFORMED"
     assert result.heads == ()
-    assert "invalid syntax" in str(result.message)
+    assert result.generated_path is None
+    assert result.to_dict()["details"]["error_type"] == "SyntaxError"
+
+
+@pytest.mark.unit
+def test_resolver_refuses_missing_down_revision_without_mutating(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "orphan001", "missing001")
+
+    result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
+
+    assert result.status == AlembicResolveStatus.refused
+    assert result.reason_code == "ALEMBIC_GRAPH_UNSAFE"
+    assert result.generated_path is None
+    assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
+    assert result.to_dict()["details"]["missing_down_revisions"] == ["missing001"]
+
+
+@pytest.mark.unit
+def test_resolver_refuses_duplicate_revision_ids_without_mutating(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "dup001", None, name="left")
+    _write_revision(tmp_path, "dup001", None, name="right")
+
+    result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
+
+    assert result.status == AlembicResolveStatus.refused
+    assert result.reason_code == "ALEMBIC_GRAPH_UNSAFE"
+    assert result.heads == ("dup001", "dup001")
+    assert result.generated_path is None
+    assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
+    assert result.to_dict()["details"]["duplicate_revisions"] == ["dup001"]
+
+
+@pytest.mark.unit
+def test_resolver_refuses_duplicate_non_head_revision_ids_without_warning_text(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "dup001", None, name="left")
+    _write_revision(tmp_path, "dup001", None, name="right")
+    _write_revision(tmp_path, "head001", "dup001")
+
+    original_warn = alembic_util.warn
+
+    def rewrite_duplicate_warning(
+        message: str,
+        stacklevel: int = 2,
+    ) -> None:
+        if "present more than once" in str(message):
+            original_warn("duplicate revision id detected by Alembic", stacklevel=stacklevel)
+            return
+        original_warn(message, stacklevel=stacklevel)
+
+    monkeypatch.setattr(alembic_util, "warn", rewrite_duplicate_warning)
+
+    result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
+
+    assert result.status == AlembicResolveStatus.refused
+    assert result.reason_code == "ALEMBIC_GRAPH_UNSAFE"
+    assert result.heads == ("head001",)
+    assert result.generated_path is None
+    assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
+    assert result.to_dict()["details"]["duplicate_revisions"] == ["dup001"]
 
 
 @pytest.mark.unit

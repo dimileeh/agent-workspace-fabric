@@ -102,6 +102,11 @@ async def test_monitor_commits_and_pushes_follow_up_merge_revision(tmp_path: Pat
     assert any(call.args[:3] == ["git", "-C", str(result.checkout_path)] for call in runner.calls)
     commit_call = next(call for call in runner.calls if "commit" in call.args)
     assert "fix(migrations): merge Alembic heads on development" in commit_call.args
+    add_call = next(call for call in runner.calls if call.args[3] == "add")
+    assert add_call.args[-1] == "migrations/versions/merge001_merge_alembic_heads.py"
+    assert result.to_dict()["changed_paths"] == [
+        "migrations/versions/merge001_merge_alembic_heads.py"
+    ]
     assert runner.calls[-1].args == [
         "git",
         "-C",
@@ -168,7 +173,38 @@ async def test_monitor_dry_run_reports_would_commit_without_git_write(tmp_path: 
 
     assert result.status == TargetBranchMonitorStatus.would_commit
     assert result.pushed is False
+    assert result.to_dict()["dry_run"] is True
+    assert result.to_dict()["policy_reason_code"] == "TARGET_BRANCH_DRY_RUN"
     assert len(runner.calls) == 1
+
+
+@pytest.mark.unit
+async def test_monitor_policy_blocked_result_does_not_stage_commit_or_push(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result()  # clone
+    monitor = TargetBranchReconcileMonitor(
+        runner=runner,
+        work_dir=tmp_path,
+        resolvers=(_ResolvingStubResolver(),),
+        allow_commits=False,
+    )
+
+    result = await monitor.reconcile(
+        repo_url="git@github.com:example/repo.git",
+        branch="development",
+    )
+
+    assert result.status == TargetBranchMonitorStatus.policy_blocked
+    assert result.pushed is False
+    assert len(runner.calls) == 1
+    payload = result.to_dict()
+    assert payload["commit_allowed"] is False
+    assert payload["policy_reason_code"] == "TARGET_BRANCH_COMMIT_POLICY_DENIED"
+    assert payload["changed_paths"] == [
+        "migrations/versions/merge001_merge_alembic_heads.py"
+    ]
 
 
 @pytest.mark.unit
@@ -917,6 +953,48 @@ class TestCandidateRefreshSummary:
         )
         d = summary.to_dict()
         assert d["error"] == "provider failed"
+
+
+class TestTargetBranchMonitorResult:
+    @pytest.mark.unit
+    def test_to_dict_exposes_operator_reconcile_details(self, tmp_path: Path) -> None:
+        generated = tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py"
+        result = TargetBranchMonitorResult(
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            checkout_path=tmp_path,
+            status=TargetBranchMonitorStatus.committed,
+            resolver_results=(
+                AlembicResolveResult(
+                    status=AlembicResolveStatus.resolved,
+                    reason_code="ALEMBIC_HEADS_MERGED",
+                    heads=("left001", "right001"),
+                    generated_revision="merge001",
+                    generated_path=generated,
+                    generated_path_relative="migrations/versions/merge001_merge_alembic_heads.py",
+                    message="Generated Alembic merge revision for 2 heads.",
+                ),
+            ),
+            commit_sha="abc123",
+            pushed=True,
+            changed_paths=("migrations/versions/merge001_merge_alembic_heads.py",),
+        )
+
+        payload = result.to_dict()
+
+        assert payload["status"] == "committed"
+        assert payload["commit_sha"] == "abc123"
+        assert payload["pushed"] is True
+        assert payload["changed_paths"] == [
+            "migrations/versions/merge001_merge_alembic_heads.py"
+        ]
+        resolver = payload["resolver_results"][0]
+        assert resolver["reason_code"] == "ALEMBIC_HEADS_MERGED"
+        assert resolver["heads"] == ["left001", "right001"]
+        assert resolver["generated_revision"] == "merge001"
+        assert resolver["generated_path_relative"] == (
+            "migrations/versions/merge001_merge_alembic_heads.py"
+        )
 
 
 class TestReconcileAndRefreshResult:
