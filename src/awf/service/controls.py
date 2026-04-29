@@ -5,10 +5,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import UTC, datetime
 from enum import StrEnum
 from pathlib import Path
-from typing import Protocol, cast
+from typing import Any, Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -33,6 +33,11 @@ from awf.node.cleanup import (
 )
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
+from awf.service.secret_leases import (
+    TERMINAL_CLEANUP_REVOKE_REASON,
+    SecretLeaseService,
+    secret_lease_revocation_summary,
+)
 
 ProjectStopper = Callable[[str | None], Awaitable[None]]
 CleanupResultLike = WorkspaceCleanupResult | Sequence[str] | Mapping[str, object]
@@ -909,18 +914,27 @@ class WorkspaceControlService:
             payload=operation_payload,
             idempotency_key=idempotency_key,
         )
+        secret_lease_summary = await self._revoke_destroy_secret_leases(workspace)
         if current == WorkspaceStatus.destroyed:
             cleanup_result = WorkspaceCleanupResult.skipped(
                 reason_code="WORKSPACE_ALREADY_DESTROYED"
             )
             cleanup_payload = cleanup_result.to_dict()
-            await operations.finish(
-                operation,
-                status=OperationStatus.succeeded,
-                result={
+            operation_result = _with_secret_lease_result(
+                {
                     "status": WorkspaceStatus.destroyed.value,
                     "cleanup": cleanup_payload,
                 },
+                secret_lease_summary,
+            )
+            await operations.finish(
+                operation,
+                status=OperationStatus.succeeded,
+                result=operation_result,
+            )
+            audit_evidence = _with_secret_lease_evidence(
+                {"cleanup": cleanup_payload},
+                secret_lease_summary,
             )
             await _add_control_audit_event(
                 repo,
@@ -935,7 +949,7 @@ class WorkspaceControlService:
                     "remove_worktree": remove_worktree,
                     "expected_version": expected_version,
                 },
-                evidence={"cleanup": cleanup_payload},
+                evidence=audit_evidence,
             )
             return _control_response(
                 workspace=workspace,
@@ -997,14 +1011,25 @@ class WorkspaceControlService:
                 reason_code="STALE_CALLBACK_IGNORED",
             )
             ignored_payload = dict(ignored_event.payload or {})
-            await operations.finish(
-                operation,
-                status=OperationStatus.cancelled,
-                result={
+            operation_result = _with_secret_lease_result(
+                {
                     "status": workspace.status,
                     "cleanup": cleanup_payload,
                     "ignored_callback": ignored_payload,
                 },
+                secret_lease_summary,
+            )
+            await operations.finish(
+                operation,
+                status=OperationStatus.cancelled,
+                result=operation_result,
+            )
+            audit_evidence = _with_secret_lease_evidence(
+                {
+                    "cleanup": cleanup_payload,
+                    "ignored_callback": ignored_payload,
+                },
+                secret_lease_summary,
             )
             await _add_control_audit_event(
                 repo,
@@ -1019,10 +1044,7 @@ class WorkspaceControlService:
                     "remove_worktree": remove_worktree,
                     "expected_version": expected_version,
                 },
-                evidence={
-                    "cleanup": cleanup_payload,
-                    "ignored_callback": ignored_payload,
-                },
+                evidence=audit_evidence,
             )
             return _control_response(
                 workspace=workspace,
@@ -1050,12 +1072,23 @@ class WorkspaceControlService:
                     reason_code="CLEANUP_FAILED",
                     payload=cleanup_event_payload,
                 )
+            operation_result = _with_secret_lease_result(
+                {"status": workspace.status, "cleanup": cleanup_payload},
+                secret_lease_summary,
+            )
             await operations.finish(
                 operation,
                 status=OperationStatus.failed,
                 error_code="CLEANUP_FAILED",
                 error_message=bounded_cleanup_message,
-                result={"status": workspace.status, "cleanup": cleanup_payload},
+                result=operation_result,
+            )
+            audit_evidence = _with_secret_lease_evidence(
+                {
+                    "cleanup": cleanup_payload,
+                    "error_message": bounded_cleanup_message,
+                },
+                secret_lease_summary,
             )
             await _add_control_audit_event(
                 repo,
@@ -1070,10 +1103,7 @@ class WorkspaceControlService:
                     "remove_worktree": remove_worktree,
                     "expected_version": expected_version,
                 },
-                evidence={
-                    "cleanup": cleanup_payload,
-                    "error_message": bounded_cleanup_message,
-                },
+                evidence=audit_evidence,
             )
             message = "workspace cleanup failed"
         else:
@@ -1086,10 +1116,18 @@ class WorkspaceControlService:
                     reason_code="DESTROYED",
                     payload=cleanup_event_payload,
                 )
+            operation_result = _with_secret_lease_result(
+                {"status": workspace.status, "cleanup": cleanup_payload},
+                secret_lease_summary,
+            )
             await operations.finish(
                 operation,
                 status=OperationStatus.succeeded,
-                result={"status": workspace.status, "cleanup": cleanup_payload},
+                result=operation_result,
+            )
+            audit_evidence = _with_secret_lease_evidence(
+                {"cleanup": cleanup_payload},
+                secret_lease_summary,
             )
             await _add_control_audit_event(
                 repo,
@@ -1104,7 +1142,7 @@ class WorkspaceControlService:
                     "remove_worktree": remove_worktree,
                     "expected_version": expected_version,
                 },
-                evidence={"cleanup": cleanup_payload},
+                evidence=audit_evidence,
             )
             message = "workspace destroyed"
 
@@ -1123,6 +1161,22 @@ class WorkspaceControlService:
         if workspace is None:
             raise WorkspaceNotFoundError(workspace_id)
         return workspace
+
+    async def _revoke_destroy_secret_leases(
+        self,
+        workspace: Workspace,
+    ) -> dict[str, Any] | None:
+        revoked = await SecretLeaseService(self._session).revoke_workspace_secret_leases(
+            workspace,
+            now=datetime.now(UTC),
+            reason_code=TERMINAL_CLEANUP_REVOKE_REASON,
+        )
+        if not revoked:
+            return None
+        return secret_lease_revocation_summary(
+            revoked,
+            reason_code=TERMINAL_CLEANUP_REVOKE_REASON,
+        )
 
     async def _require_workspace_for_update(
         self,
@@ -1351,6 +1405,24 @@ def _operation_payload(
     if expected_version is not None:
         operation_payload["expected_version"] = expected_version
     return operation_payload
+
+
+def _with_secret_lease_result(
+    result: dict[str, Any],
+    secret_lease_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if secret_lease_summary is None:
+        return result
+    return {**result, "secret_leases": secret_lease_summary}
+
+
+def _with_secret_lease_evidence(
+    evidence: dict[str, Any],
+    secret_lease_summary: dict[str, Any] | None,
+) -> dict[str, Any]:
+    if secret_lease_summary is None:
+        return evidence
+    return {**evidence, "lease_revocations": secret_lease_summary}
 
 
 def _workspace_pr_operation_context(workspace: Workspace) -> dict[str, object | None]:

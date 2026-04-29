@@ -16,7 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import SecretLeaseRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
 from awf.node.egress_policy import LocalEgressPolicyError
@@ -146,6 +146,76 @@ class TestSuccess:
             assert reloaded.status == WorkspaceStatus.ready.value
             assert reloaded.compose_project_name == f"awf_{ws_id}"
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
+
+    @pytest.mark.unit
+    async def test_profile_secret_leases_are_issued_before_launch_and_mounted_after_success(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        class _RecordingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                async with session_factory() as s:
+                    workspace = await WorkspaceRepository(s).get(request.workspace_id)
+                    assert workspace is not None
+                    events = [
+                        event.reason_code
+                        for event in workspace.events
+                        if event.event_type == "workspace.secret_lease"
+                    ]
+                    assert events == ["SECRET_LEASE_ISSUED"]
+                return ComposeProjectPaths(
+                    project_dir=Path("/tmp/awf-compose/ws_secret"),
+                    compose_file=Path("/tmp/awf-compose/ws_secret/compose.yml"),
+                )
+
+        profile = {
+            "name": "provisioner-secrets",
+            "secrets": [
+                {
+                    "name": "api-token",
+                    "kind": "env",
+                    "target": "API_TOKEN",
+                    "provider": "env",
+                    "ref": "env/API_TOKEN",
+                }
+            ],
+        }
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_RecordingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=profile,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            leases = await SecretLeaseRepository(s).list_for_workspace(ws_id)
+            assert len(leases) == 1
+            assert leases[0].status == "mounted"
+            assert leases[0].mounted_at is not None
+            reason_codes = [
+                event.reason_code
+                for event in reloaded.events
+                if event.event_type == "workspace.secret_lease"
+            ]
+            assert reason_codes == ["SECRET_LEASE_ISSUED", "SECRET_LEASE_MOUNTED"]
 
     @pytest.mark.unit
     async def test_uses_persisted_resolved_profile_without_rewriting_it(
@@ -344,6 +414,77 @@ class TestFailureHandling:
             assert reloaded.failure_message is not None
             assert "docker compose up failed" in reloaded.failure_message
             assert "pull access denied for awf-agent-runtime:test" in reloaded.failure_message
+
+    @pytest.mark.unit
+    async def test_stack_launch_failure_revokes_issued_secret_leases_without_hiding_error(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        git_manager: GitManager,
+        origin_repo: Path,
+    ) -> None:
+        raw_ref = "provider/path/not-a-token-value"
+
+        class _FailingStackLauncher:
+            async def launch(self, request: Any) -> object:
+                raise ComposeOperationError(
+                    operation="up",
+                    returncode=17,
+                    stdout="",
+                    stderr=f"compose up failed for {raw_ref}",
+                    reason_code="COMPOSE_UP_FAILED",
+                )
+
+        profile = {
+            "name": "failing-secrets",
+            "secrets": [
+                {
+                    "name": "api-token",
+                    "kind": "env",
+                    "target": "API_TOKEN",
+                    "provider": "vault",
+                    "ref": raw_ref,
+                }
+            ],
+        }
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git_manager,
+            stack_launcher=_FailingStackLauncher(),
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url=str(origin_repo),
+                branch_base="development",
+                task_title="t",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile=profile,
+            )
+            await s.commit()
+            ws_id = ws.id
+
+        with pytest.raises(ComposeOperationError, match="compose up failed"):
+            await provisioner.provision(ws_id)
+
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(ws_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.failed.value
+            leases = await SecretLeaseRepository(s).list_for_workspace(ws_id)
+            assert len(leases) == 1
+            assert leases[0].status == "revoked"
+            assert leases[0].revoke_reason_code == "PROVISIONING_FAILED"
+            payloads = [
+                event.payload
+                for event in reloaded.events
+                if event.event_type == "workspace.secret_lease"
+            ]
+            assert raw_ref not in str(payloads)
+            assert [event.reason_code for event in reloaded.events].count(
+                "SECRET_LEASE_REVOKED"
+            ) == 1
 
     @pytest.mark.unit
     async def test_local_egress_policy_failure_marks_failed_before_compose_up(

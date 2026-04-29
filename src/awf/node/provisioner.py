@@ -17,6 +17,7 @@ re-raised so the caller can log/alert.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -30,6 +31,10 @@ from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
+from awf.service.secret_leases import (
+    PROVISIONING_FAILED_REVOKE_REASON,
+    SecretLeaseService,
+)
 
 _log = get_logger(__name__)
 
@@ -115,6 +120,7 @@ class Provisioner:
                 profile = WorkspaceProfile.model_validate(ws.resolved_profile)
             stack_paths: ComposeProjectPaths | None = None
             if self._stack_launcher is not None:
+                await self._issue_secret_leases(workspace_id, profile)
                 if not await self._recheck_status(
                     workspace_id,
                     expected=WorkspaceStatus.provisioning,
@@ -223,6 +229,15 @@ class Provisioner:
             persisted.compose_project_name = f"awf_{workspace_id}"
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
+                await SecretLeaseService(session).record_secret_lease_mounts(
+                    persisted,
+                    mount_metadata={
+                        "schema": "secret_lease_mount_metadata.v1",
+                        "mount_plan": "profile_declared_secrets",
+                        "compose_project": f"awf_{workspace_id}",
+                        "compose_file": str(stack_paths.compose_file),
+                    },
+                )
             if profile_resolution is not None:
                 persisted.resolved_profile = profile_resolution.profile.model_dump(
                     mode="json", by_alias=True
@@ -307,6 +322,11 @@ class Provisioner:
                     )
                     await session.commit()
                     return
+                await SecretLeaseService(session).revoke_workspace_secret_leases(
+                    ws,
+                    now=datetime.now(UTC),
+                    reason_code=PROVISIONING_FAILED_REVOKE_REASON,
+                )
                 ws.failure_reason = failure_reason.value
                 ws.failure_message = message
                 await repo.transition(
@@ -317,6 +337,38 @@ class Provisioner:
                 await session.commit()
         except Exception:  # pragma: no cover - defensive
             _log.exception("provisioner.mark_failed_failed", workspace_id=workspace_id)
+
+    async def _issue_secret_leases(
+        self,
+        workspace_id: str,
+        profile: WorkspaceProfile,
+    ) -> None:
+        if not profile.secrets:
+            return
+        try:
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.get(workspace_id)
+                if ws is None:
+                    return
+                if ws.status != WorkspaceStatus.provisioning.value:
+                    await self._record_stale_action_skip(
+                        repo,
+                        ws,
+                        action="issue_secret_leases",
+                        expected=WorkspaceStatus.provisioning,
+                        reason_code="PROVISIONER_STALE_STATUS",
+                    )
+                    await session.commit()
+                    return
+                await SecretLeaseService(session).issue_profile_secret_leases(ws, profile)
+                await session.commit()
+        except Exception:
+            _log.exception(
+                "provisioner.secret_lease_issue_failed",
+                workspace_id=workspace_id,
+            )
+            raise
 
     async def _recheck_status(
         self,

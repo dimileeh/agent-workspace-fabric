@@ -289,6 +289,12 @@ class Workspace(Base):
         lazy="raise",
         order_by="ValidationRun.started_at",
     )
+    secret_leases: Mapped[list[WorkspaceSecretLease]] = relationship(
+        back_populates="workspace",
+        cascade="all, delete-orphan",
+        lazy="selectin",
+        order_by="WorkspaceSecretLease.issued_at",
+    )
 
     @property
     def latest_queue_decision(self) -> dict[str, Any] | None:
@@ -449,6 +455,73 @@ class TaskAttempt(Base):
         lazy="raise",
         order_by="ValidationRun.started_at",
     )
+    secret_leases: Mapped[list[WorkspaceSecretLease]] = relationship(
+        back_populates="attempt",
+        lazy="selectin",
+        order_by="WorkspaceSecretLease.issued_at",
+    )
+
+
+class WorkspaceSecretLease(Base):
+    """Local control-plane metadata for a profile-declared workspace secret lease."""
+
+    __tablename__ = "workspace_secret_leases"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "secret_name",
+            "kind",
+            "target",
+            name="uq_workspace_secret_leases_declaration",
+        ),
+        Index("ix_workspace_secret_leases_workspace_status", "workspace_id", "status"),
+        Index("ix_workspace_secret_leases_status_expires", "status", "expires_at"),
+        Index("ix_workspace_secret_leases_workspace_issued", "workspace_id", "issued_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    workspace_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("workspaces.id"), nullable=False
+    )
+    attempt_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("task_attempts.id"), nullable=True
+    )
+
+    secret_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    target: Mapped[str] = mapped_column(String(512), nullable=False)
+    mode: Mapped[str] = mapped_column(String(8), nullable=False)
+    required: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    provider: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    ref_digest: Mapped[str | None] = mapped_column(String(80), nullable=True)
+
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="issued")
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    mounted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    issue_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
+    mount_metadata: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
+    revoke_reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+    workspace: Mapped[Workspace] = relationship(back_populates="secret_leases")
+    attempt: Mapped[TaskAttempt | None] = relationship(back_populates="secret_leases")
 
 
 class QueueDecision(Base):

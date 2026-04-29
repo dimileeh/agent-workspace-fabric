@@ -308,6 +308,24 @@ class WorkspaceRuntimeHealthResponse(BaseModel):
     services: list[dict[str, str]] = Field(default_factory=list)
 
 
+class WorkspaceSecretLeaseResponse(BaseModel):
+    lease_id: str
+    secret_name: str
+    kind: str
+    target: str
+    status: str
+    provider: str | None = None
+    ref_digest: str | None = None
+    issued_at: datetime
+    mounted_at: datetime | None = None
+    expires_at: datetime | None = None
+    revoked_at: datetime | None = None
+
+
+class WorkspaceSecretLeaseListResponse(BaseModel):
+    items: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -367,6 +385,7 @@ class WorkspaceResponse(BaseModel):
         default_factory=lambda: ValidationFreshnessSummaryResponse()
     )
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
+    secret_leases: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
 
     created_at: datetime
     updated_at: datetime

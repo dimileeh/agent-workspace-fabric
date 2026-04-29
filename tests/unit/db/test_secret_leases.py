@@ -1,0 +1,222 @@
+"""Workspace secret lease repository tests."""
+
+from __future__ import annotations
+
+import json
+from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
+
+import pytest
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from awf.db.base import Base
+from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace, WorkspaceEvent, WorkspaceSecretLease
+from awf.db.repositories import SecretLeaseIssue, SecretLeaseRepository, WorkspaceRepository
+from awf.db.session import make_engine, make_session_factory
+
+
+@pytest.fixture
+async def session() -> AsyncIterator[AsyncSession]:
+    engine = make_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+
+    factory = make_session_factory(engine)
+    async with factory() as s:
+        yield s
+
+    await engine.dispose()
+
+
+async def _workspace(session: AsyncSession) -> Workspace:
+    workspace = await WorkspaceRepository(session).create(
+        repo_url="git@github.com:example/secrets.git",
+        branch_base="main",
+        task_title="secret lease test",
+        task_prompt="exercise secret lease metadata",
+        agent="codex",
+        test_commands=[],
+    )
+    workspace.status = WorkspaceStatus.provisioning.value
+    await session.flush()
+    return workspace
+
+
+def _lease_issues(now: datetime) -> list[SecretLeaseIssue]:
+    expires_at = now + timedelta(hours=1)
+    return [
+        SecretLeaseIssue(
+            secret_name="api-token",
+            kind="env",
+            target="API_TOKEN",
+            mode="ro",
+            required=True,
+            provider="env",
+            ref_digest="sha256:" + "a" * 64,
+            expires_at=expires_at,
+            issue_metadata={"profile": "secure-local", "declaration_index": 0},
+        ),
+        SecretLeaseIssue(
+            secret_name="db-password",
+            kind="mount",
+            target="/run/awf/secrets/db-password",
+            mode="ro",
+            required=False,
+            provider="vault",
+            ref_digest="sha256:" + "b" * 64,
+            expires_at=expires_at,
+            issue_metadata={"profile": "secure-local", "declaration_index": 1},
+        ),
+    ]
+
+
+async def _events(session: AsyncSession, workspace_id: str) -> list[WorkspaceEvent]:
+    rows = await session.execute(
+        select(WorkspaceEvent)
+        .where(WorkspaceEvent.workspace_id == workspace_id)
+        .order_by(WorkspaceEvent.occurred_at, WorkspaceEvent.id)
+    )
+    return list(rows.scalars())
+
+
+@pytest.mark.unit
+async def test_issue_profile_secret_leases_persists_sanitized_metadata(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    workspace = await _workspace(session)
+    leases = await SecretLeaseRepository(session).issue_declared_leases(
+        workspace,
+        leases=_lease_issues(now),
+        now=now,
+    )
+
+    assert [lease.status for lease in leases] == ["issued", "issued"]
+    assert {lease.secret_name for lease in leases} == {"api-token", "db-password"}
+    assert leases[0].workspace_id == workspace.id
+    assert leases[0].attempt_id is None
+    assert leases[0].issued_at == now
+    assert leases[0].expires_at == now + timedelta(hours=1)
+    assert leases[0].kind == "env"
+    assert leases[0].target == "API_TOKEN"
+    assert leases[0].mode == "ro"
+    assert leases[0].required is True
+    assert leases[0].provider == "env"
+    assert leases[0].ref_digest == "sha256:" + "a" * 64
+    assert leases[0].issue_metadata["profile"] == "secure-local"
+    assert "secret-value" not in json.dumps([lease.__dict__ for lease in leases], default=str)
+
+
+@pytest.mark.unit
+async def test_issue_declared_leases_is_idempotent_for_workspace_profile_retry(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    workspace = await _workspace(session)
+    repo = SecretLeaseRepository(session)
+
+    first = await repo.issue_declared_leases(workspace, leases=_lease_issues(now), now=now)
+    second = await repo.issue_declared_leases(
+        workspace,
+        leases=_lease_issues(now + timedelta(minutes=5)),
+        now=now + timedelta(minutes=5),
+    )
+
+    assert [lease.id for lease in second] == [lease.id for lease in first]
+    rows = await repo.list_for_workspace(workspace.id)
+    assert len(rows) == 2
+    assert {lease.status for lease in rows} == {"issued"}
+
+
+@pytest.mark.unit
+async def test_mount_expire_revoke_and_audit_events_are_recorded(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    workspace = await _workspace(session)
+    repo = SecretLeaseRepository(session)
+    await repo.issue_declared_leases(workspace, leases=_lease_issues(now), now=now)
+
+    mounted = await repo.mark_issued_mounted(
+        workspace,
+        now=now + timedelta(minutes=1),
+        mount_metadata={
+            "mount_plan": "local-profile-declarations",
+            "compose_project": "awf_ws_secret",
+            "secret_value": "must-not-persist",
+        },
+    )
+    assert {lease.status for lease in mounted} == {"mounted"}
+    assert all(lease.mounted_at == now + timedelta(minutes=1) for lease in mounted)
+    assert "must-not-persist" not in json.dumps(
+        [lease.mount_metadata for lease in mounted],
+        default=str,
+    )
+
+    expired = await repo.expire_due_leases(now=now + timedelta(hours=2))
+    assert {lease.status for lease in expired} == {"expired"}
+
+    revoked = await repo.revoke_workspace_leases(
+        workspace,
+        now=now + timedelta(hours=3),
+        reason_code="TERMINAL_CLEANUP",
+    )
+    assert {lease.status for lease in revoked} == {"revoked"}
+    assert all(lease.revoke_reason_code == "TERMINAL_CLEANUP" for lease in revoked)
+    assert all(lease.revoked_at == now + timedelta(hours=3) for lease in revoked)
+
+    replay = await repo.revoke_workspace_leases(
+        workspace,
+        now=now + timedelta(hours=4),
+        reason_code="TERMINAL_CLEANUP",
+    )
+    assert replay == []
+    assert {lease.revoked_at for lease in revoked} == {now + timedelta(hours=3)}
+
+    events = await _events(session, workspace.id)
+    reason_codes = [event.reason_code for event in events]
+    assert reason_codes.count("SECRET_LEASE_ISSUED") == 2
+    assert reason_codes.count("SECRET_LEASE_MOUNTED") == 2
+    assert reason_codes.count("SECRET_LEASE_EXPIRED") == 2
+    assert reason_codes.count("SECRET_LEASE_REVOKED") == 2
+    payloads = [event.payload for event in events if event.event_type == "workspace.secret_lease"]
+    assert all(payload and payload["schema"] == "secret_lease_audit.v1" for payload in payloads)
+    assert "must-not-persist" not in json.dumps(payloads, default=str)
+
+
+@pytest.mark.unit
+async def test_expire_due_leases_only_changes_due_active_rows(session: AsyncSession) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    workspace = await _workspace(session)
+    other = await _workspace(session)
+    repo = SecretLeaseRepository(session)
+    due = _lease_issues(now)
+    future = [
+        SecretLeaseIssue(
+            secret_name="future-token",
+            kind="env",
+            target="FUTURE_TOKEN",
+            mode="ro",
+            required=True,
+            provider="env",
+            ref_digest="sha256:" + "c" * 64,
+            expires_at=now + timedelta(days=1),
+            issue_metadata={"profile": "secure-local", "declaration_index": 0},
+        )
+    ]
+    await repo.issue_declared_leases(workspace, leases=due, now=now)
+    await repo.issue_declared_leases(other, leases=future, now=now)
+
+    expired = await repo.expire_due_leases(now=now + timedelta(hours=2))
+
+    assert {lease.workspace_id for lease in expired} == {workspace.id}
+    assert {lease.status for lease in expired} == {"expired"}
+    rows = await session.execute(select(WorkspaceSecretLease))
+    statuses = {lease.secret_name: lease.status for lease in rows.scalars()}
+    assert statuses == {
+        "api-token": "expired",
+        "db-password": "expired",
+        "future-token": "issued",
+    }

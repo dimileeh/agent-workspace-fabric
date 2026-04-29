@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import SecretLeaseIssue, SecretLeaseRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
@@ -76,6 +76,35 @@ async def _seed_old_completed_pr_workspace(
         workspace.pr_number = 42
         await session.commit()
         return workspace.id
+
+
+async def _issue_monitor_secret_lease(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    now: datetime,
+) -> None:
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        await SecretLeaseRepository(session).issue_declared_leases(
+            workspace,
+            leases=[
+                SecretLeaseIssue(
+                    secret_name="api-token",
+                    kind="env",
+                    target="API_TOKEN",
+                    mode="ro",
+                    required=True,
+                    provider="env",
+                    ref_digest="sha256:" + "f" * 64,
+                    expires_at=now + timedelta(hours=1),
+                    issue_metadata={"profile": "monitor", "declaration_index": 0},
+                )
+            ],
+            now=now,
+        )
+        await session.commit()
 
 
 @pytest.mark.unit
@@ -172,6 +201,43 @@ async def test_completed_monitor_filesystem_gc_logs_success_for_retained_old_wor
         and record.get("deleted_path_count") == 3
         for record in captured
     )
+
+
+@pytest.mark.unit
+async def test_completed_monitor_filesystem_gc_revokes_active_secret_leases(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    worktrees_root = work_dir / "git" / "worktrees"
+    now = datetime.now(UTC)
+    ws_id = await _seed_old_completed_pr_workspace(
+        factory,
+        updated_at=now - timedelta(days=30),
+    )
+    await _issue_monitor_secret_lease(factory, ws_id, now=now)
+    worktree = worktrees_root / ws_id
+    auth = work_dir / "auth" / ws_id
+    _write(worktree / "repo.txt", "repo")
+    _write(auth / "codex" / "auth.json", "auth")
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=worktrees_root,
+    )
+
+    await runner._gc_completed_workspace_filesystem(ws_id)
+
+    async with factory() as session:
+        leases = await SecretLeaseRepository(session).list_for_workspace(ws_id)
+    assert leases[0].status == "revoked"
+    assert leases[0].revoke_reason_code == "TERMINAL_GC"
+    assert not auth.exists()
 
 
 @pytest.mark.unit

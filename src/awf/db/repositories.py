@@ -24,7 +24,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
-from awf.common.audit import build_audit_payload
+from awf.common.audit import build_audit_payload, redact_audit_value
 from awf.common.ids import (
     new_event_id,
     new_log_stream_id,
@@ -33,6 +33,7 @@ from awf.common.ids import (
     new_policy_finding_id,
     new_queue_decision_id,
     new_resource_reservation_id,
+    new_secret_lease_id,
     new_stale_reason_id,
     new_task_attempt_id,
     new_task_id,
@@ -55,6 +56,7 @@ from awf.db.models import (
     Workspace,
     WorkspaceEvent,
     WorkspaceLogStream,
+    WorkspaceSecretLease,
 )
 from awf.runtime.merge_eligibility import DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
 
@@ -1285,6 +1287,298 @@ class PolicyFindingRepository:
             stmt = stmt.where(PolicyFinding.status == status)
         stmt = stmt.order_by(PolicyFinding.detected_at.asc(), PolicyFinding.id.asc())
         return list((await self._session.execute(stmt)).scalars())
+
+
+SECRET_LEASE_AUDIT_EVENT_TYPE: Final = "workspace.secret_lease"
+SECRET_LEASE_AUDIT_SCHEMA: Final = "secret_lease_audit.v1"
+SECRET_LEASE_STATUS_ISSUED: Final = "issued"
+SECRET_LEASE_STATUS_MOUNTED: Final = "mounted"
+SECRET_LEASE_STATUS_EXPIRED: Final = "expired"
+SECRET_LEASE_STATUS_REVOKED: Final = "revoked"
+_SECRET_LEASE_ACTIVE_STATUSES: Final = (
+    SECRET_LEASE_STATUS_ISSUED,
+    SECRET_LEASE_STATUS_MOUNTED,
+)
+_SECRET_LEASE_REVOCABLE_STATUSES: Final = (
+    SECRET_LEASE_STATUS_ISSUED,
+    SECRET_LEASE_STATUS_MOUNTED,
+    SECRET_LEASE_STATUS_EXPIRED,
+)
+
+
+@dataclass(frozen=True)
+class SecretLeaseIssue:
+    secret_name: str
+    kind: str
+    target: str
+    mode: str
+    required: bool
+    provider: str | None
+    ref_digest: str | None
+    expires_at: datetime | None
+    issue_metadata: dict[str, Any]
+    attempt_id: str | None = None
+
+
+class SecretLeaseRepository:
+    """CRUD helpers for local workspace secret lease metadata."""
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def issue_declared_leases(
+        self,
+        workspace: Workspace,
+        *,
+        leases: Iterable[SecretLeaseIssue],
+        now: datetime,
+    ) -> builtins.list[WorkspaceSecretLease]:
+        created: list[WorkspaceSecretLease] = []
+        results: list[WorkspaceSecretLease] = []
+        for issue in leases:
+            existing = await self._get_for_declaration(
+                workspace.id,
+                secret_name=issue.secret_name,
+                kind=issue.kind,
+                target=issue.target,
+            )
+            if existing is not None:
+                results.append(existing)
+                continue
+            lease = WorkspaceSecretLease(
+                id=new_secret_lease_id(),
+                workspace_id=workspace.id,
+                attempt_id=issue.attempt_id,
+                secret_name=issue.secret_name,
+                kind=issue.kind,
+                target=issue.target,
+                mode=issue.mode,
+                required=issue.required,
+                provider=issue.provider,
+                ref_digest=issue.ref_digest,
+                status=SECRET_LEASE_STATUS_ISSUED,
+                issued_at=now,
+                expires_at=issue.expires_at,
+                issue_metadata=_sanitize_metadata(issue.issue_metadata),
+                mount_metadata={},
+            )
+            self._session.add(lease)
+            created.append(lease)
+            results.append(lease)
+        await self._session.flush()
+        if created:
+            await self._add_lease_events(
+                workspace,
+                leases=created,
+                reason_code="SECRET_LEASE_ISSUED",
+                action="issue",
+                now=now,
+            )
+        return results
+
+    async def mark_issued_mounted(
+        self,
+        workspace: Workspace,
+        *,
+        now: datetime,
+        mount_metadata: Mapping[str, Any] | None = None,
+    ) -> builtins.list[WorkspaceSecretLease]:
+        leases = await self._list_for_workspace_statuses(
+            workspace.id,
+            statuses=(SECRET_LEASE_STATUS_ISSUED,),
+        )
+        sanitized_metadata = _sanitize_metadata(dict(mount_metadata or {}))
+        for lease in leases:
+            lease.status = SECRET_LEASE_STATUS_MOUNTED
+            lease.mounted_at = now
+            lease.mount_metadata = sanitized_metadata
+        await self._session.flush()
+        if leases:
+            await self._add_lease_events(
+                workspace,
+                leases=leases,
+                reason_code="SECRET_LEASE_MOUNTED",
+                action="mount",
+                now=now,
+            )
+        return leases
+
+    async def expire_due_leases(self, *, now: datetime) -> builtins.list[WorkspaceSecretLease]:
+        stmt = (
+            select(WorkspaceSecretLease)
+            .where(
+                WorkspaceSecretLease.status.in_(_SECRET_LEASE_ACTIVE_STATUSES),
+                WorkspaceSecretLease.expires_at.is_not(None),
+                WorkspaceSecretLease.expires_at <= now,
+            )
+            .order_by(WorkspaceSecretLease.workspace_id, WorkspaceSecretLease.issued_at)
+        )
+        leases = list((await self._session.execute(stmt)).scalars())
+        if not leases:
+            return []
+        workspaces = await self._workspaces_by_id({lease.workspace_id for lease in leases})
+        for lease in leases:
+            lease.status = SECRET_LEASE_STATUS_EXPIRED
+        await self._session.flush()
+        for workspace_id, workspace_leases in _group_leases_by_workspace(leases).items():
+            workspace = workspaces.get(workspace_id)
+            if workspace is None:
+                continue
+            await self._add_lease_events(
+                workspace,
+                leases=workspace_leases,
+                reason_code="SECRET_LEASE_EXPIRED",
+                action="expire",
+                now=now,
+            )
+        return leases
+
+    async def revoke_workspace_leases(
+        self,
+        workspace: Workspace,
+        *,
+        now: datetime,
+        reason_code: str,
+    ) -> builtins.list[WorkspaceSecretLease]:
+        leases = await self._list_for_workspace_statuses(
+            workspace.id,
+            statuses=_SECRET_LEASE_REVOCABLE_STATUSES,
+        )
+        for lease in leases:
+            lease.status = SECRET_LEASE_STATUS_REVOKED
+            lease.revoked_at = now
+            lease.revoke_reason_code = reason_code
+        await self._session.flush()
+        if leases:
+            await self._add_lease_events(
+                workspace,
+                leases=leases,
+                reason_code="SECRET_LEASE_REVOKED",
+                action="revoke",
+                now=now,
+            )
+        return leases
+
+    async def list_for_workspace(self, workspace_id: str) -> builtins.list[WorkspaceSecretLease]:
+        stmt = (
+            select(WorkspaceSecretLease)
+            .where(WorkspaceSecretLease.workspace_id == workspace_id)
+            .order_by(WorkspaceSecretLease.issued_at, WorkspaceSecretLease.id)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def _get_for_declaration(
+        self,
+        workspace_id: str,
+        *,
+        secret_name: str,
+        kind: str,
+        target: str,
+    ) -> WorkspaceSecretLease | None:
+        stmt = select(WorkspaceSecretLease).where(
+            WorkspaceSecretLease.workspace_id == workspace_id,
+            WorkspaceSecretLease.secret_name == secret_name,
+            WorkspaceSecretLease.kind == kind,
+            WorkspaceSecretLease.target == target,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def _list_for_workspace_statuses(
+        self,
+        workspace_id: str,
+        *,
+        statuses: tuple[str, ...],
+    ) -> builtins.list[WorkspaceSecretLease]:
+        stmt = (
+            select(WorkspaceSecretLease)
+            .where(
+                WorkspaceSecretLease.workspace_id == workspace_id,
+                WorkspaceSecretLease.status.in_(statuses),
+            )
+            .order_by(WorkspaceSecretLease.issued_at, WorkspaceSecretLease.id)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def _workspaces_by_id(self, workspace_ids: set[str]) -> dict[str, Workspace]:
+        if not workspace_ids:
+            return {}
+        stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
+        rows = (await self._session.execute(stmt)).scalars()
+        return {workspace.id: workspace for workspace in rows}
+
+    async def _add_lease_events(
+        self,
+        workspace: Workspace,
+        *,
+        leases: list[WorkspaceSecretLease],
+        reason_code: str,
+        action: str,
+        now: datetime,
+    ) -> None:
+        events = [
+            WorkspaceEventCreate(
+                event_type=SECRET_LEASE_AUDIT_EVENT_TYPE,
+                reason_code=reason_code,
+                payload=_lease_audit_payload(
+                    lease,
+                    action=action,
+                    reason_code=reason_code,
+                    occurred_at=now,
+                ),
+            )
+            for lease in leases
+        ]
+        await WorkspaceRepository(self._session).add_events(workspace, events=events)
+
+
+def _sanitize_metadata(metadata: Mapping[str, Any]) -> dict[str, Any]:
+    redacted = redact_audit_value(dict(metadata))
+    return redacted if isinstance(redacted, dict) else {}
+
+
+def _lease_audit_payload(
+    lease: WorkspaceSecretLease,
+    *,
+    action: str,
+    reason_code: str,
+    occurred_at: datetime,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "schema": SECRET_LEASE_AUDIT_SCHEMA,
+        "lease_id": lease.id,
+        "action": action,
+        "reason_code": reason_code,
+        "workspace_id": lease.workspace_id,
+        "attempt_id": lease.attempt_id,
+        "secret_name": lease.secret_name,
+        "kind": lease.kind,
+        "target": lease.target,
+        "mode": lease.mode,
+        "required": lease.required,
+        "provider": lease.provider,
+        "ref_digest": lease.ref_digest,
+        "status": lease.status,
+        "issued_at": lease.issued_at.isoformat(),
+        "mounted_at": lease.mounted_at.isoformat() if lease.mounted_at else None,
+        "expires_at": lease.expires_at.isoformat() if lease.expires_at else None,
+        "revoked_at": lease.revoked_at.isoformat() if lease.revoked_at else None,
+        "revoke_reason_code": lease.revoke_reason_code,
+        "occurred_at": occurred_at.isoformat(),
+    }
+    if lease.issue_metadata:
+        payload["issue_metadata"] = _sanitize_metadata(lease.issue_metadata)
+    if lease.mount_metadata:
+        payload["mount_metadata"] = _sanitize_metadata(lease.mount_metadata)
+    return {key: value for key, value in payload.items() if value is not None}
+
+
+def _group_leases_by_workspace(
+    leases: Iterable[WorkspaceSecretLease],
+) -> dict[str, list[WorkspaceSecretLease]]:
+    grouped: dict[str, list[WorkspaceSecretLease]] = {}
+    for lease in leases:
+        grouped.setdefault(lease.workspace_id, []).append(lease)
+    return grouped
 
 
 class WorkspaceRepository:

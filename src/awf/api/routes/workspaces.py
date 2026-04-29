@@ -37,6 +37,7 @@ from awf.api.schemas import (
     WorkspaceOverviewResponse,
     WorkspaceResponse,
     WorkspaceRetryResponse,
+    WorkspaceSecretLeaseListResponse,
     WorkspaceWarningResponse,
 )
 from awf.common.config import Settings, get_settings
@@ -50,6 +51,7 @@ from awf.db.repositories import (
 )
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.secret_leases import SecretLeaseService
 from awf.service.validation_observability import (
     latest_merge_candidate,
     validation_freshness_summary,
@@ -424,6 +426,22 @@ async def get_workspace(
         candidate=latest_merge_candidate(ws),
     )
     return workspace_response(ws, validation_provenance=validation_provenance)
+
+
+@router.get("/{workspace_id}/secret-leases", response_model=WorkspaceSecretLeaseListResponse)
+async def get_workspace_secret_leases(
+    workspace_id: str,
+    session: AsyncSession = Depends(get_db_session),
+) -> WorkspaceSecretLeaseListResponse:
+    repo = WorkspaceRepository(session)
+    if not await repo.exists(workspace_id):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
+        )
+    return WorkspaceSecretLeaseListResponse(
+        items=await SecretLeaseService(session).workspace_secret_lease_status(workspace_id)
+    )
 
 
 @router.get("", response_model=list[WorkspaceResponse])
