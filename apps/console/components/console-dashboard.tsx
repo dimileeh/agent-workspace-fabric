@@ -62,6 +62,12 @@ import {
   formatOperationFailure,
   formatOperationTitle,
 } from "@/lib/operation-format";
+import {
+  getWorkspaceOperatorControls,
+  summarizeWorkspaceOperatorFailure,
+  summarizeWorkspaceOperatorSuccess,
+} from "@/lib/workspace-operator-controls";
+import type { WorkspaceOperatorControl } from "@/lib/workspace-operator-controls";
 import type {
   ApiEnvelope,
   AwfStreamFrame,
@@ -79,6 +85,9 @@ import type {
   WorkspaceLogStream,
   WorkspaceOverview,
   WorkspaceRuntime,
+  WorkspaceControlResponse,
+  WorkspaceOperatorAction,
+  WorkspaceOperatorRequest,
   WorkspaceRetryResponse,
   WorkspaceStatus,
   WorkspaceReliabilitySummary,
@@ -134,6 +143,18 @@ type RetryActionState =
   | { status: "success"; newWorkspaceId: string; operationId: string }
   | { status: "error"; message: string };
 
+type OperatorActionState =
+  | { status: "idle" }
+  | { status: "submitting"; action: WorkspaceOperatorAction }
+  | {
+      status: "success";
+      action: WorkspaceOperatorAction;
+      operationId: string;
+      operationStatus: string;
+      message: string;
+    }
+  | { status: "error"; action: WorkspaceOperatorAction; errorCode: string | null; message: string };
+
 const emptyDetail: DetailState = {
   workspace: null,
   runtime: null,
@@ -173,6 +194,7 @@ export function ConsoleDashboard() {
   const [failureSummaryStatus, setFailureSummaryStatus] = useState<"loading" | "success" | "error" | "unavailable">("loading");
   const [failureSummaryError, setFailureSummaryError] = useState<string | null>(null);
   const [retryState, setRetryState] = useState<RetryActionState>({ status: "idle" });
+  const [operatorActionState, setOperatorActionState] = useState<OperatorActionState>({ status: "idle" });
   const [apiState, setApiState] = useState<"checking" | "ok" | "error">("checking");
   const [streamState, setStreamState] = useState<"idle" | "connecting" | "live" | "error">("idle");
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
@@ -334,6 +356,66 @@ export function ConsoleDashboard() {
     await Promise.all([loadOverview(), loadResourceSaturation(), loadMergeQueue(), loadFailureSummary(), loadWorkspaceSummary()]);
   }, [loadMergeQueue, loadOverview, loadResourceSaturation, loadFailureSummary, loadWorkspaceSummary, selectedId]);
 
+  const runWorkspaceOperatorAction = useCallback(
+    async (action: WorkspaceOperatorAction, requestedTier?: number) => {
+      if (!selectedId || operatorActionState.status === "submitting") {
+        return;
+      }
+      setOperatorActionState({ status: "submitting", action });
+      const payload: WorkspaceOperatorRequest = {
+        reason: operatorActionReason(action),
+        workspace_version: detail.workspace?.version,
+        idempotency_key: operatorIdempotencyKey(action, selectedId),
+      };
+      if (action === "revalidate") {
+        payload.requested_tier = requestedTier === 1 || requestedTier === 2 || requestedTier === 3 ? requestedTier : 1;
+      }
+
+      const result = await apiPost<WorkspaceControlResponse | Operation>(
+        operatorActionPath(action, selectedId),
+        payload,
+      );
+      if (!result.ok) {
+        const failure = summarizeWorkspaceOperatorFailure(result);
+        setOperatorActionState({
+          status: "error",
+          action,
+          errorCode: failure.errorCode,
+          message: failure.message,
+        });
+        return;
+      }
+
+      const success = summarizeWorkspaceOperatorSuccess(action, result.data);
+      setOperatorActionState({
+        status: "success",
+        action,
+        operationId: success.operationId,
+        operationStatus: success.status,
+        message: success.message,
+      });
+      await Promise.all([
+        loadOverview(),
+        loadResourceSaturation(),
+        loadMergeQueue(),
+        loadFailureSummary(),
+        loadWorkspaceSummary(),
+        loadWorkspace(selectedId),
+      ]);
+    },
+    [
+      detail.workspace?.version,
+      loadFailureSummary,
+      loadMergeQueue,
+      loadOverview,
+      loadResourceSaturation,
+      loadWorkspace,
+      loadWorkspaceSummary,
+      operatorActionState.status,
+      selectedId,
+    ],
+  );
+
   const loadLogTail = useCallback(
     async (workspaceId: string, stream: WorkspaceLogStream) => {
       const offset = Math.max(stream.byte_count - 65_536, 0);
@@ -431,6 +513,7 @@ export function ConsoleDashboard() {
     setLogEntries([]);
     setStreamOffsets({});
     setRetryState({ status: "idle" });
+    setOperatorActionState({ status: "idle" });
   }, [selectedId]);
 
   useEffect(() => {
@@ -574,6 +657,18 @@ export function ConsoleDashboard() {
   const selectedMergeQueueItem = useMemo(
     () => mergeQueue.find((item) => item.workspace_id === selectedId) ?? null,
     [mergeQueue, selectedId],
+  );
+  const operatorControls = useMemo(
+    () =>
+      selectedOverview
+        ? getWorkspaceOperatorControls({
+            overview: selectedOverview,
+            workspace: detail.workspace,
+            mergeQueueItem: selectedMergeQueueItem,
+            operations: detail.operations,
+          })
+        : [],
+    [detail.operations, detail.workspace, selectedMergeQueueItem, selectedOverview],
   );
   const selectedLogEntries = useMemo(
     () => {
@@ -727,7 +822,10 @@ export function ConsoleDashboard() {
                   workspace={detail.workspace}
                   mergeQueueItem={selectedMergeQueueItem}
                   retryState={retryState}
+                  operatorControls={operatorControls}
+                  operatorActionState={operatorActionState}
                   onRetry={retrySelectedWorkspace}
+                  onOperatorAction={runWorkspaceOperatorAction}
                 />
                 <LifecycleRail
                   status={selectedOverview.status}
@@ -1139,13 +1237,19 @@ function WorkspaceSummary({
   workspace,
   mergeQueueItem,
   retryState,
+  operatorControls,
+  operatorActionState,
   onRetry,
+  onOperatorAction,
 }: {
   overview: WorkspaceOverview;
   workspace: Workspace | null;
   mergeQueueItem: MergeQueueItem | null;
   retryState: RetryActionState;
+  operatorControls: WorkspaceOperatorControl[];
+  operatorActionState: OperatorActionState;
   onRetry: () => void;
+  onOperatorAction: (action: WorkspaceOperatorAction, requestedTier?: number) => void;
 }) {
   const canRetry = overview.status === "failed" || overview.status === "cancelled";
   const recovery = workspace?.recovery ?? overview.recovery ?? null;
@@ -1194,6 +1298,11 @@ function WorkspaceSummary({
           <Fact label="Updated" value={formatDateTime(overview.updated_at)} />
         </div>
         <WorkspaceRecoveryBlock item={mergeQueueItem} workspace={workspace} overview={overview} />
+        <OperatorControlsBlock
+          controls={operatorControls}
+          state={operatorActionState}
+          onAction={onOperatorAction}
+        />
         <UsageSummaryBlock usage={workspace?.llm_usage ?? overview.llm_usage} />
         {recovery ? <RecoveryCallout recovery={recovery} status={overview.status} /> : null}
         {overview.failure_reason || overview.failure_message ? (
@@ -1349,6 +1458,87 @@ function WorkspaceRecoveryBlock({
       </div>
     </div>
   );
+}
+
+function OperatorControlsBlock({
+  controls,
+  state,
+  onAction,
+}: {
+  controls: WorkspaceOperatorControl[];
+  state: OperatorActionState;
+  onAction: (action: WorkspaceOperatorAction, requestedTier?: number) => void;
+}) {
+  const visibleControls = controls.filter((control) => control.visible);
+  if (visibleControls.length === 0) {
+    return null;
+  }
+
+  const submittingAction = state.status === "submitting" ? state.action : null;
+  const busy = submittingAction !== null;
+
+  return (
+    <div className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-xs">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <span className="font-semibold text-slate-900">Operator controls</span>
+        {busy ? (
+          <span className="mono text-[11px] text-slate-500">{submittingAction} active</span>
+        ) : null}
+      </div>
+      <div className="flex flex-wrap gap-2">
+        {visibleControls.map((control) => {
+          const submitting = submittingAction === control.action;
+          const disabled = busy || !control.enabled;
+          const reason = busy && !submitting ? "operation active" : control.reason;
+          return (
+            <div key={control.action} className="flex min-w-0 items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => onAction(control.action, control.requestedTier)}
+                disabled={disabled}
+                title={reason ? `${control.label}: ${reason}` : control.label}
+                className="inline-flex h-8 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] font-medium text-slate-800 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <OperatorControlIcon action={control.action} spinning={submitting} />
+                {control.label}
+              </button>
+              {reason ? <span className="max-w-32 truncate text-[11px] text-slate-500">{reason}</span> : null}
+            </div>
+          );
+        })}
+      </div>
+      {state.status === "success" ? (
+        <div className="rounded-md border border-emerald-200 bg-emerald-50 px-2 py-1.5 text-emerald-900">
+          <span>{state.message}</span>
+          <span className="mono ml-2 text-emerald-800">{compactId(state.operationId, 10)}</span>
+        </div>
+      ) : null}
+      {state.status === "error" ? (
+        <div className="rounded-md border border-red-200 bg-red-50 px-2 py-1.5 text-red-900">
+          {state.message}
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function OperatorControlIcon({
+  action,
+  spinning,
+}: {
+  action: WorkspaceOperatorAction;
+  spinning: boolean;
+}) {
+  if (spinning) {
+    return <Loader2 size={13} className="animate-spin" aria-hidden />;
+  }
+  if (action === "remonitor") {
+    return <Radio size={13} aria-hidden />;
+  }
+  if (action === "refresh") {
+    return <RefreshCw size={13} aria-hidden />;
+  }
+  return <CheckCircle2 size={13} aria-hidden />;
 }
 
 function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] | null | undefined }) {
@@ -2977,9 +3167,14 @@ async function apiGet<T>(path: string): Promise<ApiEnvelope<T>> {
   }
 }
 
-async function apiPost<T>(path: string): Promise<ApiEnvelope<T>> {
+async function apiPost<T>(path: string, body?: unknown): Promise<ApiEnvelope<T>> {
   try {
-    const response = await fetch(path, { method: "POST", cache: "no-store" });
+    const init: RequestInit = { method: "POST", cache: "no-store" };
+    if (body !== undefined) {
+      init.headers = { "content-type": "application/json" };
+      init.body = JSON.stringify(omitUndefined(body));
+    }
+    const response = await fetch(path, init);
     return await parseApiResponse<T>(response);
   } catch (error) {
     return {
@@ -2988,6 +3183,40 @@ async function apiPost<T>(path: string): Promise<ApiEnvelope<T>> {
       message: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+function operatorActionPath(action: WorkspaceOperatorAction, workspaceId: string): string {
+  return `/api/operator/workspaces/${encodeURIComponent(workspaceId)}/${action}`;
+}
+
+function operatorActionReason(action: WorkspaceOperatorAction): string {
+  switch (action) {
+    case "remonitor":
+      return "operator console remonitor";
+    case "refresh":
+      return "operator console refresh";
+    case "revalidate":
+      return "operator console revalidate";
+    default:
+      return "operator console";
+  }
+}
+
+function operatorIdempotencyKey(action: WorkspaceOperatorAction, workspaceId: string): string {
+  const suffix =
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+  return `console:${action}:${workspaceId}:${suffix}`;
+}
+
+function omitUndefined(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return value;
+  }
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>).filter(([, entryValue]) => entryValue !== undefined),
+  );
 }
 
 async function parseApiResponse<T>(response: Response): Promise<ApiEnvelope<T>> {

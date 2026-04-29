@@ -22,16 +22,23 @@ const operationTitles: Record<string, string> = {
   sync_base: "Base refresh",
   human_wait: "Manual wait",
   rebase: "Rebase",
+  remonitor: "Remonitor",
   refresh: "Refresh",
+  validate: "Validate",
 };
 
 export function formatOperationTitle(operation: Operation): string {
   const action = operation.action ?? stringValue(operation.payload, "action");
+  const requestedAction = stringValue(operation.payload, "requested_action");
+  const source = stringValue(operation.payload, "source");
   if (operation.type === "monitor_state" && action && monitorTitles[action]) {
     return monitorTitles[action];
   }
   if (action && actionTitles[action]) {
     return actionTitles[action];
+  }
+  if (operation.type === "validate" && requestedAction === "validate" && source === "operator_api") {
+    return "Revalidate";
   }
   if (operationTitles[operation.type]) {
     return operationTitles[operation.type];

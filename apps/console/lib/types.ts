@@ -392,6 +392,23 @@ export interface Operation {
   log_stream_ids: string[];
 }
 
+export type WorkspaceOperatorAction = "remonitor" | "refresh" | "revalidate";
+
+export interface WorkspaceControlResponse {
+  workspace_id: string;
+  operation_id: string;
+  operation_status: string;
+  status: WorkspaceStatus;
+  message: string;
+}
+
+export interface WorkspaceOperatorRequest {
+  reason?: string;
+  workspace_version?: number;
+  requested_tier?: ValidationTier;
+  idempotency_key?: string;
+}
+
 export interface WorkspaceRetryResponse {
   source_workspace_id: string;
   new_workspace_id: string;

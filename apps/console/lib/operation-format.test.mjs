@@ -94,6 +94,25 @@ test("existing recovery operation types keep readable labels", () => {
   );
 });
 
+test("operator recovery operation types keep readable labels", () => {
+  assert.equal(
+    formatOperationTitle({
+      ...baseOperation,
+      type: "remonitor",
+      payload: { requested_action: "remonitor", source: "operator_api" },
+    }),
+    "Remonitor",
+  );
+  assert.equal(
+    formatOperationTitle({
+      ...baseOperation,
+      type: "validate",
+      payload: { requested_action: "validate", source: "operator_api" },
+    }),
+    "Revalidate",
+  );
+});
+
 test("legacy operations without payload or action render fallback text", () => {
   const operation = {
     ...baseOperation,

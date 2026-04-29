@@ -4,6 +4,9 @@ import type {
   ValidationFreshnessStatus,
   ValidationRunSummary,
   Workspace,
+  WorkspaceControlResponse,
+  WorkspaceOperatorAction,
+  WorkspaceOperatorRequest,
   WorkspaceRecoverySummary,
 } from "./types";
 
@@ -101,3 +104,36 @@ type OperationAuditFieldsAreNullable = Expect<
 >;
 
 export const operationAuditFieldsAreNullable: OperationAuditFieldsAreNullable = true;
+
+type WorkspaceOperatorActionUnionIsExplicit = Expect<
+  Equal<WorkspaceOperatorAction, "remonitor" | "refresh" | "revalidate">
+>;
+
+type WorkspaceControlResponseShape = Expect<
+  Equal<
+    Pick<WorkspaceControlResponse, "workspace_id" | "operation_id" | "operation_status" | "status" | "message">,
+    {
+      workspace_id: string;
+      operation_id: string;
+      operation_status: string;
+      status: Workspace["status"];
+      message: string;
+    }
+  >
+>;
+
+type WorkspaceOperatorRequestShape = Expect<
+  Equal<
+    WorkspaceOperatorRequest,
+    {
+      reason?: string;
+      workspace_version?: number;
+      requested_tier?: 1 | 2 | 3;
+      idempotency_key?: string;
+    }
+  >
+>;
+
+export const workspaceOperatorActionUnionIsExplicit: WorkspaceOperatorActionUnionIsExplicit = true;
+export const workspaceControlResponseShape: WorkspaceControlResponseShape = true;
+export const workspaceOperatorRequestShape: WorkspaceOperatorRequestShape = true;
