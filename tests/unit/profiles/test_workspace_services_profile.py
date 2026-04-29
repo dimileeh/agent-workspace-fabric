@@ -17,6 +17,12 @@ _POSTGRES_FIXTURE = (
     / "workspace_services"
     / "python_postgres_app"
 )
+_NODE_BROWSER_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "fixtures"
+    / "workspace_services"
+    / "node_next_browser_app"
+)
 
 
 def _load_profile() -> WorkspaceProfile:
@@ -32,6 +38,19 @@ def _load_profile() -> WorkspaceProfile:
 def _load_postgres_profile() -> WorkspaceProfile:
     assert _POSTGRES_FIXTURE.is_dir(), "python-postgres workspace-services fixture is missing"
     result = ProfileResolver().resolve(worktree_path=_POSTGRES_FIXTURE, profile_ref="auto")
+
+    assert result.reason == "repo-local .awf/workspace.yml profile"
+    assert result.candidates_considered[0] == "repo:.awf/workspace.yml"
+    assert result.profile.source == "repo:.awf/workspace.yml"
+    return result.profile
+
+
+def _load_node_browser_profile() -> WorkspaceProfile:
+    assert _NODE_BROWSER_FIXTURE.is_dir(), "node browser workspace-services fixture is missing"
+    result = ProfileResolver().resolve(
+        worktree_path=_NODE_BROWSER_FIXTURE,
+        profile_ref="auto",
+    )
 
     assert result.reason == "repo-local .awf/workspace.yml profile"
     assert result.candidates_considered[0] == "repo:.awf/workspace.yml"
@@ -253,6 +272,95 @@ def test_python_postgres_profile_services_resolves_worktree_paths_and_named_volu
     )
     assert app.depends_on == ("postgres",)
     assert app.volumes == ()
+
+
+@pytest.mark.unit
+def test_node_next_browser_workspace_services_profile_resolves_repo_local_contract() -> None:
+    profile = _load_node_browser_profile()
+
+    assert profile.name == "node-next-browser-app"
+    assert profile.docker.mode is DockerMode.none
+    assert profile.runtime.environment == {
+        "APP_BASE_URL": "http://app:3000",
+        "BROWSER_VALIDATE_URL": "http://browser:9323/validate",
+    }
+    assert profile.ports == {
+        "app": "http://app:3000",
+        "browser": "http://browser:9323/validate",
+    }
+
+
+@pytest.mark.unit
+def test_node_next_browser_workspace_services_profile_preserves_service_schema() -> None:
+    profile = _load_node_browser_profile()
+
+    services = {service.name: service for service in profile.services}
+    assert set(services) == {"app", "browser"}
+
+    app = services["app"]
+    assert app.build_context == "."
+    assert app.dockerfile == "Dockerfile"
+    assert app.environment == {"PORT": "3000"}
+    assert app.depends_on == []
+    assert app.healthcheck_cmd == (
+        "node /app/scripts/container-healthcheck.mjs http://127.0.0.1:3000/healthz ok"
+    )
+    assert app.ports == []
+    assert app.command == "node /app/server.mjs"
+
+    browser = services["browser"]
+    assert browser.build_context == "."
+    assert browser.dockerfile == "Dockerfile.playwright"
+    assert browser.environment == {
+        "APP_BASE_URL": "http://app:3000",
+        "PORT": "9323",
+    }
+    assert browser.depends_on == ["app"]
+    assert browser.healthcheck_cmd == (
+        "node /app/scripts/container-healthcheck.mjs http://127.0.0.1:9323/healthz ok"
+    )
+    assert browser.ports == []
+    assert browser.command == "node /app/browser/validator-server.mjs"
+
+    assert [command.command for command in profile.phases.setup] == [
+        "node scripts/setup.mjs"
+    ]
+    assert [command.command for command in profile.phases.validate_commands] == [
+        "node scripts/validate-browser.mjs"
+    ]
+    assert [(check.name, check.command) for check in profile.validation.healthchecks] == [
+        ("app", "node scripts/healthcheck.mjs app"),
+        ("browser", "node scripts/healthcheck.mjs browser"),
+    ]
+
+
+@pytest.mark.unit
+def test_node_next_browser_profile_services_resolves_worktree_paths_without_host_ports() -> None:
+    profile = _load_node_browser_profile()
+
+    services = {
+        service.name: service
+        for service in profile_services(profile, base_path=_NODE_BROWSER_FIXTURE)
+    }
+
+    app = services["app"]
+    assert app.build_context == str(_NODE_BROWSER_FIXTURE.resolve())
+    assert app.dockerfile == "Dockerfile"
+    assert app.environment == (("PORT", "3000"),)
+    assert app.depends_on == ()
+    assert app.ports == ()
+    assert app.volumes == ()
+
+    browser = services["browser"]
+    assert browser.build_context == str(_NODE_BROWSER_FIXTURE.resolve())
+    assert browser.dockerfile == "Dockerfile.playwright"
+    assert browser.environment == (
+        ("APP_BASE_URL", "http://app:3000"),
+        ("PORT", "9323"),
+    )
+    assert browser.depends_on == ("app",)
+    assert browser.ports == ()
+    assert browser.volumes == ()
 
 
 @pytest.mark.unit
