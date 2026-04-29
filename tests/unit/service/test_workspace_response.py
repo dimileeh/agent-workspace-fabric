@@ -9,7 +9,10 @@ import pytest
 
 from awf.api.schemas import WorkspaceResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
-from awf.service.validation_observability import validation_freshness_summary
+from awf.service.validation_observability import (
+    latest_merge_candidate,
+    validation_freshness_summary,
+)
 from awf.service.workspaces import workspace_response
 
 
@@ -300,6 +303,22 @@ def test_workspace_validation_summary_requires_post_rebase_validation() -> None:
     assert summary.reason_code == "validation_insufficient_tier"
     assert summary.latest_validation is not None
     assert summary.latest_validation.freshness_status == "fresh"
+
+
+@pytest.mark.unit
+def test_latest_merge_candidate_ignores_candidates_with_missing_status() -> None:
+    newer_missing_status = SimpleNamespace(
+        id="mc_missing_status",
+        updated_at=datetime(2026, 4, 27, 16, 0, tzinfo=UTC),
+    )
+    older_open = SimpleNamespace(
+        id="mc_open",
+        status="open",
+        updated_at=datetime(2026, 4, 27, 15, 0, tzinfo=UTC),
+    )
+    workspace = SimpleNamespace(merge_candidates=[newer_missing_status, older_open])
+
+    assert latest_merge_candidate(workspace) is older_open  # type: ignore[arg-type]
 
 
 @pytest.mark.unit

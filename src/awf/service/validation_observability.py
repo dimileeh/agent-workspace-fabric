@@ -91,7 +91,7 @@ def latest_merge_candidate(workspace: Workspace) -> MergeCandidate | None:
     candidates = [
         candidate
         for candidate in _loaded_collection(workspace, "merge_candidates")
-        if getattr(candidate, "status", "open") == "open"
+        if getattr(candidate, "status", None) == "open"
     ]
     if not candidates:
         return None
