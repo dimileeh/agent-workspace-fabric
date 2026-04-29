@@ -121,8 +121,8 @@ async def test_initial_review_grace_defers_stale_recovery_dispatch(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """Grace must win over the stale-recovery dispatch — no Operation
-    is created and the workspace stays in monitoring_pr while grace
+    """Grace must win over the stale-recovery dispatch — only a monitor-state
+    wait operation is created and the workspace stays in monitoring_pr while grace
     is active. This is the core regression guard for the dogfood
     incident where validation recovery fired during the grace window.
     """
@@ -169,7 +169,14 @@ async def test_initial_review_grace_defers_stale_recovery_dispatch(
         assert ws is not None
         assert ws.status == WorkspaceStatus.monitoring_pr.value
         operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
-        assert operations == []
+        assert len(operations) == 1
+        operation = operations[0]
+        assert operation.type == "monitor_state"
+        assert operation.status == OperationStatus.succeeded.value
+        assert operation.payload["action"] == "grace_wait"
+        assert operation.payload["reason_code"] == "INITIAL_REVIEW_GRACE"
+        assert operation.payload["stale_reason"] == "validation_insufficient_tier"
+        assert operation.payload["requested_action"] == "validate"
 
     # Slept for the grace remainder (capped by poll_interval=60).
     assert sleep_fn.calls == [60]

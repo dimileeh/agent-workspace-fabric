@@ -180,6 +180,109 @@ async def create_or_start_monitor_operation(
     )
 
 
+async def begin_monitor_state_operation(
+    session: AsyncSession,
+    *,
+    workspace: Workspace,
+    action: str,
+    requested_action: str,
+    reason: str | None,
+    reason_code: str,
+    pr_number: int,
+    source_head_sha: str | None,
+    source_base_sha: str | None,
+    target_branch: str | None,
+    remote_branch: str | None,
+    operation_status: OperationStatus = OperationStatus.running,
+    recovery_mode: str | None = None,
+    stale_reason: str | None = None,
+    log_stream_refs: Mapping[str, Any] | None = None,
+    extra: Mapping[str, Any] | None = None,
+    extra_identity: Sequence[object] = (),
+) -> MonitorOperationHandle:
+    payload = build_monitor_operation_payload(
+        workspace=workspace,
+        action=action,
+        requested_action=requested_action,
+        reason=reason,
+        reason_code=reason_code,
+        pr_number=pr_number,
+        source_head_sha=source_head_sha,
+        source_base_sha=source_base_sha,
+        target_branch=target_branch,
+        remote_branch=remote_branch,
+        recovery_mode=recovery_mode,
+        stale_reason=stale_reason,
+        log_stream_refs=log_stream_refs,
+        extra=extra,
+    )
+    idempotency_key = monitor_operation_idempotency_key(
+        workspace_id=workspace.id,
+        action=action,
+        pr_number=pr_number,
+        reason_code=reason_code,
+        source_head_sha=source_head_sha,
+        source_base_sha=source_base_sha,
+        extra=extra_identity,
+    )
+    return await create_or_start_monitor_operation(
+        session,
+        workspace_id=workspace.id,
+        operation_type=OperationType.monitor_state,
+        payload=payload,
+        idempotency_key=idempotency_key,
+        status=operation_status,
+    )
+
+
+async def record_monitor_state_operation(
+    session: AsyncSession,
+    *,
+    workspace: Workspace,
+    action: str,
+    requested_action: str,
+    reason: str | None,
+    reason_code: str,
+    pr_number: int,
+    source_head_sha: str | None,
+    source_base_sha: str | None,
+    target_branch: str | None,
+    remote_branch: str | None,
+    result: Mapping[str, Any] | None = None,
+    recovery_mode: str | None = None,
+    stale_reason: str | None = None,
+    log_stream_refs: Mapping[str, Any] | None = None,
+    extra: Mapping[str, Any] | None = None,
+    extra_identity: Sequence[object] = (),
+) -> Operation | None:
+    handle = await begin_monitor_state_operation(
+        session,
+        workspace=workspace,
+        action=action,
+        requested_action=requested_action,
+        reason=reason,
+        reason_code=reason_code,
+        pr_number=pr_number,
+        source_head_sha=source_head_sha,
+        source_base_sha=source_base_sha,
+        target_branch=target_branch,
+        remote_branch=remote_branch,
+        recovery_mode=recovery_mode,
+        stale_reason=stale_reason,
+        log_stream_refs=log_stream_refs,
+        extra=extra,
+        extra_identity=extra_identity,
+    )
+    if not handle.should_finish:
+        return await OperationRepository(session).get(handle.operation_id)
+    return await finish_monitor_operation(
+        session,
+        operation_id=handle.operation_id,
+        status=OperationStatus.succeeded,
+        result=result,
+    )
+
+
 async def finish_monitor_operation(
     session: AsyncSession,
     *,

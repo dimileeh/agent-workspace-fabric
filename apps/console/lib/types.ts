@@ -377,6 +377,19 @@ export interface Operation {
   created_at: string;
   started_at: string | null;
   finished_at: string | null;
+  owner: string | null;
+  source: string | null;
+  action: string | null;
+  pr_number: number | null;
+  pr_url: string | null;
+  source_head_sha: string | null;
+  source_base_sha: string | null;
+  reason: string | null;
+  reason_code: string | null;
+  failure_code: string | null;
+  failure_message: string | null;
+  log_stream_refs: Record<string, unknown>;
+  log_stream_ids: string[];
 }
 
 export interface WorkspaceRetryResponse {

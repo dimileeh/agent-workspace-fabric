@@ -341,7 +341,13 @@ async def test_auto_merge_blocks_when_required_validation_is_only_on_other_attem
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    assert [(op.type, op.payload) for op in operations] == [
+    recovery_operations = [
+        op for op in operations if op.type == OperationType.validate.value
+    ]
+    monitor_operations = [
+        op for op in operations if op.type == OperationType.monitor_state.value
+    ]
+    assert [(op.type, op.payload) for op in recovery_operations] == [
         (
             OperationType.validate.value,
             {
@@ -362,6 +368,7 @@ async def test_auto_merge_blocks_when_required_validation_is_only_on_other_attem
             },
         )
     ]
+    assert monitor_operations == []
 
 
 @pytest.mark.unit
@@ -397,7 +404,13 @@ async def test_auto_merge_blocks_persisted_stale_candidate(
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    assert [(op.type, op.payload) for op in operations] == [
+    recovery_operations = [
+        op for op in operations if op.type == OperationType.validate.value
+    ]
+    monitor_operations = [
+        op for op in operations if op.type == OperationType.monitor_state.value
+    ]
+    assert [(op.type, op.payload) for op in recovery_operations] == [
         (
             OperationType.validate.value,
             {
@@ -418,6 +431,7 @@ async def test_auto_merge_blocks_persisted_stale_candidate(
             },
         )
     ]
+    assert monitor_operations == []
 
 
 @pytest.mark.unit
@@ -545,7 +559,13 @@ async def test_auto_merge_rechecks_candidate_gate_inside_merge_lock(
     assert workspace is not None
     assert workspace.status == WorkspaceStatus.ready.value
     assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
-    assert [(op.type, op.payload) for op in operations] == [
+    recovery_operations = [
+        op for op in operations if op.type == OperationType.validate.value
+    ]
+    monitor_operations = [
+        op for op in operations if op.type == OperationType.monitor_state.value
+    ]
+    assert [(op.type, op.payload) for op in recovery_operations] == [
         (
             OperationType.validate.value,
             {
@@ -566,6 +586,7 @@ async def test_auto_merge_rechecks_candidate_gate_inside_merge_lock(
             },
         )
     ]
+    assert [op.payload["action"] for op in monitor_operations] == ["merge_ready"]
 
 
 @pytest.mark.unit

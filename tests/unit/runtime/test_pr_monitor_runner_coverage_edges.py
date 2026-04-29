@@ -930,8 +930,18 @@ async def test_merge_queue_wait_records_event_once_per_head_and_blocker(
         events = [
             event for event in ws.events if event.event_type == "workspace.merge_queue_waiting"
         ]
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
         assert len(events) == 1
         assert events[0].payload["blocker_candidate_id"] == "mc_older"
+        assert [(op.type, op.status, op.payload["action"]) for op in operations] == [
+            (
+                OperationType.monitor_state.value,
+                OperationStatus.succeeded.value,
+                "merge_queue_wait",
+            )
+        ]
+        assert operations[0].payload["reason_code"] == "MERGE_QUEUE_WAIT"
+        assert operations[0].payload["blocker_candidate_id"] == "mc_older"
 
 
 @pytest.mark.unit

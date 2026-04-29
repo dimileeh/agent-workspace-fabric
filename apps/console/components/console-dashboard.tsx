@@ -57,6 +57,11 @@ import {
   formatRecoveryCallout,
   isReverseWorkspaceTransition,
 } from "@/lib/recovery-format";
+import {
+  formatOperationDetail,
+  formatOperationFailure,
+  formatOperationTitle,
+} from "@/lib/operation-format";
 import type {
   ApiEnvelope,
   AwfStreamFrame,
@@ -2177,15 +2182,20 @@ function OperationsPanel({ operations }: { operations: Operation[] }) {
               className="grid gap-1 rounded-md border border-slate-200 bg-white px-3 py-2 text-xs sm:grid-cols-[1fr_auto]"
             >
               <div>
-                <span className="font-medium">{operation.type}</span>
+                <span className="font-medium">{formatOperationTitle(operation)}</span>
                 <span className="mono ml-2 text-slate-500">{compactId(operation.id, 10)}</span>
               </div>
               <div className="flex items-center gap-2">
                 <Badge value={operation.status} />
                 <span className="text-slate-500">{formatDateTime(operation.created_at)}</span>
               </div>
-              {operation.error_message ? (
-                <div className="text-red-700 sm:col-span-2">{operation.error_message}</div>
+              <div className="text-slate-600 sm:col-span-2">
+                {formatOperationDetail(operation)}
+              </div>
+              {formatOperationFailure(operation) ? (
+                <div className="text-red-700 sm:col-span-2">
+                  {formatOperationFailure(operation)}
+                </div>
               ) : null}
             </div>
           ))}
