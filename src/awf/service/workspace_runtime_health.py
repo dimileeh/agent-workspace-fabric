@@ -409,10 +409,14 @@ def _pre_provisioned_request_without_metadata(workspace: RuntimeWorkspace) -> bo
     )
 
 
+def has_open_pr_for_remonitor(status: str, pr_url: str | None) -> bool:
+    return status == WorkspaceStatus.monitoring_pr.value and bool(pr_url)
+
+
 def _decision_for(workspace: RuntimeWorkspace) -> RuntimeHealthDecision:
     if workspace.retry_policy_allows_recovery:
         return "defer_retry_policy"
-    if workspace.status == WorkspaceStatus.monitoring_pr.value and workspace.pr_url:
+    if has_open_pr_for_remonitor(workspace.status, workspace.pr_url):
         return "remonitor_workspace"
     return "fail_workspace"
 

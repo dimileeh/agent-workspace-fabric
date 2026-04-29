@@ -28,9 +28,9 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
-from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.service.workspace_runtime_health import (
@@ -38,6 +38,7 @@ from awf.service.workspace_runtime_health import (
     RuntimeWorkspace,
     WorkspaceRuntimeFinding,
     classify_runtime_snapshot,
+    has_open_pr_for_remonitor,
     retry_policy_allows_runtime_recovery,
 )
 
@@ -59,6 +60,10 @@ _RUNTIME_HEALTH_SCAN_STATUSES: tuple[WorkspaceStatus, ...] = (
 )
 _STALE_ACTIVE_EXECUTION_REASON_CODE = "STALE_ACTIVE_EXECUTION"
 _STALE_ACTIVE_EXECUTION_EVENT_TYPE = "workspace.stale_active_execution_detected"
+_MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
+_MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
+_MONITOR_RECOVERY_SOURCE = "worker_restart"
+_MONITOR_RECOVERY_OWNER = "control_worker"
 
 
 @dataclass(frozen=True)
@@ -123,6 +128,7 @@ class ControlWorker:
         self._config = config
         self._stopped = asyncio.Event()
         self._execution_tasks: dict[str, asyncio.Task[None]] = {}
+        self._monitor_recovery_operation_ids: dict[str, str] = {}
         self._worker_id = f"control-worker-{uuid.uuid4().hex}"
         self._next_stale_active_execution_scan_at = 0.0
 
@@ -400,6 +406,23 @@ class ControlWorker:
 
         finding = classify_runtime_snapshot(_runtime_workspace(candidate), snapshot)
         if finding is not None and finding.status == "unavailable":
+            if has_open_pr_for_remonitor(candidate.status, candidate.pr_url):
+                recoverable_finding = WorkspaceRuntimeFinding(
+                    workspace_id=finding.workspace_id,
+                    workspace_status=finding.workspace_status,
+                    status=finding.status,
+                    reason_code=finding.reason_code,
+                    decision="remonitor_workspace",
+                    message=finding.message,
+                    compose_project_name=finding.compose_project_name,
+                    services=finding.services,
+                )
+                await self._record_recoverable_runtime_stranding(
+                    candidate,
+                    snapshot,
+                    recoverable_finding,
+                )
+                return
             _log.warning(
                 "worker.runtime_health_inspection_unavailable",
                 workspace_id=candidate.workspace_id,
@@ -638,8 +661,12 @@ class ControlWorker:
             if workspace_id in self._execution_tasks:
                 continue
 
+            recovery_operation_id = self._monitor_recovery_operation_ids.get(workspace_id)
             task = asyncio.create_task(
-                self._safely_resume_claimed_pr_monitor(workspace_id),
+                self._safely_resume_claimed_pr_monitor(
+                    workspace_id,
+                    recovery_operation_id=recovery_operation_id,
+                ),
                 name=f"awf-monitor-{workspace_id}",
             )
             self._execution_tasks[workspace_id] = task
@@ -686,16 +713,42 @@ class ControlWorker:
                 await heartbeat
             await self._release_execution_claim(workspace_id)
 
-    async def _safely_resume_pr_monitor(self, workspace_id: str) -> None:
+    async def _safely_resume_pr_monitor(
+        self,
+        workspace_id: str,
+        *,
+        recovery_operation_id: str | None = None,
+    ) -> None:
         if self._executor is None:
+            await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.failed,
+                error_code="MONITOR_RECOVERY_NO_EXECUTOR",
+                error_message="Worker has no executor configured.",
+            )
             return
         try:
             await self._executor.resume_pr_monitor(workspace_id)
-        except Exception:
+        except Exception as exc:
             # The monitor runner owns normal terminal transitions. Recovery
             # dispatch still must not take the service worker down if a single
             # workspace hits an unexpected runtime error.
             _log.exception("worker.pr_monitor_resume_failed", workspace_id=workspace_id)
+            await self._finish_monitor_recovery_operation(
+                workspace_id,
+                operation_id=recovery_operation_id,
+                status=OperationStatus.failed,
+                error_code="MONITOR_RECOVERY_FAILED",
+                error_message=repr(exc)[:2000],
+            )
+            return
+
+        await self._finish_monitor_recovery_operation(
+            workspace_id,
+            operation_id=recovery_operation_id,
+            status=OperationStatus.succeeded,
+        )
 
     async def _claim_monitoring_pr_ids(self, workspace_ids: list[str], *, limit: int) -> list[str]:
         claimed: list[str] = []
@@ -712,27 +765,111 @@ class ControlWorker:
         now = datetime.now(UTC)
         lease_expires_at = now + timedelta(seconds=self._config.monitor_claim_lease_seconds)
         async with self._session_factory() as session:
-            claimed = await WorkspaceRepository(session).claim_monitoring_pr(
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                return False
+            previous_claim = _workspace_claim_snapshot(ws)
+            runtime_stranding_reason = _latest_runtime_stranding_reason(ws.events)
+            claimed = await repo.claim_monitoring_pr(
                 workspace_id,
                 owner_id=self._worker_id,
                 lease_expires_at=lease_expires_at,
                 now=now,
             )
+            if claimed:
+                operation_payload = _monitor_recovery_payload(
+                    ws,
+                    worker_id=self._worker_id,
+                    previous_claim=previous_claim,
+                    runtime_stranding_reason=runtime_stranding_reason,
+                )
+                operation = await OperationRepository(session).create(
+                    workspace_id=workspace_id,
+                    operation_type=OperationType.remonitor,
+                    status=OperationStatus.running,
+                    payload=operation_payload,
+                )
+                await repo.add_event(
+                    ws,
+                    event_type=_MONITOR_RECOVERY_EVENT_TYPE,
+                    reason_code=_MONITOR_RECOVERY_REASON_CODE,
+                    payload={
+                        **operation_payload,
+                        "operation_id": operation.id,
+                    },
+                )
+                self._monitor_recovery_operation_ids[workspace_id] = operation.id
             await session.commit()
             return claimed
 
-    async def _safely_resume_claimed_pr_monitor(self, workspace_id: str) -> None:
+    async def _safely_resume_claimed_pr_monitor(
+        self,
+        workspace_id: str,
+        *,
+        recovery_operation_id: str | None = None,
+    ) -> None:
         heartbeat = asyncio.create_task(
             self._refresh_monitoring_pr_claim_loop(workspace_id),
             name=f"awf-monitor-claim-{workspace_id}",
         )
         try:
-            await self._safely_resume_pr_monitor(workspace_id)
+            await self._safely_resume_pr_monitor(
+                workspace_id,
+                recovery_operation_id=recovery_operation_id,
+            )
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await heartbeat
             await self._release_monitoring_pr_claim(workspace_id)
+            self._monitor_recovery_operation_ids.pop(workspace_id, None)
+
+    async def _finish_monitor_recovery_operation(
+        self,
+        workspace_id: str,
+        *,
+        operation_id: str | None,
+        status: OperationStatus,
+        error_code: str | None = None,
+        error_message: str | None = None,
+    ) -> None:
+        if operation_id is None:
+            return
+        try:
+            async with self._session_factory() as session:
+                operation_repo = OperationRepository(session)
+                operation = await operation_repo.get(operation_id)
+                if operation is None or operation.workspace_id != workspace_id:
+                    return
+                ws = await WorkspaceRepository(session).get(workspace_id)
+                result: dict[str, Any] = {
+                    "requested_action": OperationType.remonitor.value,
+                    "worker_id": self._worker_id,
+                }
+                if ws is not None:
+                    result.update(
+                        {
+                            "status": ws.status,
+                            "pr_url": ws.pr_url,
+                            "pr_number": ws.pr_number,
+                        }
+                    )
+                await operation_repo.finish(
+                    operation,
+                    status=status,
+                    result=result,
+                    error_code=error_code,
+                    error_message=error_message,
+                )
+                await session.commit()
+        except Exception:
+            _log.exception(
+                "worker.monitor_recovery_operation_finish_failed",
+                workspace_id=workspace_id,
+                operation_id=operation_id,
+                status=status.value,
+            )
 
     async def _refresh_monitoring_pr_claim_loop(self, workspace_id: str) -> None:
         interval = max(1.0, min(60.0, self._config.monitor_claim_lease_seconds / 3))
@@ -901,6 +1038,60 @@ def _runtime_workspace(candidate: _ActiveExecutionCandidate) -> RuntimeWorkspace
             candidate.task_policy
         ),
     )
+
+
+def _workspace_claim_snapshot(workspace: Workspace) -> dict[str, str | None]:
+    return {
+        "monitor_claimed_by": workspace.monitor_claimed_by,
+        "monitor_claim_expires_at": _json_datetime(workspace.monitor_claim_expires_at),
+        "execution_claimed_by": workspace.execution_claimed_by,
+        "execution_claim_expires_at": _json_datetime(workspace.execution_claim_expires_at),
+    }
+
+
+def _latest_runtime_stranding_reason(events: list[WorkspaceEvent]) -> str | None:
+    for event in reversed(events):
+        if event.event_type == RUNTIME_STRANDED_EVENT_TYPE:
+            return event.reason_code
+    return None
+
+
+def _monitor_recovery_payload(
+    workspace: Workspace,
+    *,
+    worker_id: str,
+    previous_claim: dict[str, str | None],
+    runtime_stranding_reason: str | None,
+) -> dict[str, Any]:
+    return {
+        "owner": _MONITOR_RECOVERY_OWNER,
+        "source": _MONITOR_RECOVERY_SOURCE,
+        "requested_action": OperationType.remonitor.value,
+        "reason": (
+            "Worker claimed a persisted monitoring_pr workspace with an already-open "
+            "pull request after service restart."
+        ),
+        "reason_code": _MONITOR_RECOVERY_REASON_CODE,
+        "pr_url": workspace.pr_url,
+        "pr_number": workspace.pr_number,
+        "worker_id": worker_id,
+        "previous_claim": previous_claim,
+        "runtime_stranding_reason": runtime_stranding_reason,
+        "monitor_state": {
+            "monitor_started_at": _json_datetime(workspace.monitor_started_at),
+            "monitor_iter_count": workspace.monitor_iter_count,
+            "monitor_threads_addressed_count": len(workspace.monitor_threads_addressed or {}),
+            "monitor_last_commit_sha": workspace.monitor_last_commit_sha,
+        },
+    }
+
+
+def _json_datetime(value: datetime | None) -> str | None:
+    if value is None:
+        return None
+    if value.tzinfo is None:
+        value = value.replace(tzinfo=UTC)
+    return value.isoformat()
 
 
 def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:
