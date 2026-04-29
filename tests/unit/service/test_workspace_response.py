@@ -300,3 +300,21 @@ def test_workspace_validation_summary_requires_post_rebase_validation() -> None:
     assert summary.reason_code == "validation_insufficient_tier"
     assert summary.latest_validation is not None
     assert summary.latest_validation.freshness_status == "fresh"
+
+
+@pytest.mark.unit
+def test_validation_summary_propagates_collection_access_errors() -> None:
+    class WorkspaceWithBrokenOperations:
+        task_class = None
+        resolved_profile = None
+        monitor_last_commit_sha = None
+
+        @property
+        def operations(self) -> list[object]:
+            raise RuntimeError("relationship failed")
+
+    with pytest.raises(RuntimeError, match="relationship failed"):
+        validation_freshness_summary(
+            WorkspaceWithBrokenOperations(),  # type: ignore[arg-type]
+            [],
+        )

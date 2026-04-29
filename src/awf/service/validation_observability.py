@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from datetime import UTC, datetime
+from inspect import getattr_static
 from typing import Any, cast
 
 from sqlalchemy import inspect as sa_inspect
@@ -221,9 +222,10 @@ def _loaded_collection(obj: object, name: str) -> list[Any]:
     if state is not None and name in state.unloaded:
         return []
     try:
-        value = getattr(obj, name)
-    except Exception:
+        getattr_static(obj, name)
+    except AttributeError:
         return []
+    value = getattr(obj, name)
     if value is None:
         return []
     return list(value)
