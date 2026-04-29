@@ -1477,6 +1477,8 @@ class WorkspaceRepository:
         status: WorkspaceStatus | str | None = None,
         agent: AgentRuntime | str | None = None,
         repo_url: str | None = None,
+        before_created_at: datetime | None = None,
+        before_workspace_id: str | None = None,
         limit: int = 50,
     ) -> builtins.list[Workspace]:
         stmt = select(Workspace)
@@ -1486,6 +1488,16 @@ class WorkspaceRepository:
             stmt = stmt.where(Workspace.agent == agent)
         if repo_url is not None:
             stmt = stmt.where(Workspace.repo_url == repo_url)
+        if before_created_at is not None and before_workspace_id is not None:
+            stmt = stmt.where(
+                or_(
+                    Workspace.created_at < before_created_at,
+                    and_(
+                        Workspace.created_at == before_created_at,
+                        Workspace.id < before_workspace_id,
+                    ),
+                )
+            )
         stmt = stmt.order_by(Workspace.created_at.desc(), Workspace.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
 
