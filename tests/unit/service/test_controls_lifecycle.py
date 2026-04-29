@@ -1432,12 +1432,23 @@ async def test_force_destroy_active_workspace_runs_cleanup_and_marks_destroyed(
         remove_worktree=True,
     )
     assert operations[0].status == "succeeded"
-    assert operations[0].result == {"status": WorkspaceStatus.destroyed.value}
+    assert operations[0].result == {
+        "status": WorkspaceStatus.destroyed.value,
+        "cleanup": {
+            "status": "succeeded",
+            "reason_code": "CLEANUP_SUCCEEDED",
+            "steps": [],
+            "failed_steps": [],
+            "completed_steps": [],
+        },
+    }
     assert [event.new_state for event in events[:3]] == [
         WorkspaceStatus.destroyed.value,
         WorkspaceStatus.destroying.value,
         WorkspaceStatus.cancelled.value,
     ]
+    assert events[0].payload is not None
+    assert events[0].payload["cleanup"] == operations[0].result["cleanup"]
 
 
 @pytest.mark.unit
@@ -1470,7 +1481,16 @@ async def test_destroy_already_destroyed_workspace_succeeds_without_cleanup_and_
     assert response.status == WorkspaceStatus.destroyed
     assert cleaner.calls == []
     assert [operation.type for operation in operations] == [OperationType.destroy.value]
-    assert operations[0].result == {"status": WorkspaceStatus.destroyed.value}
+    assert operations[0].result == {
+        "status": WorkspaceStatus.destroyed.value,
+        "cleanup": {
+            "status": "skipped",
+            "reason_code": "WORKSPACE_ALREADY_DESTROYED",
+            "steps": [],
+            "failed_steps": [],
+            "completed_steps": [],
+        },
+    }
 
 
 @pytest.mark.unit
@@ -1498,7 +1518,42 @@ async def test_destroy_cleanup_failures_mark_operation_failed_and_workspace_fail
     assert operations[0].status == "failed"
     assert operations[0].error_code == "CLEANUP_FAILED"
     assert operations[0].error_message == "compose down failed, worktree removal failed"
-    assert operations[0].result == {"status": WorkspaceStatus.failed.value}
+    assert operations[0].result == {
+        "status": WorkspaceStatus.failed.value,
+        "cleanup": {
+            "status": "partial",
+            "reason_code": "CLEANUP_PARTIAL",
+            "steps": [
+                {
+                    "name": "compose down failed",
+                    "status": "failed",
+                    "reason_code": "CLEANUP_STEP_FAILED",
+                    "error": "compose down failed",
+                },
+                {
+                    "name": "worktree removal failed",
+                    "status": "failed",
+                    "reason_code": "CLEANUP_STEP_FAILED",
+                    "error": "worktree removal failed",
+                },
+            ],
+            "failed_steps": [
+                {
+                    "name": "compose down failed",
+                    "status": "failed",
+                    "reason_code": "CLEANUP_STEP_FAILED",
+                    "error": "compose down failed",
+                },
+                {
+                    "name": "worktree removal failed",
+                    "status": "failed",
+                    "reason_code": "CLEANUP_STEP_FAILED",
+                    "error": "worktree removal failed",
+                },
+            ],
+            "completed_steps": [],
+        },
+    }
 
 
 @pytest.mark.unit

@@ -697,6 +697,49 @@ async def test_single_workspace_gc_deletes_only_requested_completed_workspace_af
 
 
 @pytest.mark.unit
+async def test_single_workspace_gc_preserves_logs_and_artifacts_after_retention(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now - timedelta(hours=200),
+        pr=True,
+        pr_merge_sha="d" * 40,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    compose = work_dir / "compose" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    log_file = work_dir / "logs" / workspace_id / "agent.log"
+    artifact_file = work_dir / "artifacts" / workspace_id / "summary.json"
+    _write(worktree / "repo.txt", "repo")
+    _write(compose / "compose.yml", "compose")
+    _write(auth / "codex" / "auth.json", "auth")
+    _write(log_file, "durable log")
+    _write(artifact_file, '{"status": "kept"}')
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert result.status == "succeeded"
+    assert set(result.deleted_paths) == {worktree, compose, auth}
+    assert not worktree.exists()
+    assert not compose.exists()
+    assert not auth.exists()
+    assert log_file.exists()
+    assert artifact_file.exists()
+
+
+@pytest.mark.unit
 async def test_execute_gc_deletes_workspace_paths_in_threads(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
