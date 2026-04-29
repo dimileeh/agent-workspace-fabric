@@ -544,7 +544,7 @@ def _detect_compose_file(root: Path) -> str | None:
 def _inspect_compose_services(path: Path) -> tuple[ComposeServiceInspection, ...]:
     try:
         raw: object = yaml.safe_load(path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError):
+    except (OSError, UnicodeDecodeError, yaml.YAMLError):
         return ()
     if not isinstance(raw, Mapping):
         return ()

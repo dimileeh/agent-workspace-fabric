@@ -423,6 +423,11 @@ def test_compose_parser_ignores_unreadable_or_invalid_documents(tmp_path: Path) 
     assert invalid_yaml.draft.template == "docker-compose"
     assert invalid_yaml.inspection.compose_services == ()
 
+    (tmp_path / "compose.yml").write_bytes(b"\xff")
+    non_utf8 = preview_project_onboarding(tmp_path)
+    assert non_utf8.draft.template == "docker-compose"
+    assert non_utf8.inspection.compose_services == ()
+
     (tmp_path / "compose.yml").write_text("- just\n- a list\n", encoding="utf-8")
     non_mapping = preview_project_onboarding(tmp_path)
     assert non_mapping.inspection.compose_services == ()
