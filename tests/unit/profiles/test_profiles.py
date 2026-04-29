@@ -265,6 +265,12 @@ def test_profile_secret_accepts_safe_mount_without_provider_ref_pair() -> None:
 
 
 @pytest.mark.unit
+def test_profile_secret_rejects_empty_targets() -> None:
+    with pytest.raises(ValidationError):
+        ProfileSecret(name="empty-target", target="")
+
+
+@pytest.mark.unit
 def test_profile_secret_rejects_reserved_env_targets() -> None:
     profile = WorkspaceProfile(
         name="bad-secret-env",

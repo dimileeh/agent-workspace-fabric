@@ -258,7 +258,7 @@ class ProfileSecret(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     name: Annotated[str, Field(min_length=1, max_length=128)]
-    target: Annotated[str, Field(max_length=512)]
+    target: Annotated[str, Field(min_length=1, max_length=512)]
     kind: Literal["mount", "env"] = "mount"
     mode: Literal["ro", "rw"] = "ro"
     required: bool = True

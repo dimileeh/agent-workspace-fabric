@@ -86,7 +86,7 @@ def test_unsafe_secret_mount_targets_return_structured_lint_errors(target: str) 
         ("PATH", "SECRET_ENV_TARGET_RESERVED"),
         ("HOME", "SECRET_ENV_TARGET_RESERVED"),
         ("USER", "SECRET_ENV_TARGET_RESERVED"),
-        ("", "SECRET_ENV_TARGET_INVALID"),
+        (" ", "SECRET_ENV_TARGET_INVALID"),
         ("1TOKEN", "SECRET_ENV_TARGET_INVALID"),
         ("BAD-NAME", "SECRET_ENV_TARGET_INVALID"),
     ],
