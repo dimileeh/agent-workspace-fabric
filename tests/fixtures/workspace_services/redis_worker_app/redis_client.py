@@ -70,12 +70,12 @@ class RedisClient:
     def execute(self, *parts: str, timeout: float | None = None) -> object:
         with socket.create_connection((self._host, self._port), timeout or self._timeout) as sock:
             sock.settimeout(timeout or self._timeout)
-            reader = sock.makefile("rb")
-            if self._db:
-                sock.sendall(_encode_command(("SELECT", str(self._db))))
-                _raise_on_error(_read_response(reader))
-            sock.sendall(_encode_command(parts))
-            return _read_response(reader)
+            with sock.makefile("rb") as reader:
+                if self._db:
+                    sock.sendall(_encode_command(("SELECT", str(self._db))))
+                    _read_response(reader)
+                sock.sendall(_encode_command(parts))
+                return _read_response(reader)
 
 
 def _encode_command(parts: Iterable[str]) -> bytes:
@@ -109,10 +109,6 @@ def _read_response(reader: object) -> object:
             return None
         return [_read_response(reader) for _ in range(size)]
     raise RedisError(f"unexpected RESP prefix: {prefix!r}")
-
-
-def _raise_on_error(response: object) -> None:
-    del response
 
 
 def _read_line(reader: object) -> bytes:
