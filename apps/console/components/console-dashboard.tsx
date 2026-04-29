@@ -1977,85 +1977,85 @@ function MergeQueueRow({
           </button>
         </div>
       </div>
-      <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
-        <QueueChip
-          label="Action"
-          value={recovery.recommendedActionLabel}
-          tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
-        />
-        <QueueChip
-          label="Blocker"
-          value={recovery.blockerLabel}
-          detail={recovery.blockerDetail}
-          tone={mergeBlockerTone(item.merge_blocker_reason)}
-        />
-        <QueueChip label="Required" value={recovery.requiredTierLabel} detail={item.task_class ?? "task class unknown"} />
-        <QueueChip
-          label="Satisfied"
-          value={recovery.latestSatisfiedTierLabel}
-          detail={recovery.latestSatisfiedTierDetail}
-          tone={satisfiedTierTone(recovery.latestSatisfiedTierLabel)}
-        />
-        <QueueChip
-          label="Freshness"
-          value={recovery.freshnessLabel}
-          detail={recovery.targetRangeLabel}
-          tone={freshnessTone(recovery.freshnessLabel)}
-        />
-        <QueueChip
-          label="Readiness"
-          value={`${readiness.canonicalLabel} / ${readiness.label}`}
-          detail={readiness.detail}
-          tone={readinessTone(readiness.label)}
-        />
-        <QueueChip
-          label="Candidate"
-          value={`${recovery.candidateLabel} / ${recovery.attemptLabel}`}
-          detail={item.candidate_status ?? "unknown"}
-          mono
-        />
-        <QueueChip
-          label="Base"
-          value={recovery.baseShaLabel}
-          detail={item.latest_validation?.target_branch ?? item.base_branch}
-          mono
-        />
-        <QueueChip
-          label="Targets"
-          value={recovery.targetRangeLabel}
-          detail={`${recovery.validatedTargetShaLabel} / ${recovery.currentTargetShaLabel}`}
-          mono
-        />
-        <QueueChip
-          label="Stale"
-          value={recovery.staleReasonLabel}
-          detail={recovery.staleReasonDetail}
-          tone={
-            recovery.staleReasonBlockingCount > 0
-              ? "warn"
-              : recovery.staleReasonAdvisoryCount > 0
-                ? "info"
-                : "neutral"
-          }
-          mono={recovery.staleReasonCount > 0}
-        />
-        <QueueChip
-          label="Queue"
-          value={recovery.queueBlockerLabel}
-          detail={recovery.queueBlockerDetail}
-          tone={recovery.queueBlockerCount > 0 ? "warn" : "neutral"}
-        />
-        <QueueChip
-          label="Policy"
-          value={recovery.policyFindingLabel}
-          detail={recovery.policyFindingDetail}
-          tone={recovery.policyFindingCount > 0 ? "bad" : "neutral"}
-        />
-        <QueueChip label="Validation" value={validation.label} detail={validation.detail} tone={validationTone(item)} />
-        <QueueChip label="Coverage" value={validation.coverageLabel} detail={validation.headLabel} mono />
-      </div>
       {expanded ? (
         <div id={rowDetailsId} className="grid gap-2">
+          <div className="grid gap-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-5">
+            <QueueChip
+              label="Action"
+              value={recovery.recommendedActionLabel}
+              tone={requiredNextActionTone(item.required_next_action, item.merge_blocker_reason)}
+            />
+            <QueueChip
+              label="Blocker"
+              value={recovery.blockerLabel}
+              detail={recovery.blockerDetail}
+              tone={mergeBlockerTone(item.merge_blocker_reason)}
+            />
+            <QueueChip label="Required" value={recovery.requiredTierLabel} detail={item.task_class ?? "task class unknown"} />
+            <QueueChip
+              label="Satisfied"
+              value={recovery.latestSatisfiedTierLabel}
+              detail={recovery.latestSatisfiedTierDetail}
+              tone={satisfiedTierTone(recovery.latestSatisfiedTierLabel)}
+            />
+            <QueueChip
+              label="Freshness"
+              value={recovery.freshnessLabel}
+              detail={recovery.targetRangeLabel}
+              tone={freshnessTone(recovery.freshnessLabel)}
+            />
+            <QueueChip
+              label="Readiness"
+              value={`${readiness.canonicalLabel} / ${readiness.label}`}
+              detail={readiness.detail}
+              tone={readinessTone(readiness.label)}
+            />
+            <QueueChip
+              label="Candidate"
+              value={`${recovery.candidateLabel} / ${recovery.attemptLabel}`}
+              detail={item.candidate_status ?? "unknown"}
+              mono
+            />
+            <QueueChip
+              label="Base"
+              value={recovery.baseShaLabel}
+              detail={item.latest_validation?.target_branch ?? item.base_branch}
+              mono
+            />
+            <QueueChip
+              label="Targets"
+              value={recovery.targetRangeLabel}
+              detail={`${recovery.validatedTargetShaLabel} / ${recovery.currentTargetShaLabel}`}
+              mono
+            />
+            <QueueChip
+              label="Stale"
+              value={recovery.staleReasonLabel}
+              detail={recovery.staleReasonDetail}
+              tone={
+                recovery.staleReasonBlockingCount > 0
+                  ? "warn"
+                  : recovery.staleReasonAdvisoryCount > 0
+                    ? "info"
+                    : "neutral"
+              }
+              mono={recovery.staleReasonCount > 0}
+            />
+            <QueueChip
+              label="Queue"
+              value={recovery.queueBlockerLabel}
+              detail={recovery.queueBlockerDetail}
+              tone={recovery.queueBlockerCount > 0 ? "warn" : "neutral"}
+            />
+            <QueueChip
+              label="Policy"
+              value={recovery.policyFindingLabel}
+              detail={recovery.policyFindingDetail}
+              tone={recovery.policyFindingCount > 0 ? "bad" : "neutral"}
+            />
+            <QueueChip label="Validation" value={validation.label} detail={validation.detail} tone={validationTone(item)} />
+            <QueueChip label="Coverage" value={validation.coverageLabel} detail={validation.headLabel} mono />
+          </div>
           <div className="grid gap-1 sm:grid-cols-3">
             <QueueDatum label="Candidate" value={item.candidate_id ? compactId(item.candidate_id, 10) : "legacy"} mono />
             <QueueDatum label="Attempt" value={item.attempt_id ? compactId(item.attempt_id, 10) : "none"} mono />
