@@ -120,13 +120,23 @@ class WorkspaceCleanupResult:
         return item in tuple(self)
 
     def __eq__(self, other: object) -> bool:
+        if isinstance(other, WorkspaceCleanupResult):
+            return (
+                self.status,
+                self.reason_code,
+                self.steps,
+            ) == (
+                other.status,
+                other.reason_code,
+                other.steps,
+            )
         if isinstance(other, list):
             return list(self) == other
         if isinstance(other, tuple):
             return tuple(self) == other
         if isinstance(other, set):
             return set(self) == other
-        return super().__eq__(other)
+        return NotImplemented
 
 
 class WorkspaceCleaner:
