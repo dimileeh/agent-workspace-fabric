@@ -464,21 +464,24 @@ def _accepted(
 
 def _encode_overview_cursor(workspace: Workspace) -> str:
     payload = {
-        "created_at": workspace.created_at.isoformat(),
-        "workspace_id": workspace.id,
+        "t": workspace.created_at.isoformat(),
+        "id": workspace.id,
     }
     encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
-    return encoded.decode("ascii")
+    return encoded.decode("ascii").rstrip("=")
 
 
 def _decode_overview_cursor(cursor: str | None) -> _WorkspaceOverviewCursor | None:
     if cursor is None:
         return None
     try:
-        decoded = base64.urlsafe_b64decode(cursor.encode("ascii"))
+        padded_cursor = cursor + ("=" * (-len(cursor) % 4))
+        decoded = base64.urlsafe_b64decode(padded_cursor.encode("ascii"))
         payload = json.loads(decoded.decode("utf-8"))
-        created_at = datetime.fromisoformat(payload["created_at"])
-        workspace_id = payload["workspace_id"]
+        created_at = datetime.fromisoformat(
+            payload["t"] if "t" in payload else payload["created_at"]
+        )
+        workspace_id = payload["id"] if "id" in payload else payload["workspace_id"]
     except (
         binascii.Error,
         KeyError,

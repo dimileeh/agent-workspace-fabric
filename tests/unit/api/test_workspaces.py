@@ -7,6 +7,7 @@ true integration + E2E tests live under tests/integration/ and tests/e2e/.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -1662,6 +1663,38 @@ class TestWorkspaceDirectRoutes:
         assert second_body["has_more"] is True
         assert second_body["next_cursor"] is not None
         assert second_body["cursor"] == first_body["next_cursor"]
+
+    @pytest.mark.unit
+    def test_overview_cursor_fits_query_param_limit_for_max_workspace_id(self) -> None:
+        workspace_id = "ws_" + ("a" * 33)
+        created_at = datetime(2026, 4, 28, 12, 0, 0, 123456, tzinfo=UTC)
+
+        cursor = workspaces_route._encode_overview_cursor(
+            SimpleNamespace(id=workspace_id, created_at=created_at)
+        )
+
+        assert len(cursor) <= 128
+        assert workspaces_route._decode_overview_cursor(cursor) == workspaces_route._WorkspaceOverviewCursor(
+            created_at=created_at,
+            workspace_id=workspace_id,
+        )
+
+    @pytest.mark.unit
+    def test_overview_cursor_decodes_legacy_verbose_payload(self) -> None:
+        workspace_id = "ws_" + ("a" * 24)
+        created_at = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
+        payload = {
+            "created_at": created_at.isoformat(),
+            "workspace_id": workspace_id,
+        }
+        cursor = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+
+        assert workspaces_route._decode_overview_cursor(cursor) == workspaces_route._WorkspaceOverviewCursor(
+            created_at=created_at,
+            workspace_id=workspace_id,
+        )
 
     @pytest.mark.unit
     async def test_overview_rejects_invalid_cursor(self, client: AsyncClient) -> None:
