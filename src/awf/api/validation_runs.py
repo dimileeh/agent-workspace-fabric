@@ -27,8 +27,6 @@ def validation_run_summary(
         current_target_head_sha=current_target_head_sha,
     )
     freshness_status, freshness_reason_code = validation_freshness_status(
-        validation_target_head_sha=run.target_head_sha,
-        current_target_head_sha=current_target_head_sha,
         fresh_for_target=fresh,
     )
     return ValidationRunSummaryResponse(
@@ -66,16 +64,12 @@ def fresh_for_target(
 
 def validation_freshness_status(
     *,
-    validation_target_head_sha: str | None,
-    current_target_head_sha: str | None,
     fresh_for_target: bool | None,
 ) -> tuple[ValidationFreshnessStatus, str]:
     if fresh_for_target is True:
         return "fresh", "validation_fresh"
     if fresh_for_target is False:
         return "stale", "validation_target_stale"
-    if not validation_target_head_sha or not current_target_head_sha:
-        return "unknown", "validation_target_unknown"
     return "unknown", "validation_target_unknown"
 
 

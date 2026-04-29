@@ -9,6 +9,7 @@ import pytest
 from awf.api.validation_runs import (
     fresh_for_target,
     validation_coverage_fields,
+    validation_freshness_status,
     validation_run_summary,
 )
 from awf.db.models import ValidationRun
@@ -149,4 +150,20 @@ def test_fresh_for_target_handles_true_false_and_unknown_cases() -> None:
     assert (
         fresh_for_target(validation_target_head_sha="", current_target_head_sha="def")
         is None
+    )
+
+
+@pytest.mark.unit
+def test_validation_freshness_status_maps_computed_freshness_to_reason() -> None:
+    assert validation_freshness_status(fresh_for_target=True) == (
+        "fresh",
+        "validation_fresh",
+    )
+    assert validation_freshness_status(fresh_for_target=False) == (
+        "stale",
+        "validation_target_stale",
+    )
+    assert validation_freshness_status(fresh_for_target=None) == (
+        "unknown",
+        "validation_target_unknown",
     )
