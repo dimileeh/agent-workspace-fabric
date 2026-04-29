@@ -23,6 +23,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.service.controls import (
+    _OPERATION_ERROR_MESSAGE_MAX_LENGTH,
     ActiveWorkspaceDestroyError,
     IdempotencyConflictError,
     VersionConflictError,
@@ -1554,6 +1555,28 @@ async def test_destroy_cleanup_failures_mark_operation_failed_and_workspace_fail
             "completed_steps": [],
         },
     }
+
+
+@pytest.mark.unit
+async def test_destroy_cleanup_failure_message_is_bounded(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.failed)
+    cleanup_failure = "cleanup failed: " + ("x" * _OPERATION_ERROR_MESSAGE_MAX_LENGTH)
+    cleaner = RecordingCleaner(failures=[cleanup_failure])
+    service, _stopper, _cleaner = _service(session, cleaner=cleaner)
+
+    await service.destroy_workspace(
+        workspace.id,
+        force=False,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+    operations = await _operations(session, workspace.id)
+
+    expected = cleanup_failure[:_OPERATION_ERROR_MESSAGE_MAX_LENGTH]
+    assert workspace.failure_message == expected
+    assert operations[0].error_message == expected
 
 
 @pytest.mark.unit

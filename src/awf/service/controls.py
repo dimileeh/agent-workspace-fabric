@@ -904,8 +904,9 @@ class WorkspaceControlService:
         )
         if not cleanup_result.ok:
             cleanup_message = _cleanup_failure_message(cleanup_result)
+            bounded_cleanup_message = _bounded_operation_error_message(cleanup_message)
             workspace.failure_reason = "cleanup_failure"
-            workspace.failure_message = cleanup_message
+            workspace.failure_message = bounded_cleanup_message
             if WorkspaceStateMachine.can_transition(
                 WorkspaceStatus(workspace.status), WorkspaceStatus.failed
             ):
@@ -919,7 +920,7 @@ class WorkspaceControlService:
                 operation,
                 status=OperationStatus.failed,
                 error_code="CLEANUP_FAILED",
-                error_message=_bounded_operation_error_message(cleanup_message),
+                error_message=bounded_cleanup_message,
                 result={"status": workspace.status, "cleanup": cleanup_payload},
             )
             message = "workspace cleanup failed"
