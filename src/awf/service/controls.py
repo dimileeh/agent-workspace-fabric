@@ -1279,13 +1279,11 @@ def _payload_matches_idempotency_identity(
         return True
     if not isinstance(payload, dict):
         return False
-    keys = identity_keys or frozenset(identity)
+    keys = identity_keys if identity_keys is not None else frozenset(identity)
     for key in keys:
-        identity_has_key = key in identity
-        payload_has_key = key in payload
-        if identity_has_key != payload_has_key:
-            return False
-        if identity_has_key and payload[key] != identity[key]:
+        if key not in identity:
+            continue
+        if key not in payload or payload[key] != identity[key]:
             return False
     return True
 
