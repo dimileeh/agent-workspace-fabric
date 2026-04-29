@@ -20,6 +20,7 @@ type WorkspaceOverlapNodeQueueState = Literal["queued", "running"]
 
 OVERLAP_GRAPH_REASON_CODE: Final = "OWNED_PATH_OVERLAP_RISK"
 OVERLAP_GRAPH_SEVERITY: Final = "advisory"
+OVERLAP_GRAPH_PATH_MATCH_LIMIT: Final = 8
 QUEUED_WORKSPACE_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.requested.value,
     WorkspaceStatus.ready.value,
@@ -71,6 +72,8 @@ class WorkspaceOverlapEdge:
     severity: str
     blocks_launch: bool
     affected_workspace_ids: tuple[str, str]
+    path_match_count: int
+    path_matches_truncated: bool
     path_matches: tuple[WorkspaceOverlapPathMatch, ...]
 
 
@@ -103,6 +106,16 @@ class _GraphWorkspace:
     owned_paths: tuple[str, ...]
     created_at: datetime
     updated_at: datetime
+
+
+@dataclass(frozen=True)
+class _WorkspaceOverlapPathMatches:
+    matches: tuple[WorkspaceOverlapPathMatch, ...]
+    total_count: int
+
+    @property
+    def truncated(self) -> bool:
+        return self.total_count > len(self.matches)
 
 
 async def build_workspace_overlap_graph(
@@ -200,7 +213,7 @@ def _workspace_overlap_edge(
     right: _GraphWorkspace,
 ) -> WorkspaceOverlapEdge | None:
     path_matches = _workspace_overlap_path_matches(left, right)
-    if not path_matches:
+    if path_matches.total_count == 0:
         return None
 
     affected_workspace_ids = (left.workspace_id, right.workspace_id)
@@ -213,15 +226,18 @@ def _workspace_overlap_edge(
         severity=OVERLAP_GRAPH_SEVERITY,
         blocks_launch=False,
         affected_workspace_ids=affected_workspace_ids,
-        path_matches=path_matches,
+        path_match_count=path_matches.total_count,
+        path_matches_truncated=path_matches.truncated,
+        path_matches=path_matches.matches,
     )
 
 
 def _workspace_overlap_path_matches(
     left: _GraphWorkspace,
     right: _GraphWorkspace,
-) -> tuple[WorkspaceOverlapPathMatch, ...]:
+) -> _WorkspaceOverlapPathMatches:
     matches: list[WorkspaceOverlapPathMatch] = []
+    total_count = 0
     seen: set[tuple[str, str, str]] = set()
     for left_owned_path in sorted(dict.fromkeys(left.owned_paths)):
         for right_owned_path in sorted(dict.fromkeys(right.owned_paths)):
@@ -232,25 +248,30 @@ def _workspace_overlap_path_matches(
             if key in seen:
                 continue
             seen.add(key)
-            matches.append(
-                WorkspaceOverlapPathMatch(
-                    left_workspace_id=left.workspace_id,
-                    left_owned_path=left_owned_path,
-                    right_workspace_id=right.workspace_id,
-                    right_owned_path=right_owned_path,
-                    match_reason_code=overlap.match_reason_code,
-                    explanation=overlap.explanation,
+            total_count += 1
+            if len(matches) < OVERLAP_GRAPH_PATH_MATCH_LIMIT:
+                matches.append(
+                    WorkspaceOverlapPathMatch(
+                        left_workspace_id=left.workspace_id,
+                        left_owned_path=left_owned_path,
+                        right_workspace_id=right.workspace_id,
+                        right_owned_path=right_owned_path,
+                        match_reason_code=overlap.match_reason_code,
+                        explanation=overlap.explanation,
+                    )
                 )
+    return _WorkspaceOverlapPathMatches(
+        matches=tuple(
+            sorted(
+                matches,
+                key=lambda match: (
+                    match.left_owned_path,
+                    match.right_owned_path,
+                    match.match_reason_code,
+                ),
             )
-    return tuple(
-        sorted(
-            matches,
-            key=lambda match: (
-                match.left_owned_path,
-                match.right_owned_path,
-                match.match_reason_code,
-            ),
-        )
+        ),
+        total_count=total_count,
     )
 
 

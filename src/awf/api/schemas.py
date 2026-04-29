@@ -708,6 +708,8 @@ class WorkspaceOverlapGraphEdgeResponse(BaseModel):
     severity: WorkspaceOverlapGraphSeverity
     blocks_launch: bool
     affected_workspace_ids: list[str]
+    path_match_count: int
+    path_matches_truncated: bool
     path_matches: list[WorkspaceOverlapPathMatchResponse]
 
 

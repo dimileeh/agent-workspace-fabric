@@ -193,3 +193,36 @@ async def test_get_overlap_graph_applies_queue_state_filter_and_validates_enum(
         [queued_left_id, queued_right_id]
     )
     assert invalid_response.status_code == 422
+
+
+@pytest.mark.unit
+async def test_get_overlap_graph_serializes_bounded_path_match_metadata(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    from awf.service.overlap_graph import OVERLAP_GRAPH_PATH_MATCH_LIMIT
+
+    path_count = OVERLAP_GRAPH_PATH_MATCH_LIMIT + 2
+    running_id = await _create_graph_workspace(
+        client,
+        title="Broad running",
+        owned_paths=[f"src/pkg{index}/**" for index in range(path_count)],
+    )
+    queued_id = await _create_graph_workspace(
+        client,
+        title="Broad queued",
+        owned_paths=[f"src/pkg{index}/feature.py" for index in range(path_count)],
+    )
+    await _set_workspace_status(engine, running_id, WorkspaceStatus.running)
+
+    response = await client.get(
+        "/v1/locks/overlap-graph",
+        params={"repo_url": "git@github.com:example/app.git"},
+    )
+
+    assert response.status_code == 200
+    edge = response.json()["edges"][0]
+    assert edge["affected_workspace_ids"] == sorted([running_id, queued_id])
+    assert edge["path_match_count"] == path_count
+    assert edge["path_matches_truncated"] is True
+    assert len(edge["path_matches"]) == OVERLAP_GRAPH_PATH_MATCH_LIMIT

@@ -325,6 +325,42 @@ async def test_overlap_graph_deterministic_and_compact(
 
 
 @pytest.mark.unit
+async def test_overlap_graph_caps_path_matches_per_edge(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.overlap_graph import (
+        OVERLAP_GRAPH_PATH_MATCH_LIMIT,
+        build_workspace_overlap_graph,
+    )
+
+    now = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+    path_count = OVERLAP_GRAPH_PATH_MATCH_LIMIT + 2
+    left_id = await _workspace(
+        session_factory,
+        title="Broad left",
+        owned_paths=[f"src/pkg{index}/**" for index in range(path_count)],
+        status=WorkspaceStatus.running,
+        created_at=now,
+    )
+    right_id = await _workspace(
+        session_factory,
+        title="Broad right",
+        owned_paths=[f"src/pkg{index}/feature.py" for index in range(path_count)],
+        status=WorkspaceStatus.ready,
+        created_at=now + timedelta(minutes=1),
+    )
+
+    graph = await build_workspace_overlap_graph(session_factory)
+
+    assert len(graph.edges) == 1
+    edge = graph.edges[0]
+    assert edge.affected_workspace_ids == tuple(sorted([left_id, right_id]))
+    assert edge.path_match_count == path_count
+    assert edge.path_matches_truncated is True
+    assert len(edge.path_matches) == OVERLAP_GRAPH_PATH_MATCH_LIMIT
+
+
+@pytest.mark.unit
 async def test_overlap_graph_offloads_pairwise_path_comparison(
     session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
