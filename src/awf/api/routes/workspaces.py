@@ -260,7 +260,6 @@ async def list_workspace_overview(
             repo_url=repo_url,
             limit=limit,
             cursor=cursor,
-            workspace_repository_type=WorkspaceRepository,
         )
     except InvalidWorkspaceOverviewCursorError as exc:
         raise HTTPException(

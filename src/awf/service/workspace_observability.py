@@ -213,10 +213,9 @@ async def list_workspace_overview_response(
     repo_url: str | None = None,
     limit: int = 50,
     cursor: str | None = None,
-    workspace_repository_type: type[WorkspaceRepository] = WorkspaceRepository,
 ) -> WorkspaceOverviewListResponse:
     decoded_cursor = _decode_overview_cursor(cursor)
-    rows = await workspace_repository_type(session).list(
+    rows = await WorkspaceRepository(session).list(
         status=workspace_status,
         agent=agent,
         repo_url=repo_url,
