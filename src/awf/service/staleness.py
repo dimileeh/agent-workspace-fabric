@@ -597,10 +597,7 @@ def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
 
 
 def _primary_blocking_reason(findings: Sequence[StalenessFinding]) -> str | None:
-    for finding in findings:
-        if finding.blocks_merge:
-            return finding.reason_code
-    return None
+    return next((finding.reason_code for finding in findings if finding.blocks_merge), None)
 
 
 async def _load_candidate(session: AsyncSession, candidate_id: str) -> MergeCandidate | None:
