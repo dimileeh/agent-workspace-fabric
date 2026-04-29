@@ -619,6 +619,66 @@ async def test_workspace_log_sink_reopen_behavior(
 
 
 @pytest.mark.unit
+async def test_log_store_appends_to_existing_closed_stream_without_reopening_sinks(
+    engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@example.com:repo/app.git",
+            branch_base="main",
+            task_title="Append Logs",
+            task_prompt="Append",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+    broadcaster = LogBroadcaster()
+    store = LogStore(root=tmp_path, session_factory=factory, broadcaster=broadcaster)
+    sink = await store.open_stream(
+        workspace_id=workspace.id,
+        stream_id="validation.01_healthcheck.stderr",
+        source="validation",
+        name="healthcheck stderr",
+        kind="stderr",
+    )
+    await sink.write("connection refused\n")
+    await sink.close()
+
+    async with broadcaster.subscribe(workspace.id) as queue:
+        await store.append_to_stream(
+            workspace_id=workspace.id,
+            stream_id="validation.01_healthcheck.stderr",
+            source="validation",
+            fd="stderr",
+            data="\nhealth check api failed after 1 attempt(s)\n",
+            close_after_append=True,
+        )
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    log_path = tmp_path / workspace.id / "validation.01_healthcheck.stderr.log"
+    expected = "connection refused\n\nhealth check api failed after 1 attempt(s)\n"
+    assert log_path.read_text(encoding="utf-8") == expected
+    assert frame.stream_id == "validation.01_healthcheck.stderr"
+    assert frame.offset == len("connection refused\n")
+    assert frame.data == "\nhealth check api failed after 1 attempt(s)\n"
+
+    async with factory() as session:
+        repo = WorkspaceLogStreamRepository(session)
+        stream = await repo.get(
+            workspace_id=workspace.id,
+            stream_id="validation.01_healthcheck.stderr",
+        )
+
+    assert stream is not None
+    assert stream.closed_at is not None
+    assert stream.byte_count == len(expected.encode("utf-8"))
+    assert stream.line_count == expected.count("\n")
+
+
+@pytest.mark.unit
 async def test_agent_and_validation_runners_create_indexed_log_streams(
     engine: AsyncEngine,
     tmp_path,

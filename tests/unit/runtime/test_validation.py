@@ -10,7 +10,7 @@ import pytest
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.profiles.models import WorkspaceProfile
-from awf.runtime.logs import LogStore
+from awf.runtime.logs import CommandLogSinks, LogStore
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -28,6 +28,28 @@ from awf.runtime.validation_identity import (
 
 _COMPOSE_PROJECT = "awf_ws_val"
 _COMPOSE_FILE = Path("/fake/compose.yml")
+
+
+class _CountingLogStore(LogStore):
+    def __init__(self, *, root: Path) -> None:
+        super().__init__(root=root)
+        self.open_command_stream_calls: list[str] = []
+
+    async def open_command_streams(
+        self,
+        *,
+        workspace_id: str,
+        base_stream_id: str,
+        source: str,
+        name: str,
+    ) -> CommandLogSinks:
+        self.open_command_stream_calls.append(base_stream_id)
+        return await super().open_command_streams(
+            workspace_id=workspace_id,
+            base_stream_id=base_stream_id,
+            source=source,
+            name=name,
+        )
 
 
 @pytest.fixture
@@ -541,6 +563,55 @@ class TestProfileHealthChecks:
             encoding="utf-8"
         )
         assert "pytest -q" not in fake.calls[0].args[-1]
+
+    @pytest.mark.unit
+    async def test_healthcheck_failure_appends_diagnostic_without_reopening_command_streams(
+        self, tmp_path: Path
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=7, stderr="connection refused\n")
+        log_store = _CountingLogStore(root=tmp_path / "logs")
+        val = ValidationRunner(
+            runner=fake,
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=log_store,
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "health-command-failure",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 0.001,
+                            "interval_seconds": 0.001,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_health_command_failure_log",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert not result.all_passed
+        assert log_store.open_command_stream_calls == ["validation.01_healthcheck"]
+        stderr_log = (
+            tmp_path
+            / "logs"
+            / "ws_health_command_failure_log"
+            / "validation.01_healthcheck.stderr.log"
+        ).read_text(encoding="utf-8")
+        assert "connection refused" in stderr_log
+        assert "health check api failed after 1 attempt(s)" in stderr_log
 
     @pytest.mark.unit
     async def test_http_style_healthcheck_uses_fixed_python_urllib_command(

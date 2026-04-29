@@ -520,17 +520,14 @@ class ValidationRunner:
         stderr_stream_id = result.stream_ids.get("stderr")
         if not isinstance(stderr_stream_id, str) or not stderr_stream_id.endswith(".stderr"):
             return
-        base_stream_id = stderr_stream_id[: -len(".stderr")]
-        sinks = await self._log_store.open_command_streams(
+        await self._log_store.append_to_stream(
             workspace_id=workspace_id,
-            base_stream_id=base_stream_id,
+            stream_id=stderr_stream_id,
             source="validation",
-            name=f"{result.phase} {base_stream_id.removeprefix('validation.')}",
+            fd="stderr",
+            data=diagnostic,
+            close_after_append=True,
         )
-        try:
-            await sinks.write_stderr(diagnostic)
-        finally:
-            await sinks.close()
 
     async def _collect_coverage(
         self,
