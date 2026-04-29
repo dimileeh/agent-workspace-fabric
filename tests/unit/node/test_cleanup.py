@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from awf.node.cleanup import WorkspaceCleaner
+from awf.node.cleanup import WorkspaceCleaner, WorkspaceCleanupResult, WorkspaceCleanupStepResult
 from awf.node.compose_manager import ComposeOperationError
 from awf.node.git_manager import GitOperationError
 
@@ -20,6 +20,25 @@ def cleaner() -> tuple[AsyncMock, AsyncMock, WorkspaceCleaner]:
 
 
 class TestCleanup:
+    @pytest.mark.unit
+    def test_cleanup_result_preserves_dataclass_value_equality(self) -> None:
+        step = WorkspaceCleanupStepResult(
+            name="compose_down",
+            status="failed",
+            reason_code="COMPOSE_DOWN_FAILED",
+            error="network still in use",
+        )
+
+        assert WorkspaceCleanupResult(
+            status="partial",
+            reason_code="CLEANUP_PARTIAL",
+            steps=(step,),
+        ) == WorkspaceCleanupResult(
+            status="partial",
+            reason_code="CLEANUP_PARTIAL",
+            steps=(step,),
+        )
+
     @pytest.mark.unit
     async def test_happy_path_calls_compose_down_then_worktree_remove(
         self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]

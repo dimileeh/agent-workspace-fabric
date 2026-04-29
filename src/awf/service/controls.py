@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from datetime import datetime
 from pathlib import Path
-from typing import Protocol
+from typing import Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -22,11 +22,18 @@ from awf.db.repositories import (
     TaskAttemptRepository,
     WorkspaceRepository,
 )
-from awf.node.cleanup import WorkspaceCleaner
+from awf.node.cleanup import (
+    WorkspaceCleaner,
+    WorkspaceCleanupResult,
+    WorkspaceCleanupStatus,
+    WorkspaceCleanupStepResult,
+    WorkspaceCleanupStepStatus,
+)
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
 
 ProjectStopper = Callable[[str | None], Awaitable[None]]
+CleanupResultLike = WorkspaceCleanupResult | Sequence[str] | Mapping[str, object]
 CleanerFactory = Callable[[], "WorkspaceCleanerProtocol"]
 _REMONITOR_ELIGIBLE_STATUSES = (
     WorkspaceStatus.monitoring_pr,
@@ -74,7 +81,7 @@ class WorkspaceCleanerProtocol(Protocol):
         worktree_host_path: Path | None = None,
         remove_volumes: bool = True,
         remove_worktree: bool = True,
-    ) -> list[str]: ...
+    ) -> CleanupResultLike: ...
 
 
 class WorkspaceControlError(Exception):
@@ -836,10 +843,16 @@ class WorkspaceControlService:
             idempotency_key=idempotency_key,
         )
         if current == WorkspaceStatus.destroyed:
+            cleanup_result = WorkspaceCleanupResult.skipped(
+                reason_code="WORKSPACE_ALREADY_DESTROYED"
+            )
             await operations.finish(
                 operation,
                 status=OperationStatus.succeeded,
-                result={"status": WorkspaceStatus.destroyed.value},
+                result={
+                    "status": WorkspaceStatus.destroyed.value,
+                    "cleanup": cleanup_result.to_dict(),
+                },
             )
             return WorkspaceControlResponse(
                 workspace_id=workspace_id,
@@ -868,20 +881,32 @@ class WorkspaceControlService:
 
         await self._session.flush()
         cleaner = self._cleaner_factory()
-        failures = await cleaner.cleanup(
-            workspace_id=workspace_id,
-            repo_url=workspace.repo_url,
-            compose_project_name=workspace.compose_project_name,
-            compose_file_path=(
-                Path(workspace.compose_file_path) if workspace.compose_file_path else None
-            ),
-            worktree_host_path=None,
-            remove_volumes=remove_volumes,
-            remove_worktree=remove_worktree,
+        cleanup_result = _normalize_cleanup_result(
+            await cleaner.cleanup(
+                workspace_id=workspace_id,
+                repo_url=workspace.repo_url,
+                compose_project_name=workspace.compose_project_name,
+                compose_file_path=(
+                    Path(workspace.compose_file_path) if workspace.compose_file_path else None
+                ),
+                worktree_host_path=None,
+                remove_volumes=remove_volumes,
+                remove_worktree=remove_worktree,
+            )
         )
-        if failures:
+        cleanup_payload = cleanup_result.to_dict()
+        cleanup_event_payload = _event_payload(
+            {
+                **event_payload,
+                "cleanup": cleanup_payload,
+            },
+            expected_version=None,
+        )
+        if not cleanup_result.ok:
+            cleanup_message = _cleanup_failure_message(cleanup_result)
+            bounded_cleanup_message = _bounded_operation_error_message(cleanup_message)
             workspace.failure_reason = "cleanup_failure"
-            workspace.failure_message = ", ".join(failures)
+            workspace.failure_message = bounded_cleanup_message
             if WorkspaceStateMachine.can_transition(
                 WorkspaceStatus(workspace.status), WorkspaceStatus.failed
             ):
@@ -889,14 +914,14 @@ class WorkspaceControlService:
                     workspace,
                     to=WorkspaceStatus.failed,
                     reason_code="CLEANUP_FAILED",
-                    payload=event_payload,
+                    payload=cleanup_event_payload,
                 )
             await operations.finish(
                 operation,
                 status=OperationStatus.failed,
                 error_code="CLEANUP_FAILED",
-                error_message=", ".join(failures),
-                result={"status": workspace.status},
+                error_message=bounded_cleanup_message,
+                result={"status": workspace.status, "cleanup": cleanup_payload},
             )
             message = "workspace cleanup failed"
         else:
@@ -907,12 +932,12 @@ class WorkspaceControlService:
                     workspace,
                     to=WorkspaceStatus.destroyed,
                     reason_code="DESTROYED",
-                    payload=event_payload,
+                    payload=cleanup_event_payload,
                 )
             await operations.finish(
                 operation,
                 status=OperationStatus.succeeded,
-                result={"status": workspace.status},
+                result={"status": workspace.status, "cleanup": cleanup_payload},
             )
             message = "workspace destroyed"
 
@@ -1198,6 +1223,117 @@ def _event_payload(
     if expected_version is not None:
         event_payload["expected_version"] = expected_version
     return event_payload
+
+
+def _normalize_cleanup_result(result: CleanupResultLike) -> WorkspaceCleanupResult:
+    if isinstance(result, WorkspaceCleanupResult):
+        return result
+    if isinstance(result, Mapping):
+        return _cleanup_result_from_mapping(result)
+    failures = [str(item) for item in result]
+    if not failures:
+        return WorkspaceCleanupResult.from_steps([])
+    return WorkspaceCleanupResult.from_steps(
+        [
+            WorkspaceCleanupStepResult(
+                name=failure,
+                status="failed",
+                reason_code="CLEANUP_STEP_FAILED",
+                error=failure,
+            )
+            for failure in failures
+        ]
+    )
+
+
+def _cleanup_result_from_mapping(result: Mapping[str, object]) -> WorkspaceCleanupResult:
+    status = _cleanup_status(result.get("status"))
+    reason_code = _cleanup_reason_code(result.get("reason_code"), status=status)
+    steps = tuple(_cleanup_steps_from_mapping(result))
+    return WorkspaceCleanupResult(
+        status=status,
+        reason_code=reason_code,
+        steps=steps,
+    )
+
+
+def _cleanup_steps_from_mapping(
+    result: Mapping[str, object],
+) -> list[WorkspaceCleanupStepResult]:
+    raw_steps = result.get("steps")
+    if not isinstance(raw_steps, Sequence) or isinstance(raw_steps, str):
+        raw_failed_steps = result.get("failed_steps")
+        raw_completed_steps = result.get("completed_steps")
+        failed_steps = (
+            raw_failed_steps
+            if isinstance(raw_failed_steps, Sequence) and not isinstance(raw_failed_steps, str)
+            else ()
+        )
+        completed_steps = (
+            raw_completed_steps
+            if isinstance(raw_completed_steps, Sequence)
+            and not isinstance(raw_completed_steps, str)
+            else ()
+        )
+        raw_steps = (*completed_steps, *failed_steps)
+    steps: list[WorkspaceCleanupStepResult] = []
+    for index, raw_step in enumerate(raw_steps):
+        if not isinstance(raw_step, Mapping):
+            continue
+        step_status = _cleanup_step_status(raw_step.get("status"))
+        steps.append(
+            WorkspaceCleanupStepResult(
+                name=_cleanup_string(raw_step.get("name"), fallback=f"cleanup_step_{index + 1}"),
+                status=step_status,
+                reason_code=_cleanup_string(
+                    raw_step.get("reason_code"),
+                    fallback=(
+                        "CLEANUP_STEP_FAILED"
+                        if step_status == "failed"
+                        else "CLEANUP_STEP_SUCCEEDED"
+                    ),
+                ),
+                error=_cleanup_optional_string(raw_step.get("error")),
+            )
+        )
+    return steps
+
+
+def _cleanup_status(value: object) -> WorkspaceCleanupStatus:
+    if value in {"succeeded", "partial", "skipped"}:
+        return cast(WorkspaceCleanupStatus, value)
+    return "partial"
+
+
+def _cleanup_step_status(value: object) -> WorkspaceCleanupStepStatus:
+    if value in {"succeeded", "failed", "skipped"}:
+        return cast(WorkspaceCleanupStepStatus, value)
+    return "failed"
+
+
+def _cleanup_reason_code(value: object, *, status: str) -> str:
+    if isinstance(value, str) and value:
+        return value
+    if status == "succeeded":
+        return "CLEANUP_SUCCEEDED"
+    if status == "skipped":
+        return "CLEANUP_SKIPPED"
+    return "CLEANUP_PARTIAL"
+
+
+def _cleanup_string(value: object, *, fallback: str) -> str:
+    return value if isinstance(value, str) and value else fallback
+
+
+def _cleanup_optional_string(value: object) -> str | None:
+    return value if isinstance(value, str) and value else None
+
+
+def _cleanup_failure_message(cleanup_result: WorkspaceCleanupResult) -> str:
+    failures = cleanup_result.failure_messages
+    if failures:
+        return ", ".join(failures)
+    return cleanup_result.reason_code
 
 
 async def _finish_stack_stop_failed_operation(
