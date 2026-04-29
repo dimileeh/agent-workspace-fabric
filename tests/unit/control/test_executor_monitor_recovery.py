@@ -760,6 +760,65 @@ async def test_open_pr_ready_without_recovery_operation_is_blocked_before_featur
 
 
 @pytest.mark.unit
+async def test_open_pr_guard_uses_fresh_recovery_operation_after_claim(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    ws_id = await _seed_open_pr_ready_workspace_without_recovery(factory)
+    original_claim_ready = executor._claim_ready
+
+    async def _claim_then_insert_recovery(
+        workspace_id: str,
+        **kwargs: Any,
+    ) -> WorkspaceModel | None:
+        ws = await original_claim_ready(workspace_id, **kwargs)
+        assert ws is not None
+        async with factory() as s:
+            await OperationRepository(s).create(
+                workspace_id=workspace_id,
+                operation_type=OperationType.validate,
+                payload={
+                    "source": "pr_monitor",
+                    "action": "validate_only",
+                    "requested_action": "validate",
+                    "reason_code": "VALIDATION_INSUFFICIENT_TIER",
+                    "recovery_mode": "validate_only",
+                    "pr_number": 9,
+                    "pr_url": "https://github.com/x/y/pull/9",
+                },
+                idempotency_key=f"pr_monitor:validate_only:{workspace_id}",
+            )
+            await s.commit()
+        return ws
+
+    executor._claim_ready = _claim_then_insert_recovery  # type: ignore[method-assign]
+    _queue_validation_head(fake)
+    fake.queue_result(returncode=0, stdout="tests ok")
+
+    await executor.execute(ws_id)
+
+    assert _all_adapter_args(fake) == []
+    assert _all_push_and_pr_create_calls(fake) == []
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+        ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.completed.value
+    assert all(event.event_type != "workspace.pr_reexecution_blocked" for event in events)
+    recovery_ops = [
+        op
+        for op in ops
+        if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
+    ]
+    assert len(recovery_ops) == 1
+    assert recovery_ops[0].status == OperationStatus.succeeded.value
+
+
+@pytest.mark.unit
 async def test_executor_normal_path_unchanged_when_no_recovery_op(
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
