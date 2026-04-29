@@ -10,7 +10,7 @@ import pytest
 import structlog
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.db.base import Base
@@ -56,10 +56,17 @@ from awf.runtime.pr_monitor_runner import (
     _notify_human_reason,
     _redact_and_truncate_github_error,
     _stale_pending_check_warnings,
+    _target_reconcile_failure_payload,
     _target_reconcile_payload,
     _with_ci_failures,
 )
+from awf.service.alembic_resolver import AlembicResolveResult, AlembicResolveStatus
 from awf.service.merge_queue import MergeQueueBlocker
+from awf.service.target_branch_monitor import (
+    TargetBranchMonitorError,
+    TargetBranchMonitorResult,
+    TargetBranchMonitorStatus,
+)
 from tests.unit.runtime._monitor_runner_fixtures import (
     FakeAdapter,
     RecordedSleep,
@@ -1413,11 +1420,26 @@ async def test_target_branch_reconcile_failure_appends_workspace_event(
         post_merge_target_reconciler=failing_reconciler,
     )
 
-    await runner._reconcile_target_branch_after_merge(
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        base_branch="development",
+    with structlog.testing.capture_logs() as captured:
+        await runner._reconcile_target_branch_after_merge(
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            base_branch="development",
+        )
+
+    failure_log = next(
+        event
+        for event in captured
+        if event.get("event") == "monitor.target_branch_reconcile_failed"
     )
+    assert failure_log["status"] == "failed"
+    assert failure_log["reason_code"] == "TARGET_BRANCH_RECONCILE_FAILED"
+    assert failure_log["error_type"] == "RuntimeError"
+    assert failure_log["resolver_results"] == []
+    assert failure_log["commit_sha"] is None
+    assert failure_log["pushed"] is False
+    assert failure_log["dry_run"] is None
+    assert failure_log["commit_allowed"] is None
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(workspace_id)
@@ -1425,6 +1447,103 @@ async def test_target_branch_reconcile_failure_appends_workspace_event(
         assert ws.events[-1].event_type == "target_branch.reconcile_failed"
         assert ws.events[-1].reason_code == "TARGET_BRANCH_RECONCILE_FAILED"
         assert ws.events[-1].payload["error"] == "target branch locked"
+
+
+@pytest.mark.unit
+async def test_target_branch_reconcile_failure_reuses_exception_payload(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+
+    class _CountingResultError(Exception):
+        def __init__(self) -> None:
+            super().__init__("target branch locked " + ("x" * 1200))
+            self.result_accesses = 0
+            self._result = CommandResult(
+                returncode=128,
+                stdout="stdout " + ("o" * 1200),
+                stderr="stderr " + ("e" * 1200),
+                reason_code="GIT_FAILED",
+            )
+
+        @property
+        def result(self) -> CommandResult:
+            self.result_accesses += 1
+            return self._result
+
+    failure = _CountingResultError()
+
+    async def failing_reconciler(*, repo_url: str, branch: str, workspace_id: str) -> object:
+        del repo_url, branch, workspace_id
+        raise failure
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        post_merge_target_reconciler=failing_reconciler,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await runner._reconcile_target_branch_after_merge(
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            base_branch="development",
+        )
+
+    failure_log = next(
+        event
+        for event in captured
+        if event.get("event") == "monitor.target_branch_reconcile_failed"
+    )
+    assert failure.result_accesses == 1
+    assert len(failure_log["error"]) == 500
+    assert len(failure_log["stderr"]) == 500
+    assert len(failure_log["stdout"]) == 500
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        event_payload = ws.events[-1].payload
+        assert len(event_payload["error"]) == 1000
+        assert len(event_payload["stderr"]) == 1000
+        assert len(event_payload["stdout"]) == 1000
+
+
+@pytest.mark.unit
+def test_target_reconcile_failure_payload_uses_command_error_contract() -> None:
+    result = CommandResult(
+        returncode=128,
+        stdout="fatal stdout",
+        stderr="fatal stderr",
+        reason_code="GIT_FAILED",
+    )
+    exc = TargetBranchMonitorError(
+        operation="target_branch.git_fetch",
+        result=result,
+    )
+    exc.target_reconcile_payload = lambda: {  # type: ignore[attr-defined]
+        "status": "committed",
+        "resolver_results": [{"status": "resolved"}],
+        "commit_sha": "abc123",
+        "pushed": True,
+    }
+
+    payload = _target_reconcile_failure_payload(exc, error_limit=100)
+
+    assert payload["status"] == "failed"
+    assert "target_reconcile_status" not in payload
+    assert payload["resolver_results"] == []
+    assert payload["commit_sha"] is None
+    assert payload["pushed"] is False
+    assert payload["operation"] == "target_branch.git_fetch"
+    assert payload["returncode"] == 128
+    assert payload["command_reason_code"] == "GIT_FAILED"
+    assert payload["stderr"] == "fatal stderr"
+    assert payload["stdout"] == "fatal stdout"
 
 
 @pytest.mark.unit
@@ -1463,6 +1582,95 @@ async def test_target_branch_reconcile_success_appends_payload_event(
         assert ws.events[-1].event_type == "target_branch.reconciled"
         assert ws.events[-1].reason_code == "TARGET_BRANCH_FAST_FORWARDED"
         assert ws.events[-1].payload["branch"] == "development"
+
+
+@pytest.mark.unit
+async def test_target_branch_reconcile_event_preserves_resolver_operator_details(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+
+    async def reconciler(*, repo_url: str, branch: str, workspace_id: str) -> object:
+        checkout = tmp_path / "checkout"
+        generated = checkout / "migrations" / "versions" / "merge001_merge_alembic_heads.py"
+        return TargetBranchMonitorResult(
+            repo_url=repo_url,
+            branch=branch,
+            checkout_path=checkout,
+            status=TargetBranchMonitorStatus.committed,
+            resolver_results=(
+                AlembicResolveResult(
+                    status=AlembicResolveStatus.resolved,
+                    reason_code="ALEMBIC_HEADS_MERGED",
+                    heads=("left001", "right001"),
+                    generated_revision="merge001",
+                    generated_path=generated,
+                    generated_path_relative="migrations/versions/merge001_merge_alembic_heads.py",
+                    message="Generated Alembic merge revision for 2 heads.",
+                ),
+            ),
+            commit_sha="abc123",
+            pushed=True,
+            changed_paths=("migrations/versions/merge001_merge_alembic_heads.py",),
+        )
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        post_merge_target_reconciler=reconciler,
+    )
+
+    with structlog.testing.capture_logs() as captured:
+        await runner._reconcile_target_branch_after_merge(
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            base_branch="development",
+        )
+
+    reconciled_log = next(
+        event
+        for event in captured
+        if event.get("event") == "monitor.target_branch_reconciled"
+    )
+    assert reconciled_log["status"] == "committed"
+    assert reconciled_log["commit_sha"] == "abc123"
+    assert reconciled_log["pushed"] is True
+    assert reconciled_log["dry_run"] is False
+    assert reconciled_log["commit_allowed"] is True
+    assert reconciled_log["policy_reason_code"] is None
+    assert reconciled_log["changed_paths"] == [
+        "migrations/versions/merge001_merge_alembic_heads.py"
+    ]
+    logged_resolver = reconciled_log["resolver_results"][0]
+    assert logged_resolver["reason_code"] == "ALEMBIC_HEADS_MERGED"
+    assert logged_resolver["heads"] == ["left001", "right001"]
+    assert logged_resolver["generated_revision"] == "merge001"
+    assert logged_resolver["generated_path_relative"] == (
+        "migrations/versions/merge001_merge_alembic_heads.py"
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        payload = ws.events[-1].payload
+        assert payload["status"] == "committed"
+        assert payload["commit_sha"] == "abc123"
+        assert payload["pushed"] is True
+        assert payload["branch"] == "development"
+        assert payload["changed_paths"] == [
+            "migrations/versions/merge001_merge_alembic_heads.py"
+        ]
+        resolver = payload["resolver_results"][0]
+        assert resolver["reason_code"] == "ALEMBIC_HEADS_MERGED"
+        assert resolver["heads"] == ["left001", "right001"]
+        assert resolver["generated_revision"] == "merge001"
+        assert resolver["generated_path_relative"] == (
+            "migrations/versions/merge001_merge_alembic_heads.py"
+        )
 
 
 @pytest.mark.unit
