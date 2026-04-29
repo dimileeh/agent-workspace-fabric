@@ -278,6 +278,68 @@ async def test_workspace_log_sink_redacts_persisted_data_live_frames_and_metadat
 
 
 @pytest.mark.unit
+async def test_workspace_log_sink_redacts_tokens_split_across_write_boundaries(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "workspace.log"
+    broadcaster = LogBroadcaster()
+    sink = WorkspaceLogSink(
+        workspace_id="ws_split",
+        stream_id="agent.stdout",
+        source="agent",
+        fd="stdout",
+        path=path,
+        session_factory=None,
+        broadcaster=broadcaster,
+    )
+
+    async with broadcaster.subscribe("ws_split") as queue:
+        await sink.write("context ghp_FA")
+        assert not path.exists() or path.read_text(encoding="utf-8") == ""
+        assert queue.empty()
+
+        await sink.write("KEgithubTokenValue123456 done\n")
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    persisted = path.read_text(encoding="utf-8")
+    assert persisted == f"context {REDACTION_MARKER} done\n"
+    assert frame.data == persisted
+    assert frame.offset == 0
+    for raw_fragment in ("ghp_FA", "KEgithubTokenValue123456"):
+        assert raw_fragment not in persisted
+        assert raw_fragment not in frame.data
+
+
+@pytest.mark.unit
+async def test_workspace_log_sink_flushes_pending_redacted_data_on_close(tmp_path: Path) -> None:
+    path = tmp_path / "workspace.log"
+    broadcaster = LogBroadcaster()
+    sink = WorkspaceLogSink(
+        workspace_id="ws_pending",
+        stream_id="agent.stdout",
+        source="agent",
+        fd="stdout",
+        path=path,
+        session_factory=None,
+        broadcaster=broadcaster,
+    )
+
+    async with broadcaster.subscribe("ws_pending") as queue:
+        await sink.write("partial ghp_PENDINGgithubTokenValue123456")
+        assert not path.exists() or path.read_text(encoding="utf-8") == ""
+        assert queue.empty()
+
+        await sink.close()
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    persisted = path.read_text(encoding="utf-8")
+    assert persisted == f"partial {REDACTION_MARKER}"
+    assert frame.data == persisted
+    assert "ghp_PENDINGgithubTokenValue123456" not in persisted
+    assert "ghp_PENDINGgithubTokenValue123456" not in frame.data
+
+
+@pytest.mark.unit
 async def test_log_broadcaster_delivers_workspace_frames() -> None:
     broadcaster = LogBroadcaster()
 
