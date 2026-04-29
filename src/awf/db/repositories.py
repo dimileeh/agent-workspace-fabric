@@ -24,6 +24,7 @@ from sqlalchemy.orm import selectinload
 from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
+from awf.common.audit import build_audit_payload
 from awf.common.ids import (
     new_event_id,
     new_log_stream_id,
@@ -1929,6 +1930,52 @@ class WorkspaceRepository:
             ],
         )
         return events[0]
+
+    async def add_audit_event(
+        self,
+        workspace: Workspace,
+        *,
+        event_type: str,
+        actor: str,
+        action: str,
+        outcome: str,
+        reason_code: str,
+        source: str | None = None,
+        operation_id: str | None = None,
+        operation_type: str | None = None,
+        pr_number: int | None = None,
+        pr_url: str | None = None,
+        source_head_sha: str | None = None,
+        source_base_sha: str | None = None,
+        target_branch: str | None = None,
+        remote_branch: str | None = None,
+        branch_name: str | None = None,
+        evidence: Mapping[str, Any] | None = None,
+        extra: Mapping[str, Any] | None = None,
+    ) -> WorkspaceEvent:
+        return await self.add_event(
+            workspace,
+            event_type=event_type,
+            reason_code=reason_code,
+            payload=build_audit_payload(
+                actor=actor,
+                source=source,
+                action=action,
+                outcome=outcome,
+                reason_code=reason_code,
+                operation_id=operation_id,
+                operation_type=operation_type,
+                pr_number=pr_number,
+                pr_url=pr_url,
+                source_head_sha=source_head_sha,
+                source_base_sha=source_base_sha,
+                target_branch=target_branch,
+                remote_branch=remote_branch,
+                branch_name=branch_name,
+                evidence=evidence,
+                extra=extra,
+            ),
+        )
 
     async def record_ignored_stale_callback(
         self,
