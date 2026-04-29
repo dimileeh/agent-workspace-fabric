@@ -392,11 +392,16 @@ async def test_executor_skips_planning_and_agent_run_when_recovery_dispatched(
     # Workspace handed off to monitor (no monitor wired in this test ⇒ completed).
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
         assert ws is not None
-        assert ws.status in {
-            WorkspaceStatus.completed.value,
-            WorkspaceStatus.monitoring_pr.value,
-        }
+        assert ws.status == WorkspaceStatus.completed.value
+        assert any(
+            event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_VALIDATION_OK"
+            and event.old_state == WorkspaceStatus.validating.value
+            and event.new_state == WorkspaceStatus.completed.value
+            for event in events
+        )
         # The recovery operation is closed cleanly.
         ops = await OperationRepository(s).list_all(workspace_id=ws_id)
         recovery_ops = [
@@ -587,6 +592,7 @@ async def test_executor_recovery_closes_operation_row_for_rebase_only_mode(
     assert op.finished_at is not None
     assert op.started_at < op.finished_at
     assert len(runs) == 1
+    assert runs[0].tier >= 2
     assert runs[0].target_head_sha == "c" * 40
     assert runs[0].workspace_head_sha == "c" * 40
     rebase_ops = [op for op in ops if op.type == OperationType.rebase.value]
@@ -825,11 +831,16 @@ async def test_recovery_skips_push_when_pr_already_exists(
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
         assert ws is not None
-        assert ws.status in {
-            WorkspaceStatus.completed.value,
-            WorkspaceStatus.monitoring_pr.value,
-        }
+        assert ws.status == WorkspaceStatus.completed.value
+        assert any(
+            event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_VALIDATION_OK"
+            and event.old_state == WorkspaceStatus.validating.value
+            and event.new_state == WorkspaceStatus.completed.value
+            for event in events
+        )
 
 
 @pytest.mark.unit
@@ -871,8 +882,16 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
         assert ws is not None
         assert ws.status == WorkspaceStatus.monitoring_pr.value
+        assert any(
+            event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_VALIDATION_OK"
+            and event.old_state == WorkspaceStatus.validating.value
+            and event.new_state == WorkspaceStatus.monitoring_pr.value
+            for event in events
+        )
 
 
 @pytest.mark.unit
