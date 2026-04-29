@@ -1199,6 +1199,109 @@ class TestFailurePaths:
         }
 
     @pytest.mark.unit
+    async def test_healthcheck_failure_records_validation_run_failure_and_event(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+        validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+        pr = PullRequestCreator(fake)
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=compose,
+            validation=validation,
+            pr_creator=pr,
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+                default_models={AgentRuntime.codex: "gpt-5"},
+                max_validation_fix_passes=0,
+            ),
+        )
+        ws_id = await _seed_ready_workspace(
+            factory,
+            test_commands=[],
+            resolved_profile={
+                "name": "healthcheck-executor",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 0.001,
+                            "interval_seconds": 0.001,
+                        }
+                    ]
+                },
+            },
+        )
+
+        fake.queue_result(returncode=0, stdout="codex finished")  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor ok
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=7, stderr="connection refused")  # healthcheck
+
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            assert workspace is not None
+            run = (
+                (
+                    await session.execute(
+                        text(
+                            """
+                            SELECT status, reason_code, commands
+                            FROM validation_runs
+                            WHERE workspace_id = :workspace_id
+                            """
+                        ),
+                        {"workspace_id": ws_id},
+                    )
+                )
+                .mappings()
+                .one()
+            )
+            events = [
+                event
+                for event in workspace.events
+                if event.event_type == "workspace.health_check_failed"
+            ]
+
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == "health_check_failure"
+        assert "health check api" in (workspace.failure_message or "")
+        assert "validation.01_healthcheck.stderr" in (workspace.failure_message or "")
+        assert run["status"] == "failed"
+        assert run["reason_code"] == "HEALTHCHECK_COMMAND_FAILED"
+        commands = json.loads(run["commands"])
+        assert commands[0]["phase"] == "healthcheck"
+        assert commands[0]["retry_count"] == 0
+        assert len(events) == 1
+        assert events[0].reason_code == "HEALTHCHECK_COMMAND_FAILED"
+        assert events[0].payload == {
+            "healthcheck_name": "api",
+            "healthcheck_kind": "command",
+            "target": "curl -fsS http://api:8000/healthz",
+            "attempts": 1,
+            "timeout_seconds": 0.001,
+            "stream_ids": {
+                "stdout": "validation.01_healthcheck.stdout",
+                "stderr": "validation.01_healthcheck.stderr",
+            },
+        }
+        assert not any("pytest -q" in call.args[-1] for call in fake.calls)
+
+    @pytest.mark.unit
     async def test_push_failure_marks_failed_with_infrastructure_reason(
         self,
         executor: WorkspaceExecutor,

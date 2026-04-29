@@ -198,6 +198,46 @@ class LogStore:
             broadcaster=self._broadcaster,
         )
 
+    async def append_to_stream(
+        self,
+        *,
+        workspace_id: str,
+        stream_id: str,
+        source: str,
+        fd: str,
+        data: str,
+        close_after_append: bool = False,
+    ) -> None:
+        """Append data to an already indexed stream without opening new sinks."""
+        if not data:
+            return
+        stream_path = self._root / workspace_id / f"{_safe_stream_id(stream_id)}.log"
+        stream_path.parent.mkdir(parents=True, exist_ok=True)
+        stream_path.touch(exist_ok=True)
+        redacted_data = await asyncio.to_thread(redact_secrets, data)
+        encoded = redacted_data.encode("utf-8")
+        offset = await asyncio.to_thread(_append_log_bytes, stream_path, encoded)
+        if self._session_factory is not None:
+            async with self._session_factory() as session:
+                repo = WorkspaceLogStreamRepository(session)
+                await repo.append_metadata(
+                    workspace_id=workspace_id,
+                    stream_id=stream_id,
+                    byte_delta=len(encoded),
+                    line_delta=redacted_data.count("\n"),
+                )
+                if close_after_append:
+                    await repo.close(workspace_id=workspace_id, stream_id=stream_id)
+                await session.commit()
+        self._broadcaster.publish_redacted(
+            workspace_id=workspace_id,
+            stream_id=stream_id,
+            source=source,
+            fd=fd,
+            offset=offset,
+            data=redacted_data,
+        )
+
     async def read(
         self,
         *,

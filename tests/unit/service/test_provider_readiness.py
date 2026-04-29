@@ -57,9 +57,11 @@ def _ollama_ok(url: str, *, timeout: float) -> Any:
 
 @pytest.mark.unit
 def test_provider_readiness_validates_aliases_and_rejects_unknown() -> None:
-    assert validate_provider_names(["claude", "opencode", ""]) == {
+    assert validate_provider_names(["claude", "opencode", "codex", "docker", ""]) == {
         "claude_code",
         "opencode",
+        "codex",
+        "docker",
     }
 
     with pytest.raises(ProviderReadinessError, match="unknown provider"):
@@ -67,8 +69,32 @@ def test_provider_readiness_validates_aliases_and_rejects_unknown() -> None:
 
 
 @pytest.mark.unit
+def test_provider_readiness_validates_codex_and_docker_providers(tmp_path: Path) -> None:
+    assert validate_provider_names(["codex", "docker"]) == {"codex", "docker"}
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert set(payload["providers"]) == {
+        "github",
+        "codex",
+        "claude_code",
+        "gemini",
+        "opencode",
+        "docker",
+    }
+
+
+@pytest.mark.unit
 def test_provider_readiness_all_green(tmp_path: Path) -> None:
     home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "auth.json").write_text('{"token":"codex_file_secret"}')
+    (home / ".codex" / "config.toml").write_text("model = 'gpt-5.5'\n")
+    (home / ".codex" / "installation_id").write_text("installation-123\n")
     (home / ".claude").mkdir(parents=True)
     (home / ".gemini").mkdir()
     (home / ".config" / "opencode").mkdir(parents=True)
@@ -105,13 +131,267 @@ def test_provider_readiness_all_green(tmp_path: Path) -> None:
 
     assert payload["status"] == "ok"
     providers = payload["providers"]
-    assert set(providers) == {"github", "claude_code", "gemini", "opencode"}
+    assert set(providers) == {"github", "codex", "claude_code", "gemini", "opencode", "docker"}
     assert all(provider["ok"] is True for provider in providers.values())
     assert providers["github"]["capabilities"] == ["pr_create", "comment", "merge"]
     assert subprocess_calls == [["gh", "auth", "status", "--hostname", "github.com"]]
     serialized = json.dumps(payload, sort_keys=True)
-    for secret in (github_secret, anthropic_secret, gemini_secret, ollama_secret):
+    for secret in (
+        github_secret,
+        "codex_file_secret",
+        anthropic_secret,
+        gemini_secret,
+        ollama_secret,
+    ):
         assert secret not in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_codex_isolated_file_auth_reports_least_privilege(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    codex_home = home / ".codex"
+    codex_home.mkdir(parents=True)
+    (codex_home / "auth.json").write_text('{"token":"codex_file_secret"}')
+    (codex_home / "config.toml").write_text("model = 'gpt-5.5'\n")
+    (codex_home / "installation_id").write_text("installation-secret\n")
+    (codex_home / "sessions").mkdir()
+    (codex_home / "sessions" / "session.jsonl").write_text("session-secret\n")
+    (codex_home / "logs_2.sqlite").write_text("log-secret\n")
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    codex = payload["providers"]["codex"]
+    assert codex["ok"] is True
+    assert codex["status"] == "ok"
+    assert codex["reason"] == "CODEX_FILE_AUTH_PRESENT"
+    assert codex["credential_scope"] == "isolated_workspace"
+    assert codex["isolation"] == "per_workspace_copy"
+    assert codex["warnings"] == []
+    assert {
+        source["signal"]
+        for source in codex["credential_sources"]
+    } >= {"~/.codex/auth.json", "~/.codex/config.toml", "~/.codex/installation_id"}
+    serialized = json.dumps(payload, sort_keys=True)
+    for secret in (
+        "codex_file_secret",
+        "installation-secret",
+        "session-secret",
+        "log-secret",
+    ):
+        assert secret not in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_codex_static_env_auth_warns_without_leaking_value(
+    tmp_path: Path,
+) -> None:
+    token = "sk-proj-codex-env-secret"
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"OPENAI_API_KEY": token},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    codex = payload["providers"]["codex"]
+    assert codex["ok"] is True
+    assert codex["status"] == "ok"
+    assert codex["reason"] == "CODEX_ENV_AUTH_PRESENT"
+    assert codex["credential_scope"] == "static_env_token"
+    assert codex["isolation"] == "service_env"
+    assert codex["credential_sources"] == [
+        {
+            "type": "env",
+            "signal": "OPENAI_API_KEY",
+            "credential_scope": "static_env_token",
+            "isolation": "service_env",
+        }
+    ]
+    assert {warning["reason"] for warning in codex["warnings"]} == {
+        "STATIC_TOKEN_FALLBACK"
+    }
+    serialized = json.dumps(payload, sort_keys=True)
+    assert token not in serialized
+    assert "OPENAI_API_KEY" in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_codex_missing_warns_by_default_and_fails_when_strict(
+    tmp_path: Path,
+) -> None:
+    default_payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    default_codex = default_payload["providers"]["codex"]
+    assert default_payload["status"] == "ok"
+    assert default_codex["ok"] is False
+    assert default_codex["status"] == "warn"
+    assert default_codex["reason"] == "CODEX_AUTH_MISSING"
+    assert default_codex["credential_scope"] == "not_observed"
+    assert default_codex["isolation"] == "none"
+
+    strict_payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        strict_providers={"codex"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    strict_codex = strict_payload["providers"]["codex"]
+    assert strict_payload["status"] == "fail"
+    assert strict_payload["strict_providers"] == ["codex"]
+    assert strict_codex["status"] == "fail"
+    assert strict_codex["reason"] == "CODEX_AUTH_MISSING"
+
+
+@pytest.mark.unit
+def test_provider_readiness_existing_file_providers_report_credential_scope(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".claude").mkdir(parents=True)
+    (home / ".claude" / "settings.json").write_text('{"token":"claude_file_secret"}')
+    (home / ".claude.json").write_text('{"oauth":"claude_json_secret"}')
+    (home / ".gemini").mkdir()
+    (home / ".gemini" / "oauth_creds.json").write_text("gemini_file_secret")
+    (home / ".config" / "opencode").mkdir(parents=True)
+    (home / ".config" / "opencode" / "opencode.json").write_text("opencode_file_secret")
+    (home / ".ollama").mkdir()
+    (home / ".ollama" / "id_ed25519").write_text("ollama_file_secret")
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_ollama_ok,
+    )
+
+    for name in ("claude_code", "gemini", "opencode"):
+        provider = payload["providers"][name]
+        assert provider["ok"] is True
+        assert provider["credential_scope"] == "isolated_workspace"
+        assert provider["isolation"] == "per_workspace_copy"
+        assert provider["credential_sources"]
+    serialized = json.dumps(payload, sort_keys=True)
+    for secret in (
+        "claude_file_secret",
+        "claude_json_secret",
+        "gemini_file_secret",
+        "opencode_file_secret",
+        "ollama_file_secret",
+    ):
+        assert secret not in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_env_fallbacks_report_security_warnings(
+    tmp_path: Path,
+) -> None:
+    env = {
+        "AWF_GITHUB_TOKEN": "ghp_env_fallback_secret",
+        "OPENAI_API_KEY": "sk-proj-codex-fallback-secret",
+        "ANTHROPIC_API_KEY": "sk-ant-env-fallback-secret",
+        "GEMINI_API_KEY": "gemini-env-fallback-secret",
+        "OLLAMA_API_KEY": "ollama-env-fallback-secret",
+        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+    }
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ=env,
+        run_subprocess=lambda _args, **_kwargs: _completed(stdout="logged in\n"),
+        http_get=_ollama_ok,
+    )
+
+    for name in ("github", "codex", "claude_code", "gemini", "opencode"):
+        provider = payload["providers"][name]
+        assert provider["ok"] is True
+        assert provider["credential_scope"] == "static_env_token"
+        assert provider["isolation"] == "service_env"
+        assert any(
+            warning["reason"] == "STATIC_TOKEN_FALLBACK"
+            for warning in provider["warnings"]
+        )
+    serialized = json.dumps(payload, sort_keys=True)
+    for secret in env.values():
+        assert secret not in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_docker_reports_host_daemon_broad_control_warning(
+    tmp_path: Path,
+) -> None:
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    docker = payload["providers"]["docker"]
+    assert docker["ok"] is True
+    assert docker["status"] == "ok"
+    assert docker["reason"] == "DOCKER_HOST_CONFIGURED"
+    assert docker["credential_scope"] == "docker_host_control"
+    assert docker["isolation"] == "host_daemon"
+    assert any(
+        warning["reason"] == "DOCKER_HOST_BROAD_CONTROL"
+        for warning in docker["warnings"]
+    )
+
+
+@pytest.mark.unit
+def test_provider_readiness_docker_registry_auth_is_observed_not_read(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    docker_home = home / ".docker"
+    docker_home.mkdir(parents=True)
+    (docker_home / "config.json").write_text(
+        '{"auths":{"ghcr.io":{"auth":"docker_file_secret"}}}'
+    )
+    env_auth = '{"auths":{"registry.example":{"auth":"docker_env_secret"}}}'
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"DOCKER_AUTH_CONFIG": env_auth},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    docker = payload["providers"]["docker"]
+    source_signals = {source["signal"] for source in docker["credential_sources"]}
+    assert "DOCKER_AUTH_CONFIG" in source_signals
+    assert "~/.docker/config.json" in source_signals
+    serialized = json.dumps(payload, sort_keys=True)
+    assert "docker_file_secret" not in serialized
+    assert "docker_env_secret" not in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_security_summary_collects_provider_warnings(
+    tmp_path: Path,
+) -> None:
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={"OPENAI_API_KEY": "sk-proj-security-summary-secret"},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    security = payload["security"]
+    assert security["status"] == "warning"
+    assert security["warning_count"] >= 1
+    assert "codex" in security["providers_with_warnings"]
+    assert "STATIC_TOKEN_FALLBACK" in security["reason_codes"]
+    assert "DOCKER_HOST_BROAD_CONTROL" in security["reason_codes"]
+    assert "sk-proj-security-summary-secret" not in json.dumps(security, sort_keys=True)
 
 
 @pytest.mark.unit
@@ -520,6 +800,32 @@ def test_provider_readiness_default_subprocess_and_http_wrappers(
     ) is completed
     assert calls == [(["gh", "auth", "status"], 1.5)]
     assert provider_readiness._http_get("http://example.test/api/version", timeout=1.5).text == "ok"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "secret",
+    [
+        "ghp_providerreadinesssecret",
+        "gho_providerreadinesssecret",
+        "github_pat_providerreadinesssecret",
+        "sk-proj-provider-readiness-secret",
+        "sk-ant-provider-readiness-secret",
+        "sk-providerReadinessSecret1234567890",
+        "AIzaProviderReadinessSecret",
+        "xoxb-provider-readiness-secret",
+    ],
+)
+def test_provider_readiness_redacts_known_token_patterns(secret: str) -> None:
+    assert provider_readiness._redact(f"token {secret}", frozenset()) == "token <redacted>"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("identifier", ["sk-live-abc12345", "sk-test-abc12345"])
+def test_provider_readiness_preserves_non_secret_sk_identifiers(identifier: str) -> None:
+    assert provider_readiness._redact(f"diagnostic {identifier}", frozenset()) == (
+        f"diagnostic {identifier}"
+    )
 
 
 @pytest.mark.unit

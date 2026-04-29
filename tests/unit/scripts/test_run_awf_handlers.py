@@ -263,6 +263,11 @@ def patch_handlers(
     monkeypatch.setattr(run_awf, "ComposeManager", _compose_ctor)
     monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
 
+    async def _noop_stream_service_logs(**_kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr(run_awf, "_stream_service_logs_best_effort", _noop_stream_service_logs)
+
     executors: list[_FakeExecutor] = []
     monitors: list[_FakeMonitor] = []
     monitor_builder_calls: list[dict[str, Any]] = []
@@ -1312,6 +1317,7 @@ class TestAgentEnvironmentWithHostAuth:
         env = run_awf._agent_environment_with_host_auth(
             (("PYTHONUNBUFFERED", "1"),),
             host_env={
+                "OPENAI_API_KEY": "secret-codex",
                 "ANTHROPIC_API_KEY": "secret-anthropic",
                 "GEMINI_API_KEY": "secret-gemini",
                 "OLLAMA_API_KEY": "secret-ollama",
@@ -1320,11 +1326,13 @@ class TestAgentEnvironmentWithHostAuth:
         )
 
         assert ("PYTHONUNBUFFERED", "1") in env
+        assert ("OPENAI_API_KEY", "${OPENAI_API_KEY}") in env
         assert ("ANTHROPIC_API_KEY", "${ANTHROPIC_API_KEY}") in env
         assert ("GEMINI_API_KEY", "${GEMINI_API_KEY}") in env
         assert ("OLLAMA_API_KEY", "${OLLAMA_API_KEY}") in env
         assert ("GH_TOKEN", "${AWF_GITHUB_TOKEN}") in env
         assert ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}") in env
+        assert ("OPENAI_API_KEY", "secret-codex") not in env
         assert ("ANTHROPIC_API_KEY", "secret-anthropic") not in env
         assert ("OLLAMA_API_KEY", "secret-ollama") not in env
         assert ("GH_TOKEN", "ghp_raw_secret") not in env

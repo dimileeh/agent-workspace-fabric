@@ -10,9 +10,10 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class DockerMode(StrEnum):
@@ -92,14 +93,80 @@ class ProfilePhaseSet(BaseModel):
         return commands
 
 
+_HealthCheckCommand = Annotated[str, Field(min_length=1, max_length=4096)]
+_HealthCheckUrl = Annotated[str, Field(min_length=1, max_length=2048)]
+
+
 class ProfileHealthCheck(BaseModel):
     """A command that must pass before validation runs."""
 
-    model_config = ConfigDict(extra="forbid")
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
 
     name: Annotated[str, Field(min_length=1, max_length=128)]
-    command: Annotated[str, Field(min_length=1, max_length=4096)]
-    timeout_seconds: int = Field(default=60, ge=1, le=3600)
+    kind: Literal["command", "http"] | None = Field(
+        default=None,
+        validation_alias=AliasChoices("kind", "type"),
+        serialization_alias="kind",
+    )
+    command: _HealthCheckCommand | None = None
+    url: _HealthCheckUrl | None = None
+    method: Literal["GET", "HEAD"] = "GET"
+    expected_status: int = Field(default=200, ge=100, le=599)
+    timeout_seconds: float = Field(default=60.0, gt=0, le=3600)
+    interval_seconds: float = Field(default=1.0, gt=0, le=3600)
+    attempt_timeout_seconds: float | None = Field(default=None, gt=0, le=3600)
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def _normalize_method(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.upper()
+        return value
+
+    @model_validator(mode="after")
+    def _validate_mode(self) -> ProfileHealthCheck:
+        has_command = self.command is not None
+        has_url = self.url is not None
+        if has_command == has_url:
+            raise ValueError("healthcheck must set exactly one of command or url")
+
+        inferred_kind: Literal["command", "http"] = "command" if has_command else "http"
+        if self.kind is None:
+            self.kind = inferred_kind
+        elif self.kind != inferred_kind:
+            raise ValueError("healthcheck kind must match command/url configuration")
+
+        if self.url is not None:
+            parsed = urlparse(self.url)
+            if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+                raise ValueError("healthcheck url must be an absolute http or https URL")
+
+        return self
+
+    def display_command(self) -> str:
+        """Human-readable command/target used in validation provenance."""
+        if self.command is not None:
+            return self.command
+        return f"{self.method} {self.target()} expected {self.expected_status}"
+
+    def target(self) -> str:
+        """Secret-free health-check target for logs and events."""
+        if self.command is not None:
+            return self.command
+        return _redact_url_userinfo(self._require_url())
+
+    def _require_url(self) -> str:
+        if self.url is None:
+            raise ValueError("healthcheck must set command or url")
+        return self.url
+
+
+def _redact_url_userinfo(url: str) -> str:
+    parsed = urlparse(url)
+    if "@" not in parsed.netloc:
+        return url
+    host_target = parsed.netloc.rsplit("@", 1)[1] or "<redacted>"
+    return parsed._replace(netloc=host_target).geturl()
 
 
 class ProfileCoverage(BaseModel):
@@ -265,52 +332,6 @@ class ProfileSecret(BaseModel):
     provider: str | None = Field(default=None, max_length=128)
     ref: str | None = Field(default=None, max_length=512)
 
-    @model_validator(mode="after")
-    def _validate_secret(self) -> ProfileSecret:
-        # Broad targets check
-        if self.kind == "mount":
-            target_norm = self.target.rstrip("/")
-            if target_norm in (
-                "",
-                "/tmp",
-                "/var",
-                "/etc",
-                "/root",
-                "/home",
-                "/dev",
-                "/proc",
-                "/sys",
-            ):
-                raise ValueError(f"secret target '{self.target}' is too broad")
-        elif self.kind == "env":
-            if self.target in ("PATH", "HOME", "USER", ""):
-                raise ValueError(f"secret target '{self.target}' is too broad or invalid")
-
-        # Missing provider/ref on required secrets check
-        if self.provider and not self.ref:
-            raise ValueError("secret 'ref' must be provided if 'provider' is specified")
-        if self.ref and not self.provider:
-            raise ValueError("secret 'provider' must be provided if 'ref' is specified")
-
-        # If required and it's not a legacy 'secrets' declaration, we might enforce both,
-        # but for compatibility, we only require they be symmetric right now.
-
-        # Raw looking values
-        def _looks_like_raw_secret(value: str | None) -> bool:
-            if not value:
-                return False
-            # Check for generic high-entropy strings or common token prefixes
-            if value.startswith(("sk-", "xoxb-", "xoxp-", "AIza")):
-                return True
-            # Check length to prevent embedding large JWTs or keys in 'ref'
-            # Overly long strings not looking like a simple path or ARN
-            return len(value) > 128 and not bool(re.match(r"^[a-zA-Z0-9_\-./:@]+$", value))
-
-        if _looks_like_raw_secret(self.ref):
-            raise ValueError("secret 'ref' appears to contain a raw secret value")
-
-        return self
-
 
 class EgressMode(StrEnum):
     open = "open"
@@ -340,12 +361,49 @@ class ProfileEgress(BaseModel):
         return self
 
 
+class ProfileLintSeverity(StrEnum):
+    """Severity for structured profile lint findings."""
+
+    warning = "warning"
+    error = "error"
+
+
+class ProfileLintFinding(BaseModel):
+    """Structured profile validation finding for API/console consumers."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason_code: Annotated[str, Field(min_length=1, max_length=128)]
+    message: Annotated[str, Field(min_length=1, max_length=512)]
+    path: str | None = Field(default=None, max_length=512)
+    severity: ProfileLintSeverity = ProfileLintSeverity.error
+    details: dict[str, Any] = Field(default_factory=dict)
+
+
+class HostHomeAuthMountMode(StrEnum):
+    """How profile-declared host-home auth mounts are treated."""
+
+    block = "block"
+    warn = "warn"
+
+
+class HostHomeAuthMountPolicy(BaseModel):
+    """Compatibility policy for local host-home credential mounts."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    mode: HostHomeAuthMountMode = HostHomeAuthMountMode.block
+
+
 class ProfileSecurity(BaseModel):
     """Security and policy declarations for the workspace."""
 
     model_config = ConfigDict(extra="forbid")
 
     egress: ProfileEgress = Field(default_factory=ProfileEgress)
+    host_home_auth_mounts: HostHomeAuthMountPolicy = Field(
+        default_factory=HostHomeAuthMountPolicy
+    )
 
 
 class WorkspaceProfile(BaseModel):
@@ -392,3 +450,4 @@ class ProfileResolution(BaseModel):
     profile: WorkspaceProfile
     reason: str
     candidates_considered: list[str] = Field(default_factory=list)
+    lint_findings: list[ProfileLintFinding] = Field(default_factory=list)

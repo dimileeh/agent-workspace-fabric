@@ -7,9 +7,21 @@ from collections.abc import Mapping
 from pathlib import Path
 
 from awf.node.compose_manager import ComposeService
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.lint import profile_service_volume_lint_errors
+from awf.profiles.models import ProfileLintFinding, WorkspaceProfile
 
 AGENT_AUTH_ENV_VARS = (
+    # Codex/OpenAI static-token fallback auth. Prefer isolated ~/.codex copies
+    # when present; these keep local shells compatible without writing values.
+    "OPENAI_API_KEY",
+    "OPENAI_API_TOKEN",
+    "CODEX_API_KEY",
+    "CODEX_AUTH_TOKEN",
+    "OPENAI_BASE_URL",
+    "OPENAI_ORG_ID",
+    "OPENAI_ORGANIZATION",
+    "OPENAI_PROJECT",
+    "OPENAI_PROJECT_ID",
     # Claude Code portable/API-key auth. Host claude.ai OAuth can live in
     # macOS Keychain, which is not available inside a Linux container.
     "ANTHROPIC_API_KEY",
@@ -36,11 +48,25 @@ AGENT_AUTH_ENV_VARS = (
 )
 
 
+class ProfileServiceValidationError(ValueError):
+    """Raised when profile-declared services fail security validation."""
+
+    def __init__(self, findings: tuple[ProfileLintFinding, ...]) -> None:
+        self.findings = findings
+        self.reason_code = findings[0].reason_code if findings else "PROFILE_SERVICE_INVALID"
+        message = findings[0].message if findings else "profile service validation failed"
+        super().__init__(f"{self.reason_code}: {message}")
+
+
 def profile_services(
     profile: WorkspaceProfile,
     *,
     base_path: Path | None = None,
 ) -> tuple[ComposeService, ...]:
+    lint_errors = profile_service_volume_lint_errors(profile)
+    if lint_errors:
+        raise ProfileServiceValidationError(lint_errors)
+
     return tuple(
         ComposeService(
             name=s.name,

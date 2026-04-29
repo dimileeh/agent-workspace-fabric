@@ -39,6 +39,10 @@ _PROVIDER_ENV_KEYS = (
     "AWF_GITHUB_TOKEN",
     "GH_TOKEN",
     "GITHUB_TOKEN",
+    "OPENAI_API_KEY",
+    "OPENAI_API_TOKEN",
+    "CODEX_API_KEY",
+    "CODEX_AUTH_TOKEN",
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
     "CLAUDE_CODE_OAUTH_TOKEN",
@@ -49,6 +53,8 @@ _PROVIDER_ENV_KEYS = (
     "OLLAMA_API_KEY",
     "AWF_OPENCODE_OLLAMA_BASE_URL",
     "OLLAMA_HOST",
+    "DOCKER_AUTH_CONFIG",
+    "DOCKER_HOST",
 )
 
 # ---- /healthz ---------------------------------------------------------------
@@ -168,6 +174,16 @@ async def test_readyz_response_shape_matches_contract(
             assert check["status"] == "ok"
             assert check.get("reason") is None
     assert body["agent_readiness"]["status"] == "ok"
+    assert set(body["agent_readiness"]["providers"]) == {
+        "github",
+        "codex",
+        "claude_code",
+        "gemini",
+        "opencode",
+        "docker",
+    }
+    assert body["agent_readiness"]["security"]["status"] == "warning"
+    assert "DOCKER_HOST_BROAD_CONTROL" in body["agent_readiness"]["security"]["reason_codes"]
     assert body["agent_readiness"]["providers"]["github"]["reason"] == (
         "GITHUB_TOKEN_ENV_MISSING"
     )
@@ -209,6 +225,48 @@ async def test_readyz_strict_github_provider_missing_auth_returns_503(
     assert body["agent_readiness"]["providers"]["github"]["status"] == "fail"
     assert body["agent_readiness"]["providers"]["github"]["reason"] == (
         "GITHUB_TOKEN_ENV_MISSING"
+    )
+
+
+@pytest.mark.unit
+async def test_readyz_strict_codex_provider_missing_auth_returns_503(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz?provider=codex")
+    body = response.json()
+
+    assert response.status_code == 503
+    assert body["status"] == "fail"
+    assert body["agent_readiness"]["status"] == "fail"
+    assert body["agent_readiness"]["providers"]["codex"]["status"] == "fail"
+    assert body["agent_readiness"]["providers"]["codex"]["reason"] == "CODEX_AUTH_MISSING"
+
+
+@pytest.mark.unit
+async def test_readyz_docker_provider_is_validated_and_reports_security_metadata(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    app, client = ready_app_and_client
+    runner = FakeCommandRunner()
+    _queue_all_ok(runner)
+    app.state.command_runner = runner
+
+    response = await client.get("/readyz?provider=docker")
+    body = response.json()
+
+    assert response.status_code == 200
+    assert body["checks"]["docker_daemon"]["status"] == "ok"
+    docker = body["agent_readiness"]["providers"]["docker"]
+    assert docker["status"] == "ok"
+    assert docker["credential_scope"] == "docker_host_control"
+    assert any(
+        warning["reason"] == "DOCKER_HOST_BROAD_CONTROL"
+        for warning in docker["warnings"]
     )
 
 

@@ -1111,6 +1111,66 @@ def test_service_status_provider_option_requests_strict_provider(
 
 
 @pytest.mark.unit
+def test_service_status_provider_option_accepts_codex(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import status as status_mod
+
+    settings = object()
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+
+    async def _collect(received: object, **kwargs: object) -> dict[str, object]:
+        assert received is settings
+        assert kwargs["strict_providers"] == {"codex"}
+        return {
+            "service": "awf",
+            "status": "fail",
+            "checks": {},
+            "agent_readiness": {
+                "status": "fail",
+                "strict_providers": ["codex"],
+                "security": {
+                    "status": "warning",
+                    "warning_count": 1,
+                    "providers_with_warnings": ["codex"],
+                    "reason_codes": ["CODEX_AUTH_MISSING"],
+                },
+                "providers": {
+                    "codex": {
+                        "ok": False,
+                        "status": "fail",
+                        "reason": "CODEX_AUTH_MISSING",
+                    }
+                },
+            },
+        }
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(
+        app,
+        ["service", "status", "--provider", "codex", "--format", "pretty"],
+    )
+
+    assert result.exit_code == 1, result.output
+    assert "agent_readiness.providers.codex.status: fail" in result.stdout
+    assert "agent_readiness.security.reason_codes: ['CODEX_AUTH_MISSING']" in result.stdout
+
+
+@pytest.mark.unit
+def test_service_provider_help_lists_codex_and_docker() -> None:
+    status_result = _runner.invoke(app, ["service", "status", "--help"])
+    bootstrap_result = _runner.invoke(app, ["service", "bootstrap", "--help"])
+
+    assert status_result.exit_code == 0, status_result.output
+    assert bootstrap_result.exit_code == 0, bootstrap_result.output
+    for output in (status_result.output, bootstrap_result.output):
+        assert "codex" in output
+        assert "docker" in output
+
+
+@pytest.mark.unit
 def test_worker_entrypoint_wires_control_worker_dependencies(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

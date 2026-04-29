@@ -8,9 +8,11 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from awf.profiles.lint import profile_lint_errors
 from awf.profiles.models import (
     DockerMode,
     ProfileCommand,
+    ProfileHealthCheck,
     ProfilePhaseSet,
     ProfileSecret,
     WorkspaceProfile,
@@ -123,6 +125,117 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
         profile.validation.coverage.command.command == "uv run pytest --cov=awf --cov-report=term"
     )
     assert profile.validation.coverage.command.timeout_seconds == 900
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_legacy_command_healthcheck_shape() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "health-command",
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "api",
+                        "command": "curl -fsS http://api:8000/healthz",
+                        "timeout_seconds": 20,
+                    }
+                ]
+            },
+        }
+    )
+
+    healthcheck = profile.validation.healthchecks[0]
+    assert healthcheck.name == "api"
+    assert healthcheck.kind == "command"
+    assert healthcheck.command == "curl -fsS http://api:8000/healthz"
+    assert healthcheck.timeout_seconds == 20
+    assert healthcheck.interval_seconds == 1
+    assert healthcheck.attempt_timeout_seconds is None
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_http_healthcheck_without_shell_command() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "health-http",
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "api",
+                        "url": "https://api.example.test/healthz",
+                        "method": "head",
+                    }
+                ]
+            },
+        }
+    )
+
+    healthcheck = profile.validation.healthchecks[0]
+    assert healthcheck.kind == "http"
+    assert healthcheck.command is None
+    assert healthcheck.url == "https://api.example.test/healthz"
+    assert healthcheck.method == "HEAD"
+    assert healthcheck.expected_status == 200
+    assert healthcheck.timeout_seconds == 60
+    assert healthcheck.interval_seconds == 1
+
+
+@pytest.mark.unit
+def test_http_healthcheck_public_targets_redact_url_userinfo() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "health-http-userinfo",
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "api",
+                        "url": "https://agent:token@api.example.test:8443/healthz?ready=1",
+                        "method": "HEAD",
+                        "expected_status": 204,
+                    }
+                ]
+            },
+        }
+    )
+
+    healthcheck = profile.validation.healthchecks[0]
+
+    assert healthcheck.url == "https://agent:token@api.example.test:8443/healthz?ready=1"
+    assert healthcheck.target() == "https://api.example.test:8443/healthz?ready=1"
+    assert (
+        healthcheck.display_command()
+        == "HEAD https://api.example.test:8443/healthz?ready=1 expected 204"
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "healthcheck",
+    [
+        {"name": "missing-target"},
+        {"name": "both", "command": "curl localhost", "url": "http://localhost/health"},
+        {"name": "ftp", "url": "ftp://localhost/health"},
+        {"name": "status", "url": "http://localhost/health", "expected_status": 99},
+        {"name": "interval", "url": "http://localhost/health", "interval_seconds": 0},
+    ],
+)
+def test_profile_schema_rejects_invalid_healthchecks(healthcheck: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-health",
+                "validation": {"healthchecks": [healthcheck]},
+            }
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method_name", ["display_command", "target"])
+def test_healthcheck_public_targets_reject_invalid_constructed_state(method_name: str) -> None:
+    healthcheck = ProfileHealthCheck.model_construct(name="invalid")
+
+    with pytest.raises(ValueError, match="healthcheck must set command or url"):
+        getattr(healthcheck, method_name)()
 
 
 @pytest.mark.unit
@@ -264,9 +377,19 @@ def test_profile_secret_accepts_safe_mount_without_provider_ref_pair() -> None:
 
 
 @pytest.mark.unit
+def test_profile_secret_rejects_empty_targets() -> None:
+    with pytest.raises(ValidationError):
+        ProfileSecret(name="empty-target", target="")
+
+
+@pytest.mark.unit
 def test_profile_secret_rejects_reserved_env_targets() -> None:
-    with pytest.raises(ValidationError, match="too broad or invalid"):
-        ProfileSecret(name="bad-home", target="HOME", kind="env")
+    profile = WorkspaceProfile(
+        name="bad-secret-env",
+        secrets=[ProfileSecret(name="bad-home", target="HOME", kind="env")],
+    )
+
+    assert profile_lint_errors(profile)[0].reason_code == "SECRET_ENV_TARGET_RESERVED"
 
 
 @pytest.mark.unit

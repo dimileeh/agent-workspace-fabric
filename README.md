@@ -179,7 +179,7 @@ A `WorkspaceProfile` can describe:
 - `validation`: health checks, artifact paths, timeout and tier hints.
 - `monitor`: PR-monitor policy such as initial review grace.
 - `secrets`: named mounts or env leases.
-- `security`: local egress policy and related security declarations.
+- `security`: local egress policy, related security declarations, and profile lint policy for credential mounts.
 - `ports`: endpoint names exposed to agents or tests.
 
 Resolution order:
@@ -749,9 +749,12 @@ uv run --python 3.12 --extra dev awf service logs --follow --service worker
 ```
 
 `awf service status` and `/readyz` include an `agent_readiness` section for
-GitHub, Claude Code, Gemini, and OpenCode/Ollama. Missing optional providers
-are warnings by default. Pass `--provider <name>` or `?provider=<name>` to make
-that provider strict for scheduling or rollout checks.
+GitHub, Codex, Claude Code, Gemini, OpenCode/Ollama, and Docker. Each provider
+reports redacted `credential_sources`, `credential_scope`, `isolation`, and
+structured warnings. Missing optional providers and local least-privilege
+downgrades are warnings by default. Pass `--provider <name>` or
+`?provider=<name>` to make that provider strict for scheduling or rollout
+checks.
 
 The service-mode default database URL is local Postgres
 (`postgresql+asyncpg://awf:...@localhost:5433/awf`). SQLite remains supported
@@ -1166,6 +1169,7 @@ AWF_AGENT_RUNTIME_IMAGE=awf-agent-runtime:latest
 AWF_HOST_WORK_DIR=${HOME}/.awf/service
 AWF_HOST_HOME=${HOME}
 AWF_GITHUB_TOKEN=<token from gh auth token>
+OPENAI_API_KEY=<optional Codex env auth>
 ANTHROPIC_API_KEY=<optional Claude env auth>
 GEMINI_API_KEY=<optional Gemini env auth>
 AWF_OPENCODE_OLLAMA_BASE_URL=http://host.docker.internal:11434/v1
@@ -1214,23 +1218,42 @@ the worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
 launching the workspace stack. AWF does not copy `~/.ollama/models`; workspace
 OpenCode runs talk to the host Ollama daemon through `host.docker.internal`.
 
+Profiles should prefer declared `secrets` over host-home bind mounts. Profile
+lint blocks profile-declared service volumes that mount `${HOME}`,
+`${AWF_HOST_HOME}`, `~`, `/home/<user>`, or `/Users/<user>` into broad auth
+locations such as `/home/agent` or `/root`. The only local-development
+compatibility exception is the credential path list above, mounted read-only;
+set `security.host_home_auth_mounts.mode: warn` to allow those narrow mounts
+with a structured warning. Writable host-home credential mounts are rejected;
+seed writable auth into AWF's per-workspace auth directory instead.
+
 Readiness checks use the same service-visible signals without reading secret
 file contents:
 
 - GitHub: `AWF_GITHUB_TOKEN`, `GH_TOKEN`, or `GITHUB_TOKEN`, plus a bounded
   `gh auth status` check for PR creation, comments, and merges.
+- Codex: isolated per-workspace copies from `~/.codex`, or Codex/OpenAI static
+  env auth such as `OPENAI_API_KEY`.
 - Claude Code: `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`,
   `CLAUDE_CODE_OAUTH_TOKEN`, `~/.claude`, or `~/.claude.json`.
 - Gemini: `GEMINI_API_KEY`, `GOOGLE_API_KEY`, `GOOGLE_CLOUD_ACCESS_TOKEN`,
   visible `GOOGLE_APPLICATION_CREDENTIALS`, or `~/.gemini`.
 - OpenCode/Ollama: `~/.config/opencode`, selected small `~/.ollama` auth files,
   `OLLAMA_API_KEY`, and a cheap Ollama `/api/version` reachability probe.
+- Docker: configured Docker host/socket control and Docker registry auth signals
+  such as `DOCKER_AUTH_CONFIG` or `~/.docker/config.json`. Docker CLI and daemon
+  health remain separate readiness resource checks.
+
+The top-level `agent_readiness.security` summary aggregates warning counts,
+provider names, and reason codes such as `STATIC_TOKEN_FALLBACK` or
+`DOCKER_HOST_BROAD_CONTROL`.
 
 Use strict checks before provider-specific work:
 
 ```bash
 uv run --python 3.12 --extra dev awf service status --format pretty
 uv run --python 3.12 --extra dev awf service status --provider claude_code --format pretty
+uv run --python 3.12 --extra dev awf service status --provider codex --format pretty
 curl 'http://localhost:8000/readyz?provider=opencode'
 ```
 
@@ -1365,6 +1388,62 @@ awf:
       - command: docker compose down -v --remove-orphans
         timeout_seconds: 300
 ```
+
+For DB-backed projects that do not need nested Docker, declare the app and
+database as profile services in AWF's outer workspace stack. The agent reaches
+them by Compose service name on `awf_net`; no host port is required.
+
+Example repo-local Python/Postgres profile:
+
+```yaml
+awf:
+  name: my-db-backed-app
+  version: 1
+  docker:
+    mode: none
+  runtime:
+    environment:
+      APP_BASE_URL: http://app:8080
+      DATABASE_URL: postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf
+  services:
+    - name: postgres
+      image: postgres:16-alpine
+      environment:
+        POSTGRES_DB: awf
+        POSTGRES_PASSWORD: ${AWF_POSTGRES_PASSWORD}
+        POSTGRES_USER: awf
+      healthcheck_cmd: pg_isready -U awf -d awf
+      volumes:
+        - [postgres_data, /var/lib/postgresql/data]
+    - name: app
+      build_context: .
+      dockerfile: Dockerfile
+      environment:
+        DATABASE_URL: postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf
+        PORT: "8080"
+      depends_on:
+        - postgres
+      healthcheck_cmd: python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).read()"
+      command: python /app/app.py
+  phases:
+    setup:
+      - command: python -c "import os, urllib.request; urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', timeout=10).read()"
+        timeout_seconds: 30
+    validate:
+      - command: python -c "import os, urllib.request; urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/validate', timeout=10).read()"
+        timeout_seconds: 30
+  validation:
+    healthchecks:
+      - name: app
+        command: python -c "import os, urllib.request; urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/healthz', timeout=10).read()"
+        timeout_seconds: 30
+  ports:
+    app: http://app:8080
+    postgres: postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf
+```
+
+This Postgres service is workspace-local project data. It is distinct from the
+AWF control-plane Postgres database used by the API and worker.
 
 ## Observability
 

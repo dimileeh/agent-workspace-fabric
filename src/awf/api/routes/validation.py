@@ -364,7 +364,7 @@ def _command_lookup(workspace: Workspace) -> dict[tuple[str, int], str]:
                     profile.validation.healthchecks,
                     start=1,
                 ):
-                    lookup.setdefault((phase_key, index), healthcheck.command)
+                    lookup.setdefault((phase_key, index), healthcheck.display_command())
                 continue
 
             for index, (_, command) in enumerate(

@@ -190,6 +190,44 @@ def test_validation_run_command_records_include_healthchecks_and_coverage() -> N
 
 
 @pytest.mark.unit
+def test_validation_run_command_records_include_http_healthcheck_display() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-http-healthcheck",
+            "phases": {"validate": ["pytest -q"]},
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "api",
+                        "url": "http://api:8080/healthz",
+                        "expected_status": 204,
+                    }
+                ]
+            },
+        }
+    )
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("validate",),
+        run_healthchecks=True,
+    )
+
+    assert records[0] == {
+        "phase": "healthcheck",
+        "command_index": 1,
+        "command": "GET http://api:8080/healthz expected 204",
+        "healthcheck_name": "api",
+        "healthcheck_kind": "http",
+        "target": "http://api:8080/healthz",
+        "stream_ids": {
+            "stdout": "validation.01_healthcheck.stdout",
+            "stderr": "validation.01_healthcheck.stderr",
+        },
+    }
+
+
+@pytest.mark.unit
 def test_validation_run_command_records_can_skip_healthchecks_and_coverage() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -659,6 +697,41 @@ def test_validation_failure_message_carries_coverage_context(tmp_path: Path) -> 
         )
         == "validation failed"
     )
+
+
+@pytest.mark.unit
+def test_validation_failure_message_carries_healthcheck_context(tmp_path: Path) -> None:
+    stdout = tmp_path / "health.stdout"
+    stderr = tmp_path / "health.stderr"
+    stdout.write_text("starting", encoding="utf-8")
+    stderr.write_text("connection refused", encoding="utf-8")
+    failure = ValidationCommandResult(
+        command="GET http://api:8080/healthz expected 200",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        phase="healthcheck",
+        reason_code="HEALTHCHECK_HTTP_STATUS_MISMATCH",
+        stream_ids={
+            "stdout": "validation.01_healthcheck.stdout",
+            "stderr": "validation.01_healthcheck.stderr",
+        },
+        metadata={
+            "healthcheck_name": "api",
+            "healthcheck_kind": "http",
+            "target": "http://api:8080/healthz",
+            "attempts": 3,
+            "timeout_seconds": 30,
+        },
+    )
+
+    message = _validation_failure_message(ValidationResult(commands=[failure]))
+
+    assert "health check api" in message
+    assert "http://api:8080/healthz" in message
+    assert "HEALTHCHECK_HTTP_STATUS_MISMATCH" in message
+    assert "validation.01_healthcheck.stderr" in message
 
 
 @pytest.mark.unit
