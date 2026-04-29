@@ -59,6 +59,10 @@ class TestIds:
         assert new_workspace_id().startswith("ws_")
 
     @pytest.mark.unit
+    def test_redact_secrets_preserves_empty_text(self) -> None:
+        assert redact_secrets("") == ""
+
+    @pytest.mark.unit
     def test_operation_id_prefix(self) -> None:
         assert new_operation_id().startswith("op_")
 

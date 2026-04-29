@@ -801,6 +801,25 @@ class WorkspaceLogReadResponse(BaseModel):
     data: str
 
 
+class WorkspaceArtifactResponse(BaseModel):
+    artifact_id: str
+    workspace_id: str
+    name: str
+    relative_path: str
+    path: str
+    kind: str
+    size_bytes: int
+    modified_at: datetime
+
+
+class WorkspaceArtifactListResponse(BaseModel):
+    items: list[WorkspaceArtifactResponse]
+    next_cursor: str | None = None
+    has_more: bool = False
+    limit: int = 50
+    cursor: str | None = None
+
+
 class ValidationProvenanceItemResponse(BaseModel):
     validation_run_id: str | None = None
     workspace_id: str
