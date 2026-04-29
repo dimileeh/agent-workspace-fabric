@@ -6,6 +6,7 @@ import pytest
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+import awf.api.routes.events as events_route
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
 
@@ -47,6 +48,32 @@ async def _add_event(
 
 
 class TestListEvents:
+    @pytest.mark.unit
+    async def test_direct_call_returns_empty_envelope(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        class _Repo:
+            def __init__(self, session: object) -> None:
+                self.session = session
+
+            async def list(self, *, workspace_id: str | None, limit: int) -> list[object]:
+                assert workspace_id == "ws_missing"
+                assert limit == 7
+                return []
+
+        monkeypatch.setattr(events_route, "WorkspaceEventRepository", _Repo)
+
+        response = await events_route.list_events(
+            workspace_id="ws_missing",
+            limit=7,
+            session=object(),  # type: ignore[arg-type]
+        )
+
+        assert response.items == []
+        assert response.limit == 7
+        assert response.cursor is None
+
     @pytest.mark.unit
     async def test_lists_all_events_newest_first(self, client: AsyncClient) -> None:
         first_id = await _create_workspace(client, "first")

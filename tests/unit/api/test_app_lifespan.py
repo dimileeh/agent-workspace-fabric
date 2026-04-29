@@ -102,3 +102,30 @@ class TestLifespan:
             "non-sqlite URL must NOT call create_all — Alembic owns the schema"
         )
         assert disposed[0] is True
+
+    @pytest.mark.unit
+    def test_lifespan_disposes_original_engine_when_state_engine_is_replaced(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.api import app as app_mod
+
+        class _FakeEngine:
+            def __init__(self) -> None:
+                self.dispose_count = 0
+
+            async def dispose(self) -> None:
+                self.dispose_count += 1
+
+        original_engine = _FakeEngine()
+        replacement_engine = _FakeEngine()
+        monkeypatch.setattr(app_mod, "make_engine", lambda _url: original_engine)
+        monkeypatch.setattr(app_mod, "make_session_factory", lambda _e: lambda: None)
+        monkeypatch.setenv("AWF_DATABASE_URL", "postgresql+asyncpg://u:p@h/d")
+
+        app = create_app(use_lifespan=True)
+        with TestClient(app):
+            app.state.db_engine = replacement_engine
+
+        assert replacement_engine.dispose_count == 1
+        assert original_engine.dispose_count == 1

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -373,6 +374,158 @@ def test_provider_readiness_docker_registry_auth_is_observed_not_read(
     serialized = json.dumps(payload, sort_keys=True)
     assert "docker_file_secret" not in serialized
     assert "docker_env_secret" not in serialized
+
+
+@pytest.mark.unit
+def test_provider_readiness_docker_without_host_or_registry_warns_when_unobserved(
+    tmp_path: Path,
+) -> None:
+    payload = collect_agent_readiness(
+        replace(_settings(tmp_path), docker_host=""),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    docker = payload["providers"]["docker"]
+    assert docker["ok"] is False
+    assert docker["status"] == "warn"
+    assert docker["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
+    assert docker["credential_scope"] == "not_observed"
+    assert docker["isolation"] == "none"
+
+
+@pytest.mark.unit
+def test_provider_readiness_docker_config_registry_auth_is_observed(
+    tmp_path: Path,
+) -> None:
+    docker_config = tmp_path / "docker-config"
+    docker_config.mkdir()
+    (docker_config / "config.json").write_text(
+        '{"auths":{"registry.example":{"auth":"docker_config_secret"}}}'
+    )
+
+    payload = collect_agent_readiness(
+        replace(_settings(tmp_path), docker_host=""),
+        environ={"DOCKER_CONFIG": str(docker_config)},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    docker = payload["providers"]["docker"]
+    assert docker["ok"] is True
+    assert docker["reason"] == "DOCKER_REGISTRY_AUTH_PRESENT"
+    assert docker["credential_scope"] == "read_only_host_path"
+    assert docker["isolation"] == "read_only_bind"
+    assert docker["credential_sources"] == [
+        {
+            "type": "path",
+            "signal": "DOCKER_CONFIG/config.json",
+            "credential_scope": "read_only_host_path",
+            "isolation": "read_only_bind",
+        }
+    ]
+    assert "docker_config_secret" not in json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_provider_readiness_explicit_missing_docker_config_does_not_fallback(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    docker_home = home / ".docker"
+    docker_home.mkdir(parents=True)
+    (docker_home / "config.json").write_text(
+        '{"auths":{"registry.example":{"auth":"docker_home_secret"}}}'
+    )
+
+    payload = collect_agent_readiness(
+        replace(_settings(tmp_path, host_home=str(home)), docker_host=""),
+        environ={"DOCKER_CONFIG": str(tmp_path / "missing-docker-config")},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    docker = payload["providers"]["docker"]
+    assert docker["ok"] is False
+    assert docker["reason"] == "DOCKER_AUTH_NOT_OBSERVED"
+    assert docker["credential_sources"] == []
+    assert "docker_home_secret" not in json.dumps(payload, sort_keys=True)
+
+
+@pytest.mark.unit
+def test_provider_readiness_codex_directory_fallback_and_rules_are_sources(
+    tmp_path: Path,
+) -> None:
+    rules_home = tmp_path / "rules-home"
+    (rules_home / ".codex" / "rules").mkdir(parents=True)
+    rules_payload = collect_agent_readiness(
+        _settings(tmp_path, host_home=str(rules_home)),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    empty_home = tmp_path / "empty-home"
+    (empty_home / ".codex").mkdir(parents=True)
+    empty_payload = collect_agent_readiness(
+        _settings(tmp_path, host_home=str(empty_home)),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert {
+        source["signal"]
+        for source in rules_payload["providers"]["codex"]["credential_sources"]
+    } == {"~/.codex/rules"}
+    assert {
+        source["signal"]
+        for source in empty_payload["providers"]["codex"]["credential_sources"]
+    } == {"~/.codex"}
+
+
+@pytest.mark.unit
+def test_provider_readiness_security_summary_tolerates_sparse_warning_payloads() -> None:
+    security = provider_readiness._security_summary(
+        {
+            "github": {"status": "ok", "warnings": "not-a-list"},
+            "codex": {
+                "status": "ok",
+                "warnings": ["ignored", {"reason": "STATIC_TOKEN_FALLBACK"}],
+            },
+            "docker": {
+                "status": "warn",
+                "reason": "DOCKER_AUTH_NOT_OBSERVED",
+                "warnings": [],
+            },
+        }
+    )
+
+    assert security["status"] == "warning"
+    assert security["warning_count"] == 1
+    assert security["providers_with_warnings"] == ["codex", "docker"]
+    assert security["reason_codes"] == [
+        "DOCKER_AUTH_NOT_OBSERVED",
+        "STATIC_TOKEN_FALLBACK",
+    ]
+
+
+@pytest.mark.unit
+def test_provider_readiness_provider_result_defaults_unknown_source_metadata() -> None:
+    result = provider_readiness._provider_result(
+        ok=True,
+        strict=False,
+        reason="CUSTOM_AUTH_PRESENT",
+        message="Custom provider auth was observed.",
+        secrets=frozenset(),
+        credential_sources=[
+            {
+                "type": "path",
+                "signal": "~/.custom/auth.json",
+                "credential_scope": "custom_scope",
+                "isolation": "custom_isolation",
+            }
+        ],
+    )
+
+    assert result["credential_scope"] == "not_observed"
+    assert result["isolation"] == "none"
 
 
 @pytest.mark.unit

@@ -364,23 +364,12 @@ async def _cancel_unneeded_task(task: asyncio.Task[Any]) -> None:
 
 async def _check_orphan_resources_with_concurrent_scans(
     *,
-    runner: AsyncCommandRunner,
-    factory: Any,
-    work_dir: str,
     db_check_task: asyncio.Task[CheckResult],
     docker_check_task: asyncio.Task[CheckResult],
+    workspace_view_task: asyncio.Task[WorkspaceIdView],
+    docker_scan_task: asyncio.Task[ResourceScan],
+    worktree_scan_task: asyncio.Task[ResourceScan],
 ) -> CheckResult:
-    workspace_view_task = asyncio.create_task(_workspace_view_for_readyz(factory))
-    docker_scan_task = asyncio.create_task(
-        scan_docker_resources_async(
-            runner=runner,
-            timeout=_CHECK_TIMEOUT_SECONDS,
-        )
-    )
-    worktree_scan_task = asyncio.create_task(
-        asyncio.to_thread(scan_managed_worktrees, work_dir)
-    )
-
     db_check, docker_check = await asyncio.gather(db_check_task, docker_check_task)
 
     if db_check.ok:
@@ -434,6 +423,27 @@ async def readyz(
     daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_docker_daemon(runner)
     )
+    workspace_view_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
+        _workspace_view_for_readyz(factory)
+    )
+    docker_scan_task: asyncio.Task[ResourceScan] = asyncio.create_task(
+        scan_docker_resources_async(
+            runner=runner,
+            timeout=_CHECK_TIMEOUT_SECONDS,
+        )
+    )
+    worktree_scan_task: asyncio.Task[ResourceScan] = asyncio.create_task(
+        asyncio.to_thread(scan_managed_worktrees, settings.work_dir)
+    )
+    orphan_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_orphan_resources_with_concurrent_scans(
+            db_check_task=db_check_task,
+            docker_check_task=daemon_check_task,
+            workspace_view_task=workspace_view_task,
+            docker_scan_task=docker_scan_task,
+            worktree_scan_task=worktree_scan_task,
+        )
+    )
     compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_docker_compose(runner)
     )
@@ -445,15 +455,6 @@ async def readyz(
             collect_agent_readiness,
             service_settings,
             validated_strict_providers=strict_providers,
-        )
-    )
-    orphan_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
-        _check_orphan_resources_with_concurrent_scans(
-            runner=runner,
-            factory=factory,
-            work_dir=settings.work_dir,
-            db_check_task=db_check_task,
-            docker_check_task=daemon_check_task,
         )
     )
     await asyncio.gather(

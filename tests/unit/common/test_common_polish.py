@@ -15,6 +15,7 @@ import pytest
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
 from awf.common.ids import new_event_id, new_operation_id, new_workspace_id
+from awf.common.redaction import redact_secrets
 
 
 class TestAsyncioSubprocessRunner:
@@ -92,3 +93,9 @@ class TestSettings:
         assert s.database_url.startswith("sqlite")
         assert s.service_name == "awf"
         assert s.env == "local"
+
+
+class TestRedaction:
+    @pytest.mark.unit
+    def test_empty_text_is_returned_unchanged(self) -> None:
+        assert redact_secrets("") == ""
