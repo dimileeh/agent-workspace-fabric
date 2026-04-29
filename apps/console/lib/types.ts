@@ -81,6 +81,7 @@ export interface WorkspaceOverview {
   workspace_id: string;
   task_id: string;
   title: string;
+  task_prompt: string;
   repo_url: string;
   base_branch: string;
   branch_name: string | null;

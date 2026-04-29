@@ -7,6 +7,7 @@ import type {
   WorkspaceControlResponse,
   WorkspaceOperatorAction,
   WorkspaceOperatorRequest,
+  WorkspaceOverview,
   WorkspaceRecoverySummary,
 } from "./types";
 
@@ -24,6 +25,12 @@ type WorkspaceRecoverySummaryTextIsRequired = Expect<
 >;
 
 export const workspaceRecoverySummaryTextIsRequired: WorkspaceRecoverySummaryTextIsRequired = true;
+
+type WorkspaceOverviewIncludesTaskPrompt = Expect<
+  Equal<Pick<WorkspaceOverview, "task_prompt">, { task_prompt: string }>
+>;
+
+export const workspaceOverviewIncludesTaskPrompt: WorkspaceOverviewIncludesTaskPrompt = true;
 
 type WorkspaceValidationProvenanceAllowsMissing = Expect<
   Equal<

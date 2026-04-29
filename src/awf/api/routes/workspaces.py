@@ -263,6 +263,7 @@ async def list_workspace_overview(
                 workspace_id=ws.id,
                 task_id=ws.task_external_id or ws.id,
                 title=ws.task_title,
+                task_prompt=getattr(ws, "task_prompt", ""),
                 repo_url=ws.repo_url,
                 base_branch=ws.branch_base,
                 branch_name=ws.branch_name,

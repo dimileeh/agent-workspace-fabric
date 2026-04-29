@@ -509,6 +509,7 @@ class WorkspaceOverviewResponse(BaseModel):
     workspace_id: str
     task_id: str
     title: str
+    task_prompt: str
     repo_url: str
     base_branch: str
     branch_name: str | None

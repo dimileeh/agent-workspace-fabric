@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-04-28
+Last updated: 2026-04-29
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust industrial system that is ready for a
@@ -49,12 +49,40 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| _None_ | _No active AWF dogfood slices after the 2026-04-28 reconciliation._ | _-_ | _-_ | _-_ | Service was rebuilt with the remonitor/rebase recovery fixes; commit local fixes before dispatching more work. |
+| _None_ | _No active AWF dogfood slices after the 2026-04-29 reconciliation._ | _-_ | _-_ | _-_ | All tracked workspaces completed; local changes must be committed/reconciled before the next service refresh and wave. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 Operation And Recovery Truth | Safe console recovery controls | `ws_3407ebb7411448af9db52daf` | [#131](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/131) | merged | Adds safe remonitor/refresh/revalidate controls using stable recovery APIs. |
+| P0 Operation And Recovery Truth | Terminal-state stale callback guard | `ws_caa5d122e46d47d1a696cf0b` | [#129](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/129) | merged | Prevents cancelled/destroyed/completed workspaces from advancing after stale callbacks. |
+| P1 Operator Console Completion | PR monitor transitions visible as operations | `ws_5eac8b3526704e77ad477d0c` | [#130](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/130) | merged | Exposes monitor wait/recovery/merge transitions as durable operations and console entries. |
+| P0 Test Coverage And Quality Gates | Test quality guardrails for fake tests | `ws_1aacbc2dd884497d8eab8e7d` | [#128](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/128) | merged | Forbids empty tests, fake assertions, and broad behavior-skipping monkeypatches. |
+| P1 Security, Secrets, And Egress Policy | Redact known token patterns from logs | `ws_abd68626a284423594916909` | [#127](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/127) | merged | Redacts known secrets before persistence and live streaming. |
+| P1 Local Packaging And Upgrade Path | Repeatable local service bootstrap | `ws_aa2d95f571fc4a128dc86f18` | [#126](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/126) | merged | Makes local service startup/migration/health bootstrap one-command and idempotent. |
+| P0 Merge Safety And PR Monitor Correctness | Post-PR recovery state regression coverage | `ws_8cf441f5e78e4cb2bc646106` | [#125](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/125) | merged | Proves recovery paths do not re-enter full agent execution after PR creation. |
+| P0 Operation And Recovery Truth | Active PR workspace recovery after service restart | `ws_3b51ab18f6b04912807e9197` | [#124](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/124) | merged | Resumes monitoring without rerunning agent or recreating PR. |
+| P0 Reliability, Cleanup, And SLOs | Idempotent retained cleanup after Docker failures | `ws_b3507d25cb624d858f2cb9e4` | [#123](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/123) | merged | Preserves logs/artifacts and makes partial cleanup retry-safe. |
+| P0 Test Coverage And Quality Gates | Dockerized sidecar workspace fixture coverage | `ws_bc51ec47dac64ea9a0077cdd` | [#122](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/122) | merged | Covers Dockerized app plus sidecar service profile behavior. |
+| P0 Operation And Recovery Truth | Complete control operation idempotency matrix | `ws_b054789dccf84535b592e527` | [#121](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/121) | merged | Covers replay/conflict semantics for cancel/stop/delete/remonitor/refresh/validate/rebase. |
+| P0 Validation Tier Provenance As Merge Policy | Validation tier/freshness API and console exposure | `ws_08d7037136ea44c2a6c65dff` | [#120](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/120) | merged | Exposes required/latest tier, freshness identity, and reason codes in API/console. |
+| P0 Merge Safety And PR Monitor Correctness | Non-actionable bot comment regression coverage | `ws_632058449475452598e98d3e` | [#119](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/119) | merged | Proves ignored bot comments do not suppress meaningful later comments. |
+| P0 Stale Detection And Merge Queue Truth | Post-merge overlap stale-risk signal | `ws_bad04ed0e59f452bb04ff4eb` | [#118](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/118) | merged | Keeps overlap advisory at launch while using post-merge overlap as stale-risk signal. |
+| P0 Operation And Recovery Truth | Stranded active workspace recovery detection | `ws_173dfcb6cd3d44209923bd8e` | [#117](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/117) | merged | Detects stranded active workspaces whose runtime resources disappeared or exited. |
+| P0 Test Coverage And Quality Gates | Alembic multi-head resolver integration coverage | `ws_cf269265081c44b498b713bb` | [#116](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/116) | merged | Adds resolver tests for multiple Alembic heads and generated merge revisions. |
+| P0 Operation And Recovery Truth | Public idempotent rebase operation API | `ws_dc1ce9a4217e4fbcab609701` | [#115](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/115) | merged | Adds token-protected replay-safe rebase operation endpoint. |
+| P0 Merge Safety And PR Monitor Correctness | Full auto-merge gate regression coverage | `ws_48757c50d7e842f896fe962f` | [#114](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/114) | merged | Covers grace/comments/checks/freshness/tier/final-settle auto-merge gates. |
+| P0 Test Coverage And Quality Gates | Parallel PR stale workflow integration coverage | `ws_fbc967faf6b2488c8a9ddc3e` | [#113](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/113) | merged | Adds integration coverage for parallel PR stale/revalidate workflow. |
+| P0 Validation Tier Provenance As Merge Policy | Complete validation freshness identity | `ws_b7ff7fb6515e485eb00d0f49` | [#112](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/112) | merged | Adds command/profile/environment/target identity for validation freshness. |
+| P0 Operation And Recovery Truth | Explicit PR monitor recovery operation records | `ws_1a047c3867f54195b2b2ee70` | [#111](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/111) | merged | Adds durable recovery operation records for rebase/validate/remonitor/manual-wait paths. |
+| P0 Stale Detection And Merge Queue Truth | Keep plan artifact overlaps advisory | `ws_4a85880fd415476f8a584079` | [#110](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/110) | merged | Prevents docs/awf-plans-only changes from hard-blocking otherwise mergeable PRs. |
+| P1 Operator Console Completion | Explain workspace recovery reversals in console | `ws_8d370f44fe3c4d31b68923a8` | [#109](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/109) | merged | Console/API now explain intentional workflow step-backs such as stale PR recovery. |
+| P0 Reliability, Cleanup, And SLOs | Completed PR workspace cleanup retention | `ws_d71ff14f12ac4513b45b097f` | [#108](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/108) | merged | Adds safe cleanup eligibility and retention for completed PR workspaces. |
+| P0 Merge Safety And PR Monitor Correctness | Retry transient GitHub errors without losing monitor state | `ws_744d79861eb94d37b8f1e654` | [#107](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/107) | merged | PR monitor now retries transient GitHub errors without losing monitor state. |
+| P0 Stale Detection And Merge Queue Truth | Dependency/build/schema stale reasons | `ws_d8629b74e7944b688ae34df6` | [#106](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/106) | merged | Adds structured stale reasons for sensitive target-branch changes. |
+| P0 Operation And Recovery Truth | Mutating operation idempotency and concurrency hardening | `ws_03f3b6484d3744e1849afab8` | [#105](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/105) | merged | Hardens control API idempotency and conflict behavior. |
+| P1 Operator Console Completion | Validation freshness and stale action drill-down | `ws_6d67b95a51cf46ab87aaf33e` | [#104](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/104) | merged | Console visibility for validation freshness and stale action details. |
 | P0 Reliability, Cleanup, And SLOs | Orphan AWF resource detection and cleanup readiness reporting | `ws_5605c5ca71c942d999f5b78f` | [#103](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/103) | merged | Recovered through service remonitor after local stale-rebase fixes; Tier 2 validation and 99% coverage passed before auto-merge. |
 | P0 Stale Detection And Merge Queue Truth | Console merge queue stale reasons and required actions | `ws_7314436b72d147949dbf681d` | [#102](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/102) | merged | UI-only slice for merge-queue clarity, using existing API fields. |
 | P0 Operation And Recovery Truth | Persist operation audit details and log stream references | `ws_83f4e614951446cf883f5c09` | [#101](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/101) | merged | Feature landed even though the workspace later failed in stale-rebase recovery; the local executor now treats already-synced branches as refreshed before Tier 2 validation. |
@@ -108,58 +136,58 @@ Status values:
 ## P0: Merge Safety And PR Monitor Correctness
 
 - [x] Ensure PR monitor never re-enters the full agent execution path for validate-only, rebase-only, or recovery-only work.
-- [ ] Add end-to-end regression coverage for `monitoring_pr -> ready -> running` regressions after PR creation.
+- [x] Add end-to-end regression coverage for `monitoring_pr -> ready -> running` regressions after PR creation.
 - [x] Prove manual-merge mode waits until the human merge is observed, then completes and cleans up.
-- [ ] Prove auto-merge mode waits for grace, comments, checks, freshness, validation tier, and final settle recheck.
-- [ ] Prove transient GitHub errors are retried without losing monitor state.
-- [ ] Prove non-actionable bot comments are ignored without suppressing meaningful later comments.
+- [x] Prove auto-merge mode waits for grace, comments, checks, freshness, validation tier, and final settle recheck.
+- [x] Prove transient GitHub errors are retried without losing monitor state.
+- [x] Prove non-actionable bot comments are ignored without suppressing meaningful later comments.
 - [x] Wait for configured async reviewers that do not expose GitHub checks/statuses before auto-merge.
-- [ ] Add explicit monitor recovery operation records for rebase, validate-only, remonitor, and human wait.
-- [ ] Make PR monitor state transitions visible in the console as operations, not just log text.
+- [x] Add explicit monitor recovery operation records for rebase, validate-only, remonitor, and human wait.
+- [x] Make PR monitor state transitions visible in the console as operations, not just log text.
 
 ## P0: Stale Detection And Merge Queue Truth
 
 - [x] Make target branch monitor detect every merged PR that can stale open candidates.
 - [x] Mark candidates stale when target branch advances and validation freshness is invalid.
-- [ ] Treat owned-path overlap as advisory at launch time, not blocking.
-- [ ] Use overlap as a stale-risk input after another candidate lands.
-- [ ] Detect dependency/build config changes as structured stale reasons.
-- [ ] Detect migration/schema/model changes for migration-sensitive tasks.
+- [x] Treat owned-path overlap as advisory at launch time, not blocking.
+- [x] Use overlap as a stale-risk input after another candidate lands.
+- [x] Detect dependency/build config changes as structured stale reasons.
+- [x] Detect migration/schema/model changes for migration-sensitive tasks.
 - [x] Keep stale reasons active until a successful refresh/rebase plus required validation clears them.
 - [x] Make `/v1/merge-queue` candidate-backed readiness the single source of truth.
-- [ ] Display candidate blockers, stale reasons, required action, and canonical attempt in the console.
+- [x] Display candidate blockers, stale reasons, required action, and canonical attempt in the console.
 
 ## P0: Validation Tier Provenance As Merge Policy
 
-- [ ] Define the freshness identity for every validation run:
+- [x] Define the freshness identity for every validation run:
   command set hash, target branch, target SHA, base SHA, profile version, and environment identity.
 - [x] Enforce Tier 1 as the normal profile/request validation gate.
 - [x] Enforce Tier 2 after rebase, stale refresh, conflict resolution, or target branch drift.
 - [x] Represent Tier 3 metadata and policy before full Tier 3 infrastructure exists.
 - [x] Store validation log stream references for every validation run.
 - [x] Ensure merge eligibility reads `validation_runs`, not old operation rows or log-derived state.
-- [ ] Expose required tier, latest satisfied tier, validation freshness, and reason code in API and console.
+- [x] Expose required tier, latest satisfied tier, validation freshness, and reason code in API and console.
 - [x] Prevent agents from lowering coverage thresholds, profile requirements, or PRD quality gates.
 
 ## P0: Operation And Recovery Truth
 
-- [ ] Make cancel, stop, delete, remonitor, refresh, rebase, and validate idempotent operations.
-- [ ] Add public API endpoints for refresh, rebase, and validate operations.
-- [ ] Add optimistic concurrency or equivalent conflict protection for mutating APIs.
-- [ ] Persist operation start, finish, owner, reason, result, failure code, and log streams.
-- [ ] Ensure cancelled/destroyed workspaces cannot move forward after stale executor or monitor callbacks.
-- [ ] Add recovery for stranded workspaces whose containers exited but DB state is active.
-- [ ] Add recovery for active PR workspaces after AWF service restart.
-- [ ] Add console controls for safe remonitor/refresh/revalidate once API semantics are stable.
+- [x] Make cancel, stop, delete, remonitor, refresh, rebase, and validate idempotent operations.
+- [x] Add public API endpoints for refresh, rebase, and validate operations.
+- [x] Add optimistic concurrency or equivalent conflict protection for mutating APIs.
+- [x] Persist operation start, finish, owner, reason, result, failure code, and log streams.
+- [x] Ensure cancelled/destroyed workspaces cannot move forward after stale executor or monitor callbacks.
+- [x] Add recovery for stranded workspaces whose containers exited but DB state is active.
+- [x] Add recovery for active PR workspaces after AWF service restart.
+- [x] Add console controls for safe remonitor/refresh/revalidate once API semantics are stable.
 
 ## P0: Reliability, Cleanup, And SLOs
 
 - [x] Define and expose rolling creation success, cleanup success, stuck-state, and recovery success metrics.
 - [x] Add stuck-state watchdog metrics and actionable reason codes.
 - [x] Detect orphan containers, networks, volumes, and worktrees.
-- [ ] Automatically clean completed PR workspaces after merge and safe retention.
-- [ ] Preserve logs/artifacts during cleanup according to retention policy.
-- [ ] Make cleanup idempotent and safe after partial Docker failures.
+- [x] Automatically clean completed PR workspaces after merge and safe retention.
+- [x] Preserve logs/artifacts during cleanup according to retention policy.
+- [x] Make cleanup idempotent and safe after partial Docker failures.
 - [x] Add SLO-style API and console indicators for local AWF health.
 - [x] Keep local disk pressure and admission blocking actionable in service status.
 
@@ -168,18 +196,18 @@ Status values:
 - [x] Keep branch coverage enabled.
 - [x] Keep AWF self-development coverage at 99%+.
 - [x] Add coverage reports that explain remaining gaps instead of only failing a threshold.
-- [ ] Add focused tests for PR monitor recovery, stale detection, validation tier gating, and service restart recovery.
-- [ ] Add integration tests for two parallel PRs where one merge stales the other.
-- [ ] Add integration tests for Alembic multi-head detection and automatic merge revision generation.
-- [ ] Add integration tests for Dockerized project profiles with sidecar services.
-- [ ] Forbid empty tests, fake assertions, and broad monkeypatching that skips behavior under test.
+- [x] Add focused tests for PR monitor recovery, stale detection, validation tier gating, and service restart recovery.
+- [x] Add integration tests for two parallel PRs where one merge stales the other.
+- [x] Add integration tests for Alembic multi-head detection and automatic merge revision generation.
+- [x] Add integration tests for Dockerized project profiles with sidecar services.
+- [x] Forbid empty tests, fake assertions, and broad monkeypatching that skips behavior under test.
 
 ## P1: Security, Secrets, And Egress Policy
 
 - [ ] Replace broad static auth mounts with declared secret leases where possible.
 - [ ] Track secret lease issue, mount, expiry, revoke, and audit events.
 - [ ] Revoke workspace secrets when workspace reaches terminal cleanup.
-- [ ] Redact known token patterns from persisted logs and artifacts.
+- [x] Redact known token patterns from persisted logs and artifacts.
 - [ ] Add profile lint failures for unsafe secret targets and broad host-home mounts.
 - [ ] Enforce egress policy at Docker network/profile level in local mode.
 - [ ] Add provider-specific least-privilege credential checks for Codex, Claude, Gemini, OpenCode/Ollama, GitHub, and Docker.
@@ -210,10 +238,10 @@ Status values:
 ## P1: API Contract Completion
 
 - [ ] Normalize pagination envelopes across list APIs.
-- [ ] Add explicit idempotency support to every mutating endpoint.
-- [ ] Add optimistic concurrency or version checks to mutating workspace/candidate operations.
+- [x] Add explicit idempotency support to every mutating endpoint.
+- [x] Add optimistic concurrency or version checks to mutating workspace/candidate operations.
 - [ ] Add callbacks/webhook support for external operators.
-- [ ] Add first-class operation endpoints for rebase, validate, refresh, and make-canonical.
+- [x] Add first-class operation endpoints for rebase, validate, refresh, and make-canonical.
 - [ ] Add artifact listing and download semantics beyond metadata.
 - [x] Add failure analysis API with root cause, evidence links, and suggested recovery actions.
 - [ ] Keep old compatibility endpoints stable until a documented v2 API cutover.
@@ -222,18 +250,18 @@ Status values:
 
 - [x] Show exact agent model and thinking/effort settings for every workspace.
 - [x] Show lifecycle stage start time, end time, and duration.
-- [ ] Show validation tier, validation freshness, command hash, and target SHA.
+- [x] Show validation tier, validation freshness, command hash, and target SHA.
 - [ ] Show token usage when providers expose it.
 - [ ] Show estimated cost only when reliable pricing metadata is configured.
 - [x] Add merge queue blocker drill-down.
-- [ ] Add stale reason and recovery action drill-down.
+- [x] Add stale reason and recovery action drill-down.
 - [ ] Add safe remonitor/refresh/revalidate controls after API hardening.
 - [ ] Add security/secret/egress status panels.
 
 ## P1: Local Packaging And Upgrade Path
 
-- [ ] Make local service bootstrap one-command and repeatable.
-- [ ] Make migrations run safely during service startup or documented bootstrap.
+- [x] Make local service bootstrap one-command and repeatable.
+- [x] Make migrations run safely during service startup or documented bootstrap.
 - [ ] Add image versioning and local upgrade notes.
 - [ ] Add backup/restore instructions for AWF control-plane Postgres.
 - [ ] Add local disaster recovery instructions for stuck containers, broken migrations, and corrupt work dirs.

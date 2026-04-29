@@ -11,8 +11,12 @@ export interface RecoveryCallout {
 
 export function formatRecoveryBadge(
   recovery: WorkspaceRecoverySummary | null | undefined,
+  currentStatus?: WorkspaceStatus | string | null,
 ): string | null {
   if (!recovery) {
+    return null;
+  }
+  if (currentStatus === "completed") {
     return null;
   }
   return `Recovery: ${recovery.reason_code ?? recoveryModeLabel(recovery.recovery_mode) ?? "active"}`;

@@ -33,6 +33,11 @@ test("badge formatting prefers reason code and stays compact", () => {
   assert.equal(formatRecoveryBadge(null), null);
 });
 
+test("badge formatting hides recovered history after successful completion", () => {
+  assert.equal(formatRecoveryBadge(recovery, "validating"), "Recovery: STALE_OVERLAP");
+  assert.equal(formatRecoveryBadge(recovery, "completed"), null);
+});
+
 test("callout formatting explains reverse transition, reason, and action", () => {
   const callout = formatRecoveryCallout(recovery, "validating");
 

@@ -174,6 +174,7 @@ export function ConsoleDashboard() {
   const [logsFullscreen, setLogsFullscreen] = useState(false);
   const [workspaceLogSelection, setWorkspaceLogSelection] = useState<string[]>([]);
   const [fullscreenWorkspaceIds, setFullscreenWorkspaceIds] = useState<string[]>([]);
+  const [taskDetailsWorkspaceId, setTaskDetailsWorkspaceId] = useState<string | null>(null);
   const [fullscreenTailSignal, setFullscreenTailSignal] = useState(0);
   const [logSortDirection, setLogSortDirection] = useState<SortDirection>("desc");
   const [statusFilter, setStatusFilter] = useState<string>("all");
@@ -230,6 +231,7 @@ export function ConsoleDashboard() {
     setOverview(
       result.data.items.map((item) => ({
         ...item,
+        task_prompt: item.task_prompt ?? "",
         lifecycle: item.lifecycle ?? [],
         llm_usage: fallbackLlmUsage(item.llm_usage),
         recovery: item.recovery ?? null,
@@ -738,6 +740,10 @@ export function ConsoleDashboard() {
     },
     [fullscreenWorkspaceIds],
   );
+  const taskDetailsWorkspace = useMemo(
+    () => overview.find((workspace) => workspace.workspace_id === taskDetailsWorkspaceId) ?? null,
+    [overview, taskDetailsWorkspaceId],
+  );
 
   return (
     <main className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
@@ -788,6 +794,7 @@ export function ConsoleDashboard() {
             onToggleWorkspaceSelection={(workspaceId, checked) =>
               setWorkspaceLogSelection((current) => toggleWorkspaceSelection(current, workspaceId, checked))
             }
+            onOpenDetails={setTaskDetailsWorkspaceId}
             onOpenLogs={openWorkspaceLogs}
           />
         </aside>
@@ -879,6 +886,12 @@ export function ConsoleDashboard() {
           }
           onRemoveWorkspace={removeFullscreenWorkspace}
           onClose={() => setLogsFullscreen(false)}
+        />
+      ) : null}
+      {taskDetailsWorkspace ? (
+        <TaskDetailsModal
+          workspace={taskDetailsWorkspace}
+          onClose={() => setTaskDetailsWorkspaceId(null)}
         />
       ) : null}
     </main>
@@ -1143,6 +1156,7 @@ function WorkspaceList({
   selectedWorkspaceIds,
   onSelect,
   onToggleWorkspaceSelection,
+  onOpenDetails,
   onOpenLogs,
 }: {
   items: WorkspaceOverview[];
@@ -1150,6 +1164,7 @@ function WorkspaceList({
   selectedWorkspaceIds: string[];
   onSelect: (workspaceId: string) => void;
   onToggleWorkspaceSelection: (workspaceId: string, checked: boolean) => void;
+  onOpenDetails: (workspaceId: string) => void;
   onOpenLogs: (workspaceId: string) => void;
 }) {
   if (items.length === 0) {
@@ -1167,7 +1182,7 @@ function WorkspaceList({
   return (
     <div className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden">
       {items.map((item) => {
-        const recoveryBadge = formatRecoveryBadge(item.recovery);
+        const recoveryBadge = formatRecoveryBadge(item.recovery, item.status);
         return (
           <div
             key={item.workspace_id}
@@ -1216,7 +1231,15 @@ function WorkspaceList({
                 {item.pr_url ? <SmallExternalAnchor href={item.pr_url} label="PR" /> : null}
               </div>
             </div>
-            <div className="flex justify-end">
+            <div className="flex justify-end gap-2">
+              <button
+                type="button"
+                onClick={() => onOpenDetails(item.workspace_id)}
+                className="inline-flex h-7 items-center gap-1.5 rounded-md border border-slate-300 bg-white px-2.5 text-[11px] text-slate-800 transition hover:bg-slate-50"
+              >
+                <FileText size={12} aria-hidden />
+                Details
+              </button>
               <button
                 type="button"
                 onClick={() => onOpenLogs(item.workspace_id)}
@@ -1227,6 +1250,123 @@ function WorkspaceList({
               </button>
             </div>
           </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function TaskDetailsModal({
+  workspace,
+  onClose,
+}: {
+  workspace: WorkspaceOverview;
+  onClose: () => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 grid bg-slate-950/45 p-3 sm:p-6" role="dialog" aria-modal="true">
+      <div className="m-auto grid max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-md border border-slate-300 bg-white shadow-xl">
+        <header className="flex min-h-14 items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+              <FileText size={16} aria-hidden />
+              Task details
+            </div>
+            <h2 className="mt-1 line-clamp-2 text-base font-semibold text-slate-950">
+              {workspace.title}
+            </h2>
+            <div className="mono mt-1 truncate text-xs text-slate-500">{workspace.workspace_id}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onClose}
+            className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-md border border-slate-300 bg-white text-slate-700 transition hover:bg-slate-50"
+            aria-label="Close task details"
+          >
+            <X size={16} aria-hidden />
+          </button>
+        </header>
+        <div className="grid min-h-0 gap-3 overflow-y-auto p-4">
+          <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+            <Fact label="Agent" value={formatAgentLabel(workspace)} />
+            <Fact label="Effort" value={formatAgentEffort(workspace)} />
+            <Fact label="Base" value={workspace.base_branch} mono />
+            <Fact label="Status" value={workspace.status} />
+            <Fact label="Created" value={formatDateTime(workspace.created_at)} />
+            <Fact label="Updated" value={formatDateTime(workspace.updated_at)} />
+            <Fact label="Repository" value={workspace.repo_url} />
+            <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
+          </div>
+          <section className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 p-3">
+            <div className="text-xs font-semibold text-slate-500">Prompt sent to AWF</div>
+            <TaskPromptBody prompt={workspace.task_prompt} />
+          </section>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function TaskPromptBody({ prompt }: { prompt: string }) {
+  const lines = prompt.trim() ? prompt.trim().split(/\r?\n/) : ["No prompt stored for this workspace."];
+
+  return (
+    <div className="grid gap-1 text-sm leading-6 text-slate-800">
+      {lines.map((line, index) => {
+        const trimmed = line.trim();
+        const key = `${index}:${line}`;
+        if (!trimmed) {
+          return <div key={key} className="h-2" />;
+        }
+        if (trimmed.startsWith("### ")) {
+          return (
+            <h4 key={key} className="mt-3 text-sm font-semibold text-slate-950">
+              {trimmed.slice(4)}
+            </h4>
+          );
+        }
+        if (trimmed.startsWith("## ")) {
+          return (
+            <h3 key={key} className="mt-4 text-base font-semibold text-slate-950">
+              {trimmed.slice(3)}
+            </h3>
+          );
+        }
+        if (trimmed.startsWith("# ")) {
+          return (
+            <h3 key={key} className="text-base font-semibold text-slate-950">
+              {trimmed.slice(2)}
+            </h3>
+          );
+        }
+        if (trimmed.startsWith("- ")) {
+          return (
+            <div key={key} className="grid grid-cols-[16px_minmax(0,1fr)] gap-2">
+              <span className="text-slate-400">•</span>
+              <span className="min-w-0 whitespace-pre-wrap break-words">{trimmed.slice(2)}</span>
+            </div>
+          );
+        }
+        if (/^\d+\.\s/.test(trimmed)) {
+          const [prefix, ...rest] = trimmed.split(/\s+/);
+          return (
+            <div key={key} className="grid grid-cols-[28px_minmax(0,1fr)] gap-2">
+              <span className="mono text-xs text-slate-400">{prefix}</span>
+              <span className="min-w-0 whitespace-pre-wrap break-words">{rest.join(" ")}</span>
+            </div>
+          );
+        }
+        if (trimmed.startsWith("```")) {
+          return (
+            <div key={key} className="mono rounded-md bg-slate-900 px-2 py-1 text-xs text-slate-100">
+              {trimmed}
+            </div>
+          );
+        }
+        return (
+          <p key={key} className="whitespace-pre-wrap break-words">
+            {line}
+          </p>
         );
       })}
     </div>
@@ -1305,7 +1445,9 @@ function WorkspaceSummary({
           onAction={onOperatorAction}
         />
         <UsageSummaryBlock usage={workspace?.llm_usage ?? overview.llm_usage} />
-        {recovery ? <RecoveryCallout recovery={recovery} status={overview.status} /> : null}
+        {recovery && overview.status !== "completed" ? (
+          <RecoveryCallout recovery={recovery} status={overview.status} />
+        ) : null}
         {overview.failure_reason || overview.failure_message ? (
           <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
             <div className="font-semibold">{overview.failure_reason ?? "failure"}</div>
