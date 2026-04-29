@@ -77,6 +77,48 @@ def _write(path: Path, content: str) -> None:
 
 
 @pytest.mark.unit
+def test_default_gc_predicates_handle_status_subsets() -> None:
+    cutoff = datetime(2026, 4, 26, 12, tzinfo=UTC)
+
+    assert (
+        gc._workspace_gc_candidate_predicate(
+            eligible_statuses={WorkspaceStatus.failed.value},
+            cutoff_at=cutoff,
+            default_policy=True,
+            cleanup_enabled=True,
+        )
+        is None
+    )
+    assert (
+        gc._workspace_gc_preserved_predicate(
+            eligible_statuses=set(),
+            cutoff_at=cutoff,
+            default_policy=True,
+            cleanup_enabled=True,
+        )
+        is None
+    )
+    assert (
+        gc._workspace_gc_preserved_predicate(
+            eligible_statuses={WorkspaceStatus.completed.value},
+            cutoff_at=cutoff,
+            default_policy=True,
+            cleanup_enabled=True,
+        )
+        is not None
+    )
+    assert (
+        gc._workspace_gc_preserved_predicate(
+            eligible_statuses={WorkspaceStatus.failed.value},
+            cutoff_at=cutoff,
+            default_policy=True,
+            cleanup_enabled=True,
+        )
+        is not None
+    )
+
+
+@pytest.mark.unit
 async def test_plan_selects_completed_pr_workspace_after_retention(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

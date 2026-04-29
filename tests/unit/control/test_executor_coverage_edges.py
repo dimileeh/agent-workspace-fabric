@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import awf.control.executor as executor_mod
 from awf.adapters.base import AgentDefaults
 from awf.common.commands import FakeCommandRunner
 from awf.control.executor import (
@@ -19,6 +20,7 @@ from awf.control.executor import (
     _call_pr_monitor_factory,
     _coverage_preserves_below_threshold_baseline,
     _failure_reason_for_phase,
+    _get_active_recovery_payload,
     _MonitorRebaseRecoveryError,
     _read_text_if_present,
     _validation_failure_message,
@@ -28,7 +30,7 @@ from awf.control.executor import (
     _validation_run_reason_code,
     _validation_tier_for_workspace,
 )
-from awf.db.enums import FailureReason, TaskClass
+from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -1175,3 +1177,286 @@ async def test_monitor_rebase_recovery_reports_git_failures(
             reason="stale",
             recovery_payload={},
         )
+
+
+@pytest.mark.unit
+def test_active_recovery_payload_ignores_rebase_validate_only_operations() -> None:
+    workspace = SimpleNamespace(
+        operations=[
+            SimpleNamespace(
+                status=OperationStatus.pending.value,
+                type=OperationType.rebase.value,
+                payload={
+                    "source": "pr_monitor",
+                    "recovery_mode": "validate_only",
+                },
+            ),
+            SimpleNamespace(
+                status=OperationStatus.running.value,
+                type=OperationType.validate.value,
+                payload={
+                    "source": "operator_api",
+                    "recovery_mode": "validate_only",
+                    "reason": "operator requested validation",
+                },
+            ),
+        ]
+    )
+
+    payload = _get_active_recovery_payload(workspace)
+
+    assert payload == {
+        "source": "operator_api",
+        "recovery_mode": "validate_only",
+        "reason": "operator requested validation",
+    }
+
+
+@pytest.mark.unit
+async def test_rebase_operation_helpers_noop_for_lightweight_executor(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+
+    assert (
+        await executor._begin_rebase_recovery_operation(
+            workspace_id="ws_rebase",
+            base_branch="main",
+            remote_branch="awf/ws",
+            reason="stale",
+            reason_code="STALE_TARGET_BRANCH",
+            source_base_sha=None,
+            source_head_sha=None,
+            recovery_payload={},
+        )
+        is None
+    )
+    await executor._finish_rebase_recovery_operation(
+        SimpleNamespace(operation_id="op_skip", should_finish=False),  # type: ignore[arg-type]
+        status=OperationStatus.succeeded,
+        result={"status": "succeeded"},
+    )
+    await executor._finish_rebase_recovery_operation(
+        None,
+        status=OperationStatus.succeeded,
+        result={"status": "succeeded"},
+    )
+
+
+class _FakeSession:
+    def __init__(self) -> None:
+        self.commits = 0
+
+    async def __aenter__(self) -> _FakeSession:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    async def commit(self) -> None:
+        self.commits += 1
+
+
+@pytest.mark.unit
+async def test_record_rebase_recovery_success_ignores_terminal_callback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    workspace = SimpleNamespace(id="ws_terminal", status=WorkspaceStatus.completed.value)
+    ignored_callbacks: list[tuple[str, str]] = []
+    finished_callbacks: list[dict[str, object]] = []
+
+    class FakeWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> object:
+            assert workspace_id == workspace.id
+            return workspace
+
+        async def record_ignored_stale_callback(
+            self,
+            _workspace: object,
+            *,
+            callback_source: str,
+            callback_action: str,
+            expected_status: WorkspaceStatus,
+            reason_code: str,
+        ) -> None:
+            assert expected_status == WorkspaceStatus.running
+            assert reason_code == "STALE_CALLBACK_IGNORED"
+            ignored_callbacks.append((callback_source, callback_action))
+
+    async def finish_ignored(
+        _session: object,
+        **kwargs: object,
+    ) -> None:
+        finished_callbacks.append(kwargs)
+
+    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        executor,
+        "_finish_ignored_stale_callback_operations_in_session",
+        finish_ignored,
+    )
+
+    await executor._record_rebase_recovery_success(
+        workspace_id=workspace.id,
+        base_sha="b" * 40,
+        head_sha="h" * 40,
+        source_base_sha="old-base",
+        source_head_sha="old-head",
+        operation=SimpleNamespace(operation_id="op", should_finish=True),  # type: ignore[arg-type]
+        pushed=True,
+        rebased=True,
+    )
+
+    assert ignored_callbacks == [("executor", "rebase_recovery")]
+    assert finished_callbacks[0]["workspace_id"] == workspace.id
+    assert finished_callbacks[0]["actual_status"] == WorkspaceStatus.completed.value
+    assert session.commits == 1
+
+
+@pytest.mark.unit
+async def test_record_rebase_recovery_success_updates_candidate_and_operation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    workspace = SimpleNamespace(
+        id="ws_rebased",
+        status=WorkspaceStatus.running.value,
+        base_commit="old-base",
+        monitor_last_commit_sha="old-head",
+    )
+    candidate_workspace = SimpleNamespace(base_commit="old-base", monitor_last_commit_sha="old-head")
+    candidate = SimpleNamespace(
+        id="candidate",
+        workspace_id=workspace.id,
+        attempt_id="attempt",
+        task_id="task",
+        base_sha="old-base",
+        head_sha="old-head",
+        workspace=candidate_workspace,
+        attempt=SimpleNamespace(id="attempt"),
+    )
+    readiness_calls: list[tuple[str, str]] = []
+    finished_operations: list[dict[str, object]] = []
+
+    class FakeWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> object:
+            assert workspace_id == workspace.id
+            return workspace
+
+    class FakeMergeCandidateRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_open_for_workspace_with_merge_inputs(self, workspace_id: str) -> object:
+            assert workspace_id == workspace.id
+            return candidate
+
+    def sync_readiness(_candidate: object, **kwargs: object) -> None:
+        readiness_calls.append(
+            (
+                kwargs["workspace"].base_commit,  # type: ignore[index, union-attr]
+                kwargs["workspace"].monitor_last_commit_sha,  # type: ignore[index, union-attr]
+            )
+        )
+
+    async def finish_operation(_session: object, **kwargs: object) -> None:
+        finished_operations.append(kwargs)
+
+    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
+    monkeypatch.setattr(executor_mod, "MergeCandidateRepository", FakeMergeCandidateRepository)
+    monkeypatch.setattr(executor_mod, "sync_candidate_readiness", sync_readiness)
+    monkeypatch.setattr(executor_mod, "finish_monitor_operation", finish_operation)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+
+    await executor._record_rebase_recovery_success(
+        workspace_id=workspace.id,
+        base_sha="new-base",
+        head_sha="new-head",
+        source_base_sha="old-base",
+        source_head_sha="old-head",
+        operation=SimpleNamespace(operation_id="op_rebase", should_finish=True),  # type: ignore[arg-type]
+        pushed=True,
+        rebased=True,
+    )
+
+    assert workspace.base_commit == "new-base"
+    assert workspace.monitor_last_commit_sha == "new-head"
+    assert candidate.base_sha == "new-base"
+    assert candidate.head_sha == "new-head"
+    assert readiness_calls == [("new-base", "new-head")]
+    assert finished_operations[0]["operation_id"] == "op_rebase"
+    assert finished_operations[0]["status"] == OperationStatus.succeeded
+    assert finished_operations[0]["result"]["target_base_sha"] == "new-base"
+    assert session.commits == 1
+
+
+@pytest.mark.unit
+async def test_clear_rebase_recovery_staleness_refreshes_candidate_readiness(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    candidate = SimpleNamespace(
+        id="candidate",
+        workspace_id="ws_rebase",
+        attempt_id="attempt",
+        task_id="task",
+        stale=True,
+        stale_reason="target moved",
+        workspace=SimpleNamespace(id="ws_rebase"),
+        attempt=SimpleNamespace(id="attempt"),
+    )
+    replaced_findings: list[dict[str, object]] = []
+    readiness_calls: list[object] = []
+
+    class FakeMergeCandidateRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get_open_for_workspace_with_merge_inputs(self, workspace_id: str) -> object:
+            assert workspace_id == candidate.workspace_id
+            return candidate
+
+    class FakeStaleReasonRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def replace_active_findings(self, **kwargs: object) -> None:
+            replaced_findings.append(kwargs)
+
+    def sync_readiness(candidate_arg: object, **_kwargs: object) -> None:
+        readiness_calls.append(candidate_arg)
+
+    monkeypatch.setattr(executor_mod, "MergeCandidateRepository", FakeMergeCandidateRepository)
+    monkeypatch.setattr(executor_mod, "StaleReasonRepository", FakeStaleReasonRepository)
+    monkeypatch.setattr(executor_mod, "sync_candidate_readiness", sync_readiness)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+
+    await executor._clear_rebase_recovery_staleness(workspace_id="ws_rebase")
+
+    assert replaced_findings == [
+        {
+            "workspace_id": "ws_rebase",
+            "candidate_id": "candidate",
+            "attempt_id": "attempt",
+            "task_id": "task",
+            "findings": [],
+        }
+    ]
+    assert candidate.stale is False
+    assert candidate.stale_reason is None
+    assert readiness_calls == [candidate]
+    assert session.commits == 1

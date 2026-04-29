@@ -50,6 +50,20 @@ def _queue_validation_head(fake: FakeCommandRunner, head: str = "deadbeef01") ->
     fake.queue_result(returncode=0, stdout=f"{head}\n")  # pre-validation rev-parse HEAD
 
 
+async def _force_workspace_status(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    status: WorkspaceStatus,
+) -> None:
+    async with factory() as s:
+        await s.execute(
+            sa_update(WorkspaceModel)
+            .where(WorkspaceModel.id == workspace_id)
+            .values(status=status.value)
+        )
+        await s.commit()
+
+
 @pytest.fixture
 async def factory(tmp_path: Path) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     engine = make_engine(f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}")
@@ -76,9 +90,10 @@ def _make_executor(
     tmp_path: Path,
     max_fix_passes: int = 5,
     pr_monitor_factory: Any = None,
+    validation: Any = None,
 ) -> WorkspaceExecutor:
     compose = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
-    validation = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
+    validation = validation or ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
     pr = PullRequestCreator(fake)
     return WorkspaceExecutor(
         session_factory=factory,
@@ -98,6 +113,40 @@ def _make_executor(
         ),
         pr_monitor_factory=pr_monitor_factory,
     )
+
+
+class _TerminalAfterSuccessfulValidation:
+    def __init__(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        final_status: WorkspaceStatus,
+    ) -> None:
+        self._factory = factory
+        self._final_status = final_status
+        self.calls: list[tuple[str, ...]] = []
+
+    async def run_profile_phases(
+        self,
+        *,
+        workspace_id: str,
+        phase_names: tuple[str, ...],
+        **_kwargs: Any,
+    ) -> Any:
+        self.calls.append(phase_names)
+        if phase_names == ("post_agent", "validate"):
+            await _force_workspace_status(self._factory, workspace_id, self._final_status)
+        return SimpleValidationResult()
+
+    async def run_profile_coverage(self, **_kwargs: Any) -> None:
+        return None
+
+
+class SimpleValidationResult:
+    all_passed = True
+    first_failure = None
+    total_retries = 0
+    commands: list[Any] = []
+    coverage = None
 
 
 async def _seed_ready_workspace_with_recovery(
@@ -1273,14 +1322,23 @@ async def test_rebase_only_recovery_skips_rebase_when_target_already_merged(
 
 
 @pytest.mark.unit
-async def test_stale_callback_cancelled_blocks_recovery(
+@pytest.mark.parametrize(
+    "final_status",
+    [
+        WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroyed,
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
+    ],
+)
+async def test_stale_callback_terminal_status_blocks_recovery(
+    final_status: WorkspaceStatus,
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """If a workspace is cancelled after the executor claims it, the
-    recovery path must stop and must NOT silently mark the recovery
-    operation succeeded."""
+    """If a workspace enters a callback-terminal state after executor claim,
+    recovery must stop and close the monitor-created operation as ignored."""
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
     ws_id = await _seed_ready_workspace_with_recovery(factory)
 
@@ -1294,13 +1352,13 @@ async def test_stale_callback_cancelled_blocks_recovery(
         reason_code: str = "EXECUTOR_STALE_STATUS",
     ) -> bool:
         if action == "execute" and expected == WorkspaceStatus.running:
-            async with factory() as s:
-                repo = WorkspaceRepository(s)
-                ws = await repo.get(workspace_id)
-                if ws is not None and ws.status == WorkspaceStatus.running.value:
-                    await repo.transition(ws, to=WorkspaceStatus.cancelled, reason_code="CANCELLED")
-                    await s.commit()
-        return await original_recheck(workspace_id, expected=expected, action=action, reason_code=reason_code)
+            await _force_workspace_status(factory, workspace_id, final_status)
+        return await original_recheck(
+            workspace_id,
+            expected=expected,
+            action=action,
+            reason_code=reason_code,
+        )
 
     executor._recheck_status = _patched_recheck
 
@@ -1309,69 +1367,115 @@ async def test_stale_callback_cancelled_blocks_recovery(
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
-        assert ws.status == WorkspaceStatus.cancelled.value
+        assert ws.status == final_status.value
         ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id, limit=20)
     pr_monitor_ops = [
         op
         for op in ops
         if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
     ]
     assert len(pr_monitor_ops) == 1
-    # The operation must NOT be silently succeeded.
-    assert pr_monitor_ops[0].status != OperationStatus.succeeded.value
+    assert pr_monitor_ops[0].status == OperationStatus.cancelled.value
+    assert pr_monitor_ops[0].result == {
+        "status": "ignored",
+        "reason_code": "STALE_CALLBACK_IGNORED",
+        "callback_source": "executor",
+        "callback_action": "execute",
+        "expected_status": WorkspaceStatus.running.value,
+        "actual_status": final_status.value,
+    }
+    ignored_events = [
+        event for event in events if event.event_type == "workspace.stale_callback_ignored"
+    ]
+    assert ignored_events[-1].reason_code == "STALE_CALLBACK_IGNORED"
+    assert ignored_events[-1].payload == {
+        "callback_source": "executor",
+        "callback_action": "execute",
+        "expected_status": WorkspaceStatus.running.value,
+        "actual_status": final_status.value,
+        "reason_code": "EXECUTOR_STALE_STATUS",
+    }
 
 
 @pytest.mark.unit
-async def test_stale_callback_destroyed_blocks_recovery(
+@pytest.mark.parametrize(
+    "final_status",
+    [
+        WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroyed,
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
+    ],
+)
+async def test_stale_validation_callback_terminal_status_cancels_recovery_operation(
+    final_status: WorkspaceStatus,
     fake: FakeCommandRunner,
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
-    """If a workspace is destroyed after the executor claims it, the
-    recovery path must stop and must NOT silently mark the recovery
-    operation succeeded."""
-    executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
+    monitor_calls: list[str] = []
+    validation = _TerminalAfterSuccessfulValidation(factory, final_status)
+
+    class _Monitor:
+        async def run(
+            self,
+            *,
+            workspace_id: str,
+            compose_project: str,
+            compose_file: Path,
+        ) -> None:
+            del compose_project, compose_file
+            monitor_calls.append(workspace_id)
+
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        validation=validation,
+        pr_monitor_factory=lambda *_args: _Monitor(),
+    )
     ws_id = await _seed_ready_workspace_with_recovery(factory)
-
-    original_recheck = executor._recheck_status
-
-    async def _patched_recheck(
-        workspace_id: str,
-        *,
-        expected: WorkspaceStatus,
-        action: str,
-        reason_code: str = "EXECUTOR_STALE_STATUS",
-    ) -> bool:
-        if action == "execute" and expected == WorkspaceStatus.running:
-            async with factory() as s:
-                ws = await WorkspaceRepository(s).get(workspace_id)
-                if ws is not None and ws.status == WorkspaceStatus.running.value:
-                    # Bypass state machine: the point is a stale callback
-                    # on a destroyed workspace, not a valid transition.
-                    await s.execute(
-                        sa_update(WorkspaceModel)
-                        .where(WorkspaceModel.id == workspace_id)
-                        .values(status=WorkspaceStatus.destroyed.value)
-                    )
-                    await s.commit()
-        return await original_recheck(workspace_id, expected=expected, action=action, reason_code=reason_code)
-
-    executor._recheck_status = _patched_recheck
+    _queue_validation_head(fake)
 
     await executor.execute(ws_id)
 
     async with factory() as s:
         ws = await WorkspaceRepository(s).get(ws_id)
         assert ws is not None
-        assert ws.status == WorkspaceStatus.destroyed.value
         ops = await OperationRepository(s).list_all(workspace_id=ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id, limit=30)
     pr_monitor_ops = [
         op
         for op in ops
         if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
     ]
-    assert len(pr_monitor_ops) == 1
-    assert pr_monitor_ops[0].status != OperationStatus.succeeded.value
+
+    assert validation.calls == [("setup", "pre_agent"), ("post_agent", "validate")]
+    assert ws.status == final_status.value
+    assert monitor_calls == []
+    assert pr_monitor_ops[0].status == OperationStatus.cancelled.value
+    assert pr_monitor_ops[0].result == {
+        "status": "ignored",
+        "reason_code": "STALE_CALLBACK_IGNORED",
+        "callback_source": "executor",
+        "callback_action": "validate",
+        "expected_status": WorkspaceStatus.validating.value,
+        "actual_status": final_status.value,
+        "validation_run_id": pr_monitor_ops[0].result["validation_run_id"],
+        "requested_tier": pr_monitor_ops[0].result["requested_tier"],
+        "log_stream_refs": pr_monitor_ops[0].result["log_stream_refs"],
+    }
+    ignored_events = [
+        event for event in events if event.event_type == "workspace.stale_callback_ignored"
+    ]
+    assert ignored_events[-1].payload == {
+        "callback_source": "executor",
+        "callback_action": "validate",
+        "expected_status": WorkspaceStatus.validating.value,
+        "actual_status": final_status.value,
+        "reason_code": "STALE_CALLBACK_IGNORED",
+    }
 
 
 @pytest.mark.unit

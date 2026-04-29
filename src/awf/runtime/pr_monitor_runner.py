@@ -45,6 +45,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
+from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
@@ -1827,8 +1828,20 @@ class PullRequestMonitorRunner:
             async with self._deps.session_factory() as s:
                 from awf.db.repositories import OperationRepository, WorkspaceRepository
 
-                _ws = await WorkspaceRepository(s).get(workspace_id)
+                workspace_repo = WorkspaceRepository(s)
+                _ws = await workspace_repo.get(workspace_id)
                 if _ws is None:  # pragma: no cover - defensive invariant
+                    return True
+                if _is_callback_terminal_workspace_status(_ws.status):
+                    await workspace_repo.record_ignored_stale_callback(
+                        _ws,
+                        callback_source="pr_monitor",
+                        callback_action="recovery_dispatch",
+                        expected_status=WorkspaceStatus.monitoring_pr,
+                        requested_status=WorkspaceStatus.ready,
+                        reason_code="STALE_CALLBACK_IGNORED",
+                    )
+                    await s.commit()
                     return True
                 active_recovery = any(
                     op.status
@@ -1842,6 +1855,17 @@ class PullRequestMonitorRunner:
                     for op in _ws.operations
                 )
                 if active_recovery:
+                    return True
+                if _ws.status != WorkspaceStatus.monitoring_pr.value:
+                    await workspace_repo.record_ignored_stale_callback(
+                        _ws,
+                        callback_source="pr_monitor",
+                        callback_action="recovery_dispatch",
+                        expected_status=WorkspaceStatus.monitoring_pr,
+                        requested_status=WorkspaceStatus.ready,
+                        reason_code="STALE_CALLBACK_IGNORED",
+                    )
+                    await s.commit()
                     return True
                 operation_payload = build_monitor_operation_payload(
                     workspace=_ws,
@@ -1878,7 +1902,7 @@ class PullRequestMonitorRunner:
                     payload=operation_payload,
                     idempotency_key=idempotency_key,
                 )
-                await WorkspaceRepository(s).transition(
+                await workspace_repo.transition(
                     _ws,
                     to=WorkspaceStatus.ready,
                     reason_code="RECOVERY_DISPATCH",
@@ -3101,16 +3125,26 @@ async def _record_ignored_monitor_terminal_callback(
     requested_status: WorkspaceStatus,
     reason_code: str,
 ) -> None:
-    await repo.add_event(
+    await repo.record_ignored_stale_callback(
         workspace,
-        event_type="workspace.monitor_terminal_ignored",
-        reason_code="STALE_MONITOR_TERMINAL_CALLBACK",
-        payload={
-            "current_status": workspace.status,
-            "requested_status": requested_status.value,
-            "reason_code": reason_code,
-        },
+        callback_source="pr_monitor",
+        callback_action=(
+            "terminal_completed"
+            if requested_status == WorkspaceStatus.completed
+            else "terminal_failed"
+        ),
+        expected_status=WorkspaceStatus.monitoring_pr,
+        requested_status=requested_status,
+        reason_code=reason_code,
     )
+
+
+def _is_callback_terminal_workspace_status(status: str) -> bool:
+    try:
+        workspace_status = WorkspaceStatus(status)
+    except ValueError:  # pragma: no cover - defensive for legacy bad rows
+        return False
+    return WorkspaceStateMachine.is_callback_terminal(workspace_status)
 
 
 _VERDICT_FALSE_POSITIVE = re.compile(r"\bFALSE\s+POSITIVE\s*:", re.IGNORECASE)

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 import structlog
+from sqlalchemy import update as sa_update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import CommandResult, FakeCommandRunner
@@ -202,6 +203,20 @@ async def _update_workspace(
         assert ws is not None
         for key, value in values.items():
             setattr(ws, key, value)
+        await s.commit()
+
+
+async def _force_workspace_status(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    status: WorkspaceStatus,
+) -> None:
+    async with factory() as s:
+        await s.execute(
+            sa_update(Workspace)
+            .where(Workspace.id == workspace_id)
+            .values(status=status.value)
+        )
         await s.commit()
 
 
@@ -613,6 +628,147 @@ async def test_stale_auto_merge_dispatches_validation_recovery(
             },
         )
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "final_status",
+    [
+        WorkspaceStatus.cancelled,
+        WorkspaceStatus.destroying,
+        WorkspaceStatus.destroyed,
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
+    ],
+)
+async def test_stale_recovery_dispatch_ignores_terminal_workspace_race(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    final_status: WorkspaceStatus,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    original_gate = runner._merge_gate_for_workspace
+
+    async def _gate_then_terminal(
+        workspace_id_arg: str,
+        *,
+        check_policy: bool = False,
+    ) -> object:
+        gate = await original_gate(workspace_id_arg, check_policy=check_policy)
+        await _force_workspace_status(factory, workspace_id_arg, final_status)
+        return gate
+
+    runner._merge_gate_for_workspace = _gate_then_terminal  # type: ignore[method-assign]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        ignored_events = [
+            event
+            for event in ws.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert ws.status == final_status.value
+    assert operations == []
+    assert ignored_events[-1].reason_code == "STALE_CALLBACK_IGNORED"
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "recovery_dispatch",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": final_status.value,
+        "requested_status": WorkspaceStatus.ready.value,
+        "reason_code": "STALE_CALLBACK_IGNORED",
+    }
+
+
+@pytest.mark.unit
+async def test_stale_recovery_dispatch_ignores_legacy_invalid_workspace_status(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    cmd = FakeCommandRunner()
+    adapter = FakeAdapter()
+    sleep_fn = RecordedSleep()
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _mark_refactor_task(factory, workspace_id, auto_merge=True)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0, stdout="0\n")
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+    original_gate = runner._merge_gate_for_workspace
+
+    async def _gate_then_legacy_status(
+        workspace_id_arg: str,
+        *,
+        check_policy: bool = False,
+    ) -> object:
+        gate = await original_gate(workspace_id_arg, check_policy=check_policy)
+        await _update_workspace(
+            factory,
+            workspace_id_arg,
+            status="legacy-invalid-status",
+        )
+        return gate
+
+    runner._merge_gate_for_workspace = _gate_then_legacy_status  # type: ignore[method-assign]
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(workspace_id)
+        assert ws is not None
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        ignored_events = [
+            event
+            for event in ws.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+
+    assert ws.status == "legacy-invalid-status"
+    assert operations == []
+    assert ignored_events[-1].reason_code == "STALE_CALLBACK_IGNORED"
+    assert ignored_events[-1].payload == {
+        "callback_source": "pr_monitor",
+        "callback_action": "recovery_dispatch",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": "legacy-invalid-status",
+        "requested_status": WorkspaceStatus.ready.value,
+        "reason_code": "STALE_CALLBACK_IGNORED",
+    }
 
 
 @pytest.mark.unit
@@ -2218,6 +2374,8 @@ async def test_missing_workspace_terminal_helpers_return_without_side_effects(
         WorkspaceStatus.cancelled,
         WorkspaceStatus.destroying,
         WorkspaceStatus.destroyed,
+        WorkspaceStatus.completed,
+        WorkspaceStatus.failed,
     ],
 )
 @pytest.mark.parametrize("callback", ["completed", "failed"])
@@ -2232,22 +2390,34 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
         repo = WorkspaceRepository(s)
         workspace = await repo.get(workspace_id)
         assert workspace is not None
-        await repo.transition(
-            workspace,
-            to=WorkspaceStatus.cancelled,
-            reason_code="OPERATOR_CANCEL",
-        )
-        if operator_status in {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}:
+        if operator_status == WorkspaceStatus.cancelled:
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.cancelled,
+                reason_code="OPERATOR_CANCEL",
+            )
+        elif operator_status in {WorkspaceStatus.destroying, WorkspaceStatus.destroyed}:
+            await repo.transition(
+                workspace,
+                to=WorkspaceStatus.cancelled,
+                reason_code="OPERATOR_CANCEL",
+            )
             await repo.transition(
                 workspace,
                 to=WorkspaceStatus.destroying,
                 reason_code="OPERATOR_DESTROY",
             )
-        if operator_status == WorkspaceStatus.destroyed:
+            if operator_status == WorkspaceStatus.destroyed:
+                await repo.transition(
+                    workspace,
+                    to=WorkspaceStatus.destroyed,
+                    reason_code="OPERATOR_DESTROY",
+                )
+        else:
             await repo.transition(
                 workspace,
-                to=WorkspaceStatus.destroyed,
-                reason_code="OPERATOR_DESTROY",
+                to=operator_status,
+                reason_code="MONITOR_TERMINAL",
             )
         await s.commit()
     cmd = FakeCommandRunner()
@@ -2258,6 +2428,22 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
         sleep_fn=RecordedSleep(),
         worktrees_root=tmp_path / "worktrees",
     )
+    reconcile_calls: list[tuple[str, str, str]] = []
+    gc_calls: list[str] = []
+
+    async def _record_reconcile_call(
+        *,
+        workspace_id: str,
+        repo_url: str,
+        base_branch: str,
+    ) -> None:
+        reconcile_calls.append((workspace_id, repo_url, base_branch))
+
+    async def _record_gc_call(workspace_id: str) -> None:
+        gc_calls.append(workspace_id)
+
+    runner._reconcile_target_branch_after_merge = _record_reconcile_call  # type: ignore[method-assign]
+    runner._gc_completed_workspace_filesystem = _record_gc_call  # type: ignore[method-assign]
 
     if callback == "completed":
         await runner._terminate_completed(
@@ -2281,6 +2467,11 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
         ignored_events = [
             event
             for event in workspace.events
+            if event.event_type == "workspace.stale_callback_ignored"
+        ]
+        monitor_terminal_events = [
+            event
+            for event in workspace.events
             if event.event_type == "workspace.monitor_terminal_ignored"
         ]
 
@@ -2289,8 +2480,14 @@ async def test_stale_monitor_terminal_callbacks_do_not_override_operator_states(
     assert workspace.failure_reason is None
     assert workspace.failure_message is None
     assert cmd.calls == []
+    assert reconcile_calls == []
+    assert gc_calls == []
+    assert monitor_terminal_events == []
     assert ignored_events[-1].payload == {
-        "current_status": operator_status.value,
+        "callback_source": "pr_monitor",
+        "callback_action": "terminal_completed" if callback == "completed" else "terminal_failed",
+        "expected_status": WorkspaceStatus.monitoring_pr.value,
+        "actual_status": operator_status.value,
         "requested_status": "completed" if callback == "completed" else "failed",
         "reason_code": "MONITOR_DONE" if callback == "completed" else "STALE_MONITOR",
     }
