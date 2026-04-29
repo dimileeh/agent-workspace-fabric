@@ -197,8 +197,11 @@ def _is_excluded(
 
 
 def _scan_file(path: Path) -> list[TestQualityViolation]:
-    source = path.read_text(encoding="utf-8")
-    tree = ast.parse(source, filename=str(path))
+    try:
+        source = path.read_text(encoding="utf-8")
+        tree = ast.parse(source, filename=str(path))
+    except (OSError, UnicodeDecodeError, SyntaxError):
+        return []
     escape_hatches = _parse_escape_hatches(source)
     pending: list[_PendingViolation] = []
     for test in _iter_test_nodes(tree):
@@ -556,7 +559,10 @@ def _expr_to_dotted_name(node: ast.AST) -> str | None:
 
 def _parse_escape_hatches(source: str) -> list[_EscapeHatch]:
     hatches: list[_EscapeHatch] = []
-    tokens = tokenize.generate_tokens(io.StringIO(source).readline)
+    try:
+        tokens = list(tokenize.generate_tokens(io.StringIO(source).readline))
+    except tokenize.TokenError:
+        return []
     for token in tokens:
         if token.type != tokenize.COMMENT:
             continue

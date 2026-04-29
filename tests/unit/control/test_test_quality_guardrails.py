@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import tokenize
+from collections.abc import Callable, Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
+import awf.control.test_quality_guardrails as guardrails
 from awf.control.test_quality_guardrails import scan_test_quality
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -110,3 +114,67 @@ def test_exclude_globs_are_evaluated_from_repository_root(
     )
 
     assert violations == []
+
+
+@pytest.mark.unit
+def test_scan_skips_unreadable_and_invalid_python_files(tmp_path: Path) -> None:
+    invalid_encoding = tmp_path / "invalid_encoding.py"
+    invalid_encoding.write_bytes(b"\xff")
+    invalid_syntax = tmp_path / "invalid_syntax.py"
+    invalid_syntax.write_text("def test_broken(:\n    pass\n", encoding="utf-8")
+    valid_empty = tmp_path / "valid_empty.py"
+    valid_empty.write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
+
+    violations = scan_test_quality([invalid_encoding, invalid_syntax, valid_empty])
+
+    assert [(violation.path.name, violation.code, violation.line) for violation in violations] == [
+        ("valid_empty.py", "EMPTY_TEST", 1),
+    ]
+
+
+@pytest.mark.unit
+def test_scan_skips_os_errors_and_continues(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    unreadable = tmp_path / "unreadable.py"
+    unreadable.write_text("def test_unreadable():\n    pass\n", encoding="utf-8")
+    valid_empty = tmp_path / "valid_empty.py"
+    valid_empty.write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def fail_for_unreadable(self: Path, *args: Any, **kwargs: Any) -> str:
+        if self == unreadable:
+            raise OSError("cannot read test source")
+        return original_read_text(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", fail_for_unreadable)
+
+    violations = scan_test_quality([unreadable, valid_empty])
+
+    assert [(violation.path.name, violation.code, violation.line) for violation in violations] == [
+        ("valid_empty.py", "EMPTY_TEST", 1),
+    ]
+
+
+@pytest.mark.unit
+def test_scan_treats_tokenize_errors_as_missing_escape_hatches(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    valid_empty = tmp_path / "valid_empty.py"
+    valid_empty.write_text("def test_placeholder():\n    pass\n", encoding="utf-8")
+
+    def fail_generate_tokens(
+        _readline: Callable[[], str],
+    ) -> Iterator[tokenize.TokenInfo]:
+        raise tokenize.TokenError("cannot tokenize test source", (1, 0))
+        yield from ()
+
+    monkeypatch.setattr(guardrails.tokenize, "generate_tokens", fail_generate_tokens)
+
+    violations = scan_test_quality([valid_empty])
+
+    assert [(violation.path.name, violation.code, violation.line) for violation in violations] == [
+        ("valid_empty.py", "EMPTY_TEST", 1),
+    ]
