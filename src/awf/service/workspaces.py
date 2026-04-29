@@ -7,7 +7,7 @@ from collections.abc import Mapping
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -23,6 +23,7 @@ from awf.api.schemas import (
     WorkspaceLogStreamResponse,
     WorkspaceResponse,
     WorkspaceRetryResponse,
+    WorkspaceRuntimeHealthResponse,
     WorkspaceRuntimeResponse,
     WorkspaceWarningResponse,
 )
@@ -59,6 +60,11 @@ from awf.service.validation_observability import (
     validation_provenance_unavailable,
 )
 from awf.service.workspace_observability import workspace_observability_payload
+from awf.service.workspace_runtime_health import (
+    RUNTIME_STRANDED_EVENT_TYPE,
+    classify_runtime_snapshot,
+    runtime_workspace_from_workspace,
+)
 
 
 class RuntimeInspection(Protocol):
@@ -305,8 +311,10 @@ class WorkspaceService:
             if workspace is None:
                 return None
             compose_project_name = workspace.compose_project_name
+            runtime_workspace = runtime_workspace_from_workspace(workspace)
 
         snapshot = await self._runtime_inspector.inspect(compose_project_name)
+        finding = classify_runtime_snapshot(runtime_workspace, snapshot)
         return WorkspaceRuntimeResponse(
             workspace_id=workspace_id,
             compose_project_name=compose_project_name,
@@ -327,6 +335,11 @@ class WorkspaceService:
             logs_available=True,
             control_available=True,
             reason=snapshot.reason,
+            runtime_health=(
+                WorkspaceRuntimeHealthResponse(**finding.to_response_dict())
+                if finding is not None
+                else None
+            ),
         )
 
     async def list_operations(
@@ -688,9 +701,50 @@ def workspace_response(
         if validation_provenance is not None
         else validation_provenance_unavailable(workspace)
     )
+    computed_fields["runtime_health"] = _workspace_runtime_health_from_events(workspace)
     return WorkspaceResponse.model_validate(
         _WorkspaceResponseSource(workspace, computed_fields)
     )
+
+
+def _workspace_runtime_health_from_events(
+    workspace: Workspace,
+) -> WorkspaceRuntimeHealthResponse | None:
+    for event in reversed(workspace.events):
+        if event.event_type != RUNTIME_STRANDED_EVENT_TYPE:
+            continue
+        payload = event.payload or {}
+        reason_code = payload.get("reason_code") or event.reason_code
+        decision = payload.get("decision")
+        message = payload.get("message")
+        if not isinstance(reason_code, str) or not isinstance(decision, str):
+            return None
+        if not isinstance(message, str):
+            message = reason_code
+        return WorkspaceRuntimeHealthResponse(
+            status="unavailable"
+            if reason_code == "RUNTIME_INSPECTION_UNAVAILABLE"
+            else "stranded",
+            reason_code=reason_code,
+            decision=cast(Any, decision),
+            message=message,
+            services=_runtime_health_event_services(payload),
+        )
+    return None
+
+
+def _runtime_health_event_services(payload: Mapping[str, Any]) -> list[dict[str, str]]:
+    runtime = payload.get("runtime")
+    if not isinstance(runtime, Mapping):
+        return []
+    services = runtime.get("services")
+    if not isinstance(services, list):
+        return []
+    return [
+        {key: str(value) for key, value in service.items() if value is not None}
+        for service in services
+        if isinstance(service, Mapping)
+    ]
 
 
 async def _record_owned_path_overlap_risk(

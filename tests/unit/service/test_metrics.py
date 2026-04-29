@@ -625,6 +625,67 @@ async def test_resource_saturation_includes_orphan_resource_summary(
 
 
 @pytest.mark.unit
+async def test_resource_saturation_includes_runtime_health_counts(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.workspace_runtime_health import (
+        RuntimeResource,
+        RuntimeWorkspace,
+        summarize_runtime_health,
+    )
+
+    runtime_health = summarize_runtime_health(
+        workspaces=(
+            RuntimeWorkspace(
+                workspace_id="ws_missing_stack",
+                status=WorkspaceStatus.running.value,
+                compose_project_name="awf_ws_missing_stack",
+                compose_file_path="/tmp/ws_missing_stack/compose.yml",
+            ),
+            RuntimeWorkspace(
+                workspace_id="ws_exited",
+                status=WorkspaceStatus.running.value,
+                compose_project_name="awf_ws_exited",
+                compose_file_path="/tmp/ws_exited/compose.yml",
+            ),
+            RuntimeWorkspace(
+                workspace_id="ws_monitor",
+                status=WorkspaceStatus.monitoring_pr.value,
+                compose_project_name="awf_ws_monitor",
+                compose_file_path="/tmp/ws_monitor/compose.yml",
+                pr_url="https://github.com/example/repo/pull/42",
+            ),
+        ),
+        resources=(
+            RuntimeResource(
+                resource_kind="container",
+                workspace_id="ws_exited",
+                compose_project="awf_ws_exited",
+                service="agent",
+                state="exited",
+                container_id="agent",
+            ),
+        ),
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=Settings(_env_file=None, work_dir="/tmp/awf-work"),
+        disk_check=_disk_check(),
+        runtime_health=runtime_health,
+    )
+
+    assert summary.runtime_health.stranded_count == 3
+    assert summary.runtime_health.fail_candidate_count == 2
+    assert summary.runtime_health.recoverable_count == 1
+    assert summary.runtime_health.reason_counts == {
+        "AGENT_CONTAINER_EXITED": 1,
+        "STRANDED_WORKSPACE": 2,
+    }
+
+
+@pytest.mark.unit
 async def test_resource_saturation_prefers_active_reservations_and_falls_back_for_old_rows(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
