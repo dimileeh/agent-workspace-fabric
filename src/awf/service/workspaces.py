@@ -209,6 +209,11 @@ class WorkspaceService:
         self._project_stopper = project_stopper or stop_project_containers
         self._cleaner_factory = cleaner_factory or default_cleaner
 
+    @property
+    def session_factory(self) -> async_sessionmaker[AsyncSession]:
+        """Expose the shared session factory for read-only parity clients."""
+        return self._factory
+
     async def create(self, req: WorkspaceCreateRequest) -> WorkspaceResponse:
         async with self._factory() as s:
             ws = await WorkspaceRepository(s).create(

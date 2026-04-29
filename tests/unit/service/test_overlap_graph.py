@@ -8,6 +8,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+import awf.service.overlap_graph as overlap_graph
 from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -18,6 +19,17 @@ async def session_factory(
     engine: AsyncEngine,
 ) -> AsyncIterator[async_sessionmaker[AsyncSession]]:
     yield make_session_factory(engine)
+
+
+@pytest.mark.unit
+async def test_overlap_graph_edge_builder_returns_empty_for_single_workspace() -> None:
+    assert await overlap_graph._workspace_overlap_edges(()) == ()
+
+
+@pytest.mark.unit
+def test_overlap_graph_rejects_status_outside_queue_states() -> None:
+    with pytest.raises(ValueError, match="not part of the overlap graph"):
+        overlap_graph._queue_state_for_status(WorkspaceStatus.completed.value)
 
 
 async def _workspace(

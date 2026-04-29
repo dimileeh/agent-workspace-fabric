@@ -28,15 +28,9 @@ async def list_operations(
         workspace_id=workspace_id,
         status=status,
         operation_type=operation_type,
-        limit=limit,
+        limit=limit + 1,
     )
-    return OperationListResponse(
-        items=[OperationResponse.model_validate(row) for row in rows],
-        next_cursor=None,
-        has_more=False,
-        limit=limit,
-        cursor=None,
-    )
+    return _operation_list_response(rows, limit=limit)
 
 
 @router.get("/v1/operations/{operation_id}", response_model=OperationResponse)
@@ -65,17 +59,26 @@ async def list_workspace_operations(
         workspace_id,
         status=status,
         operation_type=operation_type,
-        limit=limit,
+        limit=limit + 1,
     )
     if rows is None:
         raise HTTPException(
             status_code=fastapi_status.HTTP_404_NOT_FOUND,
             detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
         )
+    return _operation_list_response(rows, limit=limit)
+
+
+def _operation_list_response(
+    rows: list[OperationResponse],
+    *,
+    limit: int,
+) -> OperationListResponse:
+    page_rows = rows[:limit]
     return OperationListResponse(
-        items=rows,
+        items=page_rows,
         next_cursor=None,
-        has_more=False,
+        has_more=len(rows) > limit,
         limit=limit,
         cursor=None,
     )

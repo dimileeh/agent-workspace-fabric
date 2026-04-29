@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from sqlalchemy.orm.attributes import set_committed_value
 
 import awf.api.routes.merge_queue as merge_queue_route
+import awf.service.merge_queue as merge_queue_service
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import MergeCandidate
 from awf.db.repositories import (
@@ -23,6 +24,10 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_session_factory
 from awf.runtime.merge_eligibility import VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+
+
+def test_merge_queue_route_exports_only_route_endpoint() -> None:
+    assert merge_queue_route.__all__ == ["list_merge_queue"]
 
 
 async def _create_queue_workspace(
@@ -1776,7 +1781,7 @@ class TestMergeQueueHelpers:
     ) -> None:
         candidate = _candidate_for_reason(**flags)
 
-        assert merge_queue_route._merge_blocker_reason(
+        assert merge_queue_service._merge_blocker_reason(
             candidate,
             stale_reasons=[],
             policy_findings=[],

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from awf.api.routes import artifacts
 from awf.common.config import get_settings
 from awf.db.session import make_session_factory
+from awf.service.artifacts import list_workspace_artifacts_metadata
 
 _MINIMAL_BODY = {
     "repo_url": "git@github.com:example/artifacts.git",
@@ -483,6 +484,28 @@ class TestWorkspaceArtifacts:
             with pytest.raises(HTTPException) as exc_info:
                 await artifacts._require_workspace(session, "ws_missing")
 
+        assert exc_info.value.status_code == 404
+        assert exc_info.value.detail == {
+            "error_code": "NOT_FOUND",
+            "message": "No workspace with id ws_missing",
+        }
+
+    @pytest.mark.unit
+    async def test_artifact_service_and_route_report_missing_workspace(
+        self,
+        engine: AsyncEngine,
+        tmp_path: Path,
+    ) -> None:
+        async with make_session_factory(engine)() as session:
+            service_response = await list_workspace_artifacts_metadata(
+                session,
+                workspace_id="ws_missing",
+                work_dir=tmp_path,
+            )
+            with pytest.raises(HTTPException) as exc_info:
+                await artifacts.list_workspace_artifacts("ws_missing", session=session)
+
+        assert service_response is None
         assert exc_info.value.status_code == 404
         assert exc_info.value.detail == {
             "error_code": "NOT_FOUND",
