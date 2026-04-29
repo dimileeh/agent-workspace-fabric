@@ -59,6 +59,34 @@ async def _workspace(
         return workspace.id
 
 
+async def _workspace_with_runtime_health_event(
+    session_factory: async_sessionmaker[AsyncSession],
+    *,
+    payload: dict[str, object],
+    reason_code: str = "STRANDED_WORKSPACE",
+) -> str:
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/runtime.git",
+            branch_base="main",
+            task_title="persisted runtime edge",
+            task_prompt="show persisted runtime finding edge",
+            agent="codex",
+            test_commands=[],
+        )
+        workspace.status = WorkspaceStatus.failed.value
+        workspace.failure_reason = "infrastructure_failure"
+        await repo.add_event(
+            workspace,
+            event_type=RUNTIME_STRANDED_EVENT_TYPE,
+            reason_code=reason_code,
+            payload=payload,
+        )
+        await session.commit()
+        return workspace.id
+
+
 @pytest.mark.unit
 async def test_runtime_health_flags_missing_compose_project_as_stranded(
     session_factory: async_sessionmaker[AsyncSession],
@@ -268,3 +296,54 @@ async def test_workspace_detail_exposes_persisted_runtime_health(
     assert detail.runtime_health.services == [
         {"name": "agent", "state": "exited", "container_id": "agent"}
     ]
+
+
+@pytest.mark.unit
+async def test_workspace_detail_ignores_persisted_runtime_health_without_decision(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _workspace_with_runtime_health_event(
+        session_factory,
+        payload={"reason_code": "STRANDED_WORKSPACE"},
+    )
+
+    detail = await WorkspaceService(session_factory).get(workspace_id)
+
+    assert detail is not None
+    assert detail.runtime_health is None
+
+
+@pytest.mark.unit
+async def test_workspace_detail_defaults_runtime_health_message_and_ignores_bad_services(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    no_runtime_id = await _workspace_with_runtime_health_event(
+        session_factory,
+        payload={
+            "reason_code": "STRANDED_WORKSPACE",
+            "decision": "fail_workspace",
+            "runtime": "not parsed",
+        },
+    )
+    bad_services_id = await _workspace_with_runtime_health_event(
+        session_factory,
+        payload={
+            "reason_code": "AGENT_CONTAINER_MISSING",
+            "decision": "fail_workspace",
+            "message": "Workspace runtime is present but the agent container is missing.",
+            "runtime": {"services": "not a list"},
+        },
+        reason_code="AGENT_CONTAINER_MISSING",
+    )
+
+    no_runtime = await WorkspaceService(session_factory).get(no_runtime_id)
+    bad_services = await WorkspaceService(session_factory).get(bad_services_id)
+
+    assert no_runtime is not None
+    assert no_runtime.runtime_health is not None
+    assert no_runtime.runtime_health.message == "STRANDED_WORKSPACE"
+    assert no_runtime.runtime_health.services == []
+    assert bad_services is not None
+    assert bad_services.runtime_health is not None
+    assert bad_services.runtime_health.reason_code == "AGENT_CONTAINER_MISSING"
+    assert bad_services.runtime_health.services == []

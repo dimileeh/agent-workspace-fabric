@@ -1022,6 +1022,165 @@ def test_recovery_summary_uses_latest_reverse_recovery_pair() -> None:
 
 
 @pytest.mark.unit
+def test_recovery_summary_uses_reverse_reason_when_payloads_are_empty() -> None:
+    base = datetime(2026, 4, 27, 22, 0, tzinfo=UTC)
+    reverse_at = base + timedelta(seconds=45)
+    workspace = SimpleNamespace(
+        id="ws_recovery",
+        status="",
+        created_at=base,
+        operations=[],
+        events=[
+            _recovery_event(
+                event_id="evt_reverse",
+                event_type="workspace.state_changed",
+                occurred_at=reverse_at,
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="MANUAL_RECOVERY",
+            )
+        ],
+    )
+
+    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
+
+    assert summary is not None
+    assert summary.reason_code == "MANUAL_RECOVERY"
+    assert summary.action is None
+    assert summary.recovery_mode is None
+    assert summary.payload is None
+    assert summary.summary == "Reverted monitoring_pr -> ready for MANUAL_RECOVERY."
+
+
+@pytest.mark.unit
+def test_recovery_summary_filters_non_recovery_operations_before_latest_match() -> None:
+    base = datetime(2026, 4, 27, 22, 15, tzinfo=UTC)
+    reverse_at = base + timedelta(seconds=30)
+    valid_payload = {
+        "source": "operator_api",
+        "recovery_mode": "validate_only",
+        "requested_action": "validate",
+        "reason_code": "OPERATOR_REFRESH",
+    }
+    workspace = _workspace_for_recovery(
+        status=WorkspaceStatus.validating,
+        created_at=base,
+        events=[
+            _recovery_event(
+                event_id="evt_reverse",
+                event_type="workspace.state_changed",
+                occurred_at=reverse_at,
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="RECOVERY_DISPATCH",
+            )
+        ],
+        operations=[
+            _recovery_operation(
+                operation_id="op_finished",
+                status=OperationStatus.succeeded.value,
+                created_at=base,
+                payload={"source": "pr_monitor", "recovery_mode": "validate_only"},
+            ),
+            _recovery_operation(
+                operation_id="op_cleanup",
+                operation_type="cleanup",
+                status=OperationStatus.pending.value,
+                created_at=base + timedelta(seconds=1),
+                payload={"source": "pr_monitor", "recovery_mode": "validate_only"},
+            ),
+            _recovery_operation(
+                operation_id="op_bad_payload",
+                status=OperationStatus.pending.value,
+                created_at=base + timedelta(seconds=2),
+                payload=None,
+            ),
+            _recovery_operation(
+                operation_id="op_manual_mode",
+                status=OperationStatus.pending.value,
+                created_at=base + timedelta(seconds=3),
+                payload={"source": "operator_api", "recovery_mode": "manual"},
+            ),
+            _recovery_operation(
+                operation_id="op_operator_validate",
+                status=OperationStatus.pending.value,
+                created_at=base + timedelta(seconds=4),
+                payload=valid_payload,
+            ),
+        ],
+    )
+
+    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
+
+    assert summary is not None
+    assert summary.reason_code == "OPERATOR_REFRESH"
+    assert summary.action == "validate"
+    assert summary.recovery_mode == "validate_only"
+    assert summary.current_operation is not None
+    assert summary.current_operation.id == "op_operator_validate"
+    assert summary.current_operation.payload == valid_payload
+
+
+@pytest.mark.unit
+def test_recovery_summary_bounds_json_safe_payload_values() -> None:
+    base = datetime(2026, 4, 27, 22, 45, tzinfo=UTC)
+    reverse_at = base + timedelta(seconds=20)
+
+    class OpaquePayloadValue:
+        def __str__(self) -> str:
+            return "opaque-payload-value"
+
+    event_payload: dict[str, object] = {
+        "reason": "MANUAL_RUNTIME_RECOVERY",
+        "action": "retry",
+        "recovery_mode": "manual",
+        "at": base,
+        "nested": {f"nested_{index}": index for index in range(35)},
+        "items": list(range(21)),
+        "deep": {"level1": {"level2": {"level3": {"level4": {"value": "hidden"}}}}},
+        "opaque": OpaquePayloadValue(),
+    }
+    event_payload.update({f"extra_{index}": index for index in range(40)})
+    workspace = _workspace_for_recovery(
+        created_at=base,
+        events=[
+            _recovery_event(
+                event_id="evt_reverse",
+                event_type="workspace.state_changed",
+                occurred_at=reverse_at,
+                old_state=WorkspaceStatus.monitoring_pr.value,
+                new_state=WorkspaceStatus.ready.value,
+                reason_code="RECOVERY_DISPATCH",
+            ),
+            _recovery_event(
+                event_id="evt_dispatch",
+                event_type="monitor.recovery_dispatched",
+                occurred_at=reverse_at + timedelta(seconds=1),
+                reason_code="RECOVERY_DISPATCH",
+                payload=event_payload,
+            ),
+        ],
+    )
+
+    summary = workspace_recovery_summary(workspace)  # type: ignore[arg-type]
+
+    assert summary is not None
+    assert summary.reason_code == "MANUAL_RUNTIME_RECOVERY"
+    assert summary.action == "retry"
+    assert summary.recovery_mode == "manual"
+    assert "AWF dispatched retry." in summary.summary
+    assert summary.payload is not None
+    assert summary.payload["at"] == base.isoformat()
+    assert summary.payload["nested"]["__truncated__"] is True
+    assert summary.payload["items"][-1] == "__truncated__"
+    assert summary.payload["deep"]["level1"]["level2"]["level3"]["level4"] == (
+        "{'value': 'hidden'}"
+    )
+    assert summary.payload["opaque"] == "opaque-payload-value"
+    assert summary.payload["__truncated__"] is True
+
+
+@pytest.mark.unit
 def test_latest_reverse_state_event_scans_from_most_recent_event() -> None:
     base = datetime(2026, 4, 27, 21, 45, tzinfo=UTC)
 
