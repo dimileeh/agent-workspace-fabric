@@ -759,6 +759,46 @@ class TestListWorkspaces:
 
         assert [row.id for row in listed] == sorted((row.id for row in rows), reverse=True)
 
+    @pytest.mark.unit
+    async def test_list_applies_created_at_cursor_bound(self, session: AsyncSession) -> None:
+        repo = WorkspaceRepository(session)
+        oldest = await repo.create(
+            repo_url="git@github.com:example/oldest.git",
+            branch_base="development",
+            task_title="oldest",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+        )
+        middle = await repo.create(
+            repo_url="git@github.com:example/middle.git",
+            branch_base="development",
+            task_title="middle",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+        )
+        newest = await repo.create(
+            repo_url="git@github.com:example/newest.git",
+            branch_base="development",
+            task_title="newest",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+        )
+        oldest.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        middle.created_at = datetime(2026, 1, 2, tzinfo=UTC)
+        newest.created_at = datetime(2026, 1, 3, tzinfo=UTC)
+        await session.commit()
+
+        rows = await repo.list(
+            before_created_at=newest.created_at,
+            before_workspace_id=newest.id,
+            limit=2,
+        )
+
+        assert [row.id for row in rows] == [middle.id, oldest.id]
+
 
 class TestOwnedPathOverlapLookup:
     @pytest.mark.unit

@@ -104,6 +104,8 @@ async def test_get_locks_lists_active_reservations_and_excludes_terminal_by_defa
     body = response.json()
     assert body["next_cursor"] is None
     assert body["has_more"] is False
+    assert body["limit"] == 50
+    assert body["cursor"] is None
     assert [item["workspace_id"] for item in body["items"]] == [active_id]
     item = body["items"][0]
     assert item["title"] == "API lock visibility"
@@ -190,6 +192,8 @@ async def test_get_locks_reports_has_more_and_accepts_next_cursor(
     assert len(first_body["items"]) == 1
     assert first_body["has_more"] is True
     assert first_body["next_cursor"] is not None
+    assert first_body["limit"] == 1
+    assert first_body["cursor"] is None
 
     second_response = await client.get(
         "/v1/locks",
@@ -201,6 +205,8 @@ async def test_get_locks_reports_has_more_and_accepts_next_cursor(
     assert len(second_body["items"]) == 1
     assert second_body["has_more"] is False
     assert second_body["next_cursor"] is None
+    assert second_body["limit"] == 1
+    assert second_body["cursor"] == first_body["next_cursor"]
     returned_ids = {
         first_body["items"][0]["workspace_id"],
         second_body["items"][0]["workspace_id"],

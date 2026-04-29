@@ -444,6 +444,8 @@ class TestMergeQueueList:
         body = response.json()
         assert body["next_cursor"] is None
         assert body["has_more"] is False
+        assert body["limit"] == 50
+        assert body["cursor"] is None
         assert [item["workspace_id"] for item in body["items"]] == [older_id]
 
         item = body["items"][0]
@@ -951,6 +953,8 @@ class TestMergeQueueList:
         assert [item["workspace_id"] for item in first_body["items"]] == [newer_id]
         assert first_body["has_more"] is True
         assert first_body["next_cursor"] is not None
+        assert first_body["limit"] == 1
+        assert first_body["cursor"] is None
 
         second_response = await client.get(
             "/v1/merge-queue",
@@ -962,6 +966,8 @@ class TestMergeQueueList:
         assert [item["workspace_id"] for item in second_body["items"]] == [older_id]
         assert second_body["has_more"] is False
         assert second_body["next_cursor"] is None
+        assert second_body["limit"] == 1
+        assert second_body["cursor"] == first_body["next_cursor"]
 
     @pytest.mark.unit
     async def test_route_function_paginates_candidate_rows_directly(
@@ -992,6 +998,8 @@ class TestMergeQueueList:
         assert [item.workspace_id for item in first_page.items] == [newer_id]
         assert first_page.has_more is True
         assert first_page.next_cursor is not None
+        assert first_page.limit == 1
+        assert first_page.cursor is None
 
         async with make_session_factory(engine)() as session:
             second_page = await merge_queue_route.list_merge_queue(
@@ -1003,6 +1011,8 @@ class TestMergeQueueList:
         assert [item.workspace_id for item in second_page.items] == [older_id]
         assert second_page.has_more is False
         assert second_page.next_cursor is None
+        assert second_page.limit == 1
+        assert second_page.cursor == first_page.next_cursor
 
     @pytest.mark.unit
     async def test_rejects_invalid_cursor(self, client: AsyncClient) -> None:

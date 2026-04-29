@@ -68,4 +68,6 @@ async def list_locks(
         items=[WorkspaceLockResponse.model_validate(row) for row in page.items],
         next_cursor=page.next_cursor,
         has_more=page.has_more,
+        limit=limit,
+        cursor=cursor,
     )

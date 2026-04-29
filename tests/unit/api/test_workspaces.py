@@ -7,6 +7,7 @@ true integration + E2E tests live under tests/integration/ and tests/e2e/.
 
 from __future__ import annotations
 
+import base64
 import json
 from collections.abc import AsyncIterator, Iterator
 from datetime import UTC, datetime, timedelta
@@ -215,6 +216,21 @@ async def _set_workspace_status(
         ws = await repo.get(workspace_id)
         assert ws is not None
         ws.status = status.value
+        await session.commit()
+
+
+async def _set_workspace_created_at(
+    engine: AsyncEngine,
+    workspace_id: str,
+    created_at: datetime,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.get(workspace_id)
+        assert ws is not None
+        ws.created_at = created_at
+        ws.updated_at = created_at
         await session.commit()
 
 
@@ -1616,6 +1632,84 @@ class TestGetWorkspace:
 
 class TestWorkspaceDirectRoutes:
     @pytest.mark.unit
+    async def test_overview_reports_next_cursor_and_applies_cursor(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        oldest_id = await _create_workspace(client, task_title="oldest overview")
+        middle_id = await _create_workspace(client, task_title="middle overview")
+        newest_id = await _create_workspace(client, task_title="newest overview")
+        base = datetime(2026, 4, 28, 12, 0, tzinfo=UTC)
+        await _set_workspace_created_at(engine, oldest_id, base)
+        await _set_workspace_created_at(engine, middle_id, base + timedelta(seconds=1))
+        await _set_workspace_created_at(engine, newest_id, base + timedelta(seconds=2))
+
+        first = await client.get("/v1/workspaces/overview", params={"limit": 1})
+        assert first.status_code == 200
+        first_body = first.json()
+        assert [item["workspace_id"] for item in first_body["items"]] == [newest_id]
+        assert first_body["has_more"] is True
+        assert first_body["next_cursor"] is not None
+        assert first_body["cursor"] is None
+
+        second = await client.get(
+            "/v1/workspaces/overview",
+            params={"limit": 1, "cursor": first_body["next_cursor"]},
+        )
+        assert second.status_code == 200
+        second_body = second.json()
+        assert [item["workspace_id"] for item in second_body["items"]] == [middle_id]
+        assert second_body["has_more"] is True
+        assert second_body["next_cursor"] is not None
+        assert second_body["cursor"] == first_body["next_cursor"]
+
+    @pytest.mark.unit
+    def test_overview_cursor_fits_query_param_limit_for_max_workspace_id(self) -> None:
+        workspace_id = "ws_" + ("a" * 33)
+        created_at = datetime(2026, 4, 28, 12, 0, 0, 123456, tzinfo=UTC)
+
+        cursor = workspaces_route._encode_overview_cursor(
+            SimpleNamespace(id=workspace_id, created_at=created_at)
+        )
+
+        assert len(cursor) <= 128
+        assert workspaces_route._decode_overview_cursor(cursor) == workspaces_route._WorkspaceOverviewCursor(
+            created_at=created_at,
+            workspace_id=workspace_id,
+        )
+
+    @pytest.mark.unit
+    def test_overview_cursor_decodes_legacy_verbose_payload(self) -> None:
+        workspace_id = "ws_" + ("a" * 24)
+        created_at = datetime(2026, 4, 28, 12, 0, 0, tzinfo=UTC)
+        payload = {
+            "created_at": created_at.isoformat(),
+            "workspace_id": workspace_id,
+        }
+        cursor = base64.urlsafe_b64encode(
+            json.dumps(payload, separators=(",", ":")).encode("utf-8")
+        ).decode("ascii")
+
+        assert workspaces_route._decode_overview_cursor(cursor) == workspaces_route._WorkspaceOverviewCursor(
+            created_at=created_at,
+            workspace_id=workspace_id,
+        )
+
+    @pytest.mark.unit
+    async def test_overview_rejects_invalid_cursor(self, client: AsyncClient) -> None:
+        response = await client.get(
+            "/v1/workspaces/overview",
+            params={"cursor": "not-a-cursor"},
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "error_code": "INVALID_CURSOR",
+            "message": "Invalid workspace overview cursor.",
+        }
+
+    @pytest.mark.unit
     async def test_overview_route_maps_workspace_without_events_or_operations(
         self,
         client: AsyncClient,
@@ -1631,6 +1725,10 @@ class TestWorkspaceDirectRoutes:
         assert item.title == "overview direct"
         assert item.active_operation is None
         assert item.last_event is not None
+        assert response.next_cursor is None
+        assert response.has_more is False
+        assert response.limit == 50
+        assert response.cursor is None
 
     @pytest.mark.unit
     async def test_overview_route_reuses_ordered_events_for_last_event(
@@ -1737,6 +1835,12 @@ class TestWorkspaceDirectRoutes:
 
         assert [event.event_type for event in events.items] == ["workspace.created"]
         assert stale.items == []
+        assert events.limit == 50
+        assert events.cursor is None
+        assert stale.next_cursor is None
+        assert stale.has_more is False
+        assert stale.limit == len(stale.items)
+        assert stale.cursor is None
         assert [workspace.id for workspace in listed] == [workspace_id]
         assert detail.id == workspace_id
         assert isinstance(retry_error, JSONResponse)

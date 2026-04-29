@@ -11,7 +11,11 @@ returns 409 ``IDEMPOTENCY_CONFLICT`` per docs/PLAN_MVP.md § Error code taxonomy
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
+import json
 from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Annotated, cast
 
@@ -68,6 +72,16 @@ from awf.service.workspaces import (
 router = APIRouter(prefix="/v1/workspaces", tags=["workspaces"])
 router_v2 = APIRouter(prefix="/v2/workspaces", tags=["workspaces-v2"])
 DiskCheckProvider = Callable[[Settings], DiskCheck]
+
+
+@dataclass(frozen=True)
+class _WorkspaceOverviewCursor:
+    created_at: datetime
+    workspace_id: str
+
+
+class InvalidWorkspaceOverviewCursorError(ValueError):
+    """Raised when a workspace overview pagination cursor cannot be decoded."""
 
 
 @router.post(
@@ -235,15 +249,28 @@ async def list_workspace_overview(
     cursor: Annotated[str | None, Query(max_length=128)] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceOverviewListResponse:
-    del cursor
+    try:
+        decoded_cursor = _decode_overview_cursor(cursor)
+    except InvalidWorkspaceOverviewCursorError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_CURSOR",
+                "message": "Invalid workspace overview cursor.",
+            },
+        ) from exc
     rows = await WorkspaceRepository(session).list(
         status=workspace_status,
         agent=agent,
         repo_url=repo_url,
-        limit=limit,
+        before_created_at=decoded_cursor.created_at if decoded_cursor is not None else None,
+        before_workspace_id=decoded_cursor.workspace_id if decoded_cursor is not None else None,
+        limit=limit + 1,
     )
+    page_rows = rows[:limit]
+    has_more = len(rows) > limit
     items: list[WorkspaceOverviewResponse] = []
-    for ws in rows:
+    for ws in page_rows:
         ordered_events = workspace_events_by_occurrence(ws)
         observability = workspace_observability_payload(
             ws,
@@ -292,7 +319,13 @@ async def list_workspace_overview(
                 updated_at=ws.updated_at,
             )
         )
-    return WorkspaceOverviewListResponse(items=items)
+    return WorkspaceOverviewListResponse(
+        items=items,
+        next_cursor=_encode_overview_cursor(page_rows[-1]) if has_more and page_rows else None,
+        has_more=has_more,
+        limit=limit,
+        cursor=cursor,
+    )
 
 
 @router.get("/{workspace_id}/events", response_model=WorkspaceEventListResponse)
@@ -315,7 +348,9 @@ async def list_workspace_events(
         limit=limit,
     )
     return WorkspaceEventListResponse(
-        items=[WorkspaceEventResponse.model_validate(row) for row in rows]
+        items=[WorkspaceEventResponse.model_validate(row) for row in rows],
+        limit=limit,
+        cursor=None,
     )
 
 
@@ -341,7 +376,11 @@ async def list_workspace_stale_reasons(
         if include_resolved
         else await stale_repo.list_active_for_workspace(workspace_id)
     )
-    return StaleReasonListResponse(items=[StaleReasonResponse.model_validate(row) for row in rows])
+    return StaleReasonListResponse(
+        items=[StaleReasonResponse.model_validate(row) for row in rows],
+        limit=len(rows),
+        cursor=None,
+    )
 
 
 @router.post(
@@ -421,6 +460,40 @@ def _accepted(
         accepted_at=created_at,
         warnings=list(warnings or []),
     )
+
+
+def _encode_overview_cursor(workspace: Workspace) -> str:
+    payload = {
+        "t": workspace.created_at.isoformat(),
+        "id": workspace.id,
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    return encoded.decode("ascii").rstrip("=")
+
+
+def _decode_overview_cursor(cursor: str | None) -> _WorkspaceOverviewCursor | None:
+    if cursor is None:
+        return None
+    try:
+        padded_cursor = cursor + ("=" * (-len(cursor) % 4))
+        decoded = base64.urlsafe_b64decode(padded_cursor.encode("ascii"))
+        payload = json.loads(decoded.decode("utf-8"))
+        created_at = datetime.fromisoformat(
+            payload["t"] if "t" in payload else payload["created_at"]
+        )
+        workspace_id = payload["id"] if "id" in payload else payload["workspace_id"]
+    except (
+        binascii.Error,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise InvalidWorkspaceOverviewCursorError("Invalid workspace overview cursor") from exc
+    if not isinstance(workspace_id, str) or workspace_id == "":
+        raise InvalidWorkspaceOverviewCursorError("Invalid workspace overview cursor")
+    return _WorkspaceOverviewCursor(created_at=created_at, workspace_id=workspace_id)
 
 
 def _payloads_match(existing: Workspace, payload: WorkspaceCreateRequest) -> bool:

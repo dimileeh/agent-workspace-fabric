@@ -68,11 +68,16 @@ async def test_list_operations_global(client: AsyncClient, sample_data):
     assert len(body["items"]) == 3
     assert body["next_cursor"] is None
     assert body["has_more"] is False
+    assert body["limit"] == 50
+    assert body["cursor"] is None
 
     # Test filter by workspace_id
-    response = await client.get(f"/v1/operations?workspace_id={ws1.id}")
+    response = await client.get(f"/v1/operations?workspace_id={ws1.id}&limit=2")
     assert response.status_code == 200
-    assert len(response.json()["items"]) == 2
+    body = response.json()
+    assert len(body["items"]) == 2
+    assert body["limit"] == 2
+    assert body["cursor"] is None
 
     # Test filter by status
     response = await client.get("/v1/operations?status=running")
@@ -94,8 +99,13 @@ async def test_list_workspace_operations_filters(client: AsyncClient, sample_dat
     # Test workspace-scoped list with status filter
     response = await client.get(f"/v1/workspaces/{ws1.id}/operations?status=succeeded")
     assert response.status_code == 200
-    assert len(response.json()["items"]) == 1
-    assert response.json()["items"][0]["type"] == "create"
+    body = response.json()
+    assert len(body["items"]) == 1
+    assert body["items"][0]["type"] == "create"
+    assert body["next_cursor"] is None
+    assert body["has_more"] is False
+    assert body["limit"] == 50
+    assert body["cursor"] is None
 
     # Test workspace-scoped list with type filter
     response = await client.get(f"/v1/workspaces/{ws1.id}/operations?type=validate")

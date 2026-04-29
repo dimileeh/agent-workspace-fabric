@@ -116,7 +116,13 @@ class TestWorkspaceArtifacts:
         )
 
         assert response.status_code == 200
-        assert response.json() == {"items": [], "next_cursor": None, "has_more": False}
+        assert response.json() == {
+            "items": [],
+            "next_cursor": None,
+            "has_more": False,
+            "limit": artifacts.DEFAULT_ARTIFACT_LIST_LIMIT,
+            "cursor": None,
+        }
 
     @pytest.mark.unit
     async def test_lists_recursive_file_metadata_and_skips_escaping_symlinks(
@@ -148,6 +154,8 @@ class TestWorkspaceArtifacts:
         body = response.json()
         assert body["next_cursor"] is None
         assert body["has_more"] is False
+        assert body["limit"] == 50
+        assert body["cursor"] is None
         assert [item["relative_path"] for item in body["items"]] == [
             "logs/stdout.txt",
             "screenshot.png",
@@ -274,7 +282,13 @@ class TestWorkspaceArtifacts:
         )
 
         assert response.status_code == 200
-        assert response.json() == {"items": [], "next_cursor": None, "has_more": False}
+        assert response.json() == {
+            "items": [],
+            "next_cursor": None,
+            "has_more": False,
+            "limit": 50,
+            "cursor": None,
+        }
         assert calls == [
             (
                 artifacts._list_artifacts,

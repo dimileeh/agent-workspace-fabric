@@ -59,6 +59,8 @@ async def list_tasks(
     items.sort(key=lambda item: (item.created_at, item.workspace_id), reverse=True)
     return TaskListResponse(
         items=items[:limit],
+        limit=limit,
+        cursor=None,
     )
 
 
@@ -80,6 +82,8 @@ async def list_task_attempts(
         task_id=task.id,
         task_ref=task_ref,
         items=[_attempt_response(row) for row in rows],
+        limit=limit,
+        cursor=None,
     )
 
 
