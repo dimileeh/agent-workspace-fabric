@@ -15,21 +15,30 @@ import httpx
 from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
 from awf.service.config import ServiceSettings
 
-ProviderName = Literal["github", "claude_code", "gemini", "opencode"]
+ProviderName = Literal["github", "codex", "claude_code", "gemini", "opencode", "docker"]
 
 PROVIDER_NAMES: tuple[ProviderName, ...] = (
     "github",
+    "codex",
     "claude_code",
     "gemini",
     "opencode",
+    "docker",
 )
 
 _GITHUB_TIMEOUT_SECONDS = 5.0
 _HTTP_TIMEOUT_SECONDS = 2.0
 _REDACTION = "<redacted>"
+_CODEX_AUTH_FILES = ("auth.json", "config.toml", "installation_id")
 _OLLAMA_AUTH_FILES = ("config.json", "id_ed25519", "id_ed25519.pub")
 
 _GITHUB_TOKEN_ENV_KEYS = ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+_CODEX_ENV_KEYS = (
+    "OPENAI_API_KEY",
+    "OPENAI_API_TOKEN",
+    "CODEX_API_KEY",
+    "CODEX_AUTH_TOKEN",
+)
 _CLAUDE_ENV_KEYS = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -41,12 +50,15 @@ _GEMINI_ENV_KEYS = (
     "GOOGLE_CLOUD_ACCESS_TOKEN",
 )
 _OPENCODE_ENV_KEYS = ("OLLAMA_API_KEY",)
+_DOCKER_AUTH_ENV_KEYS = ("DOCKER_AUTH_CONFIG",)
 _KNOWN_SECRET_ENV_KEYS = frozenset(
     (
         *_GITHUB_TOKEN_ENV_KEYS,
+        *_CODEX_ENV_KEYS,
         *_CLAUDE_ENV_KEYS,
         *_GEMINI_ENV_KEYS,
         *_OPENCODE_ENV_KEYS,
+        *_DOCKER_AUTH_ENV_KEYS,
         "GOOGLE_APPLICATION_CREDENTIALS_JSON",
     )
 )
@@ -56,7 +68,9 @@ _TOKEN_RE = re.compile(
     r"(?<![A-Za-z0-9])("
     r"gh[pousr]_[A-Za-z0-9_]{8,}|"
     r"github_pat_[A-Za-z0-9_]{8,}|"
+    r"sk-proj-[A-Za-z0-9_-]{8,}|"
     r"sk-ant-[A-Za-z0-9_-]{8,}|"
+    r"sk-[A-Za-z0-9_-]{8,}|"
     r"AIza[A-Za-z0-9_-]{12,}|"
     r"xox[baprs]-[A-Za-z0-9-]{8,}"
     r")(?![A-Za-z0-9])"
@@ -139,6 +153,12 @@ def collect_agent_readiness(
             run_subprocess=resolved_run,
             secrets=secrets,
         ),
+        "codex": _check_codex(
+            environ=env,
+            host_home=host_home,
+            strict="codex" in strict,
+            secrets=secrets,
+        ),
         "claude_code": _check_claude(
             environ=env,
             host_home=host_home,
@@ -158,6 +178,13 @@ def collect_agent_readiness(
             http_get=resolved_http_get,
             secrets=secrets,
         ),
+        "docker": _check_docker_provider(
+            settings,
+            environ=env,
+            host_home=host_home,
+            strict="docker" in strict,
+            secrets=secrets,
+        ),
     }
     return {
         "status": "fail"
@@ -165,6 +192,7 @@ def collect_agent_readiness(
         else "ok",
         "strict_providers": _ordered_names(strict),
         "providers": providers,
+        "security": _security_summary(providers),
     }
 
 
@@ -217,6 +245,16 @@ def _check_github(
                 ),
                 signals=["~/.config/gh"],
                 secrets=secrets,
+                credential_sources=[
+                    _credential_source(
+                        type_="path",
+                        signal="~/.config/gh",
+                        credential_scope="read_only_host_path",
+                        isolation="read_only_bind",
+                    )
+                ],
+                credential_scope="read_only_host_path",
+                isolation="read_only_bind",
             )
         return _provider_result(
             ok=False,
@@ -228,9 +266,23 @@ def _check_github(
             ),
             action="Set AWF_GITHUB_TOKEN from `gh auth token` before starting the service.",
             secrets=secrets,
+            credential_scope="not_observed",
+            isolation="none",
         )
 
     gh_env = {**dict(environ), "AWF_GITHUB_TOKEN": token, "GH_TOKEN": token, "GITHUB_TOKEN": token}
+    token_source = _credential_source(
+        type_="env",
+        signal=token_signal,
+        credential_scope="static_env_token",
+        isolation="service_env",
+    )
+    token_warnings = [
+        _security_warning(
+            "STATIC_TOKEN_FALLBACK",
+            f"GitHub auth is supplied by static service environment variable {token_signal}.",
+        )
+    ]
     args = ["gh", "auth", "status", "--hostname", "github.com"]
     try:
         result = run_subprocess(
@@ -251,6 +303,10 @@ def _check_github(
             signals=[token_signal],
             capabilities=["pr_create", "comment", "merge"],
             secrets=secrets,
+            credential_sources=[token_source],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=token_warnings,
         )
     except subprocess.TimeoutExpired:
         return _provider_result(
@@ -261,6 +317,10 @@ def _check_github(
             signals=[token_signal, "gh auth status"],
             capabilities=["pr_create", "comment", "merge"],
             secrets=secrets,
+            credential_sources=[token_source],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=token_warnings,
         )
     except Exception as exc:
         return _provider_result(
@@ -272,6 +332,10 @@ def _check_github(
             signals=[token_signal, "gh auth status"],
             capabilities=["pr_create", "comment", "merge"],
             secrets=secrets,
+            credential_sources=[token_source],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=token_warnings,
         )
 
     if result.returncode != 0:
@@ -284,6 +348,10 @@ def _check_github(
             signals=[token_signal, "gh auth status"],
             capabilities=["pr_create", "comment", "merge"],
             secrets=secrets,
+            credential_sources=[token_source],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=token_warnings,
         )
 
     return _provider_result(
@@ -294,6 +362,73 @@ def _check_github(
         signals=[token_signal, "gh auth status"],
         capabilities=["pr_create", "comment", "merge"],
         secrets=secrets,
+        credential_sources=[token_source],
+        credential_scope="static_env_token",
+        isolation="service_env",
+        warnings=token_warnings,
+    )
+
+
+def _check_codex(
+    *,
+    environ: Mapping[str, str],
+    host_home: Path,
+    strict: bool,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    file_sources = _codex_file_sources(host_home)
+    if file_sources:
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="CODEX_FILE_AUTH_PRESENT",
+            message="Codex auth files are visible for per-workspace isolated copies.",
+            signals=[source["signal"] for source in file_sources],
+            secrets=secrets,
+            credential_sources=file_sources,
+            credential_scope="isolated_workspace",
+            isolation="per_workspace_copy",
+            warnings=[],
+        )
+
+    signal = _first_present_env(environ, _CODEX_ENV_KEYS)
+    if signal is not None:
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="CODEX_ENV_AUTH_PRESENT",
+            message="Codex auth is visible through service environment variables.",
+            signals=[signal],
+            secrets=secrets,
+            credential_sources=[
+                _credential_source(
+                    type_="env",
+                    signal=signal,
+                    credential_scope="static_env_token",
+                    isolation="service_env",
+                )
+            ],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=[
+                _security_warning(
+                    "STATIC_TOKEN_FALLBACK",
+                    f"Codex auth is supplied by static service environment variable {signal}.",
+                )
+            ],
+        )
+
+    return _provider_result(
+        ok=False,
+        strict=strict,
+        reason="CODEX_AUTH_MISSING",
+        message=(
+            "No Codex auth signal was visible. Mount ~/.codex or set OPENAI_API_KEY, "
+            "OPENAI_API_TOKEN, CODEX_API_KEY, or CODEX_AUTH_TOKEN."
+        ),
+        secrets=secrets,
+        credential_scope="not_observed",
+        isolation="none",
     )
 
 
@@ -304,6 +439,28 @@ def _check_claude(
     strict: bool,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
+    file_sources = _existing_credential_sources(
+        (
+            (host_home / ".claude", "~/.claude"),
+            (host_home / ".claude.json", "~/.claude.json"),
+        ),
+        credential_scope="isolated_workspace",
+        isolation="per_workspace_copy",
+    )
+    if file_sources:
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="CLAUDE_FILE_AUTH_PRESENT",
+            message="Claude Code auth files are visible to the local service.",
+            signals=[source["signal"] for source in file_sources],
+            secrets=secrets,
+            credential_sources=file_sources,
+            credential_scope="isolated_workspace",
+            isolation="per_workspace_copy",
+            warnings=[],
+        )
+
     signal = _first_present_env(environ, _CLAUDE_ENV_KEYS)
     if signal is not None:
         return _provider_result(
@@ -313,22 +470,22 @@ def _check_claude(
             message="Claude Code auth is visible through service environment variables.",
             signals=[signal],
             secrets=secrets,
-        )
-
-    signals = _existing_path_signals(
-        (
-            (host_home / ".claude", "~/.claude"),
-            (host_home / ".claude.json", "~/.claude.json"),
-        )
-    )
-    if signals:
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="CLAUDE_FILE_AUTH_PRESENT",
-            message="Claude Code auth files are visible to the local service.",
-            signals=signals,
-            secrets=secrets,
+            credential_sources=[
+                _credential_source(
+                    type_="env",
+                    signal=signal,
+                    credential_scope="static_env_token",
+                    isolation="service_env",
+                )
+            ],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=[
+                _security_warning(
+                    "STATIC_TOKEN_FALLBACK",
+                    f"Claude Code auth is supplied by static service environment variable {signal}.",
+                )
+            ],
         )
 
     return _provider_result(
@@ -340,6 +497,8 @@ def _check_claude(
             "ANTHROPIC_AUTH_TOKEN, CLAUDE_CODE_OAUTH_TOKEN, or mount ~/.claude."
         ),
         secrets=secrets,
+        credential_scope="not_observed",
+        isolation="none",
     )
 
 
@@ -350,6 +509,25 @@ def _check_gemini(
     strict: bool,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
+    file_sources = _existing_credential_sources(
+        ((host_home / ".gemini", "~/.gemini"),),
+        credential_scope="isolated_workspace",
+        isolation="per_workspace_copy",
+    )
+    if file_sources:
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason="GEMINI_FILE_AUTH_PRESENT",
+            message="Gemini auth files are visible to the local service.",
+            signals=[source["signal"] for source in file_sources],
+            secrets=secrets,
+            credential_sources=file_sources,
+            credential_scope="isolated_workspace",
+            isolation="per_workspace_copy",
+            warnings=[],
+        )
+
     signal = _first_present_env(environ, _GEMINI_ENV_KEYS)
     if signal is not None:
         return _provider_result(
@@ -359,6 +537,22 @@ def _check_gemini(
             message="Gemini auth is visible through service environment variables.",
             signals=[signal],
             secrets=secrets,
+            credential_sources=[
+                _credential_source(
+                    type_="env",
+                    signal=signal,
+                    credential_scope="static_env_token",
+                    isolation="service_env",
+                )
+            ],
+            credential_scope="static_env_token",
+            isolation="service_env",
+            warnings=[
+                _security_warning(
+                    "STATIC_TOKEN_FALLBACK",
+                    f"Gemini auth is supplied by static service environment variable {signal}.",
+                )
+            ],
         )
 
     credentials = environ.get("GOOGLE_APPLICATION_CREDENTIALS")
@@ -370,16 +564,17 @@ def _check_gemini(
             message="Google application credentials are visible to the local service.",
             signals=["GOOGLE_APPLICATION_CREDENTIALS"],
             secrets=secrets,
-        )
-
-    if (host_home / ".gemini").is_dir():
-        return _provider_result(
-            ok=True,
-            strict=strict,
-            reason="GEMINI_FILE_AUTH_PRESENT",
-            message="Gemini auth files are visible to the local service.",
-            signals=["~/.gemini"],
-            secrets=secrets,
+            credential_sources=[
+                _credential_source(
+                    type_="path",
+                    signal="GOOGLE_APPLICATION_CREDENTIALS",
+                    credential_scope="read_only_host_path",
+                    isolation="read_only_bind",
+                )
+            ],
+            credential_scope="read_only_host_path",
+            isolation="read_only_bind",
+            warnings=[],
         )
 
     message = (
@@ -398,6 +593,8 @@ def _check_gemini(
         message=message,
         signals=["GOOGLE_APPLICATION_CREDENTIALS"] if credentials else None,
         secrets=secrets,
+        credential_scope="not_observed",
+        isolation="none",
     )
 
 
@@ -417,12 +614,38 @@ def _check_opencode(
     ]
     env_signal = _first_present_env(environ, _OPENCODE_ENV_KEYS)
     signals: list[str] = []
+    credential_sources: list[dict[str, str]] = []
     if opencode_config:
         signals.append("~/.config/opencode")
+        credential_sources.append(
+            _credential_source(
+                type_="path",
+                signal="~/.config/opencode",
+                credential_scope="isolated_workspace",
+                isolation="per_workspace_copy",
+            )
+        )
     if ollama_files:
         signals.append("~/.ollama auth files")
+        credential_sources.extend(
+            _credential_source(
+                type_="path",
+                signal=f"~/.ollama/{filename}",
+                credential_scope="isolated_workspace",
+                isolation="per_workspace_copy",
+            )
+            for filename in ollama_files
+        )
     if env_signal is not None:
         signals.append(env_signal)
+        credential_sources.append(
+            _credential_source(
+                type_="env",
+                signal=env_signal,
+                credential_scope="static_env_token",
+                isolation="service_env",
+            )
+        )
 
     if not signals:
         return _provider_result(
@@ -434,6 +657,8 @@ def _check_opencode(
                 "mount small ~/.ollama auth files, or set OLLAMA_API_KEY."
             ),
             secrets=secrets,
+            credential_scope="not_observed",
+            isolation="none",
         )
 
     version_url = _ollama_version_url(environ)
@@ -451,6 +676,13 @@ def _check_opencode(
             detail=probe_detail if isinstance(probe_detail, str) else None,
             signals=[*signals, "ollama /api/version"],
             secrets=secrets,
+            credential_sources=credential_sources,
+            credential_scope=_primary_credential_scope(credential_sources),
+            isolation=_primary_isolation(credential_sources),
+            warnings=_static_env_warnings(
+                provider_label="OpenCode/Ollama",
+                signals=[env_signal] if env_signal is not None and not (opencode_config or ollama_files) else [],
+            ),
         )
 
     reason = "OPENCODE_FILE_AUTH_PRESENT"
@@ -466,6 +698,89 @@ def _check_opencode(
         message="OpenCode/Ollama auth is visible and the Ollama host is reachable.",
         signals=[*signals, "OLLAMA_HOST_REACHABLE"],
         secrets=secrets,
+        credential_sources=credential_sources,
+        credential_scope=_primary_credential_scope(credential_sources),
+        isolation=_primary_isolation(credential_sources),
+        warnings=_static_env_warnings(
+            provider_label="OpenCode/Ollama",
+            signals=[env_signal] if env_signal is not None and not (opencode_config or ollama_files) else [],
+        ),
+    )
+
+
+def _check_docker_provider(
+    settings: ServiceSettings,
+    *,
+    environ: Mapping[str, str],
+    host_home: Path,
+    strict: bool,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    credential_sources: list[dict[str, str]] = []
+    warnings: list[dict[str, str]] = []
+
+    docker_host_signal = "DOCKER_HOST" if environ.get("DOCKER_HOST") else None
+    if docker_host_signal is None and settings.docker_host:
+        docker_host_signal = "service_settings.docker_host"
+    if docker_host_signal is not None:
+        credential_sources.append(
+            _credential_source(
+                type_="docker_host",
+                signal=docker_host_signal,
+                credential_scope="docker_host_control",
+                isolation="host_daemon",
+            )
+        )
+        warnings.append(
+            _security_warning(
+                "DOCKER_HOST_BROAD_CONTROL",
+                (
+                    "Docker host access grants broad control of the local Docker daemon; "
+                    "AWF reports this as a local least-privilege downgrade."
+                ),
+            )
+        )
+
+    registry_sources = _docker_registry_sources(environ=environ, host_home=host_home)
+    credential_sources.extend(registry_sources)
+    if any(source["signal"] == "DOCKER_AUTH_CONFIG" for source in registry_sources):
+        warnings.append(
+            _security_warning(
+                "STATIC_TOKEN_FALLBACK",
+                "Docker registry auth is supplied by static service environment variable DOCKER_AUTH_CONFIG.",
+            )
+        )
+
+    if credential_sources:
+        reason = (
+            "DOCKER_HOST_CONFIGURED"
+            if docker_host_signal is not None
+            else "DOCKER_REGISTRY_AUTH_PRESENT"
+        )
+        return _provider_result(
+            ok=True,
+            strict=strict,
+            reason=reason,
+            message="Docker credential and control-plane signals were observed without reading secret values.",
+            signals=[source["signal"] for source in credential_sources],
+            secrets=secrets,
+            credential_sources=credential_sources,
+            credential_scope=_primary_credential_scope(credential_sources),
+            isolation=_primary_isolation(credential_sources),
+            warnings=warnings,
+        )
+
+    return _provider_result(
+        ok=False,
+        strict=strict,
+        reason="DOCKER_AUTH_NOT_OBSERVED",
+        message=(
+            "No Docker host or registry auth signal was visible. Docker daemon "
+            "readiness is still reported by the dedicated Docker resource checks."
+        ),
+        secrets=secrets,
+        credential_scope="not_observed",
+        isolation="none",
     )
 
 
@@ -480,14 +795,33 @@ def _provider_result(
     capabilities: Iterable[str] | None = None,
     detail: str | None = None,
     action: str | None = None,
+    credential_sources: Iterable[Mapping[str, str]] | None = None,
+    credential_scope: str | None = None,
+    isolation: str | None = None,
+    warnings: Iterable[Mapping[str, str]] | None = None,
 ) -> dict[str, Any]:
     status_value = "ok" if ok else "fail" if strict else "warn"
+    severity_value = "ok" if ok else "error" if strict else "warning"
+    source_list = [dict(source) for source in credential_sources or ()]
+    warning_list = [_redacted_warning(warning, secrets) for warning in warnings or ()]
+    if not ok and not warning_list:
+        warning_list.append(
+            _security_warning(
+                reason,
+                _redact(message, secrets),
+                severity=severity_value,
+            )
+        )
     payload: dict[str, Any] = {
         "ok": ok,
         "status": status_value,
-        "severity": "ok" if ok else "error" if strict else "warning",
+        "severity": severity_value,
         "reason": reason,
         "message": _redact(message, secrets),
+        "credential_sources": source_list,
+        "credential_scope": credential_scope or _primary_credential_scope(source_list),
+        "isolation": isolation or _primary_isolation(source_list),
+        "warnings": warning_list,
     }
     if signals:
         payload["signals"] = list(signals)
@@ -498,6 +832,209 @@ def _provider_result(
     if action:
         payload["action"] = _redact(action, secrets)
     return payload
+
+
+def _credential_source(
+    *,
+    type_: str,
+    signal: str,
+    credential_scope: str,
+    isolation: str,
+) -> dict[str, str]:
+    return {
+        "type": type_,
+        "signal": signal,
+        "credential_scope": credential_scope,
+        "isolation": isolation,
+    }
+
+
+def _security_warning(
+    reason: str,
+    message: str,
+    *,
+    severity: str = "warning",
+) -> dict[str, str]:
+    return {"reason": reason, "message": message, "severity": severity}
+
+
+def _redacted_warning(warning: Mapping[str, str], secrets: frozenset[str]) -> dict[str, str]:
+    return {
+        "reason": _redact(str(warning.get("reason", "UNKNOWN")), secrets),
+        "message": _redact(str(warning.get("message", "")), secrets),
+        "severity": _redact(str(warning.get("severity", "warning")), secrets),
+    }
+
+
+def _static_env_warnings(
+    *,
+    provider_label: str,
+    signals: Iterable[str],
+) -> list[dict[str, str]]:
+    return [
+        _security_warning(
+            "STATIC_TOKEN_FALLBACK",
+            f"{provider_label} auth is supplied by static service environment variable {signal}.",
+        )
+        for signal in signals
+    ]
+
+
+def _primary_credential_scope(sources: Iterable[Mapping[str, str]]) -> str:
+    scopes = [str(source.get("credential_scope", "")) for source in sources]
+    for preferred in (
+        "isolated_workspace",
+        "read_only_host_path",
+        "docker_host_control",
+        "static_env_token",
+    ):
+        if preferred in scopes:
+            return preferred
+    return "not_observed"
+
+
+def _primary_isolation(sources: Iterable[Mapping[str, str]]) -> str:
+    isolations = [str(source.get("isolation", "")) for source in sources]
+    for preferred in (
+        "per_workspace_copy",
+        "read_only_bind",
+        "host_daemon",
+        "service_env",
+    ):
+        if preferred in isolations:
+            return preferred
+    return "none"
+
+
+def _codex_file_sources(host_home: Path) -> list[dict[str, str]]:
+    source = host_home / ".codex"
+    if not source.exists():
+        return []
+    sources = [
+        _credential_source(
+            type_="path",
+            signal=f"~/.codex/{filename}",
+            credential_scope="isolated_workspace",
+            isolation="per_workspace_copy",
+        )
+        for filename in _CODEX_AUTH_FILES
+        if (source / filename).is_file()
+    ]
+    if (source / "rules").is_dir():
+        sources.append(
+            _credential_source(
+                type_="path",
+                signal="~/.codex/rules",
+                credential_scope="isolated_workspace",
+                isolation="per_workspace_copy",
+            )
+        )
+    if not sources and source.is_dir():
+        sources.append(
+            _credential_source(
+                type_="path",
+                signal="~/.codex",
+                credential_scope="isolated_workspace",
+                isolation="per_workspace_copy",
+            )
+        )
+    return sources
+
+
+def _existing_credential_sources(
+    candidates: Iterable[tuple[Path, str]],
+    *,
+    credential_scope: str,
+    isolation: str,
+) -> list[dict[str, str]]:
+    return [
+        _credential_source(
+            type_="path",
+            signal=signal,
+            credential_scope=credential_scope,
+            isolation=isolation,
+        )
+        for path, signal in candidates
+        if path.exists()
+    ]
+
+
+def _docker_registry_sources(
+    *,
+    environ: Mapping[str, str],
+    host_home: Path,
+) -> list[dict[str, str]]:
+    sources: list[dict[str, str]] = []
+    if environ.get("DOCKER_AUTH_CONFIG"):
+        sources.append(
+            _credential_source(
+                type_="env",
+                signal="DOCKER_AUTH_CONFIG",
+                credential_scope="static_env_token",
+                isolation="service_env",
+            )
+        )
+
+    docker_config = environ.get("DOCKER_CONFIG")
+    if docker_config:
+        config_path = Path(docker_config).expanduser() / "config.json"
+        if config_path.is_file():
+            sources.append(
+                _credential_source(
+                    type_="path",
+                    signal="DOCKER_CONFIG/config.json",
+                    credential_scope="read_only_host_path",
+                    isolation="read_only_bind",
+                )
+            )
+    elif (host_home / ".docker" / "config.json").is_file():
+        sources.append(
+            _credential_source(
+                type_="path",
+                signal="~/.docker/config.json",
+                credential_scope="read_only_host_path",
+                isolation="read_only_bind",
+            )
+        )
+    return sources
+
+
+def _security_summary(providers: Mapping[str, Mapping[str, Any]]) -> dict[str, Any]:
+    warning_entries: list[dict[str, str]] = []
+    providers_with_warnings: list[str] = []
+    reason_codes: set[str] = set()
+
+    for provider_name in PROVIDER_NAMES:
+        provider = providers.get(provider_name)
+        if provider is None:
+            continue
+        provider_warnings = provider.get("warnings")
+        if isinstance(provider_warnings, list) and provider_warnings:
+            providers_with_warnings.append(provider_name)
+            for raw_warning in provider_warnings:
+                if not isinstance(raw_warning, Mapping):
+                    continue
+                reason = str(raw_warning.get("reason", "UNKNOWN"))
+                reason_codes.add(reason)
+                warning_entries.append(
+                    {
+                        "provider": provider_name,
+                        "reason": reason,
+                        "severity": str(raw_warning.get("severity", "warning")),
+                    }
+                )
+        if provider.get("status") in {"warn", "fail"}:
+            reason_codes.add(str(provider.get("reason", "UNKNOWN")))
+            if provider_name not in providers_with_warnings:
+                providers_with_warnings.append(provider_name)
+
+    return {
+        "status": "warning" if warning_entries else "ok",
+        "warning_count": len(warning_entries),
+        "providers_with_warnings": providers_with_warnings,
+        "reason_codes": sorted(reason_codes),
+        "warnings": warning_entries,
+    }
 
 
 def _github_token(settings: ServiceSettings, environ: Mapping[str, str]) -> tuple[str | None, str]:
@@ -512,10 +1049,6 @@ def _github_token(settings: ServiceSettings, environ: Mapping[str, str]) -> tupl
 
 def _first_present_env(environ: Mapping[str, str], keys: Iterable[str]) -> str | None:
     return next((key for key in keys if environ.get(key)), None)
-
-
-def _existing_path_signals(candidates: Iterable[tuple[Path, str]]) -> list[str]:
-    return [signal for path, signal in candidates if path.exists()]
 
 
 def _secret_values(settings: ServiceSettings, environ: Mapping[str, str]) -> frozenset[str]:
