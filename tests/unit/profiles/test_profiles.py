@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from awf.profiles.lint import profile_lint_errors
 from awf.profiles.models import (
     DockerMode,
     ProfileCommand,
@@ -265,8 +266,12 @@ def test_profile_secret_accepts_safe_mount_without_provider_ref_pair() -> None:
 
 @pytest.mark.unit
 def test_profile_secret_rejects_reserved_env_targets() -> None:
-    with pytest.raises(ValidationError, match="too broad or invalid"):
-        ProfileSecret(name="bad-home", target="HOME", kind="env")
+    profile = WorkspaceProfile(
+        name="bad-secret-env",
+        secrets=[ProfileSecret(name="bad-home", target="HOME", kind="env")],
+    )
+
+    assert profile_lint_errors(profile)[0].reason_code == "SECRET_ENV_TARGET_RESERVED"
 
 
 @pytest.mark.unit

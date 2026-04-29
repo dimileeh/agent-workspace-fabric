@@ -172,6 +172,7 @@ async def create_workspace_v2(
             content=ErrorResponse(
                 error_code="INVALID_PROFILE",
                 message=str(exc),
+                detail=exc.detail,
             ).model_dump(),
         )
 

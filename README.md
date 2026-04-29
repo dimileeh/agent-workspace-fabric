@@ -179,6 +179,7 @@ A `WorkspaceProfile` can describe:
 - `validation`: health checks, artifact paths, timeout and tier hints.
 - `monitor`: PR-monitor policy such as initial review grace.
 - `secrets`: named mounts or env leases.
+- `security`: egress policy plus profile lint policy for local credential mounts.
 - `ports`: endpoint names exposed to agents or tests.
 
 Resolution order:
@@ -1013,6 +1014,15 @@ the worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
 `${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}/auth/<workspace>/...` before
 launching the workspace stack. AWF does not copy `~/.ollama/models`; workspace
 OpenCode runs talk to the host Ollama daemon through `host.docker.internal`.
+
+Profiles should prefer declared `secrets` over host-home bind mounts. Profile
+lint blocks profile-declared service volumes that mount `${HOME}`,
+`${AWF_HOST_HOME}`, `~`, `/home/<user>`, or `/Users/<user>` into broad auth
+locations such as `/home/agent` or `/root`. The only local-development
+compatibility exception is the credential path list above, mounted read-only;
+set `security.host_home_auth_mounts.mode: warn` to allow those narrow mounts
+with a structured warning. Writable host-home credential mounts are rejected;
+seed writable auth into AWF's per-workspace auth directory instead.
 
 Readiness checks use the same service-visible signals without reading secret
 file contents:
