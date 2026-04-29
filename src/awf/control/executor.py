@@ -46,6 +46,7 @@ from awf.control.quality_gates import (
     find_protected_quality_gate_changes,
     quality_gate_violation_message,
 )
+from awf.control.state_machine import WorkspaceStateMachine
 from awf.control.validation_fix_cycle import (
     ValidationFixContext,
     build_fix_prompt,
@@ -184,6 +185,14 @@ def _is_validate_only_recovery_payload(payload: object) -> bool:
         payload.get("source") in _VALIDATE_ONLY_RECOVERY_SOURCES
         and payload.get("recovery_mode") in _VALIDATE_ONLY_RECOVERY_MODES
     )
+
+
+def _is_callback_terminal_status(status: str) -> bool:
+    try:
+        workspace_status = WorkspaceStatus(status)
+    except ValueError:  # pragma: no cover - defensive for legacy bad rows
+        return False
+    return WorkspaceStateMachine.is_callback_terminal(workspace_status)
 
 
 def _rebase_recovery_operation_payload_identities(
@@ -902,6 +911,12 @@ class WorkspaceExecutor:
                     invocation_id=exc.invocation_id,
                     reason_code=exc.reason_code,
                 )
+                if await self._finish_validation_callback_if_terminal(
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                    requested_tier=validation_tier,
+                ):
+                    return
                 await self._finish_validation_run(
                     validation_run_id,
                     status="failed",
@@ -929,6 +944,12 @@ class WorkspaceExecutor:
                     workspace_id=workspace_id,
                     validation_run_id=validation_run_id,
                 )
+                if await self._finish_validation_callback_if_terminal(
+                    workspace_id=workspace_id,
+                    validation_run_id=validation_run_id,
+                    requested_tier=validation_tier,
+                ):
+                    return
                 await self._finish_validation_run(
                     validation_run_id,
                     status="failed",
@@ -941,6 +962,12 @@ class WorkspaceExecutor:
                     message=f"unexpected error during validation run: {exc!r}"[:2000],
                     reason_code="VALIDATION_INFRASTRUCTURE_ERROR",
                 )
+                return
+            if await self._finish_validation_callback_if_terminal(
+                workspace_id=workspace_id,
+                validation_run_id=validation_run_id,
+                requested_tier=validation_tier,
+            ):
                 return
             val_result = _apply_baseline_coverage_ratchet(
                 val_result,
@@ -1738,6 +1765,17 @@ class WorkspaceExecutor:
                     expected=expected,
                     reason_code="EXECUTOR_STALE_STATUS",
                 )
+                if _is_callback_terminal_status(ws.status):
+                    await self._finish_ignored_stale_callback_operations_in_session(
+                        session,
+                        workspace_id=workspace_id,
+                        callback_source="executor",
+                        callback_action=action,
+                        expected_status=expected,
+                        actual_status=ws.status,
+                        validation_run_id=validation_run_id,
+                        requested_tier=requested_tier,
+                    )
                 await session.commit()
                 return False
 
@@ -2053,6 +2091,15 @@ class WorkspaceExecutor:
                 expected=expected,
                 reason_code=reason_code,
             )
+            if _is_callback_terminal_status(ws.status):
+                await self._finish_ignored_stale_callback_operations_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    callback_source="executor",
+                    callback_action=action,
+                    expected_status=expected,
+                    actual_status=ws.status,
+                )
             await session.commit()
             return False
 
@@ -2078,6 +2125,15 @@ class WorkspaceExecutor:
                     expected=from_status,
                     reason_code="EXECUTOR_STALE_STATUS",
                 )
+                if _is_callback_terminal_status(ws.status):
+                    await self._finish_ignored_stale_callback_operations_in_session(
+                        session,
+                        workspace_id=workspace_id,
+                        callback_source="executor",
+                        callback_action=action,
+                        expected_status=from_status,
+                        actual_status=ws.status,
+                    )
                 await session.commit()
                 return False
             await repo.transition(ws, to=to, reason_code=reason)
@@ -2100,6 +2156,14 @@ class WorkspaceExecutor:
             expected_status=expected.value,
             status=ws.status,
         )
+        if _is_callback_terminal_status(ws.status):
+            await repo.record_ignored_stale_callback(
+                ws,
+                callback_source="executor",
+                callback_action=action,
+                expected_status=expected,
+                reason_code=reason_code,
+            )
         await repo.add_event(
             ws,
             event_type="workspace.stale_action_skipped",
@@ -2134,6 +2198,15 @@ class WorkspaceExecutor:
                     expected=from_status,
                     reason_code="EXECUTOR_MARK_FAILED_SKIPPED",
                 )
+                if _is_callback_terminal_status(ws.status):
+                    await self._finish_ignored_stale_callback_operations_in_session(
+                        session,
+                        workspace_id=workspace_id,
+                        callback_source="executor",
+                        callback_action="mark_failed",
+                        expected_status=from_status,
+                        actual_status=ws.status,
+                    )
                 await session.commit()
                 return
             ws.failure_reason = failure_reason.value
@@ -2505,8 +2578,29 @@ class WorkspaceExecutor:
         rebased: bool,
     ) -> None:
         async with self._session_factory() as session:
-            workspace = await WorkspaceRepository(session).get(workspace_id)
+            workspace_repo = WorkspaceRepository(session)
+            workspace = await workspace_repo.get(workspace_id)
             if workspace is None:  # pragma: no cover - destroyed mid-recovery
+                return
+            if workspace.status != WorkspaceStatus.running.value and _is_callback_terminal_status(
+                workspace.status
+            ):
+                await workspace_repo.record_ignored_stale_callback(
+                    workspace,
+                    callback_source="executor",
+                    callback_action="rebase_recovery",
+                    expected_status=WorkspaceStatus.running,
+                    reason_code="STALE_CALLBACK_IGNORED",
+                )
+                await self._finish_ignored_stale_callback_operations_in_session(
+                    session,
+                    workspace_id=workspace_id,
+                    callback_source="executor",
+                    callback_action="rebase_recovery",
+                    expected_status=WorkspaceStatus.running,
+                    actual_status=workspace.status,
+                )
+                await session.commit()
                 return
             workspace.base_commit = base_sha
             workspace.monitor_last_commit_sha = head_sha
@@ -2607,29 +2701,84 @@ class WorkspaceExecutor:
         error_message: str | None = None,
     ) -> None:
         async with self._session_factory() as session:
-            repo = OperationRepository(session)
-            pending = await repo.list_for_workspace(
-                workspace_id,
-                status=OperationStatus.pending,
-                limit=100,
+            await self._finish_active_recovery_operations_in_session(
+                session,
+                workspace_id=workspace_id,
+                status=status,
+                reason_code=reason_code,
+                error_message=error_message,
             )
-            running = await repo.list_for_workspace(
-                workspace_id,
-                status=OperationStatus.running,
-                limit=100,
-            )
-            result = {"reason_code": reason_code}
-            for operation in [*pending, *running]:
-                if not _is_validate_only_recovery_payload(operation.payload):
-                    continue
-                await repo.finish(
-                    operation,
-                    status=status,
-                    result=result,
-                    error_code=reason_code if status == OperationStatus.failed else None,
-                    error_message=error_message,
-                )
             await session.commit()
+
+    async def _finish_active_recovery_operations_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        status: OperationStatus,
+        reason_code: str | None,
+        error_message: str | None = None,
+        result_extra: Mapping[str, Any] | None = None,
+    ) -> None:
+        repo = OperationRepository(session)
+        pending = await repo.list_for_workspace(
+            workspace_id,
+            status=OperationStatus.pending,
+            limit=100,
+        )
+        running = await repo.list_for_workspace(
+            workspace_id,
+            status=OperationStatus.running,
+            limit=100,
+        )
+        result: dict[str, Any] = {"reason_code": reason_code}
+        if result_extra is not None:
+            result.update(result_extra)
+        for operation in [*pending, *running]:
+            if not _is_validate_only_recovery_payload(operation.payload):
+                continue
+            await repo.finish(
+                operation,
+                status=status,
+                result=result,
+                error_code=reason_code if status == OperationStatus.failed else None,
+                error_message=error_message,
+            )
+
+    async def _finish_ignored_stale_callback_operations_in_session(
+        self,
+        session: AsyncSession,
+        *,
+        workspace_id: str,
+        callback_source: str,
+        callback_action: str,
+        expected_status: WorkspaceStatus,
+        actual_status: str,
+        validation_run_id: str | None = None,
+        requested_tier: int | None = None,
+    ) -> None:
+        result: dict[str, Any] = {
+            "status": "ignored",
+            "reason_code": "STALE_CALLBACK_IGNORED",
+            "callback_source": callback_source,
+            "callback_action": callback_action,
+            "expected_status": expected_status.value,
+            "actual_status": actual_status,
+        }
+        if validation_run_id is not None:
+            result["validation_run_id"] = validation_run_id
+            validation_run = await ValidationRunRepository(session).get(validation_run_id)
+            if validation_run is not None and isinstance(validation_run.log_stream_refs, dict):
+                result["log_stream_refs"] = dict(validation_run.log_stream_refs)
+        if requested_tier is not None:
+            result["requested_tier"] = requested_tier
+        await self._finish_active_recovery_operations_in_session(
+            session,
+            workspace_id=workspace_id,
+            status=OperationStatus.cancelled,
+            reason_code="STALE_CALLBACK_IGNORED",
+            result_extra=result,
+        )
 
     async def _finish_pending_validate_operations(
         self,
@@ -2723,6 +2872,48 @@ class WorkspaceExecutor:
                 command_retries=command_retries,
             )
             await session.commit()
+
+    async def _finish_validation_callback_if_terminal(
+        self,
+        *,
+        workspace_id: str,
+        validation_run_id: str,
+        requested_tier: int,
+    ) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:  # pragma: no cover - row disappeared mid-validation
+                return True
+            if ws.status == WorkspaceStatus.validating.value:
+                return False
+            if not _is_callback_terminal_status(ws.status):
+                return False
+            await self._record_stale_action_skip(
+                repo,
+                ws,
+                action="validate",
+                expected=WorkspaceStatus.validating,
+                reason_code="STALE_CALLBACK_IGNORED",
+            )
+            await ValidationRunRepository(session).finish(
+                validation_run_id,
+                status="failed",
+                reason_code="STALE_CALLBACK_IGNORED",
+                finished_at=datetime.now(UTC),
+            )
+            await self._finish_ignored_stale_callback_operations_in_session(
+                session,
+                workspace_id=workspace_id,
+                callback_source="executor",
+                callback_action="validate",
+                expected_status=WorkspaceStatus.validating,
+                actual_status=ws.status,
+                validation_run_id=validation_run_id,
+                requested_tier=requested_tier,
+            )
+            await session.commit()
+            return True
 
     async def _set_validation_run_target_head_sha(
         self,

@@ -567,7 +567,12 @@ class TestOperatorControlRaces:
         assert ws.status == WorkspaceStatus.cancelled.value
         assert ws.failure_reason is None
         assert ws.events[-1].event_type == "workspace.stale_action_skipped"
-        assert ws.events[-1].payload["action"] == "start_push"
+        assert ws.events[-1].payload["action"] == "validate"
+        assert any(
+            event.event_type == "workspace.stale_callback_ignored"
+            and event.payload["callback_action"] == "validate"
+            for event in ws.events
+        )
         assert not any("push" in call.args for call in fake.calls)
 
 

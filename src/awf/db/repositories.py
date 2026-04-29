@@ -1905,6 +1905,45 @@ class WorkspaceRepository:
         )
         return events[0]
 
+    async def record_ignored_stale_callback(
+        self,
+        workspace: Workspace,
+        *,
+        callback_source: str,
+        callback_action: str,
+        expected_status: WorkspaceStatus | str,
+        requested_status: WorkspaceStatus | str | None = None,
+        operation_id: str | None = None,
+        reason_code: str | None = None,
+    ) -> WorkspaceEvent:
+        expected_status_value = (
+            expected_status.value
+            if isinstance(expected_status, WorkspaceStatus)
+            else expected_status
+        )
+        payload: dict[str, Any] = {
+            "callback_source": callback_source,
+            "callback_action": callback_action,
+            "expected_status": expected_status_value,
+            "actual_status": workspace.status,
+        }
+        if requested_status is not None:
+            payload["requested_status"] = (
+                requested_status.value
+                if isinstance(requested_status, WorkspaceStatus)
+                else requested_status
+            )
+        if operation_id is not None:
+            payload["operation_id"] = operation_id
+        if reason_code is not None:
+            payload["reason_code"] = reason_code
+        return await self.add_event(
+            workspace,
+            event_type="workspace.stale_callback_ignored",
+            reason_code="STALE_CALLBACK_IGNORED",
+            payload=payload,
+        )
+
     async def add_events(
         self,
         workspace: Workspace,
