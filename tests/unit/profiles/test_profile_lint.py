@@ -213,7 +213,14 @@ def test_known_local_credential_mount_warns_under_compatibility_policy() -> None
 
 
 @pytest.mark.unit
-def test_known_local_credential_mount_blocks_under_default_strict_policy() -> None:
+@pytest.mark.parametrize(
+    "source",
+    [
+        "${AWF_HOST_HOME}/.config/gh",
+        "$AWF_HOST_HOME/.config/gh",
+    ],
+)
+def test_known_local_credential_mount_blocks_under_default_strict_policy(source: str) -> None:
     profile = WorkspaceProfile.model_validate(
         {
             "name": "local-strict",
@@ -223,7 +230,7 @@ def test_known_local_credential_mount_blocks_under_default_strict_policy() -> No
                     "image": "example/api:latest",
                     "volumes": [
                         (
-                            "${AWF_HOST_HOME}/.config/gh",
+                            source,
                             "/home/agent/.config/gh:ro",
                         )
                     ],

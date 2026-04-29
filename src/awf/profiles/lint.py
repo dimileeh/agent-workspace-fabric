@@ -54,6 +54,7 @@ _BROAD_SECRET_MOUNT_ROOTS = frozenset(
 _SAFE_SECRET_MOUNT_PREFIXES = ("/run/awf/secrets", "/run/secrets")
 _HOST_HOME_PREFIX_PATTERNS = (
     re.compile(r"^\$(?:HOME)(?:/(?P<rest>.*))?$"),
+    re.compile(r"^\$(?:AWF_HOST_HOME)(?:/(?P<rest>.*))?$"),
     re.compile(r"^\$\{HOME\}(?:/(?P<rest>.*))?$"),
     re.compile(r"^\$\{AWF_HOST_HOME\}(?:/(?P<rest>.*))?$"),
     re.compile(r"^\$\{AWF_HOST_HOME:-\$\{HOME\}\}(?:/(?P<rest>.*))?$"),
