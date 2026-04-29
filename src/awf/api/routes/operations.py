@@ -34,6 +34,8 @@ async def list_operations(
         items=[OperationResponse.model_validate(row) for row in rows],
         next_cursor=None,
         has_more=False,
+        limit=limit,
+        cursor=None,
     )
 
 
@@ -74,4 +76,6 @@ async def list_workspace_operations(
         items=rows,
         next_cursor=None,
         has_more=False,
+        limit=limit,
+        cursor=None,
     )
