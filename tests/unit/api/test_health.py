@@ -12,7 +12,9 @@ specific failing check rather than a generic 503.
 
 from __future__ import annotations
 
+import ast
 import asyncio
+import inspect
 import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
@@ -289,6 +291,28 @@ async def test_readyz_starts_orphan_scan_before_slow_peer_checks_finish(
 
     assert response.status_code == 200
     assert runner.peer_check_saw_orphan_scan is True
+
+
+@pytest.mark.unit
+def test_readyz_does_not_force_task_scheduling_with_zero_sleep() -> None:
+    source = inspect.getsource(health_route.readyz)
+    tree = ast.parse(source)
+
+    zero_sleep_yields = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Await)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Attribute)
+        and node.value.func.attr == "sleep"
+        and isinstance(node.value.func.value, ast.Name)
+        and node.value.func.value.id == "asyncio"
+        and len(node.value.args) == 1
+        and isinstance(node.value.args[0], ast.Constant)
+        and node.value.args[0].value == 0
+    ]
+
+    assert not zero_sleep_yields, "readyz should schedule top-level checks before awaiting"
 
 
 @pytest.mark.unit
