@@ -1,9 +1,5 @@
 {
-  "status": "needs_iteration",
-  "summary": "The implementation adds the shared audit payload helper, workspace_events-backed audit writes, executor PR/push audit events, PR-monitor merge/comment/sync/CI audit events, and destructive control-operation audit events. Focused audit tests, ruff, mypy, the full unit suite, and coverage all pass, with coverage at 99.14%. It does not fully satisfy the saved plan because failed PR-monitor branch-publication outcomes are not durably and accurately audited, secret-bearing git/gh stderr can still be persisted outside the redacted audit payload, and the planned failed-merge audit regression assertion is missing.",
-  "gaps": [
-    "Fix PR-monitor branch-push failure audit semantics: _git_push returns false for both no-op and auth/network failures; _run_sync_base and _run_ci_fix ignore that return and emit workspace.audit.git_push with outcome=succeeded, while comment repair emits no failed git_push audit event when publication fails. Distinguish no-op from failure and emit a failed audit event with redacted bounded evidence and the monitor operation_id.",
-    "Redact token-like git/gh stderr before persisting it to non-audit durable fields such as workspace.failure_message in executor PR push/create failures and monitor operation error_message on merge failures; current audit payloads are redacted, but raw PullRequestError/GitHubClientError strings can still be stored.",
-    "Add the planned regression assertion for failed merge audit events: extend an existing GitHub merge-error test to assert workspace.audit.merge_attempt and workspace.audit.merge_result with outcome=failed, operation_id, PR metadata, reason_code=GITHUB_MERGE_FAILED, log refs when present, and redacted error evidence."
-  ]
+  "status": "satisfied",
+  "summary": "The current implementation satisfies the saved auditability plan: workspace_events-backed control_audit.v1 events cover executor git push/PR creation and reuse/failure, executor rebase-recovery publication, PR-monitor comment/CI/sync-base pushes, merge attempts/results, comment resolution outcomes, and cancel/stop/destroy control operations with operation IDs, PR metadata, reason codes, outcomes, safe evidence/log refs, and redaction. No schema/API/console churn was observed. Validation passed: focused audit tests (49 selected), ruff, mypy, broad unit surface (1593), full unit suite (2605), and coverage (2672 passed, 4 skipped, 99.14%).",
+  "gaps": []
 }
