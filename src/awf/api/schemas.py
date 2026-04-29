@@ -12,7 +12,7 @@ from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStatus
 from awf.profiles.models import OutOfScopeChangePolicy, WorkspaceProfile
 
 OwnedPath = Annotated[str, Field(min_length=1, max_length=512)]
@@ -927,7 +927,7 @@ class WorkspaceOperationRequest(BaseModel):
 class WorkspaceControlResponse(BaseModel):
     workspace_id: str
     operation_id: str
-    operation_status: str
+    operation_status: OperationStatus
     status: WorkspaceStatus
     message: str
 
