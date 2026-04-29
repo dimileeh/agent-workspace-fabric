@@ -743,6 +743,181 @@ workspace databases remain separate and profile-isolated; if a workspace
 profile needs Postgres or another datastore, that service belongs to the
 per-workspace Compose stack, not the AWF control-plane DB.
 
+### Local Service Image Versioning
+
+The local service uses mutable Docker tags for fast iteration:
+`awf-control-plane:local` for API, worker, and migrations, and
+`awf-agent-runtime:latest` for agent workspaces. Before a local upgrade, record
+the source revision and image IDs so an image rollback has a concrete target:
+
+```bash
+git rev-parse --short HEAD
+docker image inspect awf-control-plane:local
+docker image inspect awf-agent-runtime:latest
+```
+
+When you want named local rollback anchors, tag both images with the same
+version label after building them:
+
+```bash
+export AWF_LOCAL_VERSION="$(git rev-parse --short HEAD)"
+docker compose -f docker/compose/local-service.yml build
+docker tag awf-control-plane:local "awf-control-plane:${AWF_LOCAL_VERSION}"
+docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
+docker tag awf-agent-runtime:latest "awf-agent-runtime:${AWF_LOCAL_VERSION}"
+docker image inspect "awf-control-plane:${AWF_LOCAL_VERSION}"
+docker image inspect "awf-agent-runtime:${AWF_LOCAL_VERSION}"
+```
+
+The Compose stack still points at `awf-control-plane:local` by default, and
+workspace execution still points at `awf-agent-runtime:latest` unless
+`AWF_AGENT_RUNTIME_IMAGE` is overridden. The extra local tags are operator
+bookmarks for verification and rollback, not a registry release scheme.
+
+### Local Service Upgrade
+
+For a normal local upgrade, capture a pre-upgrade backup, rebuild both images,
+rerun migrations, and check health:
+
+```bash
+export AWF_HOST_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
+mkdir -p "$AWF_HOST_WORK_DIR/backups"
+docker compose -f docker/compose/local-service.yml up -d postgres
+docker compose -f docker/compose/local-service.yml exec -T postgres \
+  pg_dump -U awf -d awf -Fc \
+  > "$AWF_HOST_WORK_DIR/backups/awf-control-plane-pre-upgrade-$(date -u +%Y%m%dT%H%M%SZ).dump"
+
+docker build -t awf-agent-runtime:latest -f docker/agent-runtime.Dockerfile .
+docker compose -f docker/compose/local-service.yml build
+uv run --python 3.12 --extra dev awf service bootstrap
+uv run --python 3.12 --extra dev awf service status --format pretty
+```
+
+`awf service bootstrap` is the preferred upgrade path because it rebuilds the
+agent runtime image, starts Postgres, force recreates the Compose `migrate`
+service, starts the API and worker, and polls health. If migration startup
+fails, inspect the migration logs before changing volumes or state:
+
+```bash
+uv run --python 3.12 --extra dev awf service logs --service migrate --tail 200
+uv run --python 3.12 --extra dev awf service logs --service api --tail 200
+uv run --python 3.12 --extra dev awf service logs --service worker --tail 200
+```
+
+### Control-Plane Postgres Backup And Restore
+
+These commands back up and restore only the AWF control-plane database in the
+local Compose `postgres` service.
+They do not back up workspace or project databases, cloned worktrees,
+per-workspace artifacts, or external services.
+
+Capture a custom-format backup into the service work directory:
+
+```bash
+export AWF_HOST_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
+mkdir -p "$AWF_HOST_WORK_DIR/backups"
+docker compose -f docker/compose/local-service.yml up -d postgres
+docker compose -f docker/compose/local-service.yml exec -T postgres \
+  pg_dump -U awf -d awf -Fc \
+  > "$AWF_HOST_WORK_DIR/backups/awf-control-plane-$(date -u +%Y%m%dT%H%M%SZ).dump"
+```
+
+Restore only when the API and worker are stopped. This avoids live writes
+during restore and makes the backup the single source of control-plane truth.
+Before restore, stop API and worker.
+
+```bash
+export AWF_BACKUP="$HOME/.awf/service/backups/awf-control-plane-YYYYmmddTHHMMSSZ.dump"
+docker compose -f docker/compose/local-service.yml stop api worker
+docker compose -f docker/compose/local-service.yml up -d postgres
+docker compose -f docker/compose/local-service.yml exec -T postgres \
+  dropdb -U awf --if-exists awf
+docker compose -f docker/compose/local-service.yml exec -T postgres \
+  createdb -U awf awf
+docker compose -f docker/compose/local-service.yml exec -T postgres \
+  pg_restore -U awf -d awf --no-owner < "$AWF_BACKUP"
+docker compose -f docker/compose/local-service.yml up --build --force-recreate migrate
+docker compose -f docker/compose/local-service.yml up -d api worker
+uv run --python 3.12 --extra dev awf service status --format pretty
+```
+
+Run `awf service status` after restore, then inspect recent logs if readiness
+does not come back cleanly.
+
+### Local Service Rollback
+
+Rollback has two separate parts: image rollback and database migration
+rollback. Image rollback can retag a previously recorded local image, but
+database migration rollback is not automatically reversible. Always keep a
+pre-upgrade backup before running migrations from a newer checkout.
+
+To roll back images to a saved local version:
+
+```bash
+export AWF_ROLLBACK_VERSION=<previous-git-sha-or-local-label>
+docker tag "awf-control-plane:${AWF_ROLLBACK_VERSION}" awf-control-plane:local
+docker tag "awf-agent-runtime:${AWF_ROLLBACK_VERSION}" awf-agent-runtime:latest
+docker compose -f docker/compose/local-service.yml up -d --force-recreate api worker
+uv run --python 3.12 --extra dev awf service status --format pretty
+```
+
+If the failed upgrade already ran migrations, treat rollback as a restore from
+the pre-upgrade backup. Check migration logs first.
+Warning: do not delete the Postgres volume until a fresh backup has been
+captured from whatever state is still readable:
+
+```bash
+uv run --python 3.12 --extra dev awf service logs --service migrate --tail 200
+```
+
+Then use the restore flow in
+`Control-Plane Postgres Backup And Restore` and restart through
+`awf service bootstrap`.
+
+### Local Disaster Recovery
+
+For stuck Compose containers, first collect state and logs, then remove only
+containers and networks. The default cleanup command below intentionally does
+not remove the Postgres volume:
+
+```bash
+docker compose -f docker/compose/local-service.yml ps
+uv run --python 3.12 --extra dev awf service logs --tail 200
+docker compose -f docker/compose/local-service.yml stop api worker migrate
+docker compose -f docker/compose/local-service.yml down --remove-orphans
+uv run --python 3.12 --extra dev awf service bootstrap
+uv run --python 3.12 --extra dev awf service status --format pretty
+```
+
+Use `down --volumes` only as a last resort after a verified control-plane
+backup exists. Removing the Compose volume destroys the local AWF
+control-plane database.
+
+For a corrupt `${AWF_HOST_WORK_DIR}`, quarantine the directory and rebuild a
+clean one. Preserve logs, artifacts, backups, and auth when they are still
+readable:
+
+```bash
+export AWF_HOST_WORK_DIR="${AWF_HOST_WORK_DIR:-$HOME/.awf/service}"
+export AWF_QUARANTINE="${AWF_HOST_WORK_DIR}.quarantine.$(date -u +%Y%m%dT%H%M%SZ)"
+docker compose -f docker/compose/local-service.yml stop api worker
+mv "$AWF_HOST_WORK_DIR" "$AWF_QUARANTINE"
+mkdir -p "$AWF_HOST_WORK_DIR"
+for name in backups logs artifacts auth; do
+  if [ -d "$AWF_QUARANTINE/$name" ]; then
+    mkdir -p "$AWF_HOST_WORK_DIR/$name"
+    cp -a "$AWF_QUARANTINE/$name/." "$AWF_HOST_WORK_DIR/$name/"
+  fi
+done
+uv run --python 3.12 --extra dev awf service bootstrap
+uv run --python 3.12 --extra dev awf service status --format pretty
+```
+
+If the work-dir corruption came from a partially deleted workspace, prefer
+`awf service gc` after the service is healthy instead of manually removing
+workspace state. If Postgres itself is suspect, capture a backup before any
+destructive cleanup, then use the restore flow above.
+
 ## MCP Surface
 
 AWF also exposes MCP tools for clients that want typed tool calls instead of
@@ -805,12 +980,13 @@ Example runtime and operation observability calls:
 
 ## Local Dogfood Runner
 
-`scripts/run_awf.py` is the compatibility dogfood runner for exercising the
-same building blocks outside the always-on service. It creates a local SQLite
-control-plane database under a run directory, provisions workspaces, launches
-Docker Compose, runs the agent, creates a PR, and runs the PR monitor. The
-service worker is now the normal always-on feature PR executor; use the script
-for isolated experiments, checked-in task specs, and release/sync flows.
+scripts/run_awf.py is the compatibility dogfood runner for exercising the same
+building blocks outside the always-on service. It stores its SQLite DB under
+`--work-dir`, does not require the local Postgres control-plane database,
+provisions workspaces, launches Docker Compose, runs the agent, creates a PR,
+and runs the PR monitor. The service worker is the normal always-on executor;
+use the script for isolated experiments, checked-in specs, release/sync
+compatibility runs, and SQLite-backed throwaway runs.
 
 Example config:
 
