@@ -473,8 +473,13 @@ class StalenessRefreshService:
             ],
         )
 
-        stale = any(finding.blocks_merge for finding in findings)
-        await self._mark_candidate_stale(candidate, stale=stale)
+        blocking_reason = _primary_blocking_reason(findings)
+        stale = blocking_reason is not None
+        await self._mark_candidate_stale(
+            candidate,
+            stale=stale,
+            stale_reason=blocking_reason,
+        )
 
         if newly_added:
             await self._emit_events(
@@ -512,6 +517,7 @@ class StalenessRefreshService:
         candidate: MergeCandidate,
         *,
         stale: bool,
+        stale_reason: str | None,
     ) -> None:
         from awf.db.repositories import sync_candidate_readiness
         from awf.runtime.merge_eligibility import compute_stale_reason
@@ -526,6 +532,7 @@ class StalenessRefreshService:
         next_stale_reason = (
             validation_reason
             or (existing_validation_reason if stale else None)
+            or (stale_reason if stale else None)
             or ("stale" if stale else None)
         )
         if candidate.stale != next_stale or candidate.stale_reason != next_stale_reason:
@@ -587,6 +594,13 @@ def _snapshot_for(candidate: MergeCandidate) -> CandidateSnapshot:
         task_class=workspace.task_class or attempt.task_class,
         base_sha=candidate.base_sha,
     )
+
+
+def _primary_blocking_reason(findings: Sequence[StalenessFinding]) -> str | None:
+    for finding in findings:
+        if finding.blocks_merge:
+            return finding.reason_code
+    return None
 
 
 async def _load_candidate(session: AsyncSession, candidate_id: str) -> MergeCandidate | None:

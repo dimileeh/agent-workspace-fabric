@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.api.schemas import WorkspaceCreateV2Request
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import QueueDecisionRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.service.workspaces import WorkspaceService
 
@@ -120,8 +120,27 @@ async def test_create_v2_allows_overlap_and_records_risk_event(
         created.id,
         event_type="workspace.owned_path_overlap_risk",
     )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        decisions = await QueueDecisionRepository(session).list_for_workspace(created.id)
 
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.requested.value
     assert created.owned_paths == ["src/awf/service/workspaces.py"]
+    assert len(decisions) == 1
+    assert decisions[0].decision == "admitted"
+    assert decisions[0].overlap_risk_summary == {
+        "warning_code": "OWNED_PATH_OVERLAP_RISK",
+        "overlap_count": 1,
+        "workspace_ids": [existing.id],
+        "overlaps": [
+            {
+                "workspace_id": existing.id,
+                "existing_path": "src/awf/service/**",
+                "requested_path": "src/awf/service/workspaces.py",
+            }
+        ],
+    }
     assert events is not None
     assert len(events) == 1
     assert events[0].reason_code == "OWNED_PATH_OVERLAP_RISK"

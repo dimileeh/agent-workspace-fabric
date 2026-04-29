@@ -15,8 +15,10 @@ from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import (
     MergeCandidateRepository,
+    StaleReasonRepository,
     TaskAttemptRepository,
     TaskRepository,
+    WorkspaceEventRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
@@ -639,6 +641,156 @@ class TestReconcileAndRefreshStaleCandidates:
         refreshed_ids = {s.candidate_id for s in result.candidate_refreshes}
         assert cand_id_1 not in refreshed_ids
         assert cand_id_2 in refreshed_ids
+
+    @pytest.mark.unit
+    async def test_reconcile_after_merge_marks_only_overlapping_open_candidate_stale(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        service_ws_id, service_attempt_id, service_candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/service/**"],
+            task_class="test_task",
+        )
+        docs_ws_id, docs_attempt_id, docs_candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["docs/**"],
+            task_class="docs_task",
+        )
+        merged_ws_id, _merged_attempt_id, merged_candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["src/awf/service/staleness.py"],
+            task_class="test_task",
+        )
+
+        async def _reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            return _fake_reconcile_result(checkout_path=tmp_path / "checkout")
+
+        target_state = TargetBranchState(
+            branch=_BASE_BRANCH,
+            head_sha="c" * 40,
+            changed_paths=("src/awf/service/staleness.py",),
+            advanced_commits=1,
+        )
+
+        result = await reconcile_and_refresh_stale_candidates(
+            reconcile_fn=_reconcile,
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            session_factory=factory,
+            target_state_for_base_sha=async_lambda(target_state),
+            exclude_workspace_ids={merged_ws_id},
+        )
+
+        summaries = {summary.candidate_id: summary for summary in result.candidate_refreshes}
+        assert set(summaries) == {service_candidate_id, docs_candidate_id}
+        assert merged_candidate_id not in summaries
+        assert summaries[service_candidate_id].stale is True
+        assert summaries[service_candidate_id].stale_reason == "STALE_OVERLAP"
+        assert summaries[service_candidate_id].findings_count == 1
+        assert summaries[docs_candidate_id].stale is False
+        assert summaries[docs_candidate_id].stale_reason is None
+        assert summaries[docs_candidate_id].findings_count == 0
+
+        async with factory() as session:
+            service_candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                service_attempt_id,
+            )
+            docs_candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                docs_attempt_id,
+            )
+            service_reasons = await StaleReasonRepository(session).list_active_for_candidate(
+                service_candidate_id,
+            )
+            docs_reasons = await StaleReasonRepository(session).list_active_for_candidate(
+                docs_candidate_id,
+            )
+            service_events = await WorkspaceEventRepository(session).list(
+                workspace_id=service_ws_id,
+                event_type="merge_candidate.stale_detected",
+            )
+            docs_events = await WorkspaceEventRepository(session).list(
+                workspace_id=docs_ws_id,
+                event_type="merge_candidate.stale_detected",
+            )
+
+        assert service_candidate is not None
+        assert service_candidate.stale is True
+        assert service_candidate.stale_reason == "STALE_OVERLAP"
+        assert docs_candidate is not None
+        assert docs_candidate.stale is False
+        assert docs_candidate.stale_reason is None
+        assert [
+            (reason.reason_code, reason.trigger_type, reason.trigger_ref)
+            for reason in service_reasons
+        ] == [
+            (
+                "STALE_OVERLAP",
+                "path_overlap",
+                "src/awf/service/staleness.py",
+            )
+        ]
+        assert docs_reasons == []
+        assert len(service_events) == 1
+        assert service_events[0].reason_code == "STALE_OVERLAP"
+        assert service_events[0].payload is not None
+        assert service_events[0].payload["trigger_ref"] == "src/awf/service/staleness.py"
+        assert docs_events == []
+
+    @pytest.mark.unit
+    async def test_reconcile_after_merge_non_overlap_leaves_candidate_without_overlap_reason(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        _docs_ws_id, docs_attempt_id, docs_candidate_id = await _seed_open_candidate(
+            factory,
+            owned_paths=["docs/**"],
+            task_class="docs_task",
+        )
+
+        async def _reconcile(
+            *, repo_url: str, branch: str, dry_run: bool = False
+        ) -> TargetBranchMonitorResult:
+            return _fake_reconcile_result(checkout_path=tmp_path / "checkout")
+
+        result = await reconcile_and_refresh_stale_candidates(
+            reconcile_fn=_reconcile,
+            repo_url=_REPO_URL,
+            branch=_BASE_BRANCH,
+            session_factory=factory,
+            target_state_for_base_sha=async_lambda(
+                TargetBranchState(
+                    branch=_BASE_BRANCH,
+                    head_sha="c" * 40,
+                    changed_paths=("src/awf/service/staleness.py",),
+                    advanced_commits=1,
+                )
+            ),
+        )
+
+        assert len(result.candidate_refreshes) == 1
+        summary = result.candidate_refreshes[0]
+        assert summary.candidate_id == docs_candidate_id
+        assert summary.stale is False
+        assert summary.stale_reason is None
+        assert summary.findings_count == 0
+
+        async with factory() as session:
+            docs_candidate = await MergeCandidateRepository(session).get_by_attempt_id(
+                docs_attempt_id,
+            )
+            docs_reasons = await StaleReasonRepository(session).list_active_for_candidate(
+                docs_candidate_id,
+            )
+
+        assert docs_candidate is not None
+        assert docs_candidate.stale is False
+        assert docs_candidate.stale_reason is None
+        assert docs_reasons == []
 
     @pytest.mark.unit
     async def test_reconcile_and_refresh_returns_structured_result_data(
