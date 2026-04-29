@@ -120,7 +120,7 @@ class TestWorkspaceArtifacts:
             "items": [],
             "next_cursor": None,
             "has_more": False,
-            "limit": 50,
+            "limit": artifacts.DEFAULT_ARTIFACT_LIST_LIMIT,
             "cursor": None,
         }
 
