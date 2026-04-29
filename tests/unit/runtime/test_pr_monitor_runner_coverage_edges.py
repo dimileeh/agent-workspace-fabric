@@ -945,6 +945,55 @@ async def test_merge_queue_wait_records_event_once_per_head_and_blocker(
 
 
 @pytest.mark.unit
+async def test_monitor_state_sleep_failure_marks_operation_failed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+
+    class FailingSleep(RecordedSleep):
+        async def __call__(self, seconds: float) -> None:
+            assert seconds == 15
+            raise RuntimeError("sleep backend unavailable")
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=FailingSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    with pytest.raises(RuntimeError, match="sleep backend unavailable"):
+        await runner._sleep_with_monitor_state_operation(
+            workspace_id=workspace_id,
+            action="grace_wait",
+            requested_action="validate",
+            reason="Initial review grace period is still active.",
+            reason_code="INITIAL_REVIEW_GRACE",
+            pr_number=42,
+            status=_status_for_helpers(),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            wait_seconds=15,
+        )
+
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id)
+        assert len(operations) == 1
+        operation = operations[0]
+        assert operation.type == OperationType.monitor_state.value
+        assert operation.status == OperationStatus.failed.value
+        assert operation.error_code == "INITIAL_REVIEW_GRACE"
+        assert operation.error_message == "sleep backend unavailable"
+        assert operation.result == {
+            "status": "failed",
+            "outcome": "wait_failed",
+            "reason_code": "INITIAL_REVIEW_GRACE",
+        }
+
+
+@pytest.mark.unit
 async def test_merge_queue_blocker_after_lock_defers_merge_without_calling_github_merge(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

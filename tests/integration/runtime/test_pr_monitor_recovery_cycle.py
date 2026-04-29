@@ -350,7 +350,13 @@ async def test_grace_window_keeps_workspace_in_monitoring_pr(
             for op in ops
             if isinstance(op.payload, dict) and op.payload.get("source") == "pr_monitor"
         ]
-        assert pr_monitor_ops == []
+        assert [(op.type, op.payload.get("action")) for op in pr_monitor_ops] == [
+            (OperationType.monitor_state.value, "grace_wait")
+        ]
+        grace_op = pr_monitor_ops[0]
+        assert grace_op.status == OperationStatus.succeeded.value
+        assert grace_op.payload["reason_code"] == "INITIAL_REVIEW_GRACE"
+        assert grace_op.payload["requested_action"] == "validate"
         # The grace started key is persisted so it doesn't restart on the
         # next iteration after the runner restarts.
         threads = ws.monitor_threads_addressed or {}
