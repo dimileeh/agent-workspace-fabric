@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 
 from awf.adapters.codex import CodexAdapter
 from awf.common.commands import FakeCommandRunner
+from awf.common.redaction import REDACTION_MARKER
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
 from awf.runtime.logs import LogBroadcaster, LogStore, WorkspaceLogSink, stream_compose_service_logs
@@ -203,6 +204,80 @@ async def test_log_sink_updates_metadata_under_write_lock(
 
 
 @pytest.mark.unit
+async def test_workspace_log_sink_redacts_persisted_data_live_frames_and_metadata(
+    engine: AsyncEngine,
+    tmp_path: Path,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).create(
+            repo_url="git@example.com:repo/app.git",
+            branch_base="main",
+            task_title="Redact logs",
+            task_prompt="Keep workspace logs safe.",
+            agent="codex",
+            test_commands=[],
+        )
+        await session.commit()
+
+    broadcaster = LogBroadcaster()
+    store = LogStore(root=tmp_path, session_factory=factory, broadcaster=broadcaster)
+    sink = await store.open_stream(
+        workspace_id=workspace.id,
+        stream_id="agent.stdout",
+        source="agent",
+        name="Codex agent stdout",
+        kind="stdout",
+    )
+    raw_secret_bodies = (
+        "ghp_LOGredactGitHubToken123456",
+        "sk-fakeOpenAIKey123456789",
+        "sk-ant-fakeAnthropicKey123456789",
+        "AIzaFakeGeminiApiKey1234567890ABCD",
+        "frameBearerToken123456",
+        "url-password-value",
+        "awf-api-token-123456",
+    )
+    raw_line = (
+        "context before "
+        "github ghp_LOGredactGitHubToken123456 "
+        "openai sk-fakeOpenAIKey123456789 "
+        "anthropic sk-ant-fakeAnthropicKey123456789 "
+        "gemini AIzaFakeGeminiApiKey1234567890ABCD "
+        "Authorization: Bearer frameBearerToken123456 "
+        "repo https://user:url-password-value@github.com/example/repo.git "
+        "AWF_API_TOKEN=awf-api-token-123456 context after\n"
+    )
+
+    async with broadcaster.subscribe(workspace.id) as queue:
+        await sink.write(raw_line)
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    persisted = sink.path.read_text(encoding="utf-8")
+    for raw_secret_body in raw_secret_bodies:
+        assert raw_secret_body not in persisted
+        assert raw_secret_body not in frame.data
+    assert "context before" in persisted
+    assert "context after" in persisted
+    assert "Authorization: Bearer <redacted>" in persisted
+    assert "https://<redacted>@github.com/example/repo.git" in persisted
+    assert "AWF_API_TOKEN=<redacted>" in persisted
+    assert persisted.count(REDACTION_MARKER) == 7
+    assert frame.data == persisted
+    assert frame.offset == 0
+
+    async with factory() as session:
+        stream = await WorkspaceLogStreamRepository(session).get(
+            workspace_id=workspace.id,
+            stream_id="agent.stdout",
+        )
+
+    assert stream is not None
+    assert stream.byte_count == len(persisted.encode("utf-8"))
+    assert stream.line_count == 1
+
+
+@pytest.mark.unit
 async def test_log_broadcaster_delivers_workspace_frames() -> None:
     broadcaster = LogBroadcaster()
 
@@ -219,6 +294,25 @@ async def test_log_broadcaster_delivers_workspace_frames() -> None:
 
     assert frame.workspace_id == "ws_1"
     assert frame.stream_id == "agent.stdout"
+
+
+@pytest.mark.unit
+async def test_log_broadcaster_redacts_direct_live_frames() -> None:
+    broadcaster = LogBroadcaster()
+
+    async with broadcaster.subscribe("ws_1") as queue:
+        await broadcaster.publish(
+            workspace_id="ws_1",
+            stream_id="agent.stdout",
+            source="agent",
+            fd="stdout",
+            offset=0,
+            data="Authorization: Bearer directBearerToken123456\n",
+        )
+        frame = await asyncio.wait_for(queue.get(), timeout=1)
+
+    assert frame.data == "Authorization: Bearer <redacted>\n"
+    assert "directBearerToken123456" not in frame.data
 
 
 @pytest.mark.unit

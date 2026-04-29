@@ -15,6 +15,7 @@ from typing import Protocol, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.common.redaction import redact_secrets
 from awf.db.repositories import WorkspaceLogStreamRepository
 
 
@@ -71,6 +72,7 @@ class LogBroadcaster:
         offset: int,
         data: str,
     ) -> None:
+        redacted_data = redact_secrets(data)
         frame = LogFrame(
             seq=next(self._seq),
             workspace_id=workspace_id,
@@ -78,7 +80,7 @@ class LogBroadcaster:
             source=source,
             fd=fd,
             offset=offset,
-            data=data,
+            data=redacted_data,
             occurred_at=datetime.now(UTC),
         )
         for queue in tuple(self._subscribers.get(workspace_id, ())):
@@ -295,7 +297,8 @@ class WorkspaceLogSink:
     async def write(self, data: str) -> None:
         if not data:
             return
-        encoded = data.encode("utf-8")
+        redacted_data = redact_secrets(data)
+        encoded = redacted_data.encode("utf-8")
         async with self._write_lock:
             offset = await asyncio.to_thread(_append_log_bytes, self.path, encoded)
             if self.session_factory is not None:
@@ -305,7 +308,7 @@ class WorkspaceLogSink:
                         workspace_id=self.workspace_id,
                         stream_id=self.stream_id,
                         byte_delta=len(encoded),
-                        line_delta=data.count("\n"),
+                        line_delta=redacted_data.count("\n"),
                     )
                     await session.commit()
         await self.broadcaster.publish(
@@ -314,7 +317,7 @@ class WorkspaceLogSink:
             source=self.source,
             fd=self.fd,
             offset=offset,
-            data=data,
+            data=redacted_data,
         )
 
     async def close(self) -> None:
