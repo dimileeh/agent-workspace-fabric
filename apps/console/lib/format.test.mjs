@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { fallbackLifecycleStages, fallbackLlmUsage, renderLogEntries } from "./format.ts";
+import { fallbackLifecycleStages, fallbackLlmUsage, renderLogEntries, toneFillClass } from "./format.ts";
 
 test("fallbackLifecycleStages marks terminal successors skipped", () => {
   const stages = Object.fromEntries(
@@ -64,6 +64,12 @@ test("fallbackLlmUsage preserves available provider usage", () => {
       reason: null,
     },
   );
+});
+
+test("toneFillClass maps warning and bad pressure to distinct fills", () => {
+  assert.equal(toneFillClass("good"), "bg-emerald-500");
+  assert.equal(toneFillClass("warn"), "bg-amber-500");
+  assert.equal(toneFillClass("bad"), "bg-red-500");
 });
 
 test("renderLogEntries preserves message order inside chunks in asc mode", () => {

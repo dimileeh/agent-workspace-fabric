@@ -40,6 +40,7 @@ import {
   renderLogEntries,
   statusTone,
   toneClass,
+  toneFillClass,
 } from "@/lib/format";
 import { formatAgentEffort, formatAgentLabel, formatAgentTitle } from "@/lib/agent-format";
 import { omitUndefined } from "@/lib/api-payload";
@@ -2405,7 +2406,7 @@ function ResourceDimensionMeter({
         </span>
       </div>
       <div className="mt-2 h-1.5 overflow-hidden rounded-full bg-white/70">
-        <div className={dimension.reason_code ? "h-full bg-amber-500" : "h-full bg-emerald-500"} style={{ width: `${fill}%` }} />
+        <div className={`h-full ${toneFillClass(tone)}`} style={{ width: `${fill}%` }} />
       </div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-slate-700">
         <span>{formatCapacityValue(dimension.available, unit)} available</span>

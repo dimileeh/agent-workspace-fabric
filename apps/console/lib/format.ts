@@ -215,3 +215,18 @@ export function toneClass(tone: ReturnType<typeof statusTone>): string {
       return "border-slate-200 bg-slate-50 text-slate-700";
   }
 }
+
+export function toneFillClass(tone: ReturnType<typeof statusTone>): string {
+  switch (tone) {
+    case "good":
+      return "bg-emerald-500";
+    case "warn":
+      return "bg-amber-500";
+    case "bad":
+      return "bg-red-500";
+    case "info":
+      return "bg-blue-500";
+    default:
+      return "bg-slate-400";
+  }
+}
