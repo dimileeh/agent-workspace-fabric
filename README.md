@@ -1375,6 +1375,62 @@ awf:
         timeout_seconds: 300
 ```
 
+For DB-backed projects that do not need nested Docker, declare the app and
+database as profile services in AWF's outer workspace stack. The agent reaches
+them by Compose service name on `awf_net`; no host port is required.
+
+Example repo-local Python/Postgres profile:
+
+```yaml
+awf:
+  name: my-db-backed-app
+  version: 1
+  docker:
+    mode: none
+  runtime:
+    environment:
+      APP_BASE_URL: http://app:8080
+      DATABASE_URL: postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf
+  services:
+    - name: postgres
+      image: postgres:16-alpine
+      environment:
+        POSTGRES_DB: awf
+        POSTGRES_PASSWORD: ${AWF_POSTGRES_PASSWORD}
+        POSTGRES_USER: awf
+      healthcheck_cmd: pg_isready -U awf -d awf
+      volumes:
+        - [postgres_data, /var/lib/postgresql/data]
+    - name: app
+      build_context: .
+      dockerfile: Dockerfile
+      environment:
+        DATABASE_URL: postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf
+        PORT: "8080"
+      depends_on:
+        - postgres
+      healthcheck_cmd: python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz', timeout=5).read()"
+      command: python /app/app.py
+  phases:
+    setup:
+      - command: python -c "import os, urllib.request; urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', timeout=10).read()"
+        timeout_seconds: 30
+    validate:
+      - command: python -c "import os, urllib.request; urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/validate', timeout=10).read()"
+        timeout_seconds: 30
+  validation:
+    healthchecks:
+      - name: app
+        command: python -c "import os, urllib.request; urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/healthz', timeout=10).read()"
+        timeout_seconds: 30
+  ports:
+    app: http://app:8080
+    postgres: postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf
+```
+
+This Postgres service is workspace-local project data. It is distinct from the
+AWF control-plane Postgres database used by the API and worker.
+
 ## Observability
 
 AWF includes a local Next.js console under `apps/console`. It talks to AWF
