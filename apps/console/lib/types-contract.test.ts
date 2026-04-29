@@ -1,4 +1,5 @@
 import type {
+  ValidationFreshnessSummary,
   ValidationFreshnessStatus,
   ValidationRunSummary,
   Workspace,
@@ -20,17 +21,10 @@ type WorkspaceRecoverySummaryTextIsRequired = Expect<
 
 export const workspaceRecoverySummaryTextIsRequired: WorkspaceRecoverySummaryTextIsRequired = true;
 
-type WorkspaceValidationProvenanceIsPresent = Expect<
+type WorkspaceValidationProvenanceAllowsMissing = Expect<
   Equal<
-    Workspace["validation_provenance"],
-    {
-      required_tier: 1 | 2 | 3 | null;
-      latest_satisfied_tier: 1 | 2 | 3 | null;
-      freshness_status: ValidationFreshnessStatus;
-      reason_code: string | null;
-      current_target_head_sha: string | null;
-      latest_validation: ValidationRunSummary | null;
-    }
+    Pick<Workspace, "validation_provenance">,
+    { validation_provenance?: ValidationFreshnessSummary | null }
   >
 >;
 
@@ -66,5 +60,5 @@ type ValidationRunSummaryIdentityFieldsArePresent = Expect<
   >
 >;
 
-export const workspaceValidationProvenanceIsPresent: WorkspaceValidationProvenanceIsPresent = true;
+export const workspaceValidationProvenanceAllowsMissing: WorkspaceValidationProvenanceAllowsMissing = true;
 export const validationRunSummaryIdentityFieldsArePresent: ValidationRunSummaryIdentityFieldsArePresent = true;

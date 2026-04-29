@@ -306,7 +306,7 @@ export interface Workspace {
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
   recovery?: WorkspaceRecoverySummary | null;
-  validation_provenance: ValidationFreshnessSummary;
+  validation_provenance?: ValidationFreshnessSummary | null;
   env_profile: string | null;
   profile_ref: string | null;
   requested_profile: Record<string, unknown> | null;
