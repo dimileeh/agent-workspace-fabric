@@ -42,6 +42,14 @@ WorkspaceLifecycleStageStatus = Literal[
     "terminal_skipped",
 ]
 LlmUsageStatus = Literal["available", "unavailable"]
+WorkspaceOverlapGraphQueueState = Literal["queued", "running"]
+WorkspaceOverlapGraphSeverity = Literal["advisory"]
+WorkspaceOverlapGraphReasonCode = Literal["OWNED_PATH_OVERLAP_RISK"]
+WorkspaceOverlapPathMatchReasonCode = Literal[
+    "OWNED_PATH_EXACT_MATCH",
+    "OWNED_PATH_ANCESTOR_MATCH",
+    "OWNED_PATH_WILDCARD_MATCH",
+]
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
 
@@ -660,6 +668,66 @@ class WorkspaceLockResponse(BaseModel):
 class WorkspaceLockListResponse(BaseModel):
     items: list[WorkspaceLockResponse]
     next_cursor: str | None = None
+    has_more: bool = False
+
+
+class WorkspaceOverlapGraphNodeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    workspace_id: str
+    title: str
+    status: WorkspaceStatus
+    queue_state: WorkspaceOverlapGraphQueueState
+    repo_url: str
+    branch_base: str
+    task_class: TaskClass | None
+    owned_paths: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+class WorkspaceOverlapPathMatchResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    left_workspace_id: str
+    left_owned_path: str
+    right_workspace_id: str
+    right_owned_path: str
+    match_reason_code: WorkspaceOverlapPathMatchReasonCode
+    explanation: str
+
+
+class WorkspaceOverlapGraphEdgeResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    left_workspace_id: str
+    right_workspace_id: str
+    repo_url: str
+    branch_base: str
+    reason_code: WorkspaceOverlapGraphReasonCode
+    severity: WorkspaceOverlapGraphSeverity
+    blocks_launch: bool
+    affected_workspace_ids: list[str]
+    path_matches: list[WorkspaceOverlapPathMatchResponse]
+
+
+class WorkspaceOverlapGraphSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    node_count: int
+    queued_count: int
+    running_count: int
+    edge_count: int
+    affected_workspace_count: int
+    has_more: bool
+
+
+class WorkspaceOverlapGraphResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    nodes: list[WorkspaceOverlapGraphNodeResponse]
+    edges: list[WorkspaceOverlapGraphEdgeResponse]
+    summary: WorkspaceOverlapGraphSummaryResponse
     has_more: bool = False
 
 
