@@ -65,11 +65,13 @@ class TestRender:
         manager: ComposeManager,
         tmp_path: Path,
     ) -> None:
-        parsed = yaml.safe_load(manager.render(_spec(tmp_path)).compose_file.read_text())
+        rendered = manager.render(_spec(tmp_path)).compose_file.read_text()
+        parsed = yaml.safe_load(rendered)
 
         assert parsed["services"]["agent"]["extra_hosts"] == [
             "host.docker.internal:host-gateway"
         ]
+        assert "\n    \n    extra_hosts:" not in rendered
 
     @pytest.mark.unit
     def test_open_egress_policy_keeps_public_network_and_host_gateway(

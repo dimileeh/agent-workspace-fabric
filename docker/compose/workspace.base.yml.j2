@@ -60,7 +60,7 @@ services:
       {% if auth_mounts %}{% for m in auth_mounts %}
       - "{{ m.source }}:{{ m.target }}:{{ m.mode | default('ro') }}"
       {% endfor %}{% endif %}
-    {% if host_gateway_enabled %}
+    {% if host_gateway_enabled -%}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     {% endif %}{% if agent_depends_on %}depends_on:
