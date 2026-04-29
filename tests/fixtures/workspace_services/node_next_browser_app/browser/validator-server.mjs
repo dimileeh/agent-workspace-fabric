@@ -2,6 +2,7 @@ import { createServer } from "node:http";
 import { chromium } from "playwright-core";
 
 const FIXTURE_ID = "awf-node-profile-fixture";
+let browserPromise;
 
 function sendText(response, body, status = 200) {
   const payload = Buffer.from(body, "utf8");
@@ -21,12 +22,10 @@ function requireAppBaseUrl() {
 }
 
 async function validateInBrowser() {
-  const browser = await chromium.launch({
-    headless: true,
-    args: ["--no-sandbox"],
-  });
+  const browser = await browserForValidation();
+  const context = await browser.newContext();
   try {
-    const page = await browser.newPage();
+    const page = await context.newPage();
     await page.goto(requireAppBaseUrl(), { waitUntil: "domcontentloaded" });
     await page.waitForSelector('main[data-awf-ready="true"][data-fixture-id="awf-node-profile-fixture"]', {
       timeout: 10_000,
@@ -49,8 +48,36 @@ async function validateInBrowser() {
       throw new Error(`unexpected status payload: ${JSON.stringify(status)}`);
     }
   } finally {
-    await browser.close();
+    await context.close();
   }
+}
+
+function launchBrowser() {
+  const promise = chromium.launch({
+    headless: true,
+    args: ["--no-sandbox"],
+  }).catch((error) => {
+    if (browserPromise === promise) {
+      browserPromise = undefined;
+    }
+    throw error;
+  });
+
+  browserPromise = promise;
+  return promise;
+}
+
+async function browserForValidation() {
+  const current = browserPromise ?? launchBrowser();
+  const browser = await current;
+  if (browser.isConnected()) {
+    return browser;
+  }
+
+  if (browserPromise === current) {
+    browserPromise = undefined;
+  }
+  return browserPromise ?? launchBrowser();
 }
 
 const server = createServer((request, response) => {
