@@ -64,23 +64,32 @@ def profile_services(
 
 
 def _resolve_repo_path(value: str | None, *, base_path: Path | None) -> str | None:
-    if value is None or base_path is None:
+    if value is None:
         return value
-    path = Path(value)
-    if path.is_absolute():
-        return value
-    return str((base_path / path).resolve())
+    return _resolve_workspace_path(value, base_path=base_path)
 
 
 def _resolve_volume_source(source: str, *, base_path: Path | None) -> str:
-    if base_path is None:
-        return source
     path = Path(source)
     if path.is_absolute():
-        return source
+        raise ValueError(f"profile service path must be workspace-relative: {source!r}")
     if source.startswith(".") or "/" in source:
-        return str((base_path / path).resolve())
+        return _resolve_workspace_path(source, base_path=base_path)
     return source
+
+
+def _resolve_workspace_path(value: str, *, base_path: Path | None) -> str:
+    path = Path(value)
+    if path.is_absolute():
+        raise ValueError(f"profile service path must be workspace-relative: {value!r}")
+    if base_path is None:
+        return value
+
+    root = base_path.resolve()
+    resolved = (root / path).resolve()
+    if not resolved.is_relative_to(root):
+        raise ValueError(f"profile service path escapes workspace root: {value!r}")
+    return str(resolved)
 
 
 def profile_agent_environment(profile: WorkspaceProfile) -> tuple[tuple[str, str], ...]:

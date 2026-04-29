@@ -91,3 +91,84 @@ def test_profile_services_adapter_preserves_renderer_fields() -> None:
     assert app.healthcheck_cmd == "wget -qO- http://127.0.0.1:8080/healthz >/dev/null"
     assert app.ports == ((8080, 18080),)
     assert app.command == "python /app/app.py"
+
+
+@pytest.mark.unit
+def test_profile_services_rejects_absolute_repo_local_paths(tmp_path: Path) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-path",
+            "services": [
+                {
+                    "name": "api",
+                    "build_context": str(tmp_path / "api"),
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="workspace-relative"):
+        profile_services(profile, base_path=tmp_path / "repo")
+
+
+@pytest.mark.unit
+def test_profile_services_rejects_paths_that_escape_worktree(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-path",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "env_file": "../secrets.env",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="escapes workspace root"):
+        profile_services(profile, base_path=repo)
+
+
+@pytest.mark.unit
+def test_profile_services_rejects_symlink_escape_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    external = tmp_path / "external"
+    repo.mkdir()
+    external.mkdir()
+    (repo / "linked").symlink_to(external, target_is_directory=True)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-path",
+            "services": [
+                {
+                    "name": "api",
+                    "build_context": "linked/api",
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="escapes workspace root"):
+        profile_services(profile, base_path=repo)
+
+
+@pytest.mark.unit
+def test_profile_services_rejects_absolute_volume_sources(tmp_path: Path) -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "bad-path",
+            "services": [
+                {
+                    "name": "api",
+                    "image": "example/api:latest",
+                    "volumes": [(str(tmp_path / "host-secrets"), "/run/secrets")],
+                }
+            ],
+        }
+    )
+
+    with pytest.raises(ValueError, match="workspace-relative"):
+        profile_services(profile, base_path=tmp_path / "repo")
