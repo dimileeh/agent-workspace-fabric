@@ -1460,6 +1460,64 @@ awf:
 This Postgres service is workspace-local project data. It is distinct from the
 AWF control-plane Postgres database used by the API and worker.
 
+Frontend projects use the same profile-service model. A Node or Next-style app
+can run as one service, with browser validation isolated in a Playwright sidecar
+that the agent triggers over the workspace network. No host port is required,
+and this is project validation rather than the AWF console/dashboard.
+
+Example repo-local Node/Next plus browser validation profile:
+
+```yaml
+name: my-next-app
+version: 1
+docker:
+  mode: none
+runtime:
+  environment:
+    APP_BASE_URL: http://app:3000
+    BROWSER_VALIDATE_URL: http://browser:9323/validate
+services:
+  - name: app
+    build_context: .
+    dockerfile: Dockerfile
+    environment:
+      PORT: "3000"
+    healthcheck_cmd: node /app/scripts/container-healthcheck.mjs http://127.0.0.1:3000/healthz ok
+    command: npm run start
+  - name: browser
+    build_context: .
+    dockerfile: Dockerfile.playwright
+    environment:
+      APP_BASE_URL: http://app:3000
+      PORT: "9323"
+    depends_on:
+      - app
+    healthcheck_cmd: node /app/scripts/container-healthcheck.mjs http://127.0.0.1:9323/healthz ok
+    command: node /app/browser/validator-server.mjs
+phases:
+  setup:
+    - command: node scripts/setup.mjs
+      timeout_seconds: 30
+  validate:
+    - command: node scripts/validate-browser.mjs
+      timeout_seconds: 120
+validation:
+  healthchecks:
+    - name: app
+      command: node scripts/healthcheck.mjs app
+      timeout_seconds: 30
+    - name: browser
+      command: node scripts/healthcheck.mjs browser
+      timeout_seconds: 30
+ports:
+  app: http://app:3000
+  browser: http://browser:9323/validate
+```
+
+AWF starts and tears down both services with the per-workspace Compose stack.
+The agent container runs setup and validation commands from `/workspace`, while
+browser automation stays inside the Playwright service.
+
 ## Observability
 
 AWF includes a local Next.js console under `apps/console`. It talks to AWF

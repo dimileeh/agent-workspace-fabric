@@ -1,0 +1,17 @@
+FROM mcr.microsoft.com/playwright:v1.49.1-noble
+
+WORKDIR /app
+
+RUN mkdir -p /app/browser \
+    && npm install --prefix /app/browser --omit=dev --no-audit --no-fund --no-save playwright-core@1.49.1
+
+COPY browser/validator-server.mjs ./browser/validator-server.mjs
+COPY scripts/container-healthcheck.mjs ./scripts/container-healthcheck.mjs
+
+ENV NODE_ENV=production
+ENV PORT=9323
+ENV APP_BASE_URL=http://app:3000
+
+EXPOSE 9323
+
+CMD ["node", "/app/browser/validator-server.mjs"]

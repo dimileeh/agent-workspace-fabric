@@ -20,7 +20,12 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.commands import FakeCommandRunner
 from awf.db.base import Base
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    WorkspaceEventRepository,
+    WorkspaceLogStreamRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.logs import LogStore
 from tests.unit.runtime._monitor_runner_fixtures import (
@@ -104,6 +109,49 @@ class TestMonitorActionLogging:
         assert entry["unresolved_threads"] == 0
         assert entry["unresolved_reviews"] == 0
         assert entry["head_sha"].startswith("abc1234567")
+        async with factory() as s:
+            operations = await OperationRepository(s).list_all(workspace_id=ws_id, limit=20)
+            attempt_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.merge_attempt",
+                limit=10,
+            )
+            result_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.merge_result",
+                limit=10,
+            )
+        merge_operation = next(
+            op
+            for op in operations
+            if op.type == "monitor_state"
+            and isinstance(op.payload, dict)
+            and op.payload.get("action") == "merge"
+        )
+        assert len(attempt_events) == 1
+        assert attempt_events[0].payload == {
+            "schema": "control_audit.v1",
+            "actor": "pr_monitor",
+            "source": "pr_monitor",
+            "action": "merge",
+            "outcome": "attempted",
+            "reason_code": "MERGE",
+            "operation_id": merge_operation.id,
+            "operation_type": "monitor_state",
+            "pr_number": 42,
+            "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+            "source_head_sha": "abc1234567890def",
+            "source_base_sha": "a" * 40,
+            "target_branch": "development",
+            "remote_branch": f"awf/{ws_id}",
+            "branch_name": f"awf/{ws_id}",
+        }
+        assert len(result_events) == 1
+        assert result_events[0].payload == {
+            **attempt_events[0].payload,
+            "outcome": "succeeded",
+            "evidence": {"merge_sha": "MERGESHA"},
+        }
 
     @pytest.mark.unit
     async def test_monitor_writes_durable_monitor_log_stream(
@@ -193,8 +241,55 @@ class TestMonitorActionLogging:
         async with factory() as s:
             streams = await WorkspaceLogStreamRepository(s).list_for_workspace(ws_id)
             recovery_stream = next((stream for stream in streams if stream.source == "recovery"), None)
+            operations = await OperationRepository(s).list_all(workspace_id=ws_id, limit=20)
+            push_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.git_push",
+                limit=10,
+            )
+            resolution_events = await WorkspaceEventRepository(s).list(
+                workspace_id=ws_id,
+                event_type="workspace.audit.comment_resolution",
+                limit=10,
+            )
         assert recovery_stream is not None, f"Expected a stream with source='recovery'. Streams: {[(s.stream_id, s.source) for s in streams]}. Calls: {[c.args for c in cmd.calls]}"
         assert recovery_stream.kind == "stdout"
+        comment_operation = next(op for op in operations if op.type == "comment_repair")
+        comment_push = next(
+            event
+            for event in push_events
+            if event.payload is not None
+            and event.payload["action"] == "comment_repair_push"
+        )
+        assert comment_push.payload == {
+            "schema": "control_audit.v1",
+            "actor": "pr_monitor",
+            "source": "pr_monitor",
+            "action": "comment_repair_push",
+            "outcome": "succeeded",
+            "reason_code": "COMMENT_REPAIR",
+            "operation_id": comment_operation.id,
+            "operation_type": "comment_repair",
+            "pr_number": 42,
+            "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
+            "source_head_sha": "head2",
+            "source_base_sha": "a" * 40,
+            "target_branch": "development",
+            "remote_branch": f"awf/{ws_id}",
+            "branch_name": f"awf/{ws_id}",
+            "evidence": {"log_stream_refs": {"monitor": "monitor.log"}},
+        }
+        assert len(resolution_events) == 1
+        assert resolution_events[0].payload is not None
+        assert resolution_events[0].payload["action"] == "resolve_thread"
+        assert resolution_events[0].payload["outcome"] == "succeeded"
+        assert resolution_events[0].payload["operation_id"] == comment_operation.id
+        assert resolution_events[0].payload["evidence"] == {
+            "thread_ids": ["T_recov"],
+            "resolved_thread_count": 1,
+            "log_stream_refs": {"monitor": "monitor.log"},
+        }
+        assert "tiny nit" not in repr(resolution_events[0].payload)
 
     @pytest.mark.unit
     async def test_notify_human_action_emits_log_line(

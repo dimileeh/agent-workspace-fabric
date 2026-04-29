@@ -300,8 +300,10 @@ async def test_cancel_workspace_records_event_when_already_cancelled(
 
     assert response.status == WorkspaceStatus.cancelled
     assert response.operation_status == OperationStatus.succeeded.value
-    assert events[0].event_type == "workspace.cancel_requested"
-    assert events[0].payload == {"reason": "second cancel", "stop_stack": False}
+    cancel_event = next(
+        event for event in events if event.event_type == "workspace.cancel_requested"
+    )
+    assert cancel_event.payload == {"reason": "second cancel", "stop_stack": False}
 
 
 @pytest.mark.unit
@@ -368,7 +370,7 @@ async def test_stop_workspace_records_event_for_inactive_workspace(
     assert response.status == WorkspaceStatus.completed
     assert response.operation_status == OperationStatus.succeeded.value
     assert stopper.calls == ["awf_ws_completed"]
-    assert events[0].event_type == "workspace.stack_stopped"
+    assert any(event.event_type == "workspace.stack_stopped" for event in events)
 
 
 @pytest.mark.unit
@@ -690,7 +692,12 @@ async def test_destroy_workspace_records_structured_partial_cleanup_and_retry(
         "status": WorkspaceStatus.failed.value,
         "cleanup": partial_cleanup,
     }
-    cleanup_event = next(event for event in failed_events if event.reason_code == "CLEANUP_FAILED")
+    cleanup_event = next(
+        event
+        for event in failed_events
+        if event.event_type == "workspace.state_changed"
+        and event.reason_code == "CLEANUP_FAILED"
+    )
     assert cleanup_event.payload is not None
     assert cleanup_event.payload["cleanup"] == partial_cleanup
 

@@ -11,29 +11,21 @@ from typing import Any, cast
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from awf.common.audit import redact_audit_text, redact_audit_value
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.models import Operation, Workspace
 from awf.db.repositories import OperationRepository
 
-_SENSITIVE_NON_TOKEN_KEY_RE = re.compile(
-    r"(authorization|bearer|password|passwd|secret|api[_-]?key|access[_-]?key)",
+_MONITOR_REDACTED_ASSIGNMENT_RE = re.compile(
+    r"\b(?:[A-Za-z][A-Za-z0-9_]*_)?"
+    r"(?:TOKEN|API[_-]?KEY|ACCESS[_-]?KEY|PASSWORD|PASSWD|SECRET)"
+    r"\s*[:=]\s*[\"']?\[redacted\][\"']?",
     re.IGNORECASE,
 )
-_SENSITIVE_TOKEN_KEY_RE = re.compile(r"token", re.IGNORECASE)
-_TOKEN_USAGE_METADATA_KEY_RE = re.compile(
-    r"(?:^|[_-])(?:input|output|total|prompt|completion|cached|reasoning)"
-    r"[_-]?tokens?(?:[_-](?:count|used|usage))?$"
-    r"|(?:^|[_-])tokens?[_-](?:count|used|usage)$",
+_MONITOR_REDACTED_BEARER_RE = re.compile(
+    r"\bBearer\s+\[redacted\]",
     re.IGNORECASE,
 )
-_SECRET_VALUE_PATTERNS = (
-    re.compile(r"Bearer\s+\S+", re.IGNORECASE),
-    re.compile(r"github_pat_[A-Za-z0-9_]+"),
-    re.compile(r"ghp_[A-Za-z0-9_]+"),
-    re.compile(r"sk-[A-Za-z0-9_-]+"),
-    re.compile(r"(?i)\b(?:token|password|secret|api[_-]?key)=\S+"),
-)
-_MAX_STRING_LENGTH = 1000
 
 
 @dataclass(frozen=True)
@@ -306,45 +298,28 @@ async def finish_monitor_operation(
         status=status,
         result=redact_monitor_operation_value(dict(result or {})),
         error_code=error_code,
-        error_message=_redact_string(error_message) if error_message is not None else None,
+        error_message=(
+            redact_audit_text(error_message) if error_message is not None else None
+        ),
     )
 
 
 def redact_monitor_operation_value(value: Any) -> Any:
+    return _collapse_monitor_secret_assignments(redact_audit_value(value))
+
+
+def _collapse_monitor_secret_assignments(value: Any) -> Any:
     if isinstance(value, Mapping):
-        redacted: dict[str, Any] = {}
-        for key, item in value.items():
-            key_text = str(key)
-            if _is_sensitive_monitor_operation_key(key_text):
-                redacted[key_text] = "[redacted]"
-            else:
-                redacted[key_text] = redact_monitor_operation_value(item)
-        return redacted
+        return {
+            str(key): _collapse_monitor_secret_assignments(item)
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [redact_monitor_operation_value(item) for item in value]
-    if isinstance(value, tuple):
-        return [redact_monitor_operation_value(item) for item in value]
+        return [_collapse_monitor_secret_assignments(item) for item in value]
     if isinstance(value, str):
-        return _redact_string(value)
+        redacted = _MONITOR_REDACTED_ASSIGNMENT_RE.sub("[redacted]", value)
+        return _MONITOR_REDACTED_BEARER_RE.sub("[redacted]", redacted)
     return value
-
-
-def _is_sensitive_monitor_operation_key(key: str) -> bool:
-    if _SENSITIVE_NON_TOKEN_KEY_RE.search(key):
-        return True
-    return bool(
-        _SENSITIVE_TOKEN_KEY_RE.search(key)
-        and not _TOKEN_USAGE_METADATA_KEY_RE.search(key)
-    )
-
-
-def _redact_string(value: str) -> str:
-    redacted = value
-    for pattern in _SECRET_VALUE_PATTERNS:
-        redacted = pattern.sub("[redacted]", redacted)
-    if len(redacted) > _MAX_STRING_LENGTH:
-        return f"{redacted[:_MAX_STRING_LENGTH]}...[truncated]"
-    return redacted
 
 
 def _drop_none(payload: Mapping[str, Any]) -> dict[str, Any]:

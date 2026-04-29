@@ -21,6 +21,12 @@ _POSTGRES_FIXTURE = (
     / "workspace_services"
     / "python_postgres_app"
 )
+_NODE_BROWSER_FIXTURE = (
+    Path(__file__).resolve().parents[2]
+    / "fixtures"
+    / "workspace_services"
+    / "node_next_browser_app"
+)
 _TEMPLATE = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
 
 
@@ -46,6 +52,14 @@ def _load_profile() -> WorkspaceProfile:
 def _load_postgres_profile() -> WorkspaceProfile:
     assert _POSTGRES_FIXTURE.is_dir(), "python-postgres workspace-services fixture is missing"
     return ProfileResolver().resolve(worktree_path=_POSTGRES_FIXTURE, profile_ref="auto").profile
+
+
+def _load_node_browser_profile() -> WorkspaceProfile:
+    assert _NODE_BROWSER_FIXTURE.is_dir(), "node browser workspace-services fixture is missing"
+    return ProfileResolver().resolve(
+        worktree_path=_NODE_BROWSER_FIXTURE,
+        profile_ref="auto",
+    ).profile
 
 
 def _clear_host_auth(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -102,6 +116,34 @@ async def _launched_postgres_spec(
             workspace_id="ws_python_pg",
             layout=layout,
             profile=_load_postgres_profile(),
+        )
+    )
+
+    assert compose.waits == [True]
+    return compose.specs[0]
+
+
+async def _launched_node_browser_spec(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> WorkspaceComposeSpec:
+    _clear_host_auth(monkeypatch)
+    compose = _RecordingCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="node:22-bookworm-slim",
+    )
+    layout = WorktreeLayout(
+        mirror_path=tmp_path / "mirror.git",
+        worktree_path=_NODE_BROWSER_FIXTURE,
+        branch_name="awf/ws-node-browser",
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_node_browser",
+            layout=layout,
+            profile=_load_node_browser_profile(),
         )
     )
 
@@ -282,3 +324,85 @@ async def test_rendered_python_postgres_compose_expresses_db_backed_service_sema
     }
     assert parsed["volumes"]["postgres_data"]["name"] == "awf-ws_python_pg-postgres_data"
     assert parsed["networks"]["awf_net"]["name"] == "awf-ws_python_pg-net"
+
+
+@pytest.mark.unit
+async def test_stack_launcher_builds_node_next_browser_profile_service_spec_from_fixture(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = await _launched_node_browser_spec(tmp_path, monkeypatch)
+
+    assert spec.workspace_id == "ws_node_browser"
+    assert spec.worktree_host_path == _NODE_BROWSER_FIXTURE
+    assert spec.agent_runtime_image == "node:22-bookworm-slim"
+    assert spec.docker_mode == "none"
+    assert dict(spec.agent_environment) == {
+        "APP_BASE_URL": "http://app:3000",
+        "BROWSER_VALIDATE_URL": "http://browser:9323/validate",
+    }
+
+    services = {service.name: service for service in spec.services}
+    assert set(services) == {"app", "browser"}
+    assert services["app"].build_context == str(_NODE_BROWSER_FIXTURE.resolve())
+    assert services["app"].environment == (("PORT", "3000"),)
+    assert services["app"].depends_on == ()
+    assert services["browser"].build_context == str(_NODE_BROWSER_FIXTURE.resolve())
+    assert services["browser"].dockerfile == "Dockerfile.playwright"
+    assert services["browser"].depends_on == ("app",)
+
+
+@pytest.mark.unit
+async def test_rendered_node_next_browser_compose_expresses_browser_validation_semantics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = await _launched_node_browser_spec(tmp_path, monkeypatch)
+    manager = ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE)
+
+    parsed = yaml.safe_load(manager.render(spec).compose_file.read_text())
+
+    assert set(parsed["services"]) == {"agent", "app", "browser"}
+    assert "docker" not in parsed["services"]
+
+    app = parsed["services"]["app"]
+    assert app["build"] == {
+        "context": str(_NODE_BROWSER_FIXTURE.resolve()),
+        "dockerfile": "Dockerfile",
+    }
+    assert app["environment"] == {"PORT": "3000"}
+    assert app["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "node /app/scripts/container-healthcheck.mjs http://127.0.0.1:3000/healthz ok",
+    ]
+    assert app["command"] == "node /app/server.mjs"
+    assert app["networks"] == ["awf_net"]
+    assert "ports" not in app
+
+    browser = parsed["services"]["browser"]
+    assert browser["build"] == {
+        "context": str(_NODE_BROWSER_FIXTURE.resolve()),
+        "dockerfile": "Dockerfile.playwright",
+    }
+    assert browser["environment"] == {
+        "APP_BASE_URL": "http://app:3000",
+        "PORT": "9323",
+    }
+    assert browser["depends_on"] == {"app": {"condition": "service_healthy"}}
+    assert browser["healthcheck"]["test"] == [
+        "CMD-SHELL",
+        "node /app/scripts/container-healthcheck.mjs http://127.0.0.1:9323/healthz ok",
+    ]
+    assert browser["command"] == "node /app/browser/validator-server.mjs"
+    assert browser["networks"] == ["awf_net"]
+    assert "ports" not in browser
+
+    agent = parsed["services"]["agent"]
+    assert agent["environment"]["APP_BASE_URL"] == "http://app:3000"
+    assert agent["environment"]["BROWSER_VALIDATE_URL"] == "http://browser:9323/validate"
+    assert agent["depends_on"] == {
+        "app": {"condition": "service_healthy"},
+        "browser": {"condition": "service_healthy"},
+    }
+    assert parsed["volumes"] == {}
+    assert parsed["networks"]["awf_net"]["name"] == "awf-ws_node_browser-net"

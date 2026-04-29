@@ -61,10 +61,18 @@ class PullRequestResult:
 class PullRequestError(Exception):
     """Raised when push or ``gh pr create`` fails."""
 
-    def __init__(self, *, operation: str, returncode: int, stderr: str) -> None:
+    def __init__(
+        self,
+        *,
+        operation: str,
+        returncode: int,
+        stderr: str,
+        head_sha: str | None = None,
+    ) -> None:
         self.operation = operation
         self.returncode = returncode
         self.stderr = stderr
+        self.head_sha = head_sha
         super().__init__(
             f"{operation} failed (exit={returncode}): {stderr.strip() or '<no output>'}"
         )
@@ -131,7 +139,10 @@ class PullRequestCreator:
         )
         if not push.ok:
             raise PullRequestError(
-                operation="git push", returncode=push.returncode, stderr=push.stderr
+                operation="git push",
+                returncode=push.returncode,
+                stderr=push.stderr,
+                head_sha=head_sha,
             )
 
         if existing_pr_url:
@@ -157,7 +168,10 @@ class PullRequestCreator:
         )
         if not pr.ok:
             raise PullRequestError(
-                operation="gh pr create", returncode=pr.returncode, stderr=pr.stderr
+                operation="gh pr create",
+                returncode=pr.returncode,
+                stderr=pr.stderr,
+                head_sha=head_sha,
             )
 
         url_match = _PR_URL_PATTERN.search(pr.stdout)
@@ -166,6 +180,7 @@ class PullRequestCreator:
                 operation="gh pr create (no URL in stdout)",
                 returncode=0,
                 stderr=f"unexpected gh output: {pr.stdout[:500]}",
+                head_sha=head_sha,
             )
 
         url = url_match.group(0)
