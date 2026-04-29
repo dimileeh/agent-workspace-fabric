@@ -181,6 +181,34 @@ def test_profile_schema_accepts_http_healthcheck_without_shell_command() -> None
 
 
 @pytest.mark.unit
+def test_http_healthcheck_public_targets_redact_url_userinfo() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "health-http-userinfo",
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "api",
+                        "url": "https://agent:token@api.example.test:8443/healthz?ready=1",
+                        "method": "HEAD",
+                        "expected_status": 204,
+                    }
+                ]
+            },
+        }
+    )
+
+    healthcheck = profile.validation.healthchecks[0]
+
+    assert healthcheck.url == "https://agent:token@api.example.test:8443/healthz?ready=1"
+    assert healthcheck.target() == "https://api.example.test:8443/healthz?ready=1"
+    assert (
+        healthcheck.display_command()
+        == "HEAD https://api.example.test:8443/healthz?ready=1 expected 204"
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "healthcheck",
     [

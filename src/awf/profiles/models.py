@@ -147,19 +147,26 @@ class ProfileHealthCheck(BaseModel):
         """Human-readable command/target used in validation provenance."""
         if self.command is not None:
             return self.command
-        url = self._require_url()
-        return f"{self.method} {url} expected {self.expected_status}"
+        return f"{self.method} {self.target()} expected {self.expected_status}"
 
     def target(self) -> str:
         """Secret-free health-check target for logs and events."""
         if self.command is not None:
             return self.command
-        return self._require_url()
+        return _redact_url_userinfo(self._require_url())
 
     def _require_url(self) -> str:
         if self.url is None:
             raise ValueError("healthcheck must set command or url")
         return self.url
+
+
+def _redact_url_userinfo(url: str) -> str:
+    parsed = urlparse(url)
+    if "@" not in parsed.netloc:
+        return url
+    host_target = parsed.netloc.rsplit("@", 1)[1] or "<redacted>"
+    return parsed._replace(netloc=host_target).geturl()
 
 
 class ProfileCoverage(BaseModel):
