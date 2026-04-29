@@ -54,6 +54,12 @@ from awf.service.controls import (
     default_cleaner,
     stop_project_containers,
 )
+from awf.service.disk import DiskCheck
+from awf.service.resource_capacity import (
+    ReservedResources,
+    WorkspaceResourceDefaults,
+    resource_capacity_summary,
+)
 from awf.service.validation_observability import (
     latest_merge_candidate,
     validation_freshness_summary,
@@ -177,9 +183,38 @@ class ResourceReservationPlan:
     peak_cpu: float
     peak_memory_gb: float
     disk_mb: int | None
+    dind_slots: int
+    dind_mode: str
     phase: str = RESOURCE_RESERVATION_PHASE_WORKSPACE
 
-    def summary(self) -> dict[str, Any]:
+    def summary(
+        self,
+        *,
+        settings: Settings,
+        disk_check: DiskCheck | None = None,
+    ) -> dict[str, Any]:
+        capacity = resource_capacity_summary(
+            settings=settings,
+            reserved=ReservedResources(
+                active_workspace_count=1,
+                steady_cpu=self.steady_cpu,
+                steady_memory_gb=self.steady_memory_gb,
+                peak_cpu=self.peak_cpu,
+                peak_memory_gb=self.peak_memory_gb,
+                disk_mb=self.disk_mb or 0,
+                dind_slots=self.dind_slots,
+            ),
+            resource_defaults=WorkspaceResourceDefaults(
+                steady_cpu=settings.workspace_steady_cpu,
+                steady_memory_gb=settings.workspace_steady_memory_gb,
+                peak_cpu=settings.workspace_peak_cpu,
+                peak_memory_gb=settings.workspace_peak_memory_gb,
+            ),
+            disk_check=disk_check,
+        )
+        pressure_reasons = [
+            reason for reason in capacity.pressure_reasons if not reason.endswith("_UNKNOWN")
+        ]
         return {
             "node_id": self.node_id,
             "steady_cpu": self.steady_cpu,
@@ -187,7 +222,11 @@ class ResourceReservationPlan:
             "peak_cpu": self.peak_cpu,
             "peak_memory_gb": self.peak_memory_gb,
             "disk_mb": self.disk_mb,
+            "dind_slots": self.dind_slots,
             "phase": self.phase,
+            "dind_mode": self.dind_mode,
+            "pressure_reasons": pressure_reasons,
+            "capacity": capacity.to_dict(),
         }
 
 
@@ -470,6 +509,7 @@ async def create_workspace_v2_row(
     *,
     idempotency_key: str | None = None,
     settings: Settings | None = None,
+    disk_check: DiskCheck | None = None,
 ) -> Workspace:
     """Persist one v2 workspace request without committing the session."""
     resolved_settings = settings or get_settings()
@@ -529,6 +569,7 @@ async def create_workspace_v2_row(
         peak_cpu=reservation_plan.peak_cpu,
         peak_memory_gb=reservation_plan.peak_memory_gb,
         disk_mb=reservation_plan.disk_mb,
+        dind_slots=reservation_plan.dind_slots,
         phase=reservation_plan.phase,
     )
     await QueueDecisionRepository(session).create(
@@ -546,7 +587,10 @@ async def create_workspace_v2_row(
         ),
         age_boost=0,
         retry_bonus=0,
-        resource_summary=reservation_plan.summary(),
+        resource_summary=reservation_plan.summary(
+            settings=resolved_settings,
+            disk_check=disk_check,
+        ),
         overlap_risk_summary=overlap_risk_summary(overlaps),
     )
     await _record_owned_path_overlap_risk(repo, ws, overlaps)
@@ -826,6 +870,8 @@ def resource_reservation_plan(
 ) -> ResourceReservationPlan:
     resources = payload.resources
     legacy_memory_gb = _parse_memory_gb(resources.memory)
+    _, resolved_profile = v2_profile_snapshots(payload)
+    dind_mode = _dind_mode_from_profile_snapshot(resolved_profile)
     return ResourceReservationPlan(
         node_id=settings.worker_node_id or "local",
         steady_cpu=(
@@ -857,7 +903,18 @@ def resource_reservation_plan(
             else settings.workspace_peak_memory_gb
         ),
         disk_mb=resources.disk_mb,
+        dind_slots=1 if dind_mode == "dind" else 0,
+        dind_mode=dind_mode,
     )
+
+
+def _dind_mode_from_profile_snapshot(profile: Mapping[str, Any] | None) -> str:
+    if profile is None:
+        return "unknown"
+    docker = profile.get("docker")
+    if isinstance(docker, Mapping) and docker.get("mode") == "dind":
+        return "dind"
+    return "none"
 
 
 def _parse_memory_gb(value: str | None) -> float | None:

@@ -521,6 +521,7 @@ class ResourceReservation(Base):
     peak_cpu: Mapped[float] = mapped_column(Float, nullable=False)
     peak_memory_gb: Mapped[float] = mapped_column(Float, nullable=False)
     disk_mb: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    dind_slots: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     phase: Mapped[str] = mapped_column(String(32), nullable=False)
     reserved_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
@@ -906,6 +907,7 @@ def _resource_reservation_summary(reservation: ResourceReservation) -> dict[str,
         "peak_cpu": reservation.peak_cpu,
         "peak_memory_gb": reservation.peak_memory_gb,
         "disk_mb": reservation.disk_mb,
+        "dind_slots": reservation.dind_slots,
         "phase": reservation.phase,
         "reserved_at": reservation.reserved_at,
         "released_at": reservation.released_at,

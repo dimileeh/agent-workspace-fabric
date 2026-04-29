@@ -14,6 +14,12 @@ from awf.db.enums import FailureReason, OperationStatus, OperationType, Workspac
 from awf.db.models import Operation, ResourceReservation, Workspace
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
+from awf.service.resource_capacity import (
+    ReservedResources,
+    ResourceCapacitySummary,
+    WorkspaceResourceDefaults,
+    resource_capacity_summary,
+)
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
@@ -179,23 +185,6 @@ class WorkerConcurrencySettings:
 
 
 @dataclass(frozen=True)
-class WorkspaceResourceDefaults:
-    steady_cpu: float
-    steady_memory_gb: float
-    peak_cpu: float
-    peak_memory_gb: float
-
-
-@dataclass(frozen=True)
-class ReservedResources:
-    active_workspace_count: int
-    steady_cpu: float
-    steady_memory_gb: float
-    peak_cpu: float
-    peak_memory_gb: float
-
-
-@dataclass(frozen=True)
 class ConcurrencyLane:
     limit: int
     in_use: int
@@ -224,6 +213,7 @@ class ResourceSaturationSummary:
     worker: WorkerConcurrencySettings
     resource_defaults: WorkspaceResourceDefaults
     reserved_resources: ReservedResources
+    capacity: ResourceCapacitySummary
     concurrency: ResourceConcurrency
     disk: DiskCheck
     orphan_resources: OrphanResourceSummary
@@ -543,6 +533,12 @@ async def summarize_resource_saturation_for_session(
             min_free_bytes=settings.min_free_disk_bytes,
             disk_usage=disk_usage,
         )
+    capacity = resource_capacity_summary(
+        settings=settings,
+        reserved=reserved_resources,
+        resource_defaults=resource_defaults,
+        disk_check=resolved_disk_check,
+    )
     admission = _resource_admission_summary(
         disk_check=resolved_disk_check,
         concurrency=concurrency,
@@ -560,6 +556,7 @@ async def summarize_resource_saturation_for_session(
         worker=worker,
         resource_defaults=resource_defaults,
         reserved_resources=reserved_resources,
+        capacity=capacity,
         concurrency=concurrency,
         disk=resolved_disk_check,
         orphan_resources=resolved_orphan_resources,
@@ -826,6 +823,8 @@ async def _reserved_resources_for_session(
         peak_memory_gb=(
             persisted["peak_memory_gb"] + fallback_count * resource_defaults.peak_memory_gb
         ),
+        disk_mb=int(persisted["disk_mb"]),
+        dind_slots=int(persisted["dind_slots"]),
     )
 
 
@@ -837,6 +836,8 @@ async def _active_reservation_totals(session: AsyncSession) -> dict[str, float |
             ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
             ResourceReservation.peak_cpu.label("peak_cpu"),
             ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
+            ResourceReservation.disk_mb.label("disk_mb"),
+            ResourceReservation.dind_slots.label("dind_slots"),
             func.row_number()
             .over(
                 partition_by=ResourceReservation.workspace_id,
@@ -861,6 +862,8 @@ async def _active_reservation_totals(session: AsyncSession) -> dict[str, float |
             func.coalesce(func.sum(latest_active_reservations.c.steady_memory_gb), 0.0),
             func.coalesce(func.sum(latest_active_reservations.c.peak_cpu), 0.0),
             func.coalesce(func.sum(latest_active_reservations.c.peak_memory_gb), 0.0),
+            func.coalesce(func.sum(latest_active_reservations.c.disk_mb), 0),
+            func.coalesce(func.sum(latest_active_reservations.c.dind_slots), 0),
         )
         .select_from(latest_active_reservations)
         .where(latest_active_reservations.c.reservation_rank == 1)
@@ -872,6 +875,8 @@ async def _active_reservation_totals(session: AsyncSession) -> dict[str, float |
         "steady_memory_gb": float(row[2] or 0.0),
         "peak_cpu": float(row[3] or 0.0),
         "peak_memory_gb": float(row[4] or 0.0),
+        "disk_mb": int(row[5] or 0),
+        "dind_slots": int(row[6] or 0),
     }
 
 

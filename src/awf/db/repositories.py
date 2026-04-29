@@ -433,6 +433,7 @@ class ResourceReservationRepository:
         peak_cpu: float,
         peak_memory_gb: float,
         disk_mb: int | None,
+        dind_slots: int = 0,
         phase: str,
         reserved_at: datetime | None = None,
     ) -> ResourceReservation:
@@ -446,6 +447,7 @@ class ResourceReservationRepository:
             peak_cpu=peak_cpu,
             peak_memory_gb=peak_memory_gb,
             disk_mb=disk_mb,
+            dind_slots=dind_slots,
             phase=phase,
             reserved_at=reserved_at or datetime.now(UTC),
             released_at=None,

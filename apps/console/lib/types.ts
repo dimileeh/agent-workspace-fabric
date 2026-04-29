@@ -62,6 +62,33 @@ export interface WorkspaceRecoverySummary {
   payload: Record<string, unknown> | null;
 }
 
+export interface QueueDecisionSummary {
+  id: string;
+  decision: string;
+  reason_code: string;
+  class_priority: number;
+  computed_priority: number;
+  age_boost: number;
+  retry_bonus: number;
+  resource_summary: Record<string, unknown>;
+  overlap_risk_summary: Record<string, unknown>;
+  decided_at: string;
+}
+
+export interface ResourceReservationSummary {
+  id: string;
+  node_id: string;
+  steady_cpu: number;
+  steady_memory_gb: number;
+  peak_cpu: number;
+  peak_memory_gb: number;
+  disk_mb: number | null;
+  dind_slots: number;
+  phase: string;
+  reserved_at: string;
+  released_at: string | null;
+}
+
 export type ApiEnvelope<T> =
   | { ok: true; data: T }
   | { ok: false; status: number; message: string; errorCode?: string; detail?: unknown };
@@ -100,6 +127,8 @@ export interface WorkspaceOverview {
   pr_url: string | null;
   failure_reason: string | null;
   failure_message: string | null;
+  latest_queue_decision?: QueueDecisionSummary | null;
+  active_resource_reservation?: ResourceReservationSummary | null;
   created_at: string;
   updated_at: string;
 }
@@ -461,6 +490,26 @@ export interface ReservedResources {
   steady_memory_gb: number;
   peak_cpu: number;
   peak_memory_gb: number;
+  disk_mb: number;
+  dind_slots: number;
+}
+
+export interface CapacityDimension {
+  limit: number | null;
+  reserved: number;
+  available: number | null;
+  available_after_next_default: number | null;
+  reason_code: string | null;
+}
+
+export interface ResourceCapacitySummary {
+  steady_cpu: CapacityDimension;
+  peak_cpu: CapacityDimension;
+  steady_memory_gb: CapacityDimension;
+  peak_memory_gb: CapacityDimension;
+  disk_mb: CapacityDimension;
+  dind_slots: CapacityDimension;
+  pressure_reasons: string[];
 }
 
 export interface ConcurrencyLane {
@@ -502,6 +551,7 @@ export interface ResourceSaturationSummary {
   worker: WorkerConcurrencySettings;
   resource_defaults: WorkspaceResourceDefaults;
   reserved_resources: ReservedResources;
+  capacity: ResourceCapacitySummary;
   concurrency: ResourceConcurrency;
   disk: DiskCheck;
   admission: AdmissionSummary;

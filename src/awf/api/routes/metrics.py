@@ -235,6 +235,30 @@ class ReservedResourcesResponse(BaseModel):
     steady_memory_gb: float
     peak_cpu: float
     peak_memory_gb: float
+    disk_mb: int
+    dind_slots: int
+
+
+class CapacityDimensionResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    limit: int | float | None
+    reserved: int | float
+    available: int | float | None
+    available_after_next_default: int | float | None
+    reason_code: str | None = None
+
+
+class ResourceCapacitySummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    steady_cpu: CapacityDimensionResponse
+    peak_cpu: CapacityDimensionResponse
+    steady_memory_gb: CapacityDimensionResponse
+    peak_memory_gb: CapacityDimensionResponse
+    disk_mb: CapacityDimensionResponse
+    dind_slots: CapacityDimensionResponse
+    pressure_reasons: list[str]
 
 
 class ConcurrencyLaneResponse(BaseModel):
@@ -336,6 +360,9 @@ class ResourceSaturationSummaryResponse(BaseModel):
     )
     reserved_resources: ReservedResourcesResponse = Field(
         description="Resource reservations implied by active workspace count and defaults.",
+    )
+    capacity: ResourceCapacitySummaryResponse = Field(
+        description="Available local capacity and pressure reasons by reserved resource.",
     )
     concurrency: ResourceConcurrencyResponse = Field(
         description="Provisioning and execution worker lane saturation.",

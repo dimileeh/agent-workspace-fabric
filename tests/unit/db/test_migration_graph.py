@@ -20,7 +20,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["4f2b9c8d7e6a"]
+    assert script.get_heads() == ["6a7b8c9d0e1f"]
 
 
 @pytest.mark.unit
@@ -93,6 +93,7 @@ def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "peak_cpu",
         "peak_memory_gb",
         "disk_mb",
+        "dind_slots",
         "phase",
         "reserved_at",
         "released_at",

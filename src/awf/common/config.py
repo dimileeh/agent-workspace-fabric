@@ -146,6 +146,30 @@ class Settings(BaseSettings):
     workspace_steady_memory_gb: float = Field(default=10.0, gt=0)
     workspace_peak_cpu: float = Field(default=6.0, gt=0)
     workspace_peak_memory_gb: float = Field(default=16.0, gt=0)
+    local_capacity_cpu_cores: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional local node CPU capacity for reservation pressure reporting. "
+            "When unset, CPU availability is reported as unknown."
+        ),
+    )
+    local_capacity_memory_gb: float | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional local node memory capacity for reservation pressure reporting. "
+            "When unset, memory availability is reported as unknown."
+        ),
+    )
+    local_capacity_dind_slots: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Optional local node DinD workspace slot capacity for reservation "
+            "pressure reporting. When unset, DinD availability is reported as unknown."
+        ),
+    )
 
 
 @lru_cache(maxsize=1)

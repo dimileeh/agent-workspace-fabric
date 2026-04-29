@@ -8,14 +8,18 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateV2Request
+from awf.common.config import Settings
 from awf.db.base import Base
+from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import (
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
+    WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.service import workspaces
+from awf.service.disk import DiskCheck
 from awf.service.workspaces import WorkspaceService
 
 
@@ -54,6 +58,34 @@ def _request() -> WorkspaceCreateV2Request:
     )
 
 
+def _dind_request() -> WorkspaceCreateV2Request:
+    data = _request().model_dump(mode="python")
+    data["workspace"] = {
+        "profile_ref": "inline",
+        "profile": {
+            "name": "local-dind",
+            "docker": {"mode": "dind"},
+        },
+    }
+    return WorkspaceCreateV2Request.model_validate(data)
+
+
+def _disk_check() -> DiskCheck:
+    return DiskCheck(
+        path="/tmp/awf-work",
+        checked_path="/tmp",
+        total_bytes=20 * 1024 * 1024 * 1024,
+        used_bytes=8 * 1024 * 1024 * 1024,
+        free_bytes=12 * 1024 * 1024 * 1024,
+        percent_free=60.0,
+        threshold_bytes=1024,
+        ok=True,
+        status="ok",
+        reason="SUFFICIENT_DISK",
+        detail=None,
+    )
+
+
 @pytest.mark.unit
 async def test_create_v2_writes_admitted_decision_and_local_reservation(
     factory: async_sessionmaker[AsyncSession],
@@ -85,7 +117,62 @@ async def test_create_v2_writes_admitted_decision_and_local_reservation(
         "peak_cpu": 8.0,
         "peak_memory_gb": 24.0,
         "disk_mb": 4096,
+        "dind_slots": 0,
         "phase": "workspace_lifecycle",
+        "dind_mode": "unknown",
+        "pressure_reasons": [],
+        "capacity": {
+            "steady_cpu": {
+                "limit": None,
+                "reserved": 4.0,
+                "available": None,
+                "available_after_next_default": None,
+                "reason_code": "STEADY_CPU_CAPACITY_UNKNOWN",
+            },
+            "peak_cpu": {
+                "limit": None,
+                "reserved": 8.0,
+                "available": None,
+                "available_after_next_default": None,
+                "reason_code": "PEAK_CPU_CAPACITY_UNKNOWN",
+            },
+            "steady_memory_gb": {
+                "limit": None,
+                "reserved": 12.0,
+                "available": None,
+                "available_after_next_default": None,
+                "reason_code": "STEADY_MEMORY_CAPACITY_UNKNOWN",
+            },
+            "peak_memory_gb": {
+                "limit": None,
+                "reserved": 24.0,
+                "available": None,
+                "available_after_next_default": None,
+                "reason_code": "PEAK_MEMORY_CAPACITY_UNKNOWN",
+            },
+            "disk_mb": {
+                "limit": None,
+                "reserved": 4096,
+                "available": None,
+                "available_after_next_default": None,
+                "reason_code": "DISK_CAPACITY_UNKNOWN",
+            },
+            "dind_slots": {
+                "limit": None,
+                "reserved": 0,
+                "available": None,
+                "available_after_next_default": None,
+                "reason_code": "DIND_CAPACITY_UNKNOWN",
+            },
+            "pressure_reasons": [
+                "STEADY_CPU_CAPACITY_UNKNOWN",
+                "PEAK_CPU_CAPACITY_UNKNOWN",
+                "STEADY_MEMORY_CAPACITY_UNKNOWN",
+                "PEAK_MEMORY_CAPACITY_UNKNOWN",
+                "DISK_CAPACITY_UNKNOWN",
+                "DIND_CAPACITY_UNKNOWN",
+            ],
+        },
     }
     assert decisions[0].overlap_risk_summary == {
         "warning_code": None,
@@ -103,8 +190,100 @@ async def test_create_v2_writes_admitted_decision_and_local_reservation(
     assert reservations[0].peak_cpu == 8.0
     assert reservations[0].peak_memory_gb == 24.0
     assert reservations[0].disk_mb == 4096
+    assert reservations[0].dind_slots == 0
     assert reservations[0].phase == "workspace_lifecycle"
     assert reservations[0].released_at is None
+
+
+@pytest.mark.unit
+async def test_create_v2_writes_resource_summary_with_disk_dind_and_capacity(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        local_capacity_cpu_cores=16.0,
+        local_capacity_memory_gb=64.0,
+        local_capacity_dind_slots=2,
+    )
+    async with factory() as session:
+        created = await workspaces.create_workspace_v2_row(
+            session,
+            _dind_request(),
+            settings=settings,
+            disk_check=_disk_check(),
+        )
+        await session.commit()
+
+    async with factory() as session:
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(created.id)
+        decisions = await QueueDecisionRepository(session).list_for_workspace(created.id)
+        reservations = await ResourceReservationRepository(session).list_for_workspace(created.id)
+
+    assert attempt is not None
+    assert len(decisions) == 1
+    summary = decisions[0].resource_summary
+    assert summary["node_id"] == "local"
+    assert summary["steady_cpu"] == 4.0
+    assert summary["peak_cpu"] == 8.0
+    assert summary["steady_memory_gb"] == 12.0
+    assert summary["peak_memory_gb"] == 24.0
+    assert summary["disk_mb"] == 4096
+    assert summary["dind_slots"] == 1
+    assert summary["dind_mode"] == "dind"
+    assert summary["pressure_reasons"] == []
+    assert summary["capacity"]["peak_cpu"] == {
+        "limit": 16.0,
+        "reserved": 8.0,
+        "available": 8.0,
+        "available_after_next_default": 2.0,
+        "reason_code": None,
+    }
+    assert summary["capacity"]["peak_memory_gb"] == {
+        "limit": 64.0,
+        "reserved": 24.0,
+        "available": 40.0,
+        "available_after_next_default": 24.0,
+        "reason_code": None,
+    }
+    assert summary["capacity"]["disk_mb"] == {
+        "limit": 12288,
+        "reserved": 4096,
+        "available": 8192,
+        "available_after_next_default": 8192,
+        "reason_code": None,
+    }
+    assert summary["capacity"]["dind_slots"] == {
+        "limit": 2,
+        "reserved": 1,
+        "available": 1,
+        "available_after_next_default": 1,
+        "reason_code": None,
+    }
+    assert reservations[0].workspace_id == created.id
+    assert reservations[0].attempt_id == attempt.id
+    assert reservations[0].disk_mb == 4096
+    assert reservations[0].dind_slots == 1
+    assert reservations[0].released_at is None
+
+
+@pytest.mark.unit
+async def test_create_v2_overlap_stays_advisory_with_resource_summary(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with factory() as session:
+        first = await workspaces.create_workspace_v2_row(session, _request())
+        second = await workspaces.create_workspace_v2_row(session, _request())
+        await session.commit()
+
+    async with factory() as session:
+        decisions = await QueueDecisionRepository(session).list_for_workspace(second.id)
+
+    assert first.id != second.id
+    assert decisions[0].decision == "admitted"
+    assert decisions[0].reason_code == "ADMITTED_LOCAL"
+    assert decisions[0].resource_summary["disk_mb"] == 4096
+    assert decisions[0].overlap_risk_summary["warning_code"] == "OWNED_PATH_OVERLAP_RISK"
+    assert decisions[0].overlap_risk_summary["workspace_ids"] == [first.id]
 
 
 @pytest.mark.unit
@@ -129,6 +308,41 @@ async def test_terminal_workspace_control_releases_active_reservation(
 
     assert active is None
     assert reservation.released_at is not None
+
+
+@pytest.mark.unit
+async def test_terminal_destroy_releases_leaked_active_reservation_once(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    created = await service.create_v2(_request())
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(created.id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.destroyed.value
+        await session.commit()
+
+    first = await service.destroy_workspace(
+        created.id,
+        force=True,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+    second = await service.destroy_workspace(
+        created.id,
+        force=True,
+        remove_volumes=True,
+        remove_worktree=True,
+    )
+
+    async with factory() as session:
+        rows = await ResourceReservationRepository(session).list_for_workspace(created.id)
+
+    assert first.status == WorkspaceStatus.destroyed
+    assert second.status == WorkspaceStatus.destroyed
+    assert rows[0].released_at is not None
+    assert len({row.released_at for row in rows}) == 1
 
 
 @pytest.mark.unit
