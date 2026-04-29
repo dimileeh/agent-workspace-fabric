@@ -21,13 +21,16 @@ from awf.db.enums import WorkspaceStatus
 # Declared here (not a class attribute) so mypy can narrow the types and ``_TRANSITIONS``
 # participates in the module-level immutability story.
 _RAW_TRANSITIONS: dict[WorkspaceStatus, frozenset[WorkspaceStatus]] = {
-    WorkspaceStatus.requested: frozenset({WorkspaceStatus.provisioning, WorkspaceStatus.cancelled}),
+    WorkspaceStatus.requested: frozenset(
+        {WorkspaceStatus.provisioning, WorkspaceStatus.failed, WorkspaceStatus.cancelled}
+    ),
     WorkspaceStatus.provisioning: frozenset(
         {WorkspaceStatus.ready, WorkspaceStatus.failed, WorkspaceStatus.cancelled}
     ),
     WorkspaceStatus.ready: frozenset(
         {
             WorkspaceStatus.running,
+            WorkspaceStatus.failed,
             WorkspaceStatus.cancelled,
             WorkspaceStatus.destroying,
         }

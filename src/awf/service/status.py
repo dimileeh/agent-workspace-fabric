@@ -18,6 +18,9 @@ from awf.db.session import make_engine, make_session_factory
 from awf.service.config import ServiceSettings
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.gc import plan_terminal_workspace_gc
+from awf.service.orphan_resources import (
+    scan_docker_resources as scan_runtime_docker_resources,
+)
 from awf.service.orphans import (
     ACTIVE_WORKSPACE_STATUSES,
     KNOWN_WORKSPACE_STATUSES,
@@ -29,6 +32,10 @@ from awf.service.orphans import (
 )
 from awf.service.provider_readiness import HttpGet as ProviderHttpGet
 from awf.service.provider_readiness import collect_agent_readiness
+from awf.service.workspace_runtime_health import (
+    RuntimeWorkspace,
+    summarize_runtime_health,
+)
 
 _CHECK_TIMEOUT_SECONDS = 5.0
 
@@ -155,14 +162,24 @@ async def collect_service_status(
         workspace_view=workspace_view,
         run_subprocess=resolved_run,
     )
+    runtime_docker_scan = await asyncio.to_thread(
+        scan_runtime_docker_resources,
+        docker_host=settings.docker_host,
+        run_subprocess=resolved_run,
+    )
     orphan_workspaces_check = orphan_summary.to_check_payload()
     orphan_resources_check = _orphan_resources_check_payload(orphan_workspaces_check)
+    stranded_workspaces_check = _stranded_workspaces_check_payload(
+        workspace_view,
+        runtime_docker_scan,
+    )
     checks = {
         "api": api_check,
         "db": db_check,
         "docker": docker_check,
         "agent_runtime_image": image_check,
         "disk": disk_check.to_dict(),
+        "stranded_workspaces": stranded_workspaces_check,
         "orphan_resources": orphan_resources_check,
         "orphan_workspaces": orphan_workspaces_check,
         "workspace_cleanup": workspace_cleanup_check,
@@ -334,6 +351,50 @@ def _orphan_resources_check_payload(
     return payload
 
 
+def _stranded_workspaces_check_payload(
+    workspace_view: WorkspaceIdView,
+    docker_scan: Any,
+) -> CheckPayload:
+    if not workspace_view.available:
+        return {
+            "ok": True,
+            "status": "unknown",
+            "reason": "DB_UNAVAILABLE",
+            "stranded_count": 0,
+            "fail_candidate_count": 0,
+            "recoverable_count": 0,
+            "reason_counts": {},
+            "examples": [],
+        }
+
+    summary = summarize_runtime_health(
+        workspaces=_runtime_workspaces_from_view(workspace_view),
+        resources=docker_scan.resources,
+        scanner_available=bool(docker_scan.ok),
+        scanner_reason=str(getattr(docker_scan, "reason", "RUNTIME_INSPECTION_UNAVAILABLE")),
+        scanner_detail=getattr(docker_scan, "detail", None),
+    )
+    return summary.to_check_payload()
+
+
+def _runtime_workspaces_from_view(
+    workspace_view: WorkspaceIdView,
+) -> tuple[RuntimeWorkspace, ...]:
+    by_id = {
+        snapshot.workspace_id: RuntimeWorkspace(
+            workspace_id=snapshot.workspace_id,
+            status=snapshot.status,
+            compose_project_name=snapshot.compose_project_name,
+            compose_file_path=snapshot.compose_file_path,
+            pr_url=snapshot.pr_url,
+        )
+        for snapshot in workspace_view.snapshots
+    }
+    # Runtime recovery decisions require lifecycle metadata such as status and
+    # PR URL; active_ids-only views are retained for orphan-resource checks.
+    return tuple(by_id[workspace_id] for workspace_id in sorted(by_id))
+
+
 def _orphan_resources_reason(reason: object) -> str:
     if reason == "ORPHANS_PRESENT":
         return "ORPHAN_RESOURCES_PRESENT"
@@ -390,6 +451,8 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
         Workspace.status,
         Workspace.updated_at,
         Workspace.compose_project_name,
+        Workspace.compose_file_path,
+        Workspace.pr_url,
     ).where(Workspace.status.in_(KNOWN_WORKSPACE_STATUSES))
     engine = None
     try:
@@ -409,7 +472,11 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
     active: set[str] = set()
     terminal: set[str] = set()
     snapshots: list[WorkspaceLifecycleSnapshot] = []
-    for ws_id, status, updated_at, compose_project_name in rows:
+    for row in rows:
+        values = tuple(row)
+        ws_id, status, updated_at, compose_project_name = values[:4]
+        compose_file_path = values[4] if len(values) > 4 else None
+        pr_url = values[5] if len(values) > 5 else None
         ws_id_str = str(ws_id)
         status_str = str(status)
         snapshots.append(
@@ -420,6 +487,10 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
                 compose_project_name=(
                     str(compose_project_name) if compose_project_name is not None else None
                 ),
+                compose_file_path=(
+                    str(compose_file_path) if compose_file_path is not None else None
+                ),
+                pr_url=str(pr_url) if pr_url is not None else None,
             )
         )
         if status_str in ACTIVE_WORKSPACE_STATUSES:

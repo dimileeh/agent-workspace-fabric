@@ -281,6 +281,79 @@ async def test_resource_saturation_endpoint_serializes_orphan_resource_summary(
 
 
 @pytest.mark.unit
+async def test_resource_saturation_endpoint_serializes_runtime_health_provider(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    from awf.service.workspace_runtime_health import (
+        WorkspaceRuntimeFinding,
+        WorkspaceRuntimeHealthSummary,
+    )
+
+    app, client = metrics_app_and_client
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-metrics-work",
+        min_free_disk_bytes=700,
+    )
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
+        provider_settings,
+        ok=True,
+    )
+
+    def _runtime_health_provider(
+        _settings: Settings,
+        _session: Any,
+        _orphan_resources: Any,
+    ) -> WorkspaceRuntimeHealthSummary:
+        return WorkspaceRuntimeHealthSummary(
+            findings=(
+                WorkspaceRuntimeFinding(
+                    workspace_id="ws_missing_stack",
+                    workspace_status=WorkspaceStatus.running.value,
+                    status="stranded",
+                    reason_code="STRANDED_WORKSPACE",
+                    decision="fail_workspace",
+                    message="No managed runtime containers were found.",
+                    compose_project_name="awf_ws_missing_stack",
+                ),
+                WorkspaceRuntimeFinding(
+                    workspace_id="ws_exited_agent",
+                    workspace_status=WorkspaceStatus.running.value,
+                    status="stranded",
+                    reason_code="AGENT_CONTAINER_EXITED",
+                    decision="fail_workspace",
+                    message="Agent container is not running.",
+                    compose_project_name="awf_ws_exited_agent",
+                ),
+                WorkspaceRuntimeFinding(
+                    workspace_id="ws_recoverable_monitor",
+                    workspace_status=WorkspaceStatus.monitoring_pr.value,
+                    status="stranded",
+                    reason_code="STRANDED_WORKSPACE",
+                    decision="remonitor_workspace",
+                    message="Monitoring PR workspace can be remonitored.",
+                    compose_project_name="awf_ws_recoverable_monitor",
+                ),
+            )
+        )
+
+    app.state.runtime_health_summary_provider = _runtime_health_provider
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    runtime_health = response.json()["runtime_health"]
+    assert runtime_health["stranded_count"] == 3
+    assert runtime_health["fail_candidate_count"] == 2
+    assert runtime_health["recoverable_count"] == 1
+    assert runtime_health["reason_counts"] == {
+        "AGENT_CONTAINER_EXITED": 1,
+        "STRANDED_WORKSPACE": 2,
+    }
+
+
+@pytest.mark.unit
 async def test_resource_saturation_orphan_provider_supports_async_and_db_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

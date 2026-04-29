@@ -63,6 +63,8 @@ class WorkspaceLifecycleSnapshot:
     status: str
     updated_at: datetime | None
     compose_project_name: str | None = None
+    compose_file_path: str | None = None
+    pr_url: str | None = None
 
 
 @dataclass(frozen=True)
