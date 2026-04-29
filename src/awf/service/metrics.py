@@ -11,7 +11,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, ResourceReservation, Workspace
+from awf.db.models import Operation, Workspace
+from awf.db.repositories import ResourceReservationRepository
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
 from awf.service.resource_capacity import (
@@ -810,7 +811,7 @@ async def _reserved_resources_for_session(
     *,
     resource_defaults: WorkspaceResourceDefaults,
 ) -> ReservedResources:
-    persisted = await _active_reservation_totals(session)
+    persisted = await ResourceReservationRepository(session).active_latest_totals()
     fallback_count = max(0, active_workspace_count - persisted["workspace_count"])
     return ReservedResources(
         active_workspace_count=active_workspace_count,
@@ -826,58 +827,6 @@ async def _reserved_resources_for_session(
         disk_mb=int(persisted["disk_mb"]),
         dind_slots=int(persisted["dind_slots"]),
     )
-
-
-async def _active_reservation_totals(session: AsyncSession) -> dict[str, float | int]:
-    latest_active_reservations = (
-        select(
-            ResourceReservation.workspace_id.label("workspace_id"),
-            ResourceReservation.steady_cpu.label("steady_cpu"),
-            ResourceReservation.steady_memory_gb.label("steady_memory_gb"),
-            ResourceReservation.peak_cpu.label("peak_cpu"),
-            ResourceReservation.peak_memory_gb.label("peak_memory_gb"),
-            ResourceReservation.disk_mb.label("disk_mb"),
-            ResourceReservation.dind_slots.label("dind_slots"),
-            func.row_number()
-            .over(
-                partition_by=ResourceReservation.workspace_id,
-                order_by=(
-                    ResourceReservation.reserved_at.desc(),
-                    ResourceReservation.id.desc(),
-                ),
-            )
-            .label("reservation_rank"),
-        )
-        .join(Workspace, ResourceReservation.workspace_id == Workspace.id)
-        .where(
-            ResourceReservation.released_at.is_(None),
-            ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
-        )
-        .subquery()
-    )
-    stmt = (
-        select(
-            func.count(latest_active_reservations.c.workspace_id),
-            func.coalesce(func.sum(latest_active_reservations.c.steady_cpu), 0.0),
-            func.coalesce(func.sum(latest_active_reservations.c.steady_memory_gb), 0.0),
-            func.coalesce(func.sum(latest_active_reservations.c.peak_cpu), 0.0),
-            func.coalesce(func.sum(latest_active_reservations.c.peak_memory_gb), 0.0),
-            func.coalesce(func.sum(latest_active_reservations.c.disk_mb), 0),
-            func.coalesce(func.sum(latest_active_reservations.c.dind_slots), 0),
-        )
-        .select_from(latest_active_reservations)
-        .where(latest_active_reservations.c.reservation_rank == 1)
-    )
-    row = (await session.execute(stmt)).one()
-    return {
-        "workspace_count": int(row[0] or 0),
-        "steady_cpu": float(row[1] or 0.0),
-        "steady_memory_gb": float(row[2] or 0.0),
-        "peak_cpu": float(row[3] or 0.0),
-        "peak_memory_gb": float(row[4] or 0.0),
-        "disk_mb": int(row[5] or 0),
-        "dind_slots": int(row[6] or 0),
-    }
 
 
 def _resource_concurrency(

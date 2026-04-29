@@ -192,10 +192,12 @@ class ResourceReservationPlan:
         *,
         settings: Settings,
         disk_check: DiskCheck | None = None,
+        reserved_resources: ReservedResources | None = None,
     ) -> dict[str, Any]:
         capacity = resource_capacity_summary(
             settings=settings,
-            reserved=ReservedResources(
+            reserved=reserved_resources
+            or ReservedResources(
                 active_workspace_count=1,
                 steady_cpu=self.steady_cpu,
                 steady_memory_gb=self.steady_memory_gb,
@@ -560,6 +562,12 @@ async def create_workspace_v2_row(
     )
     attempt = await TaskAttemptRepository(session).create_for_workspace(task=task, workspace=ws)
     reservation_plan = resource_reservation_plan(payload, settings=resolved_settings)
+    resource_summary = await _resource_reservation_summary(
+        session,
+        reservation_plan,
+        settings=resolved_settings,
+        disk_check=disk_check,
+    )
     await ResourceReservationRepository(session).create(
         workspace_id=ws.id,
         attempt_id=attempt.id,
@@ -587,10 +595,7 @@ async def create_workspace_v2_row(
         ),
         age_boost=0,
         retry_bonus=0,
-        resource_summary=reservation_plan.summary(
-            settings=resolved_settings,
-            disk_check=disk_check,
-        ),
+        resource_summary=resource_summary,
         overlap_risk_summary=overlap_risk_summary(overlaps),
     )
     await _record_owned_path_overlap_risk(repo, ws, overlaps)
@@ -905,6 +910,34 @@ def resource_reservation_plan(
         disk_mb=resources.disk_mb,
         dind_slots=1 if dind_mode == "dind" else 0,
         dind_mode=dind_mode,
+    )
+
+
+async def _resource_reservation_summary(
+    session: AsyncSession,
+    reservation_plan: ResourceReservationPlan,
+    *,
+    settings: Settings,
+    disk_check: DiskCheck | None,
+) -> dict[str, Any]:
+    active_totals = await ResourceReservationRepository(session).active_latest_totals()
+    reserved_resources = ReservedResources(
+        active_workspace_count=int(active_totals["workspace_count"]) + 1,
+        steady_cpu=float(active_totals["steady_cpu"]) + reservation_plan.steady_cpu,
+        steady_memory_gb=(
+            float(active_totals["steady_memory_gb"]) + reservation_plan.steady_memory_gb
+        ),
+        peak_cpu=float(active_totals["peak_cpu"]) + reservation_plan.peak_cpu,
+        peak_memory_gb=(
+            float(active_totals["peak_memory_gb"]) + reservation_plan.peak_memory_gb
+        ),
+        disk_mb=int(active_totals["disk_mb"]) + (reservation_plan.disk_mb or 0),
+        dind_slots=int(active_totals["dind_slots"]) + reservation_plan.dind_slots,
+    )
+    return reservation_plan.summary(
+        settings=settings,
+        disk_check=disk_check,
+        reserved_resources=reserved_resources,
     )
 
 

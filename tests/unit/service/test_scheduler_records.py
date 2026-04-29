@@ -70,6 +70,36 @@ def _dind_request() -> WorkspaceCreateV2Request:
     return WorkspaceCreateV2Request.model_validate(data)
 
 
+def _resource_request(
+    *,
+    title: str,
+    steady_cpu: float,
+    steady_memory_gb: float,
+    peak_cpu: float,
+    peak_memory_gb: float,
+    disk_mb: int,
+    dind: bool = False,
+) -> WorkspaceCreateV2Request:
+    data = _request().model_dump(mode="python")
+    data["task"]["title"] = title
+    data["resources"] = {
+        "steady_state_cpu_cores": steady_cpu,
+        "steady_state_memory_gb": steady_memory_gb,
+        "peak_cpu_cores": peak_cpu,
+        "peak_memory_gb": peak_memory_gb,
+        "disk_mb": disk_mb,
+    }
+    if dind:
+        data["workspace"] = {
+            "profile_ref": "inline",
+            "profile": {
+                "name": f"{title}-dind",
+                "docker": {"mode": "dind"},
+            },
+        }
+    return WorkspaceCreateV2Request.model_validate(data)
+
+
 def _disk_check() -> DiskCheck:
     return DiskCheck(
         path="/tmp/awf-work",
@@ -264,6 +294,99 @@ async def test_create_v2_writes_resource_summary_with_disk_dind_and_capacity(
     assert reservations[0].disk_mb == 4096
     assert reservations[0].dind_slots == 1
     assert reservations[0].released_at is None
+
+
+@pytest.mark.unit
+async def test_create_v2_resource_summary_includes_existing_active_reservations(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    settings = Settings(
+        _env_file=None,
+        local_capacity_cpu_cores=20.0,
+        local_capacity_memory_gb=80.0,
+        local_capacity_dind_slots=2,
+    )
+    async with factory() as session:
+        await workspaces.create_workspace_v2_row(
+            session,
+            _resource_request(
+                title="active-one",
+                steady_cpu=2.0,
+                steady_memory_gb=4.0,
+                peak_cpu=5.0,
+                peak_memory_gb=10.0,
+                disk_mb=2048,
+            ),
+            settings=settings,
+            disk_check=_disk_check(),
+        )
+        await workspaces.create_workspace_v2_row(
+            session,
+            _resource_request(
+                title="active-two",
+                steady_cpu=3.0,
+                steady_memory_gb=14.0,
+                peak_cpu=9.0,
+                peak_memory_gb=50.0,
+                disk_mb=6144,
+                dind=True,
+            ),
+            settings=settings,
+            disk_check=_disk_check(),
+        )
+        created = await workspaces.create_workspace_v2_row(
+            session,
+            _dind_request(),
+            settings=settings,
+            disk_check=_disk_check(),
+        )
+        await session.commit()
+
+    async with factory() as session:
+        decisions = await QueueDecisionRepository(session).list_for_workspace(created.id)
+
+    summary = decisions[0].resource_summary
+    assert summary["capacity"]["steady_cpu"] == {
+        "limit": 20.0,
+        "reserved": 9.0,
+        "available": 11.0,
+        "available_after_next_default": 8.0,
+        "reason_code": None,
+    }
+    assert summary["capacity"]["peak_cpu"] == {
+        "limit": 20.0,
+        "reserved": 22.0,
+        "available": 0.0,
+        "available_after_next_default": 0.0,
+        "reason_code": "PEAK_CPU_CAPACITY_SATURATED",
+    }
+    assert summary["capacity"]["peak_memory_gb"] == {
+        "limit": 80.0,
+        "reserved": 84.0,
+        "available": 0.0,
+        "available_after_next_default": 0.0,
+        "reason_code": "PEAK_MEMORY_CAPACITY_SATURATED",
+    }
+    assert summary["capacity"]["disk_mb"] == {
+        "limit": 12288,
+        "reserved": 12288,
+        "available": 0,
+        "available_after_next_default": 0,
+        "reason_code": "DISK_RESERVATION_PRESSURE",
+    }
+    assert summary["capacity"]["dind_slots"] == {
+        "limit": 2,
+        "reserved": 2,
+        "available": 0,
+        "available_after_next_default": 0,
+        "reason_code": "DIND_CAPACITY_SATURATED",
+    }
+    assert summary["pressure_reasons"] == [
+        "PEAK_CPU_CAPACITY_SATURATED",
+        "PEAK_MEMORY_CAPACITY_SATURATED",
+        "DISK_RESERVATION_PRESSURE",
+        "DIND_CAPACITY_SATURATED",
+    ]
 
 
 @pytest.mark.unit
