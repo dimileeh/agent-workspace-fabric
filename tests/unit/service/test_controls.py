@@ -43,6 +43,80 @@ def test_idempotency_identity_matching_ignores_identity_keys_absent_from_identit
 
 
 @pytest.mark.unit
+def test_idempotency_identity_matching_accepts_missing_identity_and_rejects_non_mapping() -> None:
+    assert controls._payload_matches_idempotency_identity(
+        "not-a-payload",
+        identity=None,
+        identity_keys=frozenset({"reason"}),
+    )
+    assert not controls._payload_matches_idempotency_identity(
+        "not-a-payload",
+        identity={"reason": "operator requested"},
+        identity_keys=None,
+    )
+
+
+@pytest.mark.unit
+def test_cleanup_result_normalization_preserves_structured_result() -> None:
+    cleanup = controls.WorkspaceCleanupResult(
+        status="succeeded",
+        reason_code="CLEANUP_SUCCEEDED",
+    )
+
+    assert controls._normalize_cleanup_result(cleanup) is cleanup
+
+
+@pytest.mark.unit
+def test_cleanup_result_mapping_falls_back_to_legacy_step_lists() -> None:
+    cleanup = controls._normalize_cleanup_result(
+        {
+            "status": "unknown",
+            "completed_steps": [
+                {
+                    "name": "compose_down",
+                    "status": "succeeded",
+                    "reason_code": "COMPOSE_DOWN_SUCCEEDED",
+                },
+                "ignored legacy entry",
+            ],
+            "failed_steps": [
+                {
+                    "status": "unknown",
+                    "error": "",
+                },
+            ],
+        }
+    )
+
+    assert cleanup.status == "partial"
+    assert cleanup.reason_code == "CLEANUP_PARTIAL"
+    assert [step.name for step in cleanup.steps] == ["compose_down", "cleanup_step_3"]
+    assert [step.status for step in cleanup.steps] == ["succeeded", "failed"]
+    assert cleanup.steps[1].reason_code == "CLEANUP_STEP_FAILED"
+    assert cleanup.steps[1].error is None
+
+
+@pytest.mark.unit
+def test_cleanup_reason_code_defaults_for_terminal_statuses() -> None:
+    assert controls._cleanup_reason_code("", status="succeeded") == "CLEANUP_SUCCEEDED"
+    assert controls._cleanup_reason_code("", status="skipped") == "CLEANUP_SKIPPED"
+    assert controls._cleanup_reason_code("", status="partial") == "CLEANUP_PARTIAL"
+
+
+@pytest.mark.unit
+def test_cleanup_failure_message_falls_back_to_result_reason_code() -> None:
+    cleanup = controls.WorkspaceCleanupResult(
+        status="partial",
+        reason_code="CLEANUP_FAILED_WITHOUT_STEP_DETAIL",
+    )
+
+    assert (
+        controls._cleanup_failure_message(cleanup)
+        == "CLEANUP_FAILED_WITHOUT_STEP_DETAIL"
+    )
+
+
+@pytest.mark.unit
 async def test_stop_project_containers_is_noop_without_project_name() -> None:
     with patch("awf.service.controls.asyncio.create_subprocess_exec") as mock_exec:
         await stop_project_containers(None)

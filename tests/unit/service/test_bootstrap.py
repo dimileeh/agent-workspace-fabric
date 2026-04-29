@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+import awf.service.bootstrap as bootstrap
 from awf.service.bootstrap import (
     ServiceBootstrapError,
     ServiceBootstrapOptions,
@@ -415,6 +416,109 @@ def test_bootstrap_compose_failure_stops_with_stage_context(tmp_path: Path) -> N
     assert exc_info.value.returncode == 17
     assert exc_info.value.stdout == "migration stdout"
     assert exc_info.value.stderr == "migration failed"
+
+
+@pytest.mark.unit
+def test_bootstrap_missing_docker_binary_reports_stage_context(tmp_path: Path) -> None:
+    def _run(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise FileNotFoundError("docker")
+
+    with pytest.raises(ServiceBootstrapError) as exc_info:
+        asyncio.run(
+            run_service_bootstrap(
+                _settings(tmp_path),
+                options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+                run_subprocess=_run,
+                status_collector=_ok_status_collector,
+                sleep=_no_sleep,
+                monotonic=lambda: 0.0,
+            )
+        )
+
+    payload = exc_info.value.to_dict()
+    assert payload["reason_code"] == "SERVICE_BOOTSTRAP_STAGE_FAILED"
+    assert payload["stage"] == "agent_runtime_build"
+    assert payload["returncode"] == 127
+    assert payload["stderr"] == "docker binary not found on PATH"
+
+
+@pytest.mark.unit
+def test_bootstrap_os_error_reports_stage_context(tmp_path: Path) -> None:
+    def _run(_args: list[str], **_kwargs: object) -> subprocess.CompletedProcess[str]:
+        raise OSError("permission denied")
+
+    with pytest.raises(ServiceBootstrapError) as exc_info:
+        asyncio.run(
+            run_service_bootstrap(
+                _settings(tmp_path),
+                options=ServiceBootstrapOptions(timeout_seconds=1, poll_interval_seconds=0.1),
+                run_subprocess=_run,
+                status_collector=_ok_status_collector,
+                sleep=_no_sleep,
+                monotonic=lambda: 0.0,
+            )
+        )
+
+    assert exc_info.value.reason_code == "SERVICE_BOOTSTRAP_STAGE_FAILED"
+    assert exc_info.value.stage == "agent_runtime_build"
+    assert exc_info.value.returncode == 1
+    assert exc_info.value.stderr == "OSError: permission denied"
+
+
+@pytest.mark.unit
+def test_bootstrap_error_payload_includes_all_optional_fields() -> None:
+    error = ServiceBootstrapError(
+        reason_code="SERVICE_BOOTSTRAP_STAGE_FAILED",
+        message="stage failed",
+        stage="migrate",
+        command=("docker", "compose", "up", "migrate"),
+        returncode=17,
+        stdout="migration stdout",
+        stderr="migration stderr",
+        last_status={"status": "fail"},
+    )
+
+    assert error.to_dict() == {
+        "status": "failed",
+        "reason_code": "SERVICE_BOOTSTRAP_STAGE_FAILED",
+        "message": "stage failed",
+        "stage": "migrate",
+        "command": ["docker", "compose", "up", "migrate"],
+        "returncode": 17,
+        "stdout": "migration stdout",
+        "stderr": "migration stderr",
+        "last_status": {"status": "fail"},
+    }
+
+
+@pytest.mark.unit
+def test_run_subprocess_delegates_to_subprocess_run(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, object]] = []
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append({"args": args, **kwargs})
+        return subprocess.CompletedProcess(args, returncode=0, stdout="ok", stderr="")
+
+    monkeypatch.setattr(bootstrap.subprocess, "run", _run)
+
+    result = bootstrap._run_subprocess(  # noqa: SLF001
+        ["docker", "version"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0
+    assert calls == [
+        {
+            "args": ["docker", "version"],
+            "check": False,
+            "capture_output": True,
+            "text": True,
+        }
+    ]
 
 
 @pytest.mark.unit

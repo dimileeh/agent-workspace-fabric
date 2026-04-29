@@ -10,6 +10,9 @@ import pytest
 from awf.api.schemas import WorkspaceResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.service.validation_observability import (
+    _loaded_collection,
+    _profile_requested_validation_tier,
+    _summary_freshness_and_reason,
     latest_merge_candidate,
     validation_freshness_summary,
 )
@@ -337,3 +340,34 @@ def test_validation_summary_propagates_collection_access_errors() -> None:
             WorkspaceWithBrokenOperations(),  # type: ignore[arg-type]
             [],
         )
+
+
+@pytest.mark.unit
+def test_validation_freshness_reason_defaults_when_latest_run_has_no_reason() -> None:
+    freshness, reason = _summary_freshness_and_reason(
+        required_tier=1,
+        latest_satisfied_tier=1,
+        latest_validation=SimpleNamespace(
+            freshness_status="fresh",
+            freshness_reason_code=None,
+        ),  # type: ignore[arg-type]
+    )
+
+    assert freshness == "fresh"
+    assert reason == "validation_target_unknown"
+
+
+@pytest.mark.unit
+def test_profile_requested_validation_tier_ignores_non_integer_profile_value() -> None:
+    workspace = SimpleNamespace(
+        resolved_profile={"validation": {"requested_tier": "3"}},
+    )
+
+    assert _profile_requested_validation_tier(workspace) == 1  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_loaded_collection_returns_empty_for_none_relationship() -> None:
+    workspace = SimpleNamespace(operations=None)
+
+    assert _loaded_collection(workspace, "operations") == []
