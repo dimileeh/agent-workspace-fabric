@@ -181,6 +181,7 @@ async def create_workspace_v2(
             payload,
             idempotency_key=idempotency_key,
             settings=settings,
+            disk_check=disk_check,
         )
     except ProfileResolutionError as exc:
         return JSONResponse(

@@ -930,6 +930,13 @@ class TestCreateWorkspaceV2PolicyMetadata:
                 "priority": 25,
                 "owned_paths": ["pyproject.toml", "uv.lock"],
             },
+            "workspace": {
+                "profile_ref": "inline",
+                "profile": {
+                    "name": "api-dind",
+                    "docker": {"mode": "dind"},
+                },
+            },
             "resources": {
                 "steady_state_cpu_cores": 4.0,
                 "steady_state_memory_gb": 12.0,
@@ -957,6 +964,9 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert decision["age_boost"] == 0
         assert decision["retry_bonus"] == 0
         assert decision["resource_summary"]["peak_cpu"] == 8.0
+        assert decision["resource_summary"]["disk_mb"] == 4096
+        assert decision["resource_summary"]["dind_slots"] == 1
+        assert decision["resource_summary"]["dind_mode"] == "dind"
         assert decision["overlap_risk_summary"]["overlap_count"] == 0
         assert reservation["id"].startswith("rr_")
         assert reservation["node_id"] == "local"
@@ -965,6 +975,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert reservation["peak_cpu"] == 8.0
         assert reservation["peak_memory_gb"] == 24.0
         assert reservation["disk_mb"] == 4096
+        assert reservation["dind_slots"] == 1
         assert reservation["phase"] == "workspace_lifecycle"
         assert reservation["released_at"] is None
 

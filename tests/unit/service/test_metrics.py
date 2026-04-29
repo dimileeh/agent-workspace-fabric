@@ -28,6 +28,8 @@ from awf.service.orphan_resources import (
 )
 from tests.unit.helpers import create_operation, create_workspace, zero_status_counts
 
+_MIB = 1024 * 1024
+
 
 @pytest.fixture
 async def session_factory(
@@ -44,6 +46,7 @@ async def _reservation_for_workspace(
     peak_cpu: float,
     peak_memory_gb: float,
     disk_mb: int | None = None,
+    dind_slots: int = 0,
     reserved_at: datetime | None = None,
     released_at: datetime | None = None,
 ) -> None:
@@ -76,6 +79,7 @@ async def _reservation_for_workspace(
             peak_cpu=peak_cpu,
             peak_memory_gb=peak_memory_gb,
             disk_mb=disk_mb,
+            dind_slots=dind_slots,
             phase="workspace_lifecycle",
             reserved_at=reserved_at,
         )
@@ -91,13 +95,14 @@ def _disk_check(
     threshold_bytes: int = 400,
     reason: str = "SUFFICIENT_DISK",
 ) -> DiskCheck:
+    total_bytes = max(1000, free_bytes + 1)
     return DiskCheck(
         path="/tmp/awf-work",
         checked_path="/tmp",
-        total_bytes=1000,
-        used_bytes=1000 - free_bytes,
+        total_bytes=total_bytes,
+        used_bytes=total_bytes - free_bytes,
         free_bytes=free_bytes,
-        percent_free=round(free_bytes / 1000 * 100, 2),
+        percent_free=round(free_bytes / total_bytes * 100, 2),
         threshold_bytes=threshold_bytes,
         ok=ok,
         status="ok" if ok else "fail",
@@ -749,6 +754,8 @@ async def test_resource_saturation_prefers_active_reservations_and_falls_back_fo
     assert summary.reserved_resources.steady_memory_gb == 22.0
     assert summary.reserved_resources.peak_cpu == 14.0
     assert summary.reserved_resources.peak_memory_gb == 40.0
+    assert summary.reserved_resources.disk_mb == 4096
+    assert summary.reserved_resources.dind_slots == 0
 
 
 @pytest.mark.unit
@@ -804,6 +811,137 @@ async def test_resource_saturation_uses_latest_active_reservation_per_workspace(
     assert summary.reserved_resources.steady_memory_gb == 14.0
     assert summary.reserved_resources.peak_cpu == 10.0
     assert summary.reserved_resources.peak_memory_gb == 28.0
+    assert summary.reserved_resources.disk_mb == 4096
+
+
+@pytest.mark.unit
+async def test_resource_saturation_reports_reserved_disk_dind_and_available_capacity(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        workspace_steady_cpu=3.0,
+        workspace_steady_memory_gb=10.0,
+        workspace_peak_cpu=6.0,
+        workspace_peak_memory_gb=16.0,
+        local_capacity_cpu_cores=24.0,
+        local_capacity_memory_gb=96.0,
+        local_capacity_dind_slots=4,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    legacy_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.ready,
+        updated_at=now,
+    )
+    released_workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=4.0,
+        steady_memory_gb=12.0,
+        peak_cpu=8.0,
+        peak_memory_gb=24.0,
+        disk_mb=4096,
+        dind_slots=1,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        released_workspace_id,
+        steady_cpu=100.0,
+        steady_memory_gb=100.0,
+        peak_cpu=100.0,
+        peak_memory_gb=100.0,
+        disk_mb=8192,
+        dind_slots=3,
+        released_at=now,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(free_bytes=16 * 1024 * _MIB),
+        now=now,
+    )
+
+    assert legacy_workspace_id
+    assert summary.reserved_resources.active_workspace_count == 2
+    assert summary.reserved_resources.steady_cpu == 7.0
+    assert summary.reserved_resources.peak_cpu == 14.0
+    assert summary.reserved_resources.steady_memory_gb == 22.0
+    assert summary.reserved_resources.peak_memory_gb == 40.0
+    assert summary.reserved_resources.disk_mb == 4096
+    assert summary.reserved_resources.dind_slots == 1
+    assert summary.capacity.peak_cpu.limit == 24.0
+    assert summary.capacity.peak_cpu.available == 10.0
+    assert summary.capacity.peak_memory_gb.limit == 96.0
+    assert summary.capacity.peak_memory_gb.available == 56.0
+    assert summary.capacity.disk_mb.limit == 16 * 1024
+    assert summary.capacity.disk_mb.available == 12 * 1024
+    assert summary.capacity.dind_slots.limit == 4
+    assert summary.capacity.dind_slots.available == 3
+    assert summary.capacity.pressure_reasons == ()
+
+
+@pytest.mark.unit
+async def test_resource_saturation_reports_pressure_reasons_per_dimension(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(
+        _env_file=None,
+        work_dir="/tmp/awf-work",
+        local_capacity_cpu_cores=8.0,
+        local_capacity_memory_gb=20.0,
+        local_capacity_dind_slots=1,
+    )
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    workspace_id = await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+    )
+    await _reservation_for_workspace(
+        session_factory,
+        workspace_id,
+        steady_cpu=4.0,
+        steady_memory_gb=12.0,
+        peak_cpu=9.0,
+        peak_memory_gb=21.0,
+        disk_mb=4096,
+        dind_slots=1,
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(free_bytes=2 * 1024 * _MIB),
+        now=now,
+    )
+
+    assert summary.capacity.peak_cpu.reason_code == "PEAK_CPU_CAPACITY_SATURATED"
+    assert summary.capacity.peak_memory_gb.reason_code == "PEAK_MEMORY_CAPACITY_SATURATED"
+    assert summary.capacity.disk_mb.reason_code == "DISK_RESERVATION_PRESSURE"
+    assert summary.capacity.dind_slots.reason_code == "DIND_CAPACITY_SATURATED"
+    assert summary.capacity.pressure_reasons == (
+        "PEAK_CPU_CAPACITY_SATURATED",
+        "PEAK_MEMORY_CAPACITY_SATURATED",
+        "DISK_RESERVATION_PRESSURE",
+        "DIND_CAPACITY_SATURATED",
+    )
 
 
 @pytest.mark.unit

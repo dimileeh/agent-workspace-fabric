@@ -152,8 +152,50 @@ async def test_resource_reservation_repository_tracks_active_and_released_rows(
     assert rows[0].peak_cpu == 8.0
     assert rows[0].peak_memory_gb == 24.0
     assert rows[0].disk_mb == 4096
+    assert rows[0].dind_slots == 0
     assert rows[0].phase == "workspace_lifecycle"
     assert rows[0].reserved_at == reserved_at
+    assert rows[0].released_at == released_at
+    assert await ResourceReservationRepository(session).active_for_workspace(workspace_id) is None
+
+
+@pytest.mark.unit
+async def test_resource_reservation_repository_persists_dind_and_releases_idempotently(
+    session: AsyncSession,
+) -> None:
+    workspace_id, _task_id, attempt_id = await _attempt(session)
+    reserved_at = datetime(2026, 4, 26, 13, 0, tzinfo=UTC)
+    released_at = datetime(2026, 4, 26, 14, 0, tzinfo=UTC)
+    second_release_at = datetime(2026, 4, 26, 15, 0, tzinfo=UTC)
+
+    reservation = await ResourceReservationRepository(session).create(
+        workspace_id=workspace_id,
+        attempt_id=attempt_id,
+        node_id="local",
+        steady_cpu=4.0,
+        steady_memory_gb=12.0,
+        peak_cpu=8.0,
+        peak_memory_gb=24.0,
+        disk_mb=4096,
+        dind_slots=1,
+        phase="workspace_lifecycle",
+        reserved_at=reserved_at,
+    )
+    await session.commit()
+
+    first_release = await ResourceReservationRepository(session).release_active_for_workspace(
+        workspace_id,
+        released_at=released_at,
+    )
+    second_release = await ResourceReservationRepository(session).release_active_for_workspace(
+        workspace_id,
+        released_at=second_release_at,
+    )
+    rows = await ResourceReservationRepository(session).list_for_workspace(workspace_id)
+
+    assert [row.id for row in first_release] == [reservation.id]
+    assert second_release == []
+    assert rows[0].dind_slots == 1
     assert rows[0].released_at == released_at
     assert await ResourceReservationRepository(session).active_for_workspace(workspace_id) is None
 
