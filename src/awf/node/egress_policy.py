@@ -104,7 +104,8 @@ def local_egress_plan(egress: ProfileEgress) -> LocalEgressPlan:
 
 
 def _policy_details(egress: ProfileEgress) -> dict[str, object]:
+    allowlist = egress.allowlist or []
     return {
         "mode": egress.mode.value,
-        "allowlist_count": len(egress.allowlist),
+        "allowlist_count": len(allowlist),
     }
