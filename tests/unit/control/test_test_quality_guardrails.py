@@ -94,6 +94,11 @@ def test_escape_hatch_requires_specific_rationale() -> None:
 
 
 @pytest.mark.unit
+def test_escape_hatch_allows_concise_specific_rationale() -> None:
+    assert _scan_fixture("case_escape_hatch_concise_specific.py") == []
+
+
+@pytest.mark.unit
 def test_exclude_globs_are_evaluated_from_repository_root(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

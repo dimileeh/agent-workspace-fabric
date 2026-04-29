@@ -53,6 +53,7 @@ _VAGUE_RATIONALES: Final[tuple[str, ...]] = (
     "known issue",
     "skip",
 )
+_MIN_ESCAPE_RATIONALE_WORDS: Final[int] = 3
 _INFRA_CALL_ROOTS: Final[set[str]] = {
     "all",
     "any",
@@ -597,12 +598,12 @@ def _invalid_escape_reason(code: str, reason: str) -> str | None:
     if code not in _SUPPRESSIBLE_CODES:
         return f"test-quality escape hatch uses unknown rule code {code!r}"
     normalized = " ".join(reason.lower().split())
-    if len(reason) < 24:
-        return "test-quality escape hatch needs a specific rationale after 'because'"
     if normalized in _VAGUE_RATIONALES:
         return "test-quality escape hatch rationale is too vague"
     if any(normalized.startswith(f"{vague} ") for vague in _VAGUE_RATIONALES):
         return "test-quality escape hatch rationale is too vague"
+    if len(_identifier_tokens(reason)) < _MIN_ESCAPE_RATIONALE_WORDS:
+        return "test-quality escape hatch needs a specific rationale after 'because'"
     return None
 
 
