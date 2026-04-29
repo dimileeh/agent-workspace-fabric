@@ -756,6 +756,8 @@ def _is_awf_status_issue_comment(body: str) -> bool:
 
 def _is_non_actionable_bot_review_body(body: str) -> bool:
     lower = " ".join(body.lower().split())
+    if _is_non_actionable_review_skip_comment(body):
+        return True
     if "no feedback" in lower or "no actionable feedback" in lower:
         return True
     if lower.startswith("## code review") and ("this pull request" in lower or "this pr" in lower):
