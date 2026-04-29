@@ -91,3 +91,17 @@ def test_escape_hatch_requires_specific_rationale() -> None:
         ("INVALID_ESCAPE_HATCH", 11),
         ("EMPTY_TEST", 12),
     ]
+
+
+@pytest.mark.unit
+def test_exclude_globs_are_evaluated_from_repository_root(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.chdir(REPO_ROOT / "tests")
+
+    violations = scan_test_quality(
+        [FIXTURES],
+        exclude_globs=("tests/fixtures/**",),
+    )
+
+    assert violations == []

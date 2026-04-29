@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import fnmatch
 import io
+import os
 import re
 import tokenize
 from collections.abc import Iterator, Sequence
@@ -139,28 +140,58 @@ def scan_test_quality(
     exclude_globs: Sequence[str] = _DEFAULT_EXCLUDE_GLOBS,
 ) -> list[TestQualityViolation]:
     """Return focused false-green test quality violations for Python tests."""
+    scan_root = _find_scan_root(paths)
     violations: list[TestQualityViolation] = []
-    for path in _iter_python_files(paths, exclude_globs):
+    for path in _iter_python_files(paths, exclude_globs, scan_root):
         violations.extend(_scan_file(path))
     return sorted(violations, key=lambda violation: (str(violation.path), violation.line, violation.code))
 
 
-def _iter_python_files(paths: Sequence[Path], exclude_globs: Sequence[str]) -> Iterator[Path]:
+def _iter_python_files(
+    paths: Sequence[Path],
+    exclude_globs: Sequence[str],
+    scan_root: Path | None,
+) -> Iterator[Path]:
     for raw_path in paths:
         path = Path(raw_path)
         if path.is_dir():
             for candidate in sorted(path.rglob("*.py")):
-                if not _is_excluded(candidate, exclude_globs):
+                if not _is_excluded(candidate, exclude_globs, scan_root):
                     yield candidate
             continue
-        if path.suffix == ".py" and not _is_excluded(path, exclude_globs):
+        if path.suffix == ".py" and not _is_excluded(path, exclude_globs, scan_root):
             yield path
 
 
-def _is_excluded(path: Path, exclude_globs: Sequence[str]) -> bool:
+def _find_scan_root(paths: Sequence[Path]) -> Path | None:
+    anchors: list[Path] = []
+    for raw_path in paths:
+        resolved = Path(raw_path).resolve()
+        anchor = resolved if resolved.is_dir() else resolved.parent
+        anchors.append(anchor)
+        if repo_root := _find_containing_repo_root(anchor):
+            return repo_root
+    if not anchors:
+        return None
+    return Path(os.path.commonpath([str(anchor) for anchor in anchors]))
+
+
+def _find_containing_repo_root(anchor: Path) -> Path | None:
+    for candidate in (anchor, *anchor.parents):
+        if (candidate / ".git").exists():
+            return candidate
+    return None
+
+
+def _is_excluded(
+    path: Path,
+    exclude_globs: Sequence[str],
+    scan_root: Path | None,
+) -> bool:
     names = {path.as_posix()}
-    with suppress(ValueError):
-        names.add(path.resolve().relative_to(Path.cwd().resolve()).as_posix())
+    if scan_root is not None:
+        with suppress(ValueError):
+            names.add(path.resolve().relative_to(scan_root).as_posix())
     return any(fnmatch.fnmatch(name, pattern) for name in names for pattern in exclude_globs)
 
 
