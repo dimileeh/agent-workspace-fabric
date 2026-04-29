@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import json
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
@@ -26,6 +28,9 @@ from awf.db.session import make_engine, make_session_factory
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.workspace_observability import (
+    InvalidWorkspaceOverviewCursorError,
+    _decode_overview_cursor,
+    _json_safe_value,
     _latest_reverse_state_event,
     effective_agent_identity,
     workspace_identity_usage_payload,
@@ -57,6 +62,27 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         yield make_session_factory(engine)
     finally:
         await engine.dispose()
+
+
+@pytest.mark.unit
+def test_workspace_overview_cursor_rejects_empty_workspace_id() -> None:
+    cursor = base64.urlsafe_b64encode(
+        json.dumps(
+            {"t": "2026-04-29T12:00:00+00:00", "id": ""},
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).decode("ascii")
+
+    with pytest.raises(InvalidWorkspaceOverviewCursorError):
+        _decode_overview_cursor(cursor)
+
+
+@pytest.mark.unit
+def test_json_safe_value_truncates_long_sequences() -> None:
+    value = _json_safe_value(tuple(range(25)))
+
+    assert value[-1] == "__truncated__"
+    assert value[:3] == [0, 1, 2]
 
 
 @pytest.mark.unit

@@ -17,11 +17,13 @@ import pytest
 from mcp.types import CallToolResult
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.api.schemas import WorkspaceControlResponse
+from awf.api.schemas import OperationResponse, WorkspaceControlResponse
+from awf.common.config import Settings
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.mcp import server as mcp_server
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.runtime.logs import LogStore
@@ -45,6 +47,38 @@ def mcp(factory: async_sessionmaker[AsyncSession]):  # type: ignore[no-untyped-d
     return build_mcp_server(service=service)
 
 
+@pytest.mark.unit
+async def test_build_mcp_server_captures_default_settings_once(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    settings = Settings(_env_file=None, work_dir=str(tmp_path / "awf-state"))
+    calls = 0
+
+    def fake_get_settings() -> Settings:
+        nonlocal calls
+        calls += 1
+        if calls > 1:
+            raise AssertionError("MCP tools should reuse settings captured at build time")
+        return settings
+
+    monkeypatch.setattr(mcp_server, "get_settings", fake_get_settings)
+    mcp = build_mcp_server(service=WorkspaceService(factory))
+
+    assert calls == 1
+
+    for _ in range(2):
+        result = await mcp.call_tool(
+            "awf_list_workspace_artifacts",
+            {"workspace_id": "ws_missing"},
+        )
+        assert isinstance(result, CallToolResult)
+        assert result.structuredContent is None
+
+    assert calls == 1
+
+
 _CREATE_ARGS: dict[str, object] = {
     "repo_url": "git@github.com:dimileeh/aira-agent.git",
     "branch_base": "development",
@@ -53,6 +87,23 @@ _CREATE_ARGS: dict[str, object] = {
     "agent": "codex",
     "test_commands": ["pytest -q"],
 }
+
+
+def _operation_response() -> OperationResponse:
+    return OperationResponse(
+        id="op_prevalidated",
+        workspace_id="ws_prevalidated",
+        type="validate",
+        status="succeeded",
+        error_code=None,
+        error_message=None,
+        payload=None,
+        result=None,
+        idempotency_key=None,
+        created_at=datetime(2026, 1, 1, tzinfo=UTC),
+        started_at=None,
+        finished_at=None,
+    )
 
 
 async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
@@ -70,6 +121,14 @@ async def _call(mcp, name, args) -> object:  # type: ignore[no-untyped-def]
     if isinstance(payload, dict) and list(payload.keys()) == ["result"]:
         return payload["result"]
     return payload
+
+
+def _optional_string_schema(schema: dict[str, object]) -> dict[str, object]:
+    any_of = schema.get("anyOf")
+    assert isinstance(any_of, list)
+    string_schema = next(item for item in any_of if isinstance(item, dict) and item.get("type") == "string")
+    assert isinstance(string_schema, dict)
+    return string_schema
 
 
 class TestToolRegistration:
@@ -95,6 +154,20 @@ class TestToolRegistration:
             "awf_cancel_workspace",
             "awf_stop_workspace",
             "awf_destroy_workspace",
+        } <= names
+        assert {
+            "awf_list_merge_queue",
+            "awf_list_workspace_overview",
+            "awf_list_workspace_validation",
+            "awf_list_workspace_stale_reasons",
+            "awf_list_workspace_artifacts",
+            "awf_get_failure_analysis_summary",
+            "awf_get_workspace_reliability_summary",
+            "awf_get_resource_saturation_summary",
+            "awf_get_slo_metrics_summary",
+            "awf_list_operations",
+            "awf_get_operation",
+            "awf_get_overlap_graph",
         } <= names
 
     @pytest.mark.unit
@@ -142,6 +215,103 @@ class TestToolRegistration:
             "minLength": 1,
             "type": "string",
         }
+
+    @pytest.mark.unit
+    async def test_operator_parity_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]
+        tools = {tool.name: tool for tool in await mcp.list_tools()}
+
+        merge_props = tools["awf_list_merge_queue"].inputSchema["properties"]
+        repo_url_schema = _optional_string_schema(merge_props["repo_url"])
+        assert repo_url_schema["maxLength"] == 512
+        assert repo_url_schema["minLength"] == 1
+        base_branch_schema = _optional_string_schema(merge_props["base_branch"])
+        assert base_branch_schema["maxLength"] == 256
+        assert merge_props["limit"]["default"] == 50
+        assert merge_props["limit"]["minimum"] == 1
+        assert merge_props["limit"]["maximum"] == 500
+        assert _optional_string_schema(merge_props["cursor"])["maxLength"] == 128
+
+        overview_props = tools["awf_list_workspace_overview"].inputSchema["properties"]
+        assert overview_props["limit"]["default"] == 50
+        assert _optional_string_schema(overview_props["cursor"])["maxLength"] == 128
+
+        operations_props = tools["awf_list_operations"].inputSchema["properties"]
+        assert operations_props["limit"]["default"] == 50
+        assert operations_props["limit"]["maximum"] == 500
+
+        overlap_props = tools["awf_get_overlap_graph"].inputSchema["properties"]
+        assert overlap_props["limit"]["default"] == 100
+        assert overlap_props["limit"]["maximum"] == 500
+
+
+class TestOperationTools:
+    @pytest.mark.unit
+    async def test_list_operations_reports_has_more_when_limit_truncates(
+        self,
+        mcp,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:  # type: ignore[no-untyped-def]
+        base = datetime(2026, 4, 25, 12, 0, tzinfo=UTC)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/app.git",
+                branch_base="main",
+                task_title="Observe operations",
+                task_prompt="List operations.",
+                agent="codex",
+                test_commands=[],
+            )
+            repo = OperationRepository(session)
+            create = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.create,
+                status=OperationStatus.succeeded,
+            )
+            validate = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.validate,
+                status=OperationStatus.running,
+            )
+            stop = await repo.create(
+                workspace_id=workspace.id,
+                operation_type=OperationType.stop,
+                status=OperationStatus.pending,
+            )
+            create.created_at = base
+            validate.created_at = base + timedelta(seconds=1)
+            stop.created_at = base + timedelta(seconds=2)
+            await session.commit()
+
+        payload = await _call(mcp, "awf_list_operations", {"limit": 2})
+
+        assert isinstance(payload, dict)
+        assert [item["id"] for item in payload["items"]] == [stop.id, validate.id]
+        assert payload["has_more"] is True
+        assert payload["next_cursor"] is None
+        assert payload["limit"] == 2
+        assert payload["cursor"] is None
+
+    @pytest.mark.unit
+    async def test_list_operations_uses_prevalidated_service_responses(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        operation = _operation_response()
+
+        class PrevalidatedOperationService:
+            async def list_all_operations(self, **kwargs) -> list[OperationResponse]:  # type: ignore[no-untyped-def]
+                return [operation]
+
+        def fail_model_validate(cls, value) -> OperationResponse:  # type: ignore[no-untyped-def]
+            raise AssertionError("OperationResponse.model_validate should not be called")
+
+        monkeypatch.setattr(OperationResponse, "model_validate", classmethod(fail_model_validate))
+        mcp = build_mcp_server(service=PrevalidatedOperationService())  # type: ignore[arg-type]
+
+        payload = await _call(mcp, "awf_list_operations", {})
+
+        assert isinstance(payload, dict)
+        assert payload["items"][0]["id"] == operation.id
 
 
 class TestCreateWorkspace:

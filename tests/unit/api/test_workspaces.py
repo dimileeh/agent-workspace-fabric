@@ -21,6 +21,7 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.workspaces as workspaces_route
+import awf.service.workspace_observability as workspace_observability
 from awf.api.app import configure_database, create_app
 from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
 from awf.common.config import Settings, get_settings
@@ -1899,7 +1900,7 @@ class TestWorkspaceDirectRoutes:
                 return [workspace]
 
         monkeypatch.setattr(
-            workspaces_route,
+            workspace_observability,
             "WorkspaceRepository",
             FakeWorkspaceRepository,
         )

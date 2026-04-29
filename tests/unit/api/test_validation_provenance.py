@@ -12,6 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.validation as validation_route
+import awf.service.validation_provenance as validation_service
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceLogStreamRepository, WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -50,6 +51,10 @@ _V1_BODY = {
     "agent": "codex",
     "test_commands": ["pytest -q"],
 }
+
+
+def test_validation_route_exports_only_route_endpoint() -> None:
+    assert validation_route.__all__ == ["list_validation_provenance"]
 
 
 async def _create_v2_profile_workspace(client: AsyncClient) -> str:
@@ -1323,13 +1328,13 @@ def test_current_target_head_sha_skips_newer_candidates_without_head_sha() -> No
         },
     )()
 
-    assert validation_route._current_target_head_sha(workspace) == "older-head"  # type: ignore[arg-type]
+    assert validation_service._current_target_head_sha(workspace) == "older-head"  # type: ignore[arg-type]
 
 
 @pytest.mark.unit
 def test_stream_pair_add_ignores_unknown_file_descriptors() -> None:
     stream = type("Stream", (), {})()
-    pair = validation_route._StreamPair(base_stream_id="validation.cmd_01")
+    pair = validation_service._StreamPair(base_stream_id="validation.cmd_01")
 
     pair.add("stdin", stream)  # type: ignore[arg-type]
 
