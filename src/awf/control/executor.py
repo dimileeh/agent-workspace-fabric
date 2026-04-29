@@ -112,6 +112,7 @@ class _MonitorRunnerProto(Protocol):
 _log = get_logger(__name__)
 
 WORKTREE_MISSING_REASON_CODE = "WORKTREE_MISSING"
+PR_REEXECUTION_GUARD_REASON_CODE = "PR_REEXECUTION_GUARD"
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -321,6 +322,11 @@ class WorkspaceExecutor:
         # plan artifact and re-implement the feature mid-merge. Recovery
         # only re-runs validation against the already-pushed work.
         recovery = _get_active_recovery_payload(ws)
+        if recovery is None and await self._block_open_pr_reexecution_without_recovery(
+            workspace_id=workspace_id,
+            workspace=ws,
+        ):
+            return
         rebase_recovery_result: _RebaseRecoveryResult | None = None
         baseline_coverage: ValidationCoverageResult | None = None
         try:
@@ -1607,6 +1613,61 @@ class WorkspaceExecutor:
             )
             await session.commit()
             return remote_push_branch
+
+    async def _block_open_pr_reexecution_without_recovery(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+    ) -> bool:
+        if not workspace.pr_url or workspace.monitor_started_at is None:
+            return False
+
+        message = (
+            "workspace already has an open PR but no active monitor/operator "
+            "recovery operation; refusing to re-enter full agent execution"
+        )
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            persisted = await repo.get(workspace_id)
+            if persisted is None:  # pragma: no cover - row disappeared mid-flight
+                return True
+            if persisted.status != WorkspaceStatus.running.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    persisted,
+                    action="pr_reexecution_guard",
+                    expected=WorkspaceStatus.running,
+                    reason_code="EXECUTOR_STALE_STATUS",
+                )
+                await session.commit()
+                return True
+            await repo.add_event(
+                persisted,
+                event_type="workspace.pr_reexecution_blocked",
+                reason_code=PR_REEXECUTION_GUARD_REASON_CODE,
+                payload={
+                    "pr_number": persisted.pr_number,
+                    "pr_url": persisted.pr_url,
+                    "status": persisted.status,
+                },
+            )
+            persisted.failure_reason = FailureReason.infrastructure_failure.value
+            persisted.failure_message = message
+            await repo.transition(
+                persisted,
+                to=WorkspaceStatus.failed,
+                reason_code=PR_REEXECUTION_GUARD_REASON_CODE,
+            )
+            await session.commit()
+        _log.error(
+            "executor.pr_reexecution_blocked",
+            workspace_id=workspace_id,
+            pr_number=workspace.pr_number,
+            pr_url=workspace.pr_url,
+            reason_code=PR_REEXECUTION_GUARD_REASON_CODE,
+        )
+        return True
 
     async def _ensure_worktree_available(
         self,

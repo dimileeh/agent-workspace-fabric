@@ -1036,6 +1036,17 @@ async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_conte
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
         operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+        recovery_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "monitor.recovery_dispatched"
+        ]
+        state_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.state_changed"
+            and event.reason_code == "RECOVERY_DISPATCH"
+        ]
     assert workspace.status == WorkspaceStatus.ready.value
     assert len(operations) == 1
     operation = operations[0]
@@ -1060,6 +1071,18 @@ async def test_monitor_recovery_dispatch_records_operation_with_pr_and_sha_conte
         "target_branch": "development",
         "remote_branch": f"awf/{workspace_id}",
     }
+    assert len(recovery_events) == 1
+    assert recovery_events[0].reason_code == "RECOVERY_DISPATCH"
+    assert recovery_events[0].payload == {
+        "pr_number": pr_number,
+        "head_sha": head_sha,
+        "reason": "validation_insufficient_tier",
+        "req_action": "validate",
+        "recovery_mode": "validate_only",
+    }
+    assert len(state_events) == 1
+    assert state_events[0].old_state == WorkspaceStatus.monitoring_pr.value
+    assert state_events[0].new_state == WorkspaceStatus.ready.value
 
 
 @pytest.mark.unit
