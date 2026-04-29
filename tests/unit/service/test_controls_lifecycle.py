@@ -1141,6 +1141,38 @@ async def test_rebase_same_key_with_different_reason_conflicts(
 
 
 @pytest.mark.unit
+async def test_rebase_same_key_with_different_expected_version_conflicts_without_duplicate_rows(
+    session: AsyncSession,
+) -> None:
+    workspace, _candidate = await _workspace_with_candidate(session)
+    service, _stopper, _cleaner = _service(session)
+    original_version = workspace.version
+
+    operation = await service.request_rebase_workspace(
+        workspace.id,
+        reason="base branch advanced",
+        idempotency_key="rebase-if-match-conflict",
+        expected_version=original_version,
+    )
+    before_operation_ids = [row.id for row in await _operations(session, workspace.id)]
+    before_event_ids = [row.id for row in await _events(session, workspace.id)]
+
+    with pytest.raises(IdempotencyConflictError):
+        await service.request_rebase_workspace(
+            workspace.id,
+            reason="base branch advanced",
+            idempotency_key="rebase-if-match-conflict",
+            expected_version=original_version + 1,
+        )
+
+    assert before_operation_ids == [operation.id]
+    assert [
+        row.id for row in await _operations(session, workspace.id)
+    ] == before_operation_ids
+    assert [row.id for row in await _events(session, workspace.id)] == before_event_ids
+
+
+@pytest.mark.unit
 async def test_rebase_active_incompatible_payload_conflicts_without_duplicate_operation(
     session: AsyncSession,
 ) -> None:

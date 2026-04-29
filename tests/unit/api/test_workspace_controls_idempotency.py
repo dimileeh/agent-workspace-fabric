@@ -1299,6 +1299,41 @@ async def test_rebase_same_key_with_different_reason_returns_idempotency_conflic
 
 
 @pytest.mark.unit
+async def test_rebase_same_key_with_different_if_match_returns_idempotency_conflict(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _seed_monitoring_workspace(
+        engine,
+        with_open_candidate=True,
+    )
+    headers = {
+        **_auth(monkeypatch),
+        "Idempotency-Key": "rebase-if-match-conflict",
+        "If-Match": "7",
+    }
+
+    first = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers=headers,
+    )
+    before_counts = await _counts(engine, workspace_id)
+    conflict = await client.post(
+        f"/v1/workspaces/{workspace_id}/rebase",
+        json={"reason": "base branch advanced"},
+        headers={**headers, "If-Match": "8"},
+    )
+    after_counts = await _counts(engine, workspace_id)
+
+    assert first.status_code == 202
+    assert conflict.status_code == 409
+    assert conflict.json()["detail"]["error_code"] == "IDEMPOTENCY_CONFLICT"
+    assert after_counts == before_counts
+
+
+@pytest.mark.unit
 async def test_rebase_fresh_key_with_different_reason_rejects_active_rebase_conflict(
     client: AsyncClient,
     engine: AsyncEngine,
