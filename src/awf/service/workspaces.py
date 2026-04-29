@@ -15,6 +15,7 @@ from awf.api.schemas import (
     OperationResponse,
     OwnedPathOverlapResponse,
     RuntimeServiceResponse,
+    ValidationFreshnessSummaryResponse,
     WorkspaceControlResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
@@ -37,6 +38,7 @@ from awf.db.repositories import (
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
+    ValidationRunRepository,
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
@@ -51,6 +53,11 @@ from awf.service.controls import (
     WorkspaceControlService,
     default_cleaner,
     stop_project_containers,
+)
+from awf.service.validation_observability import (
+    latest_merge_candidate,
+    validation_freshness_summary,
+    validation_provenance_unavailable,
 )
 from awf.service.workspace_observability import workspace_observability_payload
 from awf.service.workspace_runtime_health import (
@@ -235,7 +242,15 @@ class WorkspaceService:
     async def get(self, workspace_id: str) -> WorkspaceResponse | None:
         async with self._factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
-            return workspace_response(ws) if ws is not None else None
+            if ws is None:
+                return None
+            validation_runs = await ValidationRunRepository(s).list_for_workspace(workspace_id)
+            validation_provenance = validation_freshness_summary(
+                ws,
+                validation_runs,
+                candidate=latest_merge_candidate(ws),
+            )
+            return workspace_response(ws, validation_provenance=validation_provenance)
 
     async def list(self, *, limit: int = 50) -> list[WorkspaceResponse]:
         async with self._factory() as s:
@@ -675,11 +690,20 @@ def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResp
     )
 
 
-def workspace_response(workspace: Workspace) -> WorkspaceResponse:
-    computed = dict(workspace_observability_payload(workspace))
-    computed["runtime_health"] = _workspace_runtime_health_from_events(workspace)
+def workspace_response(
+    workspace: Workspace,
+    *,
+    validation_provenance: ValidationFreshnessSummaryResponse | None = None,
+) -> WorkspaceResponse:
+    computed_fields = dict(workspace_observability_payload(workspace))
+    computed_fields["validation_provenance"] = (
+        validation_provenance
+        if validation_provenance is not None
+        else validation_provenance_unavailable(workspace)
+    )
+    computed_fields["runtime_health"] = _workspace_runtime_health_from_events(workspace)
     return WorkspaceResponse.model_validate(
-        _WorkspaceResponseSource(workspace, computed)
+        _WorkspaceResponseSource(workspace, computed_fields)
     )
 
 

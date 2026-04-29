@@ -32,6 +32,7 @@ MergeCandidateStatus = Literal["open", "merged", "closed"]
 MergeQueueBlockerState = Literal["merge_eligible", "monitor_owned_recovery"]
 ValidationTier = Literal[1, 2, 3]
 ValidationProvenanceStatus = Literal["running", "succeeded", "failed", "unknown"]
+ValidationFreshnessStatus = Literal["fresh", "stale", "unknown", "unavailable"]
 ValidationIdentitySource = Literal["persisted", "legacy_fallback"]
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 WorkspaceLifecycleStageStatus = Literal[
@@ -243,6 +244,49 @@ class WorkspaceRecoverySummaryResponse(BaseModel):
     payload: dict[str, Any] | None = None
 
 
+class ValidationRunSummaryResponse(BaseModel):
+    validation_run_id: str
+    attempt_id: str | None = None
+    tier: ValidationTier
+    command_set_hash: str
+    base_commit: str | None = None
+    base_sha: str | None = None
+    workspace_head_sha: str | None = None
+    target_branch: str | None = None
+    target_head_sha: str | None = None
+    current_target_head_sha: str | None = None
+    profile_name: str | None = None
+    profile_version: int | None = None
+    profile_source: str | None = None
+    resolved_profile_digest: str | None = None
+    environment_identity_digest: str | None = None
+    environment_identity_inputs: dict[str, Any] = Field(default_factory=dict)
+    identity_source: ValidationIdentitySource = "legacy_fallback"
+    status: ValidationProvenanceStatus
+    reason_code: str | None = None
+    started_at: datetime
+    finished_at: datetime | None = None
+    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
+    fresh_for_target: bool | None = None
+    freshness_status: ValidationFreshnessStatus = "unknown"
+    freshness_reason_code: str | None = None
+    retry_count: int = 0
+    coverage_percent: float | None = None
+    coverage_minimum_percent: float | None = None
+    coverage_status: str | None = None
+    coverage_reason_code: str | None = None
+    coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
+
+
+class ValidationFreshnessSummaryResponse(BaseModel):
+    required_tier: ValidationTier | None = None
+    latest_satisfied_tier: ValidationTier | None = None
+    freshness_status: ValidationFreshnessStatus = "unknown"
+    reason_code: str | None = None
+    current_target_head_sha: str | None = None
+    latest_validation: ValidationRunSummaryResponse | None = None
+
+
 class WorkspaceRuntimeHealthResponse(BaseModel):
     status: Literal["ok", "stranded", "unavailable"]
     reason_code: str
@@ -311,6 +355,9 @@ class WorkspaceResponse(BaseModel):
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
     recovery: WorkspaceRecoverySummaryResponse | None = None
+    validation_provenance: ValidationFreshnessSummaryResponse = Field(
+        default_factory=lambda: ValidationFreshnessSummaryResponse()
+    )
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
 
     created_at: datetime
@@ -494,38 +541,6 @@ class WorkspaceOverviewListResponse(BaseModel):
     has_more: bool = False
 
 
-class ValidationRunSummaryResponse(BaseModel):
-    validation_run_id: str
-    attempt_id: str | None = None
-    tier: ValidationTier
-    command_set_hash: str
-    base_commit: str | None = None
-    base_sha: str | None = None
-    workspace_head_sha: str | None = None
-    target_branch: str | None = None
-    target_head_sha: str | None = None
-    current_target_head_sha: str | None = None
-    profile_name: str | None = None
-    profile_version: int | None = None
-    profile_source: str | None = None
-    resolved_profile_digest: str | None = None
-    environment_identity_digest: str | None = None
-    environment_identity_inputs: dict[str, Any] = Field(default_factory=dict)
-    identity_source: ValidationIdentitySource = "legacy_fallback"
-    status: ValidationProvenanceStatus
-    reason_code: str | None = None
-    started_at: datetime
-    finished_at: datetime | None = None
-    log_stream_refs: dict[str, Any] = Field(default_factory=dict)
-    fresh_for_target: bool | None = None
-    retry_count: int = 0
-    coverage_percent: float | None = None
-    coverage_minimum_percent: float | None = None
-    coverage_status: str | None = None
-    coverage_reason_code: str | None = None
-    coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
-
-
 StaleReasonStatus = Literal["active", "resolved"]
 StaleReasonCode = Literal[
     "STALE_TARGET_ADVANCED",
@@ -608,6 +623,8 @@ class MergeQueueItemResponse(BaseModel):
     required_next_action: str | None = None
     required_validation_tier: ValidationTier | None = None
     latest_satisfied_validation_tier: ValidationTier | None = None
+    validation_freshness_status: ValidationFreshnessStatus = "unknown"
+    validation_reason_code: str | None = None
     readiness: MergeCandidateReadinessResponse | None = None
     canonical: bool
     queue_blockers: list[MergeQueueBlockerResponse] = Field(default_factory=list)

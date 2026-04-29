@@ -314,14 +314,25 @@ test("validation summary shows tier, status, freshness, heads, and coverage", ()
           command_set_hash: "a".repeat(64),
           base_commit: "base123",
           target_branch: "main",
+          base_sha: "base123",
+          workspace_head_sha: "workspace-head",
           target_head_sha: "1234567890abcdef1234567890abcdef12345678",
           current_target_head_sha: "fedcba9876543210fedcba9876543210fedcba98",
+          profile_name: "python",
+          profile_version: 4,
+          profile_source: "repo:.awf/workspace.yml",
+          resolved_profile_digest: "1".repeat(64),
+          environment_identity_digest: "2".repeat(64),
+          environment_identity_inputs: { schema_version: 1 },
+          identity_source: "persisted",
           status: "succeeded",
           reason_code: "VALIDATION_OK",
           started_at: "2026-04-26T12:00:00Z",
           finished_at: "2026-04-26T12:05:00Z",
           log_stream_refs: {},
           fresh_for_target: true,
+          freshness_status: "fresh",
+          freshness_reason_code: "validation_fresh",
           retry_count: 1,
           coverage_percent: 99.2,
           coverage_minimum_percent: 99,
@@ -337,6 +348,15 @@ test("validation summary shows tier, status, freshness, heads, and coverage", ()
       freshLabel: "fresh",
       headLabel: "1234567 -> fedcba9",
       coverageLabel: "coverage passed 99.2/99%",
+      commandHashLabel: "aaaaaaa",
+      profileLabel: "python@4",
+      environmentLabel: "2222222",
+      identitySourceLabel: "persisted",
+      baseShaLabel: "base123",
+      workspaceHeadShaLabel: "workspace-head",
+      validatedTargetShaLabel: "1234567",
+      currentTargetShaLabel: "fedcba9",
+      reasonLabel: "VALIDATION_OK / validation_fresh",
     },
   );
 
@@ -349,15 +369,26 @@ test("validation summary shows tier, status, freshness, heads, and coverage", ()
           tier: 1,
           command_set_hash: "b".repeat(64),
           base_commit: "base123",
+          base_sha: null,
+          workspace_head_sha: null,
           target_branch: "main",
           target_head_sha: "old-head",
           current_target_head_sha: "new-head",
+          profile_name: null,
+          profile_version: null,
+          profile_source: null,
+          resolved_profile_digest: null,
+          environment_identity_digest: null,
+          environment_identity_inputs: {},
+          identity_source: "legacy_fallback",
           status: "failed",
           reason_code: "COVERAGE_BELOW_THRESHOLD",
           started_at: "2026-04-26T12:00:00Z",
           finished_at: "2026-04-26T12:05:00Z",
           log_stream_refs: {},
           fresh_for_target: false,
+          freshness_status: "stale",
+          freshness_reason_code: "validation_target_stale",
           retry_count: 0,
           coverage_percent: 98.4,
           coverage_minimum_percent: 99,
@@ -373,8 +404,144 @@ test("validation summary shows tier, status, freshness, heads, and coverage", ()
       freshLabel: "stale target",
       headLabel: "old-head -> new-head",
       coverageLabel: "coverage failed 98.4/99%",
+      commandHashLabel: "bbbbbbb",
+      profileLabel: "unavailable",
+      environmentLabel: "unavailable",
+      identitySourceLabel: "legacy fallback",
+      baseShaLabel: "base123",
+      workspaceHeadShaLabel: "unknown",
+      validatedTargetShaLabel: "old-head",
+      currentTargetShaLabel: "new-head",
+      reasonLabel: "COVERAGE_BELOW_THRESHOLD / validation_target_stale",
     },
   );
+});
+
+test("validation formatter labels unknown and unavailable identity", () => {
+  assert.deepEqual(
+    summarizeValidation(
+      mergeQueueItem({
+        validation_freshness_status: "unavailable",
+        validation_reason_code: "validation_unavailable",
+        latest_validation: null,
+      }),
+    ),
+    {
+      label: "none",
+      detail: "validation_unavailable",
+      freshLabel: "unavailable",
+      headLabel: "unknown -> unknown",
+      coverageLabel: "coverage unknown",
+      commandHashLabel: "unavailable",
+      profileLabel: "unavailable",
+      environmentLabel: "unavailable",
+      identitySourceLabel: "unavailable",
+      baseShaLabel: "unknown",
+      workspaceHeadShaLabel: "unknown",
+      validatedTargetShaLabel: "unknown",
+      currentTargetShaLabel: "unknown",
+      reasonLabel: "validation_unavailable",
+    },
+  );
+
+  const summary = summarizeValidation(
+    mergeQueueItem({
+      validation_freshness_status: "unknown",
+      validation_reason_code: "validation_target_unknown",
+      latest_validation: {
+        validation_run_id: "vr_unknown",
+        attempt_id: "att_111111111111111111111111",
+        tier: 1,
+        command_set_hash: "c".repeat(64),
+        base_commit: "legacy-base",
+        base_sha: null,
+        workspace_head_sha: null,
+        target_branch: null,
+        target_head_sha: null,
+        current_target_head_sha: "target-head",
+        profile_name: null,
+        profile_version: null,
+        profile_source: null,
+        resolved_profile_digest: null,
+        environment_identity_digest: null,
+        environment_identity_inputs: {},
+        identity_source: "legacy_fallback",
+        status: "succeeded",
+        reason_code: "VALIDATION_OK",
+        started_at: "2026-04-26T12:00:00Z",
+        finished_at: "2026-04-26T12:05:00Z",
+        log_stream_refs: {},
+        fresh_for_target: null,
+        freshness_status: "unknown",
+        freshness_reason_code: "validation_target_unknown",
+        retry_count: 0,
+        coverage_percent: null,
+        coverage_minimum_percent: null,
+        coverage_status: null,
+        coverage_reason_code: null,
+        coverage_gaps: [],
+      },
+    }),
+  );
+
+  assert.equal(summary.freshLabel, "freshness unknown");
+  assert.equal(summary.headLabel, "unknown -> target-head");
+  assert.equal(summary.baseShaLabel, "legacy-base");
+  assert.equal(summary.workspaceHeadShaLabel, "unknown");
+  assert.equal(summary.reasonLabel, "VALIDATION_OK / validation_target_unknown");
+});
+
+test("validation formatter displays profile environment and reason labels", () => {
+  const recovery = summarizeRecovery(
+    mergeQueueItem({
+      required_validation_tier: 3,
+      latest_satisfied_validation_tier: 2,
+      validation_freshness_status: "stale",
+      validation_reason_code: "validation_target_stale",
+      latest_validation: {
+        validation_run_id: "vr_identity",
+        attempt_id: "att_111111111111111111111111",
+        tier: 2,
+        command_set_hash: "d".repeat(64),
+        base_commit: "legacy-base",
+        base_sha: "base-identity",
+        workspace_head_sha: "workspace-head",
+        target_branch: "main",
+        target_head_sha: "old-head",
+        current_target_head_sha: "new-head",
+        profile_name: "python",
+        profile_version: 7,
+        profile_source: "repo:.awf/workspace.yml",
+        resolved_profile_digest: "1".repeat(64),
+        environment_identity_digest: "e".repeat(64),
+        environment_identity_inputs: { schema_version: 1 },
+        identity_source: "persisted",
+        status: "succeeded",
+        reason_code: "VALIDATION_OK",
+        started_at: "2026-04-26T12:00:00Z",
+        finished_at: "2026-04-26T12:05:00Z",
+        log_stream_refs: {},
+        fresh_for_target: false,
+        freshness_status: "stale",
+        freshness_reason_code: "validation_target_stale",
+        retry_count: 0,
+        coverage_percent: null,
+        coverage_minimum_percent: null,
+        coverage_status: null,
+        coverage_reason_code: null,
+        coverage_gaps: [],
+      },
+    }),
+  );
+
+  assert.equal(recovery.validationReasonLabel, "VALIDATION_OK / validation_target_stale");
+  assert.equal(recovery.commandHashLabel, "ddddddd");
+  assert.equal(recovery.profileLabel, "python@7");
+  assert.equal(recovery.environmentLabel, "eeeeeee");
+  assert.equal(recovery.baseShaLabel, "base-identity");
+  assert.equal(recovery.workspaceHeadShaLabel, "workspace-head");
+  assert.equal(recovery.validatedTargetShaLabel, "old-head");
+  assert.equal(recovery.currentTargetShaLabel, "new-head");
 });
 
 test("validation recovery summary shows required tier, satisfied tier, freshness, and heads", () => {
@@ -548,7 +715,7 @@ test("recovery summary falls back safely for legacy or missing validation data",
   assert.equal(recovery.recommendedActionLabel, "manual merge");
   assert.equal(recovery.requiredTierLabel, "T1 required");
   assert.equal(recovery.latestSatisfiedTierLabel, "none satisfied");
-  assert.equal(recovery.freshnessLabel, "unknown");
+  assert.equal(recovery.freshnessLabel, "unavailable");
   assert.equal(recovery.baseShaLabel, "unknown");
   assert.equal(recovery.validatedTargetShaLabel, "unknown");
   assert.equal(recovery.currentTargetShaLabel, "unknown");

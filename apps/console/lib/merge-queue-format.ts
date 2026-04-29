@@ -1,4 +1,12 @@
-import type { MergeBlockerReason, MergeQueueBlocker, MergeQueueItem, StaleReason, ValidationTier } from "@/lib/types";
+import type {
+  MergeBlockerReason,
+  MergeQueueBlocker,
+  MergeQueueItem,
+  StaleReason,
+  ValidationFreshnessStatus,
+  ValidationFreshnessSummary,
+  ValidationTier,
+} from "@/lib/types";
 import { compactId } from "./format.ts";
 
 export interface StaleReasonSummary {
@@ -33,6 +41,15 @@ export interface ValidationSummary {
   freshLabel: string;
   headLabel: string;
   coverageLabel: string;
+  commandHashLabel: string;
+  profileLabel: string;
+  environmentLabel: string;
+  identitySourceLabel: string;
+  baseShaLabel: string;
+  workspaceHeadShaLabel: string;
+  validatedTargetShaLabel: string;
+  currentTargetShaLabel: string;
+  reasonLabel: string;
 }
 
 export interface RecoverySummary {
@@ -42,9 +59,14 @@ export interface RecoverySummary {
   latestSatisfiedTierDetail: string;
   freshnessLabel: string;
   baseShaLabel: string;
+  workspaceHeadShaLabel: string;
   validatedTargetShaLabel: string;
   currentTargetShaLabel: string;
   targetRangeLabel: string;
+  validationReasonLabel: string;
+  commandHashLabel: string;
+  profileLabel: string;
+  environmentLabel: string;
   blockerLabel: string;
   blockerDetail: string;
   candidateLabel: string;
@@ -186,32 +208,97 @@ export function summarizeReadiness(
   return { ...base, label: "blocked", detail: "not merge-ready" };
 }
 
-export function summarizeValidation(item: Pick<MergeQueueItem, "latest_validation">): ValidationSummary {
+export function summarizeValidation(
+  item: Pick<MergeQueueItem, "latest_validation" | "validation_freshness_status" | "validation_reason_code">,
+): ValidationSummary {
   const validation = item.latest_validation;
   if (!validation) {
+    const reasonLabel = item.validation_reason_code ?? "validation_unavailable";
     return {
       label: "none",
-      detail: "no validation run",
-      freshLabel: "unknown",
+      detail: reasonLabel,
+      freshLabel: formatFreshnessLabel(item.validation_freshness_status ?? "unavailable"),
       headLabel: "unknown -> unknown",
       coverageLabel: "coverage unknown",
+      commandHashLabel: "unavailable",
+      profileLabel: "unavailable",
+      environmentLabel: "unavailable",
+      identitySourceLabel: "unavailable",
+      baseShaLabel: "unknown",
+      workspaceHeadShaLabel: "unknown",
+      validatedTargetShaLabel: "unknown",
+      currentTargetShaLabel: "unknown",
+      reasonLabel,
     };
   }
 
-  const freshLabel = validation.fresh_for_target === true
-    ? "fresh"
-    : validation.fresh_for_target === false
-      ? "stale target"
-      : "freshness unknown";
+  const freshnessStatus = validation.freshness_status ?? freshnessStatusFromBoolean(validation.fresh_for_target);
+  const freshnessReason = validation.freshness_reason_code ?? item.validation_reason_code ?? freshnessReasonFromStatus(freshnessStatus);
+  const freshLabel = formatFreshnessLabel(freshnessStatus);
   const retryDetail = validation.retry_count > 0 ? ` / retries ${validation.retry_count}` : "";
   const detail = `${validation.reason_code ?? "no reason"}${retryDetail}`;
+  const baseShaLabel = compactSha(validation.base_sha ?? validation.base_commit);
+  const validatedTargetShaLabel = compactSha(validation.target_head_sha);
+  const currentTargetShaLabel = compactSha(validation.current_target_head_sha);
 
   return {
     label: `T${validation.tier} ${validation.status} / ${freshLabel}`,
     detail,
     freshLabel,
-    headLabel: `${compactSha(validation.target_head_sha)} -> ${compactSha(validation.current_target_head_sha)}`,
+    headLabel: `${validatedTargetShaLabel} -> ${currentTargetShaLabel}`,
     coverageLabel: formatCoverageLabel(validation),
+    commandHashLabel: compactShaOrUnavailable(validation.command_set_hash),
+    profileLabel: formatProfileLabel(validation),
+    environmentLabel: compactShaOrUnavailable(validation.environment_identity_digest),
+    identitySourceLabel: validation.identity_source === "legacy_fallback" ? "legacy fallback" : validation.identity_source,
+    baseShaLabel,
+    workspaceHeadShaLabel: compactSha(validation.workspace_head_sha),
+    validatedTargetShaLabel,
+    currentTargetShaLabel,
+    reasonLabel: `${validation.reason_code ?? "no reason"} / ${freshnessReason}`,
+  };
+}
+
+export function summarizeValidationProvenance(
+  provenance: ValidationFreshnessSummary | null | undefined,
+): Pick<
+  RecoverySummary,
+  | "requiredTierLabel"
+  | "latestSatisfiedTierLabel"
+  | "latestSatisfiedTierDetail"
+  | "freshnessLabel"
+  | "baseShaLabel"
+  | "workspaceHeadShaLabel"
+  | "validatedTargetShaLabel"
+  | "currentTargetShaLabel"
+  | "targetRangeLabel"
+  | "validationReasonLabel"
+  | "commandHashLabel"
+  | "profileLabel"
+  | "environmentLabel"
+> {
+  const validation = summarizeValidation({
+    latest_validation: provenance?.latest_validation ?? null,
+    validation_freshness_status: provenance?.freshness_status,
+    validation_reason_code: provenance?.reason_code,
+  });
+  return {
+    requiredTierLabel: formatRequiredTierLabel(normalizeTier(provenance?.required_tier) ?? 1),
+    latestSatisfiedTierLabel: formatLatestSatisfiedTierLabel(
+      normalizeTier(provenance?.latest_satisfied_tier),
+      provenance?.latest_validation ?? null,
+    ),
+    latestSatisfiedTierDetail: validation.detail,
+    freshnessLabel: validation.freshLabel,
+    baseShaLabel: validation.baseShaLabel,
+    workspaceHeadShaLabel: validation.workspaceHeadShaLabel,
+    validatedTargetShaLabel: validation.validatedTargetShaLabel,
+    currentTargetShaLabel: validation.currentTargetShaLabel,
+    targetRangeLabel: validation.headLabel,
+    validationReasonLabel: validation.reasonLabel,
+    commandHashLabel: validation.commandHashLabel,
+    profileLabel: validation.profileLabel,
+    environmentLabel: validation.environmentLabel,
   };
 }
 
@@ -229,10 +316,15 @@ export function summarizeRecovery(item: MergeQueueItem): RecoverySummary {
     latestSatisfiedTierLabel: formatLatestSatisfiedTierLabel(latestSatisfiedValidationTier(item), item.latest_validation),
     latestSatisfiedTierDetail: validation.detail,
     freshnessLabel: validation.freshLabel,
-    baseShaLabel: compactSha(item.latest_validation?.base_commit),
-    validatedTargetShaLabel: compactSha(item.latest_validation?.target_head_sha),
-    currentTargetShaLabel: compactSha(item.latest_validation?.current_target_head_sha),
+    baseShaLabel: validation.baseShaLabel,
+    workspaceHeadShaLabel: validation.workspaceHeadShaLabel,
+    validatedTargetShaLabel: validation.validatedTargetShaLabel,
+    currentTargetShaLabel: validation.currentTargetShaLabel,
     targetRangeLabel: validation.headLabel,
+    validationReasonLabel: validation.reasonLabel,
+    commandHashLabel: validation.commandHashLabel,
+    profileLabel: validation.profileLabel,
+    environmentLabel: validation.environmentLabel,
     blockerLabel,
     blockerDetail: item.merge_blocker_reason,
     candidateLabel: identity.candidateLabel,
@@ -434,6 +526,58 @@ function compactSha(value: string | null | undefined): string {
     return "unknown";
   }
   return /^[0-9a-f]{12,}$/i.test(value) ? value.slice(0, 7) : value;
+}
+
+function compactShaOrUnavailable(value: string | null | undefined): string {
+  const compact = compactSha(value);
+  return compact === "unknown" ? "unavailable" : compact;
+}
+
+function formatFreshnessLabel(status: ValidationFreshnessStatus): string {
+  if (status === "fresh") {
+    return "fresh";
+  }
+  if (status === "stale") {
+    return "stale target";
+  }
+  if (status === "unavailable") {
+    return "unavailable";
+  }
+  return "freshness unknown";
+}
+
+function freshnessStatusFromBoolean(value: boolean | null | undefined): ValidationFreshnessStatus {
+  if (value === true) {
+    return "fresh";
+  }
+  if (value === false) {
+    return "stale";
+  }
+  return "unknown";
+}
+
+function freshnessReasonFromStatus(status: ValidationFreshnessStatus): string {
+  if (status === "fresh") {
+    return "validation_fresh";
+  }
+  if (status === "stale") {
+    return "validation_target_stale";
+  }
+  if (status === "unavailable") {
+    return "validation_unavailable";
+  }
+  return "validation_target_unknown";
+}
+
+function formatProfileLabel(
+  validation: NonNullable<MergeQueueItem["latest_validation"]>,
+): string {
+  if (!validation.profile_name) {
+    return "unavailable";
+  }
+  return validation.profile_version === null || validation.profile_version === undefined
+    ? validation.profile_name
+    : `${validation.profile_name}@${validation.profile_version}`;
 }
 
 function formatCoverageLabel(validation: NonNullable<MergeQueueItem["latest_validation"]>): string {

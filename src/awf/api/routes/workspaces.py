@@ -40,11 +40,16 @@ from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
     StaleReasonRepository,
+    ValidationRunRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.validation_observability import (
+    latest_merge_candidate,
+    validation_freshness_summary,
+)
 from awf.service.workspace_observability import (
     workspace_events_by_occurrence,
     workspace_observability_payload,
@@ -371,7 +376,13 @@ async def get_workspace(
             status_code=status.HTTP_404_NOT_FOUND,
             detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
         )
-    return workspace_response(ws)
+    validation_runs = await ValidationRunRepository(session).list_for_workspace(workspace_id)
+    validation_provenance = validation_freshness_summary(
+        ws,
+        validation_runs,
+        candidate=latest_merge_candidate(ws),
+    )
+    return workspace_response(ws, validation_provenance=validation_provenance)
 
 
 @router.get("", response_model=list[WorkspaceResponse])

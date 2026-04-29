@@ -24,7 +24,12 @@ from awf.api.app import configure_database, create_app
 from awf.api.schemas import WorkspaceCreateRequest, WorkspaceCreateV2Request
 from awf.common.config import Settings, get_settings
 from awf.db.enums import WorkspaceStatus
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import (
+    MergeCandidateRepository,
+    TaskAttemptRepository,
+    TaskRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_session_factory
 from awf.service.disk import DiskCheck
 
@@ -210,6 +215,171 @@ async def _set_workspace_status(
         ws = await repo.get(workspace_id)
         assert ws is not None
         ws.status = status.value
+        await session.commit()
+
+
+async def _attach_merge_candidate(
+    engine: AsyncEngine,
+    workspace_id: str,
+    *,
+    head_sha: str | None = "target-current",
+    base_sha: str | None = "base-current",
+) -> tuple[str, str]:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.status = WorkspaceStatus.monitoring_pr.value
+        workspace.pr_url = "https://github.com/example/app/pull/1"
+        workspace.pr_number = 1
+        workspace.branch_name = "codex/validation-observability"
+        if workspace.task_attempt is not None:
+            attempt = workspace.task_attempt
+            task = await TaskRepository(session).get(attempt.task_id)
+            assert task is not None
+        else:
+            task = await TaskRepository(session).create_or_get(
+                repo_url=workspace.repo_url,
+                base_branch=workspace.branch_base,
+                title=workspace.task_title,
+                prompt=workspace.task_prompt,
+                external_id=f"WORKSPACE-{workspace_id}",
+                idempotency_key=None,
+                task_class=workspace.task_class,
+                owned_paths=list(workspace.owned_paths),
+            )
+            attempt = await TaskAttemptRepository(session).create_for_workspace(
+                task=task,
+                workspace=workspace,
+            )
+        attempt.is_canonical_for_merge = True
+        candidate = await MergeCandidateRepository(session).create_or_update_open_for_attempt(
+            task=task,
+            attempt=attempt,
+            workspace=workspace,
+            head_sha=head_sha,
+            base_sha=base_sha,
+        )
+        await session.commit()
+        return attempt.id, candidate.id
+
+
+async def _insert_validation_run(
+    engine: AsyncEngine,
+    *,
+    run_id: str,
+    workspace_id: str,
+    attempt_id: str | None,
+    tier: int = 2,
+    target_head_sha: str | None = "target-current",
+    status: str = "succeeded",
+    reason_code: str | None = "VALIDATION_OK",
+    started_at: datetime = datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+    finished_at: datetime | None = datetime(2026, 4, 26, 12, 4, tzinfo=UTC),
+) -> None:
+    from sqlalchemy import text
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        await session.execute(
+            text(
+                """
+                INSERT INTO validation_runs (
+                    id,
+                    workspace_id,
+                    attempt_id,
+                    tier,
+                    command_set_hash,
+                    commands,
+                    base_commit,
+                    base_sha,
+                    workspace_head_sha,
+                    target_branch,
+                    target_head_sha,
+                    profile_name,
+                    profile_version,
+                    profile_source,
+                    resolved_profile_digest,
+                    environment_identity_digest,
+                    environment_identity_inputs,
+                    status,
+                    reason_code,
+                    started_at,
+                    finished_at,
+                    log_stream_refs
+                )
+                VALUES (
+                    :id,
+                    :workspace_id,
+                    :attempt_id,
+                    :tier,
+                    :command_set_hash,
+                    :commands,
+                    :base_commit,
+                    :base_sha,
+                    :workspace_head_sha,
+                    :target_branch,
+                    :target_head_sha,
+                    :profile_name,
+                    :profile_version,
+                    :profile_source,
+                    :resolved_profile_digest,
+                    :environment_identity_digest,
+                    :environment_identity_inputs,
+                    :status,
+                    :reason_code,
+                    :started_at,
+                    :finished_at,
+                    :log_stream_refs
+                )
+                """
+            ),
+            {
+                "id": run_id,
+                "workspace_id": workspace_id,
+                "attempt_id": attempt_id,
+                "tier": tier,
+                "command_set_hash": "a" * 64,
+                "commands": json.dumps(
+                    [
+                        {
+                            "phase": "validate",
+                            "command_index": 1,
+                            "command": "pytest -q",
+                            "stream_ids": {
+                                "stdout": "validation.01_validate.stdout",
+                                "stderr": "validation.01_validate.stderr",
+                            },
+                        }
+                    ]
+                ),
+                "base_commit": "legacy-base",
+                "base_sha": "base-identity",
+                "workspace_head_sha": "workspace-head",
+                "target_branch": "codex/validation-observability",
+                "target_head_sha": target_head_sha,
+                "profile_name": "python",
+                "profile_version": 3,
+                "profile_source": "repo:.awf/workspace.yml",
+                "resolved_profile_digest": "1" * 64,
+                "environment_identity_digest": "2" * 64,
+                "environment_identity_inputs": json.dumps({"schema_version": 1}),
+                "status": status,
+                "reason_code": reason_code,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "log_stream_refs": json.dumps(
+                    {
+                        "commands": [
+                            {
+                                "stdout": "validation.01_validate.stdout",
+                                "stderr": "validation.01_validate.stderr",
+                            }
+                        ]
+                    }
+                ),
+            },
+        )
         await session.commit()
 
 
@@ -1259,6 +1429,132 @@ class TestGetWorkspace:
         assert body["task_title"] == _MINIMAL_BODY["task_title"]
         assert body["agent"] == "codex"
         assert body["test_commands"] == _MINIMAL_BODY["test_commands"]
+
+    @pytest.mark.unit
+    async def test_get_workspace_exposes_validation_provenance_summary(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        create = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(task_class="refactor_task"),
+        )
+        assert create.status_code == 202
+        ws_id = create.json()["workspace_id"]
+        attempt_id, _candidate_id = await _attach_merge_candidate(
+            engine,
+            ws_id,
+            head_sha="target-current",
+        )
+        await _insert_validation_run(
+            engine,
+            run_id="vr_workspace_fresh_000001",
+            workspace_id=ws_id,
+            attempt_id=attempt_id,
+            tier=2,
+            target_head_sha="target-current",
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        provenance = response.json()["validation_provenance"]
+        assert provenance["required_tier"] == 2
+        assert provenance["latest_satisfied_tier"] == 2
+        assert provenance["freshness_status"] == "fresh"
+        assert provenance["reason_code"] == "validation_fresh"
+        assert provenance["current_target_head_sha"] == "target-current"
+        latest = provenance["latest_validation"]
+        assert latest["validation_run_id"] == "vr_workspace_fresh_000001"
+        assert latest["attempt_id"] == attempt_id
+        assert latest["tier"] == 2
+        assert latest["status"] == "succeeded"
+        assert latest["reason_code"] == "VALIDATION_OK"
+        assert latest["command_set_hash"] == "a" * 64
+        assert latest["base_commit"] == "legacy-base"
+        assert latest["base_sha"] == "base-identity"
+        assert latest["workspace_head_sha"] == "workspace-head"
+        assert latest["target_branch"] == "codex/validation-observability"
+        assert latest["target_head_sha"] == "target-current"
+        assert latest["current_target_head_sha"] == "target-current"
+        assert latest["profile_name"] == "python"
+        assert latest["profile_version"] == 3
+        assert latest["profile_source"] == "repo:.awf/workspace.yml"
+        assert latest["resolved_profile_digest"] == "1" * 64
+        assert latest["environment_identity_digest"] == "2" * 64
+        assert latest["environment_identity_inputs"] == {"schema_version": 1}
+        assert latest["identity_source"] == "persisted"
+        assert latest["fresh_for_target"] is True
+        assert latest["freshness_status"] == "fresh"
+        assert latest["freshness_reason_code"] == "validation_fresh"
+
+    @pytest.mark.unit
+    async def test_get_workspace_marks_validation_stale_when_target_identity_differs(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        create = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(task_class="refactor_task"),
+        )
+        assert create.status_code == 202
+        ws_id = create.json()["workspace_id"]
+        attempt_id, _candidate_id = await _attach_merge_candidate(
+            engine,
+            ws_id,
+            head_sha="target-new",
+        )
+        await _insert_validation_run(
+            engine,
+            run_id="vr_workspace_stale_000001",
+            workspace_id=ws_id,
+            attempt_id=attempt_id,
+            tier=2,
+            target_head_sha="target-old",
+        )
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        provenance = response.json()["validation_provenance"]
+        assert provenance["required_tier"] == 2
+        assert provenance["latest_satisfied_tier"] == 2
+        assert provenance["freshness_status"] == "stale"
+        assert provenance["reason_code"] == "validation_target_stale"
+        assert provenance["current_target_head_sha"] == "target-new"
+        latest = provenance["latest_validation"]
+        assert latest["target_head_sha"] == "target-old"
+        assert latest["current_target_head_sha"] == "target-new"
+        assert latest["fresh_for_target"] is False
+        assert latest["freshness_status"] == "stale"
+        assert latest["freshness_reason_code"] == "validation_target_stale"
+
+    @pytest.mark.unit
+    async def test_get_workspace_reports_validation_unavailable_for_legacy_workspace(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        create = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(task_class="dependency_task"),
+        )
+        assert create.status_code == 202
+        ws_id = create.json()["workspace_id"]
+
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        provenance = response.json()["validation_provenance"]
+        assert provenance == {
+            "required_tier": 2,
+            "latest_satisfied_tier": None,
+            "freshness_status": "unavailable",
+            "reason_code": "validation_unavailable",
+            "current_target_head_sha": None,
+            "latest_validation": None,
+        }
 
     @pytest.mark.unit
     async def test_returns_404_for_unknown_id(self, client: AsyncClient) -> None:

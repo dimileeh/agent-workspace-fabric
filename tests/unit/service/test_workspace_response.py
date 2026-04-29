@@ -9,6 +9,10 @@ import pytest
 
 from awf.api.schemas import WorkspaceResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.service.validation_observability import (
+    latest_merge_candidate,
+    validation_freshness_summary,
+)
 from awf.service.workspaces import workspace_response
 
 
@@ -176,3 +180,160 @@ def test_workspace_response_includes_recovery_summary_with_single_validation(
     assert response.recovery.recovery_mode == "rebase_only"
     assert response.recovery.current_operation is not None
     assert response.recovery.current_operation.id == "op_recovery"
+
+
+@pytest.mark.unit
+def test_workspace_validation_summary_ignores_other_attempt_runs() -> None:
+    now = datetime(2026, 4, 27, 14, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_attempt_scope",
+        task_class="refactor_task",
+        resolved_profile=None,
+        operations=[],
+        monitor_last_commit_sha="target-head",
+    )
+    candidate = SimpleNamespace(
+        id="mc_attempt_scope",
+        attempt_id="att_canonical",
+        head_sha="target-head",
+    )
+    other_attempt_run = SimpleNamespace(
+        id="vr_other_attempt",
+        workspace_id="ws_attempt_scope",
+        attempt_id="att_other",
+        tier=3,
+        command_set_hash="a" * 64,
+        base_commit="base",
+        base_sha="base",
+        workspace_head_sha="target-head",
+        target_branch="main",
+        target_head_sha="target-head",
+        profile_name=None,
+        profile_version=None,
+        profile_source=None,
+        resolved_profile_digest=None,
+        environment_identity_digest=None,
+        environment_identity_inputs=None,
+        status="succeeded",
+        reason_code="VALIDATION_OK",
+        started_at=now,
+        finished_at=now + timedelta(minutes=1),
+        log_stream_refs={},
+        retry_count=0,
+    )
+    canonical_run = SimpleNamespace(
+        **{
+            **vars(other_attempt_run),
+            "id": "vr_canonical",
+            "attempt_id": "att_canonical",
+            "tier": 1,
+        }
+    )
+
+    summary = validation_freshness_summary(
+        workspace,  # type: ignore[arg-type]
+        [other_attempt_run, canonical_run],  # type: ignore[list-item]
+        candidate=candidate,  # type: ignore[arg-type]
+    )
+
+    assert summary.required_tier == 2
+    assert summary.latest_satisfied_tier == 1
+    assert summary.freshness_status == "stale"
+    assert summary.reason_code == "validation_insufficient_tier"
+    assert summary.latest_validation is not None
+    assert summary.latest_validation.freshness_status == "fresh"
+    assert summary.latest_validation.validation_run_id == "vr_canonical"
+
+
+@pytest.mark.unit
+def test_workspace_validation_summary_requires_post_rebase_validation() -> None:
+    now = datetime(2026, 4, 27, 15, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_post_rebase",
+        task_class="test_task",
+        resolved_profile=None,
+        monitor_last_commit_sha="target-head",
+        operations=[
+            SimpleNamespace(
+                type=OperationType.rebase.value,
+                status=OperationStatus.succeeded.value,
+                created_at=now,
+            )
+        ],
+    )
+    candidate = SimpleNamespace(
+        id="mc_post_rebase",
+        attempt_id="att_post_rebase",
+        head_sha="target-head",
+    )
+    run = SimpleNamespace(
+        id="vr_pre_rebase",
+        workspace_id="ws_post_rebase",
+        attempt_id="att_post_rebase",
+        tier=3,
+        command_set_hash="b" * 64,
+        base_commit="base",
+        base_sha="base",
+        workspace_head_sha="target-head",
+        target_branch="main",
+        target_head_sha="target-head",
+        profile_name=None,
+        profile_version=None,
+        profile_source=None,
+        resolved_profile_digest=None,
+        environment_identity_digest=None,
+        environment_identity_inputs=None,
+        status="succeeded",
+        reason_code="VALIDATION_OK",
+        started_at=now - timedelta(minutes=2),
+        finished_at=now - timedelta(minutes=1),
+        log_stream_refs={},
+        retry_count=0,
+    )
+
+    summary = validation_freshness_summary(
+        workspace,  # type: ignore[arg-type]
+        [run],  # type: ignore[list-item]
+        candidate=candidate,  # type: ignore[arg-type]
+    )
+
+    assert summary.required_tier == 2
+    assert summary.latest_satisfied_tier is None
+    assert summary.freshness_status == "stale"
+    assert summary.reason_code == "validation_insufficient_tier"
+    assert summary.latest_validation is not None
+    assert summary.latest_validation.freshness_status == "fresh"
+
+
+@pytest.mark.unit
+def test_latest_merge_candidate_ignores_candidates_with_missing_status() -> None:
+    newer_missing_status = SimpleNamespace(
+        id="mc_missing_status",
+        updated_at=datetime(2026, 4, 27, 16, 0, tzinfo=UTC),
+    )
+    older_open = SimpleNamespace(
+        id="mc_open",
+        status="open",
+        updated_at=datetime(2026, 4, 27, 15, 0, tzinfo=UTC),
+    )
+    workspace = SimpleNamespace(merge_candidates=[newer_missing_status, older_open])
+
+    assert latest_merge_candidate(workspace) is older_open  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_validation_summary_propagates_collection_access_errors() -> None:
+    class WorkspaceWithBrokenOperations:
+        task_class = None
+        resolved_profile = None
+        monitor_last_commit_sha = None
+
+        @property
+        def operations(self) -> list[object]:
+            raise RuntimeError("relationship failed")
+
+    with pytest.raises(RuntimeError, match="relationship failed"):
+        validation_freshness_summary(
+            WorkspaceWithBrokenOperations(),  # type: ignore[arg-type]
+            [],
+        )

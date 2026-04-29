@@ -288,7 +288,7 @@ async def _insert_validation_run(
     run_id: str,
     workspace_id: str,
     attempt_id: str,
-    target_head_sha: str,
+    target_head_sha: str | None,
     base_sha: str | None = None,
     workspace_head_sha: str | None = None,
     profile_name: str | None = None,
@@ -471,6 +471,8 @@ class TestMergeQueueList:
             "required_next_action",
             "required_validation_tier",
             "latest_satisfied_validation_tier",
+            "validation_freshness_status",
+            "validation_reason_code",
             "readiness",
             "canonical",
             "queue_blockers",
@@ -509,6 +511,8 @@ class TestMergeQueueList:
             "stale_reason": None,
         }
         assert item["latest_validation"] is None
+        assert item["validation_freshness_status"] == "unavailable"
+        assert item["validation_reason_code"] == "validation_unavailable"
         assert item["required_validation_tier"] == 1
         assert item["latest_satisfied_validation_tier"] is None
         assert newer_id not in {row["workspace_id"] for row in body["items"]}
@@ -1492,6 +1496,8 @@ class TestMergeQueueList:
                 ]
             },
             "fresh_for_target": False,
+            "freshness_status": "stale",
+            "freshness_reason_code": "validation_target_stale",
             "retry_count": 0,
             "coverage_percent": None,
             "coverage_minimum_percent": None,
@@ -1499,6 +1505,8 @@ class TestMergeQueueList:
             "coverage_reason_code": None,
             "coverage_gaps": [],
         }
+        assert item["validation_freshness_status"] == "stale"
+        assert item["validation_reason_code"] == "validation_target_stale"
         assert item["required_validation_tier"] == 1
         assert item["latest_satisfied_validation_tier"] == 1
 
@@ -1536,8 +1544,45 @@ class TestMergeQueueList:
         assert item["latest_validation"]["workspace_head_sha"] == "old-head"
         assert item["latest_validation"]["environment_identity_inputs"] == {}
         assert item["latest_validation"]["identity_source"] == "legacy_fallback"
+        assert item["latest_validation"]["freshness_status"] == "stale"
+        assert item["latest_validation"]["freshness_reason_code"] == "validation_target_stale"
         assert item["required_validation_tier"] == 1
         assert item["latest_satisfied_validation_tier"] == 1
+
+    @pytest.mark.unit
+    async def test_merge_queue_freshness_status_is_explicit_for_missing_target(
+        self,
+        client: AsyncClient,
+        engine: AsyncEngine,
+    ) -> None:
+        workspace_id = await _create_queue_workspace(
+            engine,
+            title="Missing target identity",
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/console/pull/127",
+            branch_name="codex/merge-queue",
+            updated_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+        )
+        attempt_id = await _attempt_id_for_workspace(engine, workspace_id)
+        await _insert_validation_run(
+            engine,
+            run_id="vr_missing_target_identity1",
+            workspace_id=workspace_id,
+            attempt_id=attempt_id,
+            target_head_sha=None,
+        )
+
+        response = await client.get("/v1/merge-queue")
+
+        assert response.status_code == 200
+        item = next(
+            item for item in response.json()["items"] if item["workspace_id"] == workspace_id
+        )
+        assert item["validation_freshness_status"] == "unknown"
+        assert item["validation_reason_code"] == "validation_target_unknown"
+        assert item["latest_validation"]["fresh_for_target"] is None
+        assert item["latest_validation"]["freshness_status"] == "unknown"
+        assert item["latest_validation"]["freshness_reason_code"] == "validation_target_unknown"
 
     @pytest.mark.unit
     async def test_exposes_required_and_latest_satisfied_validation_tiers(
