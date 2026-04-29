@@ -1364,7 +1364,7 @@ class SecretLeaseRepository:
         *,
         leases: Iterable[SecretLeaseIssue],
         now: datetime,
-    ) -> builtins.list[WorkspaceSecretLease]:
+    ) -> list[WorkspaceSecretLease]:
         issues = list(leases)
         if not issues:
             return []
@@ -1475,7 +1475,7 @@ class SecretLeaseRepository:
         *,
         now: datetime,
         mount_metadata: Mapping[str, Any] | None = None,
-    ) -> builtins.list[WorkspaceSecretLease]:
+    ) -> list[WorkspaceSecretLease]:
         leases = await self._list_for_workspace_statuses(
             workspace.id,
             statuses=(SECRET_LEASE_STATUS_ISSUED,),
@@ -1496,7 +1496,7 @@ class SecretLeaseRepository:
             )
         return leases
 
-    async def expire_due_leases(self, *, now: datetime) -> builtins.list[WorkspaceSecretLease]:
+    async def expire_due_leases(self, *, now: datetime) -> list[WorkspaceSecretLease]:
         stmt = (
             select(WorkspaceSecretLease)
             .where(
@@ -1532,7 +1532,7 @@ class SecretLeaseRepository:
         *,
         now: datetime,
         reason_code: str,
-    ) -> builtins.list[WorkspaceSecretLease]:
+    ) -> list[WorkspaceSecretLease]:
         leases = await self._list_for_workspace_statuses(
             workspace.id,
             statuses=_SECRET_LEASE_REVOCABLE_STATUSES,
@@ -1552,7 +1552,7 @@ class SecretLeaseRepository:
             )
         return leases
 
-    async def list_for_workspace(self, workspace_id: str) -> builtins.list[WorkspaceSecretLease]:
+    async def list_for_workspace(self, workspace_id: str) -> list[WorkspaceSecretLease]:
         stmt = (
             select(WorkspaceSecretLease)
             .where(WorkspaceSecretLease.workspace_id == workspace_id)
@@ -1592,7 +1592,7 @@ class SecretLeaseRepository:
         workspace_id: str,
         *,
         statuses: tuple[str, ...],
-    ) -> builtins.list[WorkspaceSecretLease]:
+    ) -> list[WorkspaceSecretLease]:
         stmt = (
             select(WorkspaceSecretLease)
             .where(
