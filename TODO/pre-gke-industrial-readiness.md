@@ -49,7 +49,7 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| _None_ | _No active AWF dogfood slices after the 2026-04-29 reconciliation._ | _-_ | _-_ | _-_ | All tracked workspaces completed; local changes must be committed/reconciled before the next service refresh and wave. |
+| P1 Local Packaging And Upgrade Path | Local backup, upgrade, and recovery runbook | `ws_f3145b63327c482aaaa37c10` | _pending_ | running | Documents local image versioning, Postgres backup/restore, rollback, disaster recovery, and `scripts/run_awf.py` compatibility with README contract tests. |
 
 ### Completed Slices
 
@@ -262,10 +262,10 @@ Status values:
 
 - [x] Make local service bootstrap one-command and repeatable.
 - [x] Make migrations run safely during service startup or documented bootstrap.
-- [ ] Add image versioning and local upgrade notes.
-- [ ] Add backup/restore instructions for AWF control-plane Postgres.
-- [ ] Add local disaster recovery instructions for stuck containers, broken migrations, and corrupt work dirs.
-- [ ] Keep `scripts/run_awf.py` compatibility documented until the API-backed runner fully replaces it.
+- [x] Add image versioning and local upgrade notes.
+- [x] Add backup/restore instructions for AWF control-plane Postgres.
+- [x] Add local disaster recovery instructions for stuck containers, broken migrations, and corrupt work dirs.
+- [x] Keep `scripts/run_awf.py` compatibility documented until the API-backed runner fully replaces it.
 
 ## P2: GKE Readiness Design
 

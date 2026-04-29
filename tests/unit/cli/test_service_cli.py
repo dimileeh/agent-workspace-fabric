@@ -457,6 +457,72 @@ def test_readme_documents_service_bootstrap_command() -> None:
 
 
 @pytest.mark.unit
+def test_readme_documents_control_plane_postgres_backup_restore() -> None:
+    readme = Path("README.md").read_text()
+
+    assert "### Control-Plane Postgres Backup And Restore" in readme
+    assert "AWF control-plane database" in readme
+    assert "workspace or project databases" in readme
+    assert "docker compose -f docker/compose/local-service.yml exec -T postgres" in readme
+    assert "pg_dump" in readme
+    assert "pg_restore" in readme
+    assert "docker compose -f docker/compose/local-service.yml stop api worker" in readme
+    assert "before restore" in readme.lower()
+
+
+@pytest.mark.unit
+def test_readme_documents_local_service_upgrade_and_image_versioning() -> None:
+    readme = Path("README.md").read_text()
+
+    assert "### Local Service Image Versioning" in readme
+    assert "### Local Service Upgrade" in readme
+    assert "awf-control-plane:local" in readme
+    assert "docker compose -f docker/compose/local-service.yml build" in readme
+    assert "uv run --python 3.12 --extra dev awf service bootstrap" in readme
+    assert "docker build -t awf-agent-runtime:latest" in readme
+    assert "docker image inspect awf-control-plane:local" in readme
+    assert "docker image inspect awf-agent-runtime:latest" in readme
+    assert "migrate" in readme
+
+
+@pytest.mark.unit
+def test_readme_documents_rollback_and_migration_handling() -> None:
+    readme = Path("README.md").read_text()
+
+    assert "### Local Service Rollback" in readme
+    assert "pre-upgrade backup" in readme
+    assert "image rollback" in readme
+    assert "database migration rollback" in readme
+    assert "awf service logs --service migrate" in readme
+    assert "do not delete the Postgres volume" in readme
+    assert "backup" in readme
+
+
+@pytest.mark.unit
+def test_readme_documents_local_disaster_recovery() -> None:
+    readme = Path("README.md").read_text()
+
+    assert "### Local Disaster Recovery" in readme
+    assert "docker compose -f docker/compose/local-service.yml down --remove-orphans" in readme
+    assert "${AWF_HOST_WORK_DIR}" in readme
+    assert "quarantine" in readme.lower()
+    assert "logs, artifacts, backups, and auth" in readme
+    assert "Postgres volume" in readme
+    assert "uv run --python 3.12 --extra dev awf service status --format pretty" in readme
+
+
+@pytest.mark.unit
+def test_readme_documents_run_awf_compatibility_status() -> None:
+    readme = Path("README.md").read_text()
+    normalized_readme = " ".join(readme.split())
+
+    assert "`scripts/run_awf.py` is the compatibility dogfood runner" in normalized_readme
+    assert "SQLite DB under `--work-dir`" in normalized_readme
+    assert "does not require the local Postgres control-plane database" in readme
+    assert "service worker is the normal always-on executor" in readme
+
+
+@pytest.mark.unit
 def test_readme_documents_service_gc_command() -> None:
     readme = Path("README.md").read_text()
 
