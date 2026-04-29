@@ -1,3 +1,4 @@
+import { proxyAwf } from "./awf-server.ts";
 import type { ValidationTier, WorkspaceOperatorAction } from "./types.ts";
 
 type WorkspaceControlRoutePayload = {
@@ -47,17 +48,15 @@ export async function handleWorkspaceControlRoute(
   }
 
   const body = JSON.stringify(awfBody(action, payload));
-  return proxyAwfControl(
-    `/v1/workspaces/${encodeURIComponent(workspaceId)}/${actionPaths[action]}`,
-    {
-      body,
-      contentType: "application/json",
-      headers: {
-        "Idempotency-Key": idempotencyKeyResult.value,
-        "If-Match": ifMatchHeader(payload.workspace_version, request.headers),
-      },
+  return proxyAwf(`/v1/workspaces/${encodeURIComponent(workspaceId)}/${actionPaths[action]}`, {
+    method: "POST",
+    body,
+    contentType: "application/json",
+    headers: {
+      "Idempotency-Key": idempotencyKeyResult.value,
+      "If-Match": ifMatchHeader(payload.workspace_version, request.headers),
     },
-  );
+  });
 }
 
 async function parsePayload(
@@ -167,65 +166,4 @@ function invalidRequest(message: string): Response {
     },
     { status: invalidRequestStatus },
   );
-}
-
-async function proxyAwfControl(
-  path: string,
-  {
-    body,
-    contentType,
-    headers: forwardedHeaders,
-  }: {
-    body: string;
-    contentType: string;
-    headers: Record<string, string | undefined>;
-  },
-): Promise<Response> {
-  try {
-    const headers = awfHeaders();
-    headers["content-type"] = contentType;
-    for (const [key, value] of Object.entries(forwardedHeaders)) {
-      if (value) {
-        headers[key] = value;
-      }
-    }
-
-    const response = await fetch(`${awfBaseUrl()}${path}`, {
-      method: "POST",
-      cache: "no-store",
-      headers,
-      body,
-    });
-    const text = await response.text();
-    return new Response(text, {
-      status: response.status,
-      headers: {
-        "content-type": response.headers.get("content-type") || "application/json",
-        "cache-control": "no-store",
-      },
-    });
-  } catch (error) {
-    return Response.json(
-      normalizeError(error, "AWF_API_UNREACHABLE", "Unable to reach the AWF API."),
-      { status: 502 },
-    );
-  }
-}
-
-function awfBaseUrl(): string {
-  return (process.env.AWF_API_BASE_URL || "http://localhost:8000").replace(/\/+$/, "");
-}
-
-function awfHeaders(): Record<string, string> {
-  const token = process.env.AWF_API_TOKEN?.trim();
-  return token ? { authorization: `Bearer ${token}` } : {};
-}
-
-function normalizeError(error: unknown, errorCode: string, message: string) {
-  return {
-    ok: false,
-    error_code: errorCode,
-    message,
-    detail: error instanceof Error ? error.message : String(error),
-  };
 }

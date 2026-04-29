@@ -37,6 +37,7 @@ test("remonitor BFF posts with server token and idempotency key", async () => {
       idempotency_key: "browser-idem",
       ignored: "must not forward",
     }),
+    { cookie: "console-session=browser" },
   );
 
   const responseText = await response.text();
@@ -49,6 +50,7 @@ test("remonitor BFF posts with server token and idempotency key", async () => {
   assert.equal(headers["idempotency-key"], "browser-idem");
   assert.equal(headers["if-match"], "7");
   assert.equal(headers["content-type"], "application/json");
+  assert.equal(headers.cookie, undefined);
   assert.deepEqual(JSON.parse(calls[0].init.body), { reason: "resume PR monitor" });
   assert.equal(responseText.includes("server-token"), false);
 });
