@@ -279,6 +279,11 @@ async def test_cancel_active_workspace_stops_stack_transitions_and_replays(
         expected_version=expected_version,
     )
     operations = await _operations(session, workspace.id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
 
     assert response.operation_id == replay.operation_id
     assert response.message == "workspace cancellation requested"
@@ -297,6 +302,19 @@ async def test_cancel_active_workspace_stops_stack_transitions_and_replays(
         "expected_version": 1,
     }
     assert operations[0].result == {"status": WorkspaceStatus.cancelled.value}
+    assert len(audit_events) == 1
+    assert audit_events[0].payload == {
+        "schema": "control_audit.v1",
+        "actor": "operator_api",
+        "source": "operator_api",
+        "action": "cancel",
+        "outcome": "succeeded",
+        "reason_code": "OPERATOR_CANCEL",
+        "operation_id": operations[0].id,
+        "operation_type": "cancel",
+        "stop_stack": True,
+        "expected_version": 1,
+    }
 
 
 @pytest.mark.unit
@@ -336,14 +354,27 @@ async def test_stop_active_workspace_cancels_and_terminal_workspace_records_even
     active_response = await service.stop_workspace(active.id, reason="halt")
     terminal_response = await service.stop_workspace(terminal.id, reason="already done")
     terminal_events = await _events(session, terminal.id)
+    terminal_audit = await WorkspaceEventRepository(session).list(
+        workspace_id=terminal.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
 
     assert active_response.status == WorkspaceStatus.cancelled
     assert terminal_response.status == WorkspaceStatus.completed
     assert active.status == WorkspaceStatus.cancelled.value
     assert terminal.status == WorkspaceStatus.completed.value
     assert stopper.calls == [active.compose_project_name, terminal.compose_project_name]
-    assert terminal_events[0].event_type == "workspace.stack_stopped"
-    assert terminal_events[0].payload == {"reason": "already done"}
+    stack_event = next(
+        event for event in terminal_events if event.event_type == "workspace.stack_stopped"
+    )
+    assert stack_event.payload == {"reason": "already done"}
+    assert len(terminal_audit) == 1
+    assert terminal_audit[0].payload is not None
+    assert terminal_audit[0].payload["actor"] == "operator_api"
+    assert terminal_audit[0].payload["action"] == "stop"
+    assert terminal_audit[0].payload["outcome"] == "succeeded"
+    assert terminal_audit[0].payload["reason_code"] == "OPERATOR_STOP"
 
 
 @pytest.mark.unit
@@ -436,6 +467,11 @@ async def test_idempotent_replay_returns_original_operation_audit_unchanged(
         idempotency_key="stop-audit-replay",
     )
     replayed = (await _operations(session, workspace.id))[0]
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
 
     assert replay.operation_id == first.operation_id
     assert replayed.id == operation.id
@@ -450,6 +486,9 @@ async def test_idempotent_replay_returns_original_operation_audit_unchanged(
     assert replayed.started_at == original_started_at
     assert replayed.finished_at == original_finished_at
     assert replayed.idempotency_key == "stop-audit-replay"
+    assert len(audit_events) == 1
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["operation_id"] == first.operation_id
 
 
 @pytest.mark.unit
@@ -467,6 +506,11 @@ async def test_stop_stack_failure_finishes_operation_failed_with_audit(
             idempotency_key="stop-fails",
         )
     operations = await _operations(session, workspace.id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
 
     assert exc_info.value.error_code == "STACK_STOP_FAILED"
     assert stopper.calls == [workspace.compose_project_name]
@@ -484,6 +528,15 @@ async def test_stop_stack_failure_finishes_operation_failed_with_audit(
     }
     assert operations[0].started_at is not None
     assert operations[0].finished_at is not None
+    assert len(audit_events) == 1
+    assert audit_events[0].reason_code == "STACK_STOP_FAILED"
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["action"] == "stop"
+    assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["operation_id"] == operations[0].id
+    assert audit_events[0].payload["evidence"]["error_message"] == (
+        "docker stop failed (exit=17): compose stop denied"
+    )
 
 
 @pytest.mark.unit
@@ -502,6 +555,11 @@ async def test_cancel_stack_failure_finishes_operation_failed_with_audit(
             idempotency_key="cancel-fails",
         )
     operations = await _operations(session, workspace.id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
 
     assert stopper.calls == [workspace.compose_project_name]
     assert workspace.status == WorkspaceStatus.ready.value
@@ -517,6 +575,11 @@ async def test_cancel_stack_failure_finishes_operation_failed_with_audit(
         "requested_action": "cancel",
         "stop_stack": True,
     }
+    assert len(audit_events) == 1
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["action"] == "cancel"
+    assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["reason_code"] == "STACK_STOP_FAILED"
 
 
 @pytest.mark.unit
@@ -632,6 +695,11 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
     )
     operations = await _operations(session, workspace.id)
     events = await _events(session, workspace.id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
     expected_snapshot = {
         "monitor_claimed_by": "monitor-worker",
         "monitor_claim_expires_at": monitor_expiry.isoformat(),
@@ -1553,6 +1621,11 @@ async def test_force_destroy_active_workspace_runs_cleanup_and_marks_destroyed(
     )
     operations = await _operations(session, workspace.id)
     events = await _events(session, workspace.id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
 
     assert response.status == WorkspaceStatus.destroyed
     assert response.message == "workspace destroyed"
@@ -1578,13 +1651,31 @@ async def test_force_destroy_active_workspace_runs_cleanup_and_marks_destroyed(
             "completed_steps": [],
         },
     }
-    assert [event.new_state for event in events[:3]] == [
+    state_events = [
+        event for event in events if event.event_type == "workspace.state_changed"
+    ]
+    assert [event.new_state for event in state_events[:3]] == [
         WorkspaceStatus.destroyed.value,
         WorkspaceStatus.destroying.value,
         WorkspaceStatus.cancelled.value,
     ]
-    assert events[0].payload is not None
-    assert events[0].payload["cleanup"] == operations[0].result["cleanup"]
+    assert state_events[0].payload is not None
+    assert state_events[0].payload["cleanup"] == operations[0].result["cleanup"]
+    assert len(audit_events) == 1
+    assert audit_events[0].payload == {
+        "schema": "control_audit.v1",
+        "actor": "operator_api",
+        "source": "operator_api",
+        "action": "destroy",
+        "outcome": "succeeded",
+        "reason_code": "OPERATOR_DESTROY",
+        "operation_id": operations[0].id,
+        "operation_type": "destroy",
+        "force": True,
+        "remove_volumes": False,
+        "remove_worktree": True,
+        "evidence": {"cleanup": operations[0].result["cleanup"]},
+    }
 
 
 @pytest.mark.unit
@@ -1669,6 +1760,11 @@ async def test_destroy_already_destroyed_workspace_succeeds_without_cleanup_and_
         idempotency_key="destroyed-replay",
     )
     operations = await _operations(session, workspace.id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
 
     assert response.operation_id == replay.operation_id
     assert response.message == "workspace already destroyed"
@@ -1686,6 +1782,12 @@ async def test_destroy_already_destroyed_workspace_succeeds_without_cleanup_and_
             "completed_steps": [],
         },
     }
+    assert len(audit_events) == 1
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["action"] == "destroy"
+    assert audit_events[0].payload["outcome"] == "skipped"
+    assert audit_events[0].payload["operation_id"] == operations[0].id
+    assert audit_events[0].payload["evidence"]["cleanup"] == operations[0].result["cleanup"]
 
 
 @pytest.mark.unit
@@ -1703,6 +1805,11 @@ async def test_destroy_cleanup_failures_mark_operation_failed_and_workspace_fail
         remove_worktree=True,
     )
     operations = await _operations(session, workspace.id)
+    audit_events = await WorkspaceEventRepository(session).list(
+        workspace_id=workspace.id,
+        event_type="workspace.audit.control_operation",
+        limit=10,
+    )
 
     assert response.status == WorkspaceStatus.failed
     assert response.message == "workspace cleanup failed"
@@ -1749,6 +1856,17 @@ async def test_destroy_cleanup_failures_mark_operation_failed_and_workspace_fail
             "completed_steps": [],
         },
     }
+    assert len(audit_events) == 1
+    assert audit_events[0].reason_code == "CLEANUP_FAILED"
+    assert audit_events[0].payload is not None
+    assert audit_events[0].payload["action"] == "destroy"
+    assert audit_events[0].payload["outcome"] == "failed"
+    assert audit_events[0].payload["operation_id"] == operations[0].id
+    assert audit_events[0].payload["evidence"]["cleanup"] == operations[0].result["cleanup"]
+    assert (
+        audit_events[0].payload["evidence"]["error_message"]
+        == "compose down failed, worktree removal failed"
+    )
 
 
 @pytest.mark.unit
