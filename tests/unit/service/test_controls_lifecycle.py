@@ -705,11 +705,6 @@ async def test_remonitor_resets_claims_records_snapshot_and_replays(
     )
     operations = await _operations(session, workspace.id)
     events = await _events(session, workspace.id)
-    audit_events = await WorkspaceEventRepository(session).list(
-        workspace_id=workspace.id,
-        event_type="workspace.audit.control_operation",
-        limit=10,
-    )
     expected_snapshot = {
         "monitor_claimed_by": "monitor-worker",
         "monitor_claim_expires_at": monitor_expiry.isoformat(),

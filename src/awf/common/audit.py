@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, cast
 
 AUDIT_SCHEMA = "control_audit.v1"
 REDACTION_MARKER = "[redacted]"
@@ -93,7 +93,7 @@ def build_audit_payload(
         payload.update(dict(extra))
     if evidence is not None:
         payload["evidence"] = dict(evidence)
-    return _drop_none(redact_audit_value(payload))
+    return cast(dict[str, Any], _drop_none(redact_audit_value(payload)))
 
 
 def redact_audit_value(value: Any) -> Any:
