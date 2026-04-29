@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+import awf.profiles.lint as profile_lint
 from awf.profiles.lint import lint_workspace_profile, profile_lint_errors
 from awf.profiles.models import ProfileLintSeverity, WorkspaceProfile
 from awf.profiles.resolver import ProfileResolutionError, resolve_workspace_profile
@@ -150,6 +151,32 @@ def test_long_provider_ref_with_common_cloud_identifier_chars_is_not_raw_secret(
     )
 
     assert profile_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
+def test_profile_lint_private_path_and_raw_secret_edges() -> None:
+    assert profile_lint._secret_mount_target_is_too_broad("relative/path") is True
+    assert profile_lint._looks_like_raw_secret(None) is False
+    assert profile_lint._looks_like_raw_secret("   ") is False
+    assert profile_lint._looks_like_raw_secret("-----BEGIN PRIVATE KEY-----") is True
+    assert profile_lint._looks_like_raw_secret("line-one\nline-two") is True
+    assert profile_lint._looks_like_raw_secret(
+        "a" * 16 + "." + "b" * 16 + "." + "c" * 16
+    ) is True
+    assert profile_lint._looks_like_raw_secret(("x" * 128) + "!") is True
+
+    home_source = profile_lint._host_home_source("~")
+    assert home_source is not None
+    assert home_source.is_root is True
+    assert home_source.relative_path == ""
+    prefixed_source = profile_lint._host_home_source("${AWF_HOST_HOME}/.docker/config.json")
+    assert prefixed_source is not None
+    assert prefixed_source.relative_path == ".docker/config.json"
+
+    assert profile_lint._normalize_container_path("relative") is None
+    split = profile_lint._split_volume_target("/home/agent/.config/gh:rw,z")
+    assert split.path == "/home/agent/.config/gh"
+    assert split.mode == "rw"
 
 
 @pytest.mark.unit

@@ -15,6 +15,7 @@ import pytest
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
 from awf.common.ids import new_event_id, new_operation_id, new_workspace_id
+from awf.common.redaction import redact_secrets
 
 
 class TestAsyncioSubprocessRunner:
@@ -56,6 +57,10 @@ class TestIds:
     @pytest.mark.unit
     def test_workspace_id_prefix(self) -> None:
         assert new_workspace_id().startswith("ws_")
+
+    @pytest.mark.unit
+    def test_redact_secrets_preserves_empty_text(self) -> None:
+        assert redact_secrets("") == ""
 
     @pytest.mark.unit
     def test_operation_id_prefix(self) -> None:

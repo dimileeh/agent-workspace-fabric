@@ -34,6 +34,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.mcp import server as mcp_server
 from awf.mcp.server import WorkspaceService, build_mcp_server
 from awf.service.disk import DiskCheck
 from awf.service.orphan_resources import (
@@ -530,6 +531,181 @@ class TestMcpOperatorSurfaceRegistration:
 
 
 class TestMcpOperatorSurfaceParity:
+    @pytest.mark.unit
+    async def test_missing_read_only_resources_return_null_tool_results(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        for tool_name, args in (
+            ("awf_list_workspace_validation", {"workspace_id": "ws_missing"}),
+            ("awf_list_workspace_stale_reasons", {"workspace_id": "ws_missing"}),
+            ("awf_list_workspace_artifacts", {"workspace_id": "ws_missing"}),
+            ("awf_get_operation", {"operation_id": "op_missing"}),
+        ):
+            result = await _call_result(operator_stack.mcp, tool_name, args)
+            assert result.isError is False
+            assert result.structuredContent is None
+
+    @pytest.mark.unit
+    async def test_resource_provider_helpers_support_async_and_absent_providers(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        async def async_disk(settings: Settings) -> DiskCheck:
+            return _ok_disk_check(settings)
+
+        async def async_orphan(settings: Settings, session: AsyncSession) -> Any:
+            return _no_orphan_summary(settings, session)
+
+        async def async_runtime(
+            settings: Settings,
+            session: AsyncSession,
+            orphan_resources: Any,
+        ) -> WorkspaceRuntimeHealthSummary:
+            return _empty_runtime_health_summary(settings, session, orphan_resources)
+
+        async with resource_stack.factory() as session:
+            assert (
+                await mcp_server._provided_disk_check(
+                    disk_check_provider=None,
+                    settings=resource_stack.settings,
+                )
+                is None
+            )
+            disk_check = await mcp_server._provided_disk_check(
+                disk_check_provider=async_disk,
+                settings=resource_stack.settings,
+            )
+            assert disk_check is not None
+            assert disk_check.reason == "SUFFICIENT_DISK"
+
+            assert (
+                await mcp_server._provided_orphan_resources(
+                    orphan_resource_summary_provider=None,
+                    settings=resource_stack.settings,
+                    session=session,
+                )
+                is None
+            )
+            orphan_resources = await mcp_server._provided_orphan_resources(
+                orphan_resource_summary_provider=async_orphan,
+                settings=resource_stack.settings,
+                session=session,
+            )
+            assert orphan_resources is not None
+            assert orphan_resources.reason == "NO_ORPHANS"
+
+            assert (
+                await mcp_server._provided_runtime_health(
+                    runtime_health_summary_provider=None,
+                    settings=resource_stack.settings,
+                    session=session,
+                    orphan_resources=orphan_resources,
+                )
+                is None
+            )
+            assert (
+                await mcp_server._provided_runtime_health(
+                    runtime_health_summary_provider=async_runtime,
+                    settings=resource_stack.settings,
+                    session=session,
+                    orphan_resources=None,
+                )
+                is None
+            )
+            runtime_health = await mcp_server._provided_runtime_health(
+                runtime_health_summary_provider=async_runtime,
+                settings=resource_stack.settings,
+                session=session,
+                orphan_resources=orphan_resources,
+            )
+            assert runtime_health is not None
+            assert runtime_health.stranded_count == 0
+
+    @pytest.mark.unit
+    async def test_read_only_operator_tools_use_shared_services_not_route_handlers(
+        self,
+        resource_stack: OperatorStack,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.api.routes import artifacts as artifact_routes
+        from awf.api.routes import merge_queue as merge_queue_routes
+        from awf.api.routes import metrics as metrics_routes
+        from awf.api.routes import validation as validation_routes
+        from awf.api.routes import workspaces as workspace_routes
+
+        merge_workspace_id = await _seed_merge_queue(resource_stack.factory)
+        validation_workspace_id = await _seed_validation(resource_stack.factory)
+        artifact_workspace_id = await _workspace(
+            resource_stack.factory,
+            title="Artifact service parity",
+        )
+
+        async def fail_route_handler(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("MCP read-only parity tools must use shared services")
+
+        monkeypatch.setattr(
+            merge_queue_routes,
+            "list_merge_queue",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            workspace_routes,
+            "list_workspace_overview",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            workspace_routes,
+            "list_workspace_stale_reasons",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            validation_routes,
+            "list_validation_provenance",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            artifact_routes,
+            "list_workspace_artifacts",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            metrics_routes,
+            "get_failure_analysis_summary",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            metrics_routes,
+            "get_workspace_reliability_summary",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            metrics_routes,
+            "get_resource_saturation_summary",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            metrics_routes,
+            "get_slo_metrics_summary",
+            fail_route_handler,
+        )
+
+        tool_calls: list[tuple[str, dict[str, object]]] = [
+            ("awf_list_merge_queue", {"limit": 10}),
+            ("awf_list_workspace_overview", {"limit": 10}),
+            ("awf_list_workspace_validation", {"workspace_id": validation_workspace_id}),
+            ("awf_list_workspace_stale_reasons", {"workspace_id": merge_workspace_id}),
+            ("awf_list_workspace_artifacts", {"workspace_id": artifact_workspace_id}),
+            ("awf_get_failure_analysis_summary", {"since_hours": 2, "limit": 5}),
+            ("awf_get_workspace_reliability_summary", {"since_hours": 2}),
+            ("awf_get_resource_saturation_summary", {}),
+            ("awf_get_slo_metrics_summary", {"since_hours": 2}),
+        ]
+
+        for tool_name, args in tool_calls:
+            payload = await _call(resource_stack.mcp, tool_name, args)
+            assert isinstance(payload, dict)
+
     @pytest.mark.unit
     async def test_merge_queue_tool_matches_rest_payload_and_reason_codes(
         self,

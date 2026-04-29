@@ -2,14 +2,27 @@
 
 from __future__ import annotations
 
+import base64
+import binascii
+import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, Protocol, TypedDict, cast
 
+from sqlalchemy.ext.asyncio import AsyncSession
+
 from awf.adapters.defaults import DEFAULT_AGENT_DEFAULTS
+from awf.api.schemas import (
+    StaleReasonListResponse,
+    StaleReasonResponse,
+    WorkspaceEventResponse,
+    WorkspaceOverviewListResponse,
+    WorkspaceOverviewResponse,
+)
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
+from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
 
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
@@ -56,6 +69,16 @@ _GENERIC_RECOVERY_REASON_CODES = frozenset(
 _MAX_RECOVERY_PAYLOAD_KEYS = 32
 _MAX_RECOVERY_PAYLOAD_DEPTH = 4
 _MAX_RECOVERY_PAYLOAD_SEQUENCE_ITEMS = 20
+
+
+@dataclass(frozen=True)
+class _WorkspaceOverviewCursor:
+    created_at: datetime
+    workspace_id: str
+
+
+class InvalidWorkspaceOverviewCursorError(ValueError):
+    """Raised when a workspace overview pagination cursor cannot be decoded."""
 
 
 @dataclass(frozen=True)
@@ -180,6 +203,140 @@ class _RecoveryOperationLike(Protocol):
 class _LifecycleAccumulator:
     started_at: datetime | None = None
     ended_at: datetime | None = None
+
+
+async def list_workspace_overview_response(
+    session: AsyncSession,
+    *,
+    workspace_status: WorkspaceStatus | None = None,
+    agent: AgentRuntime | None = None,
+    repo_url: str | None = None,
+    limit: int = 50,
+    cursor: str | None = None,
+    workspace_repository_type: type[WorkspaceRepository] = WorkspaceRepository,
+) -> WorkspaceOverviewListResponse:
+    decoded_cursor = _decode_overview_cursor(cursor)
+    rows = await workspace_repository_type(session).list(
+        status=workspace_status,
+        agent=agent,
+        repo_url=repo_url,
+        before_created_at=decoded_cursor.created_at if decoded_cursor is not None else None,
+        before_workspace_id=decoded_cursor.workspace_id if decoded_cursor is not None else None,
+        limit=limit + 1,
+    )
+    page_rows = rows[:limit]
+    has_more = len(rows) > limit
+    return WorkspaceOverviewListResponse(
+        items=[_workspace_overview_item(ws) for ws in page_rows],
+        next_cursor=_encode_overview_cursor(page_rows[-1]) if has_more and page_rows else None,
+        has_more=has_more,
+        limit=limit,
+        cursor=cursor,
+    )
+
+
+async def list_workspace_stale_reasons_response(
+    session: AsyncSession,
+    *,
+    workspace_id: str,
+    include_resolved: bool = False,
+) -> StaleReasonListResponse | None:
+    if not await WorkspaceRepository(session).exists(workspace_id):
+        return None
+    stale_repo = StaleReasonRepository(session)
+    rows = (
+        await stale_repo.list_for_workspace(workspace_id)
+        if include_resolved
+        else await stale_repo.list_active_for_workspace(workspace_id)
+    )
+    return StaleReasonListResponse(
+        items=[StaleReasonResponse.model_validate(row) for row in rows],
+        limit=len(rows),
+        cursor=None,
+    )
+
+
+def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
+    ordered_events = workspace_events_by_occurrence(ws)
+    observability = workspace_observability_payload(
+        ws,
+        ordered_events=ordered_events,
+    )
+    latest_event = ordered_events[-1] if ordered_events else None
+    active_operation = next(
+        (
+            op
+            for op in sorted(ws.operations, key=lambda item: item.created_at, reverse=True)
+            if op.status in _ACTIVE_OPERATION_STATUSES
+        ),
+        None,
+    )
+    return WorkspaceOverviewResponse(
+        workspace_id=ws.id,
+        task_id=ws.task_external_id or ws.id,
+        title=ws.task_title,
+        task_prompt=getattr(ws, "task_prompt", ""),
+        repo_url=ws.repo_url,
+        base_branch=ws.branch_base,
+        branch_name=ws.branch_name,
+        task_class=ws.task_class,
+        owned_paths=list(ws.owned_paths),
+        agent=AgentRuntime(ws.agent),
+        agent_model=observability["agent_model"],
+        agent_effort=observability["agent_effort"],
+        agent_model_source=observability["agent_model_source"],
+        agent_effort_source=observability["agent_effort_source"],
+        lifecycle=observability["lifecycle"],
+        llm_usage=observability["llm_usage"],
+        recovery=observability["recovery"],
+        status=WorkspaceStatus(ws.status),
+        current_phase=ws.status,
+        active_operation=active_operation.type if active_operation is not None else None,
+        last_event=(
+            WorkspaceEventResponse.model_validate(latest_event)
+            if latest_event is not None
+            else None
+        ),
+        pr_url=ws.pr_url,
+        failure_reason=ws.failure_reason,
+        failure_message=ws.failure_message,
+        created_at=ws.created_at,
+        updated_at=ws.updated_at,
+    )
+
+
+def _encode_overview_cursor(workspace: Workspace) -> str:
+    payload = {
+        "t": workspace.created_at.isoformat(),
+        "id": workspace.id,
+    }
+    encoded = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":")).encode("utf-8"))
+    return encoded.decode("ascii").rstrip("=")
+
+
+def _decode_overview_cursor(cursor: str | None) -> _WorkspaceOverviewCursor | None:
+    if cursor is None:
+        return None
+    try:
+        padded_cursor = cursor + ("=" * (-len(cursor) % 4))
+        decoded = base64.urlsafe_b64decode(padded_cursor.encode("ascii"))
+        payload = json.loads(decoded.decode("utf-8"))
+        created_at = datetime.fromisoformat(
+            payload["t"] if "t" in payload else payload["created_at"]
+        )
+        workspace_id = payload["id"] if "id" in payload else payload["workspace_id"]
+    except (
+        binascii.Error,
+        KeyError,
+        TypeError,
+        UnicodeDecodeError,
+        ValueError,
+        json.JSONDecodeError,
+    ) as exc:
+        raise InvalidWorkspaceOverviewCursorError("Invalid workspace overview cursor") from exc
+    if not isinstance(workspace_id, str) or workspace_id == "":
+        raise InvalidWorkspaceOverviewCursorError("Invalid workspace overview cursor")
+    return _WorkspaceOverviewCursor(created_at=created_at, workspace_id=workspace_id)
 
 
 def effective_agent_identity(
