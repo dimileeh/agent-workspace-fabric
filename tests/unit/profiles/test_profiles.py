@@ -12,6 +12,7 @@ from awf.profiles.lint import profile_lint_errors
 from awf.profiles.models import (
     DockerMode,
     ProfileCommand,
+    ProfileHealthCheck,
     ProfilePhaseSet,
     ProfileSecret,
     WorkspaceProfile,
@@ -198,6 +199,15 @@ def test_profile_schema_rejects_invalid_healthchecks(healthcheck: dict[str, obje
                 "validation": {"healthchecks": [healthcheck]},
             }
         )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("method_name", ["display_command", "target"])
+def test_healthcheck_public_targets_reject_invalid_constructed_state(method_name: str) -> None:
+    healthcheck = ProfileHealthCheck.model_construct(name="invalid")
+
+    with pytest.raises(ValueError, match="healthcheck must set command or url"):
+        getattr(healthcheck, method_name)()
 
 
 @pytest.mark.unit

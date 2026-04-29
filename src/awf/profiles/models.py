@@ -147,14 +147,18 @@ class ProfileHealthCheck(BaseModel):
         """Human-readable command/target used in validation provenance."""
         if self.command is not None:
             return self.command
-        assert self.url is not None
-        return f"{self.method} {self.url} expected {self.expected_status}"
+        url = self._require_url()
+        return f"{self.method} {url} expected {self.expected_status}"
 
     def target(self) -> str:
         """Secret-free health-check target for logs and events."""
         if self.command is not None:
             return self.command
-        assert self.url is not None
+        return self._require_url()
+
+    def _require_url(self) -> str:
+        if self.url is None:
+            raise ValueError("healthcheck must set command or url")
         return self.url
 
 
