@@ -927,6 +927,7 @@ class WorkspaceOperationRequest(BaseModel):
 class WorkspaceControlResponse(BaseModel):
     workspace_id: str
     operation_id: str
+    operation_status: str
     status: WorkspaceStatus
     message: str
 

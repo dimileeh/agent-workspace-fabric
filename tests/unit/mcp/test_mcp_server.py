@@ -189,6 +189,7 @@ class _RecordingControlService:
         return WorkspaceControlResponse(
             workspace_id=workspace_id,
             operation_id="op_cancel",
+            operation_status="succeeded",
             status="cancelled",
             message="workspace cancellation requested",
         )
@@ -203,6 +204,7 @@ class _RecordingControlService:
         return WorkspaceControlResponse(
             workspace_id=workspace_id,
             operation_id="op_stop",
+            operation_status="succeeded",
             status="cancelled",
             message="workspace stack stopped",
         )
@@ -229,6 +231,7 @@ class _RecordingControlService:
         return WorkspaceControlResponse(
             workspace_id=workspace_id,
             operation_id="op_destroy",
+            operation_status="succeeded",
             status="destroyed",
             message="workspace destroyed",
         )
@@ -286,6 +289,7 @@ class TestWorkspaceControls:
         assert payload == {
             "workspace_id": "ws_control",
             "operation_id": "op_cancel",
+            "operation_status": "succeeded",
             "status": "cancelled",
             "message": "workspace cancellation requested",
         }
@@ -312,6 +316,7 @@ class TestWorkspaceControls:
         assert payload == {
             "workspace_id": "ws_control",
             "operation_id": "op_stop",
+            "operation_status": "succeeded",
             "status": "cancelled",
             "message": "workspace stack stopped",
         }
@@ -348,6 +353,7 @@ class TestWorkspaceControls:
         assert payload == {
             "workspace_id": "ws_control",
             "operation_id": "op_destroy",
+            "operation_status": "succeeded",
             "status": "destroyed",
             "message": "workspace destroyed",
         }

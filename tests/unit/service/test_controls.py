@@ -146,6 +146,8 @@ async def test_cancel_workspace_stops_stack_transitions_and_replays_operation(
 
     assert response.workspace_id == workspace.id
     assert response.operation_id == replay.operation_id
+    assert response.operation_status == OperationStatus.succeeded.value
+    assert replay.operation_status == OperationStatus.succeeded.value
     assert response.status == WorkspaceStatus.cancelled
     assert stopper.calls == ["awf_ws_cancel"]
 
@@ -172,6 +174,7 @@ async def test_cancel_workspace_records_event_when_already_cancelled(
         events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
 
     assert response.status == WorkspaceStatus.cancelled
+    assert response.operation_status == OperationStatus.succeeded.value
     assert events[0].event_type == "workspace.cancel_requested"
     assert events[0].payload == {"reason": "second cancel", "stop_stack": False}
 
@@ -207,6 +210,8 @@ async def test_stop_workspace_transitions_active_workspace_and_replays(
 
     assert response.status == WorkspaceStatus.cancelled
     assert replay.operation_id == response.operation_id
+    assert response.operation_status == OperationStatus.succeeded.value
+    assert replay.operation_status == OperationStatus.succeeded.value
     assert stopper.calls == ["awf_ws_stop"]
 
 
@@ -236,6 +241,7 @@ async def test_stop_workspace_records_event_for_inactive_workspace(
         events = await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
 
     assert response.status == WorkspaceStatus.completed
+    assert response.operation_status == OperationStatus.succeeded.value
     assert stopper.calls == ["awf_ws_completed"]
     assert events[0].event_type == "workspace.stack_stopped"
 
@@ -276,6 +282,8 @@ async def test_remonitor_workspace_resets_claims_records_snapshot_and_replays(
 
     assert response.status == WorkspaceStatus.monitoring_pr
     assert replay.operation_id == response.operation_id
+    assert response.operation_status == OperationStatus.succeeded.value
+    assert replay.operation_status == OperationStatus.succeeded.value
     assert workspace.monitor_claimed_by is None
     assert workspace.monitor_claim_expires_at is None
     assert workspace.execution_claimed_by is None
@@ -362,6 +370,8 @@ async def test_destroy_workspace_rejects_active_without_force_and_replays_destro
     assert first.status == WorkspaceStatus.destroyed
     assert first.message == "workspace already destroyed"
     assert replay.operation_id == first.operation_id
+    assert first.operation_status == OperationStatus.succeeded.value
+    assert replay.operation_status == OperationStatus.succeeded.value
 
 
 @pytest.mark.unit
@@ -396,6 +406,7 @@ async def test_destroy_workspace_force_cleans_resources_and_marks_destroyed(
 
     assert response.status == WorkspaceStatus.destroyed
     assert response.message == "workspace destroyed"
+    assert response.operation_status == OperationStatus.succeeded.value
     assert cleaner.calls == [
         {
             "workspace_id": workspace.id,
@@ -437,10 +448,87 @@ async def test_destroy_workspace_records_cleanup_failures(
 
     assert response.status == WorkspaceStatus.failed
     assert response.message == "workspace cleanup failed"
+    assert response.operation_status == OperationStatus.failed.value
     assert workspace.failure_reason == "cleanup_failure"
     assert workspace.failure_message == "volume busy, worktree busy"
     assert operations[0].status == OperationStatus.failed.value
     assert operations[0].error_code == "CLEANUP_FAILED"
+
+
+@pytest.mark.unit
+async def test_validate_exact_idempotency_replay_survives_terminal_workspace_movement(
+    engine: AsyncEngine,
+) -> None:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        workspace = await _create_control_workspace(
+            session,
+            status=WorkspaceStatus.monitoring_pr,
+            pr_url="https://github.com/example/controls/pull/7",
+        )
+        service = controls.WorkspaceControlService(
+            session,
+            project_stopper=_RecordingStopper(),
+            cleaner_factory=lambda: _RecordingCleaner(),
+        )
+
+        operation = await service.request_validate_workspace(
+            workspace.id,
+            reason="rerun required validation",
+            requested_tier=2,
+            idempotency_key="validate-terminal-replay",
+        )
+        await OperationRepository(session).finish(
+            operation,
+            status=OperationStatus.succeeded,
+            result={"status": WorkspaceStatus.ready.value},
+        )
+        workspace.status = WorkspaceStatus.completed.value
+        await session.flush()
+        before_operation_ids = [
+            row.id
+            for row in await OperationRepository(session).list_for_workspace(
+                workspace.id,
+                operation_type=OperationType.validate,
+            )
+        ]
+        before_event_ids = [
+            row.id for row in await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        ]
+
+        replay = await service.request_validate_workspace(
+            workspace.id,
+            reason="rerun required validation",
+            requested_tier=2,
+            idempotency_key="validate-terminal-replay",
+        )
+        with pytest.raises(controls.WorkspaceValidateStateError) as fresh_error:
+            await service.request_validate_workspace(
+                workspace.id,
+                reason="rerun required validation",
+                requested_tier=2,
+                idempotency_key="validate-fresh-terminal",
+            )
+
+        after_operation_ids = [
+            row.id
+            for row in await OperationRepository(session).list_for_workspace(
+                workspace.id,
+                operation_type=OperationType.validate,
+            )
+        ]
+        after_event_ids = [
+            row.id for row in await WorkspaceEventRepository(session).list(workspace_id=workspace.id)
+        ]
+
+    assert replay.id == operation.id
+    assert replay.status == OperationStatus.succeeded.value
+    assert fresh_error.value.detail == {
+        "status": WorkspaceStatus.completed.value,
+        "eligible_statuses": [WorkspaceStatus.monitoring_pr.value],
+    }
+    assert after_operation_ids == before_operation_ids
+    assert after_event_ids == before_event_ids
 
 
 @pytest.mark.unit

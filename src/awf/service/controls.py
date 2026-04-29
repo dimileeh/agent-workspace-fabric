@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from datetime import datetime
+from enum import StrEnum
 from pathlib import Path
 from typing import Protocol
 
@@ -61,6 +63,18 @@ _OPERATOR_VALIDATE_REASON_CODE = "OPERATOR_VALIDATE"
 _OPERATOR_REBASE_REASON_CODE = "OPERATOR_REBASE"
 _OPERATOR_DESTROY_REASON_CODE = "OPERATOR_DESTROY"
 _OPERATION_ERROR_MESSAGE_MAX_LENGTH = 2048
+
+
+class _PreparedOperationKind(StrEnum):
+    exact_replay = "exact_replay"
+    active_coalesce = "active_coalesce"
+
+
+@dataclass(frozen=True)
+class _PreparedOperation:
+    workspace: Workspace
+    replay: Operation | None = None
+    kind: _PreparedOperationKind | None = None
 
 
 class WorkspaceCleanerProtocol(Protocol):
@@ -287,7 +301,7 @@ class WorkspaceControlService:
             extra={"stop_stack": stop_stack},
         )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
-        workspace, replay = await self._prepare_operation(
+        prepared = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
@@ -296,6 +310,8 @@ class WorkspaceControlService:
             idempotency_key=idempotency_key,
             expected_version=expected_version,
         )
+        workspace = prepared.workspace
+        replay = prepared.replay
         if replay is not None:
             return _control_response(
                 workspace=workspace,
@@ -347,10 +363,9 @@ class WorkspaceControlService:
             status=OperationStatus.succeeded,
             result={"status": workspace.status},
         )
-        return WorkspaceControlResponse(
-            workspace_id=workspace_id,
-            operation_id=operation.id,
-            status=WorkspaceStatus(workspace.status),
+        return _control_response(
+            workspace=workspace,
+            operation=operation,
             message="workspace cancellation requested",
         )
 
@@ -374,7 +389,7 @@ class WorkspaceControlService:
             requested_action=OperationType.stop.value,
         )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
-        workspace, replay = await self._prepare_operation(
+        prepared = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
@@ -383,6 +398,8 @@ class WorkspaceControlService:
             idempotency_key=idempotency_key,
             expected_version=expected_version,
         )
+        workspace = prepared.workspace
+        replay = prepared.replay
         if replay is not None:
             return _control_response(
                 workspace=workspace,
@@ -430,10 +447,9 @@ class WorkspaceControlService:
             status=OperationStatus.succeeded,
             result={"status": workspace.status},
         )
-        return WorkspaceControlResponse(
-            workspace_id=workspace_id,
-            operation_id=operation.id,
-            status=WorkspaceStatus(workspace.status),
+        return _control_response(
+            workspace=workspace,
+            operation=operation,
             message="workspace stack stopped",
         )
 
@@ -455,7 +471,7 @@ class WorkspaceControlService:
             extra=_workspace_pr_operation_context(workspace_for_payload),
         )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
-        workspace, replay = await self._prepare_operation(
+        prepared = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
@@ -464,6 +480,8 @@ class WorkspaceControlService:
             idempotency_key=idempotency_key,
             expected_version=expected_version,
         )
+        workspace = prepared.workspace
+        replay = prepared.replay
         if replay is not None:
             return _control_response(
                 workspace=workspace,
@@ -534,10 +552,9 @@ class WorkspaceControlService:
             status=OperationStatus.succeeded,
             result=result,
         )
-        return WorkspaceControlResponse(
-            workspace_id=workspace_id,
-            operation_id=operation.id,
-            status=WorkspaceStatus(workspace.status),
+        return _control_response(
+            workspace=workspace,
+            operation=operation,
             message="workspace PR monitor recovery requested",
         )
 
@@ -557,7 +574,7 @@ class WorkspaceControlService:
             requested_action=OperationType.refresh.value,
         )
         operation_payload = _operation_payload(payload, expected_version=expected_version)
-        workspace, replay = await self._prepare_operation(
+        prepared = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
@@ -567,7 +584,14 @@ class WorkspaceControlService:
             expected_version=expected_version,
             active_payload_identity=payload,
         )
+        workspace = prepared.workspace
+        replay = prepared.replay
         if replay is not None:
+            if (
+                prepared.kind != _PreparedOperationKind.exact_replay
+                and WorkspaceStatus(workspace.status) in _DESTROYING_OR_DESTROYED_STATUSES
+            ):
+                raise WorkspaceRefreshStateError(workspace)
             return replay
         if WorkspaceStatus(workspace.status) in _DESTROYING_OR_DESTROYED_STATUSES:
             raise WorkspaceRefreshStateError(workspace)
@@ -614,7 +638,7 @@ class WorkspaceControlService:
         if requested_tier is not None:
             payload["requested_tier"] = requested_tier
         operation_payload = _operation_payload(payload, expected_version=expected_version)
-        workspace, replay = await self._prepare_operation(
+        prepared = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
@@ -624,9 +648,14 @@ class WorkspaceControlService:
             expected_version=expected_version,
             active_payload_identity=payload,
         )
+        workspace = prepared.workspace
+        replay = prepared.replay
         current = WorkspaceStatus(workspace.status)
         if replay is not None:
-            if current not in _VALIDATE_REPLAY_STATUSES:
+            if (
+                prepared.kind != _PreparedOperationKind.exact_replay
+                and current not in _VALIDATE_REPLAY_STATUSES
+            ):
                 raise WorkspaceValidateStateError(workspace)
             return replay
         if current not in _VALIDATE_ELIGIBLE_STATUSES:
@@ -687,7 +716,7 @@ class WorkspaceControlService:
             base_payload,
             expected_version=expected_version,
         )
-        workspace, replay = await self._prepare_operation(
+        prepared = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
@@ -701,6 +730,8 @@ class WorkspaceControlService:
                 {*base_payload.keys(), "expected_version"}
             ),
         )
+        workspace = prepared.workspace
+        replay = prepared.replay
         if replay is not None:
             return replay
 
@@ -807,7 +838,7 @@ class WorkspaceControlService:
             },
             expected_version=expected_version,
         )
-        workspace, replay = await self._prepare_operation(
+        prepared = await self._prepare_operation(
             repo,
             operations,
             workspace_id=workspace_id,
@@ -816,6 +847,8 @@ class WorkspaceControlService:
             idempotency_key=idempotency_key,
             expected_version=expected_version,
         )
+        workspace = prepared.workspace
+        replay = prepared.replay
         if replay is not None:
             message = (
                 "workspace already destroyed"
@@ -841,10 +874,9 @@ class WorkspaceControlService:
                 status=OperationStatus.succeeded,
                 result={"status": WorkspaceStatus.destroyed.value},
             )
-            return WorkspaceControlResponse(
-                workspace_id=workspace_id,
-                operation_id=operation.id,
-                status=WorkspaceStatus.destroyed,
+            return _control_response(
+                workspace=workspace,
+                operation=operation,
                 message="workspace already destroyed",
             )
 
@@ -916,10 +948,9 @@ class WorkspaceControlService:
             )
             message = "workspace destroyed"
 
-        return WorkspaceControlResponse(
-            workspace_id=workspace_id,
-            operation_id=operation.id,
-            status=WorkspaceStatus(workspace.status),
+        return _control_response(
+            workspace=workspace,
+            operation=operation,
             message=message,
         )
 
@@ -956,7 +987,7 @@ class WorkspaceControlService:
         active_payload_identity: dict[str, object | None] | None = None,
         idempotency_payload_identity: dict[str, object | None] | None = None,
         idempotency_identity_keys: frozenset[str] | None = None,
-    ) -> tuple[Workspace, Operation | None]:
+    ) -> _PreparedOperation:
         if idempotency_key is not None:
             await operations.acquire_idempotency_key_lock(idempotency_key)
             existing = await operations.get_by_idempotency_key(idempotency_key)
@@ -977,7 +1008,11 @@ class WorkspaceControlService:
                 ):
                     raise IdempotencyConflictError()
                 workspace = await self._require_workspace(repo, workspace_id)
-                return workspace, existing
+                return _PreparedOperation(
+                    workspace=workspace,
+                    replay=existing,
+                    kind=_PreparedOperationKind.exact_replay,
+                )
 
         workspace = await self._require_workspace_for_update(repo, workspace_id)
         if expected_version is not None and workspace.version != expected_version:
@@ -992,8 +1027,12 @@ class WorkspaceControlService:
                 payload_identity=active_payload_identity,
             )
             if active is not None:
-                return workspace, active
-        return workspace, None
+                return _PreparedOperation(
+                    workspace=workspace,
+                    replay=active,
+                    kind=_PreparedOperationKind.active_coalesce,
+                )
+        return _PreparedOperation(workspace=workspace)
 
 
 async def stop_project_containers(compose_project_name: str | None) -> None:
@@ -1118,6 +1157,7 @@ def _control_response(
     return WorkspaceControlResponse(
         workspace_id=workspace.id,
         operation_id=operation.id,
+        operation_status=operation.status,
         status=WorkspaceStatus(workspace.status),
         message=message,
     )
