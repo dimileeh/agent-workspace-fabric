@@ -263,6 +263,11 @@ def patch_handlers(
     monkeypatch.setattr(run_awf, "ComposeManager", _compose_ctor)
     monkeypatch.setattr(run_awf, "AsyncioSubprocessRunner", _FakeRunner)
 
+    async def _noop_stream_service_logs(**_kwargs: Any) -> None:
+        pass
+
+    monkeypatch.setattr(run_awf, "_stream_service_logs_best_effort", _noop_stream_service_logs)
+
     executors: list[_FakeExecutor] = []
     monitors: list[_FakeMonitor] = []
     monitor_builder_calls: list[dict[str, Any]] = []
