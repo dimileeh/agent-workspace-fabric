@@ -25,6 +25,7 @@ from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
+from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError
 from awf.node.stack_launcher import WorkspaceStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import WorkspaceProfile
@@ -155,6 +156,22 @@ class Provisioner:
                 from_status=WorkspaceStatus.provisioning,
             )
             raise
+        except LocalEgressPolicyError as exc:
+            _log.warning(
+                "provisioner.local_egress_policy_failed",
+                workspace_id=workspace_id,
+                reason_code=exc.reason_code,
+                mode=exc.mode,
+                details=exc.details,
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                failure_reason=FailureReason.policy_failure,
+                message=str(exc)[:2000],
+                from_status=WorkspaceStatus.provisioning,
+                reason_code=exc.reason_code,
+            )
+            raise
         except ComposeOperationError as exc:
             _log.error(
                 "provisioner.stack_startup_failed",
@@ -265,6 +282,7 @@ class Provisioner:
         failure_reason: FailureReason,
         message: str,
         from_status: WorkspaceStatus,
+        reason_code: str | None = None,
     ) -> None:
         """Best-effort transition to ``failed``.
 
@@ -294,7 +312,7 @@ class Provisioner:
                 await repo.transition(
                     ws,
                     to=WorkspaceStatus.failed,
-                    reason_code=failure_reason.value.upper(),
+                    reason_code=reason_code or failure_reason.value.upper(),
                 )
                 await session.commit()
         except Exception:  # pragma: no cover - defensive
