@@ -149,13 +149,12 @@ class ComposeStackLauncher:
             paths = await self._compose.up(spec, wait=True)
         except ComposeOperationError as e:
             if e.reason_code == "DOCKER_UNAVAILABLE":
-                required_services = [s.name for s in profile.services if s.required]
+                required_services = [s.name for s in spec.services if s.required]
                 msg = "DOCKER_UNAVAILABLE: Cannot start workspace agent container"
                 if required_services:
                     msg += f" and required services: {required_services}"
                 raise WorkspaceServiceExecutionError(msg) from e
-            else:
-                raise
+            raise
         if secret_lease_resolution is None:
             return paths
         return ComposeProjectPaths(
