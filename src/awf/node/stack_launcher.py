@@ -150,6 +150,8 @@ class ComposeStackLauncher:
         except ComposeOperationError as e:
             if e.reason_code == "DOCKER_UNAVAILABLE":
                 required_services = [s.name for s in spec.services if s.required]
+                if spec.docker_mode == "dind":
+                    required_services.append("docker")
                 if not required_services:
                     return None
                 msg = f"DOCKER_UNAVAILABLE: Cannot start workspace agent container and required services: {required_services}"
