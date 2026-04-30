@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-04-30
+Last updated: 2026-05-01
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust industrial system that is ready for a
@@ -375,6 +375,9 @@ coding agent in any project to use AWF for a feature.
 ## P1: Operator Console Completion
 
 - [x] Show exact agent model and thinking/effort settings for every workspace.
+- [ ] Add console filters for all supported agents, including OpenCode, and an
+  exact model filter so operators can view workspaces by provider/model while
+  defaulting to all workspaces.
 - [x] Show lifecycle stage start time, end time, and duration.
 - [x] Show validation tier, validation freshness, command hash, and target SHA.
 - [ ] Show token usage when providers expose it.
