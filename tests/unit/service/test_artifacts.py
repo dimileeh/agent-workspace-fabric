@@ -7,6 +7,7 @@ from typing import Any
 
 import pytest
 
+import awf.service.artifacts as artifacts_module
 from awf.service.artifacts import (
     ArtifactNotFoundError,
     ArtifactPathError,
@@ -44,6 +45,11 @@ class TestArtifactService:
         assert artifact.name == "summary.json"
         assert artifact.size_bytes == len(payload)
         assert artifact.content_type == "application/json"
+
+    @pytest.mark.unit
+    def test_artifact_compatibility_helpers_delegate_to_public_helpers(self, tmp_path: Path) -> None:
+        assert artifacts_module._artifact_id("ws_artifacts", "README").startswith("art_")
+        assert artifacts_module._artifact_kind(tmp_path / "README") == "file"
 
     @pytest.mark.unit
     @pytest.mark.parametrize(
@@ -141,6 +147,82 @@ class TestArtifactService:
                 artifact_dir=artifact_dir,
                 relative_path="report.txt",
             )
+
+    @pytest.mark.unit
+    def test_download_rejects_directory_artifact_path(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        reports_dir = artifact_dir / "reports"
+        reports_dir.mkdir(parents=True)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_downloadable_artifact(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="reports",
+            )
+
+    @pytest.mark.unit
+    def test_root_resolving_to_non_directory_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        resolved_file = tmp_path / "resolved-file"
+        resolved_file.write_text("not a directory\n", encoding="utf-8")
+        original_resolve = Path.resolve
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == artifact_dir:
+                return resolved_file
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_downloadable_artifact(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="report.txt",
+            )
+
+    @pytest.mark.unit
+    def test_listing_returns_empty_when_root_walk_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        original_walk = Path.walk
+
+        def walk_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == artifact_dir:
+                raise OSError(str(self))
+            return original_walk(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "walk", walk_candidate)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_is_symlink_fails_closed_on_filesystem_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_path = tmp_path / "artifact"
+        original_is_symlink = Path.is_symlink
+
+        def is_symlink_candidate(self: Path) -> bool:
+            if self == artifact_path:
+                raise OSError(str(self))
+            return original_is_symlink(self)
+
+        monkeypatch.setattr(Path, "is_symlink", is_symlink_candidate)
+
+        assert artifacts_module._is_symlink(artifact_path) is True
 
     @pytest.mark.unit
     def test_listing_reports_metadata_and_skips_deleted_files(

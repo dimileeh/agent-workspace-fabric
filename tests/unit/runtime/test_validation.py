@@ -9,15 +9,20 @@ import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import ProfileHealthCheck, WorkspaceProfile
 from awf.runtime.logs import CommandLogSinks, LogStore
 from awf.runtime.validation import (
+    HEALTHCHECK_HTTP_STATUS_MISMATCH,
+    HEALTHCHECK_INVALID_CONFIGURATION,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
     ValidationRunner,
     _coverage_reason_code,
     _coverage_status,
+    _healthcheck_attempt_timeout,
+    _healthcheck_cli_args,
+    _healthcheck_failure_reason,
     _parse_python_coverage_percent_from_files,
 )
 from awf.runtime.validation_identity import (
@@ -257,6 +262,69 @@ def test_environment_identity_digest_changes_for_healthcheck_wait_policy(
     assert environment_identity_digest(_identity_profile()) != environment_identity_digest(
         _identity_profile(validation={"healthchecks": [healthcheck]})
     )
+
+
+@pytest.mark.unit
+def test_healthcheck_helpers_handle_invalid_constructed_configuration(tmp_path: Path) -> None:
+    healthcheck = ProfileHealthCheck.model_construct(name="invalid", command=None, url=None)
+    latest = ValidationCommandResult(
+        command="healthcheck",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=tmp_path / "health.stdout",
+        stderr_path=tmp_path / "health.stderr",
+    )
+
+    assert _healthcheck_cli_args(healthcheck)[0:2] == ["python", "-c"]
+    assert _healthcheck_attempt_timeout(healthcheck, remaining_seconds=0) == 0.001
+    assert _healthcheck_failure_reason(healthcheck, latest) == HEALTHCHECK_INVALID_CONFIGURATION
+
+
+@pytest.mark.unit
+def test_http_healthcheck_failure_reason_reports_status_mismatch(tmp_path: Path) -> None:
+    healthcheck = ProfileHealthCheck(
+        name="api",
+        url="https://api.example.test/healthz",
+        expected_status=204,
+    )
+    latest = ValidationCommandResult(
+        command="healthcheck",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=tmp_path / "health.stdout",
+        stderr_path=tmp_path / "health.stderr",
+    )
+
+    assert _healthcheck_failure_reason(healthcheck, latest) == HEALTHCHECK_HTTP_STATUS_MISMATCH
+
+
+@pytest.mark.unit
+async def test_append_healthcheck_stderr_skips_invalid_stream_id(tmp_path: Path) -> None:
+    log_store = _CountingLogStore(root=tmp_path / "logs")
+    validation = ValidationRunner(
+        runner=FakeCommandRunner(),
+        artifacts_dir=tmp_path / "artifacts",
+        log_store=log_store,
+    )
+    stderr_path = tmp_path / "health.stderr"
+    stderr_path.write_text("initial\n", encoding="utf-8")
+    result = ValidationCommandResult(
+        command="healthcheck",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=tmp_path / "health.stdout",
+        stderr_path=stderr_path,
+        stream_ids={"stderr": "validation.01_healthcheck.stdout"},
+    )
+
+    await validation._append_healthcheck_stderr(
+        workspace_id="ws_health",
+        result=result,
+        diagnostic="diagnostic\n",
+    )
+
+    assert stderr_path.read_text(encoding="utf-8") == "initial\ndiagnostic\n"
+    assert not (tmp_path / "logs" / "ws_health").exists()
 
 
 @pytest.mark.unit

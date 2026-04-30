@@ -254,7 +254,9 @@ def test_http_healthcheck_public_targets_redact_url_userinfo() -> None:
     [
         {"name": "missing-target"},
         {"name": "both", "command": "curl localhost", "url": "http://localhost/health"},
+        {"name": "kind-mismatch", "kind": "http", "command": "curl localhost"},
         {"name": "ftp", "url": "ftp://localhost/health"},
+        {"name": "method-type", "url": "http://localhost/health", "method": 123},
         {"name": "status", "url": "http://localhost/health", "expected_status": 99},
         {"name": "interval", "url": "http://localhost/health", "interval_seconds": 0},
     ],

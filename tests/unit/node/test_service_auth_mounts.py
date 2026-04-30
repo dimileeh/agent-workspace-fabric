@@ -112,6 +112,69 @@ def test_service_auth_mounts_copy_codex_into_workspace_isolated_home(tmp_path: P
 
 
 @pytest.mark.unit
+def test_service_auth_mounts_suppressed_targets_skip_mounts_and_workspace_copying(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_codex = host_home / ".codex"
+    host_codex.mkdir(parents=True)
+    (host_codex / "auth.json").write_text('{"token": "do-not-copy"}')
+    (host_home / ".config" / "gh").mkdir(parents=True)
+    (host_home / ".claude").mkdir()
+    (host_home / ".claude" / "settings.json").write_text('{"token": "do-not-copy"}')
+    (host_home / ".claude.json").write_text('{"token": "do-not-copy"}')
+    (host_home / ".gemini").mkdir()
+    (host_home / ".config" / "opencode").mkdir(parents=True)
+    (host_home / ".ollama").mkdir()
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+        suppressed_targets=frozenset(
+            {
+                "/home/agent/.codex",
+                "/home/agent/.config/gh",
+                "/home/agent/.claude",
+                "/home/agent/.claude.json",
+                "/home/agent/.gemini",
+                "/home/agent/.config/opencode",
+                "/home/agent/.ollama",
+            }
+        ),
+    )
+
+    assert mounts == ()
+    assert not (work_dir / "auth" / "ws_auth").exists()
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_suppressed_provider_skips_provider_mount_but_keeps_compatibility(
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    (host_home / ".config" / "gh").mkdir(parents=True)
+    host_codex = host_home / ".codex"
+    host_codex.mkdir()
+    (host_codex / "auth.json").write_text('{"token": "compat"}')
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+        suppressed_providers=frozenset({"github"}),
+    )
+
+    by_target = {mount.target: mount for mount in mounts}
+    assert "/home/agent/.config/gh" not in by_target
+    assert Path(by_target["/home/agent/.codex"].source) == work_dir / "auth" / "ws_auth" / "codex"
+
+
+@pytest.mark.unit
 def test_service_auth_mounts_preserve_existing_workspace_codex_home(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_codex = host_home / ".codex"

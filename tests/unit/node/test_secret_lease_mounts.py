@@ -113,6 +113,7 @@ def test_github_provider_prefers_awf_token_and_exposes_standard_placeholders(
     assert raw_secret not in rendered
     assert "lower-priority-token" not in rendered
     assert resolution.satisfied_legacy_targets == frozenset()
+    assert resolution.satisfied_legacy_providers == frozenset({"github"})
 
 
 @pytest.mark.unit
@@ -181,6 +182,7 @@ def test_local_auth_provider_mounts_known_read_only_host_auth_path(
         ),
     )
     assert resolution.satisfied_legacy_targets == frozenset({"/home/agent/.config/gh"})
+    assert resolution.satisfied_legacy_providers == frozenset({"github"})
     assert resolution.metadata["providers"] == ["local-auth"]
     assert resolution.metadata["targets"] == ["/home/agent/.config/gh"]
 

@@ -82,6 +82,7 @@ class LocalSecretLeaseResolution:
     mounts: tuple[AuthMount, ...] = ()
     metadata: dict[str, Any] = field(default_factory=dict)
     satisfied_legacy_targets: frozenset[str] = frozenset()
+    satisfied_legacy_providers: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -112,6 +113,7 @@ class LocalSecretLeaseMountResolver:
         targets: list[str] = []
         omitted_optional: list[dict[str, str]] = []
         satisfied_legacy_targets: set[str] = set()
+        satisfied_legacy_providers: set[str] = set()
         skipped_unresolved_count = 0
 
         for secret in profile.secrets:
@@ -153,6 +155,7 @@ class LocalSecretLeaseMountResolver:
                     _append_env_pair(env, pair)
                     _append_unique(targets, pair[0])
                 _append_unique(providers, provider)
+                satisfied_legacy_providers.add("github")
                 continue
 
             if provider in _LOCAL_FILE_PROVIDERS:
@@ -180,6 +183,8 @@ class LocalSecretLeaseMountResolver:
             _append_unique(targets, mount.target)
             if mount.target in _known_local_auth_targets():
                 satisfied_legacy_targets.add(mount.target)
+            if mount.target == "/home/agent/.config/gh":
+                satisfied_legacy_providers.add("github")
 
         metadata: dict[str, Any] = {
             "schema": "secret_lease_mount_metadata.v1",
@@ -199,6 +204,7 @@ class LocalSecretLeaseMountResolver:
             mounts=tuple(mounts),
             metadata=metadata,
             satisfied_legacy_targets=frozenset(satisfied_legacy_targets),
+            satisfied_legacy_providers=frozenset(satisfied_legacy_providers),
         )
 
     def _resolve_env_secret(

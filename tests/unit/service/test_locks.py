@@ -107,6 +107,27 @@ async def test_list_workspace_locks_defaults_to_active_non_terminal_workspaces(
 
 
 @pytest.mark.unit
+async def test_list_workspace_locks_for_session_returns_page_items(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.locks import list_workspace_locks_for_session
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        title="Session 1",
+        owned_paths=["src/awf/service/locks.py"],
+        status=WorkspaceStatus.requested,
+        created_at=now,
+    )
+
+    async with session_factory() as session:
+        locks = await list_workspace_locks_for_session(session)
+
+    assert [lock.workspace_id for lock in locks] == [workspace_id]
+
+
+@pytest.mark.unit
 async def test_list_workspace_locks_applies_repo_task_class_status_and_limit_filters(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

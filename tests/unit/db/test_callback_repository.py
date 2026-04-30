@@ -51,6 +51,23 @@ async def _subscription(
 
 
 @pytest.mark.unit
+def test_callback_repository_insert_helpers_cover_postgresql_and_fallback_dialects() -> None:
+    assert repository_module._callback_delivery_insert_if_absent_stmt("postgresql") is not None
+    assert repository_module._callback_subscription_insert_if_absent_stmt("postgresql") is not None
+    assert repository_module._callback_delivery_insert_if_absent_stmt("mysql") is None
+    assert repository_module._callback_subscription_insert_if_absent_stmt("mysql") is None
+    assert repository_module._secret_lease_insert_if_absent_stmt("mysql") is None
+    assert repository_module._callback_subscription_event_type_candidates("internal.event") == ()
+    assert (
+        repository_module._callback_subscription_event_type_filter(
+            ("workspace.created",),
+            "postgresql",
+        )
+        is not None
+    )
+
+
+@pytest.mark.unit
 async def test_subscription_create_idempotent_persists_hash_and_detects_conflicts(
     session: AsyncSession,
 ) -> None:

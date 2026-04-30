@@ -92,6 +92,15 @@ def test_parse_conformance_report_defaults_and_aliases() -> None:
 
 
 @pytest.mark.unit
+def test_parse_conformance_report_defaults_blank_reason_code() -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration","summary":"still checking","gaps":[],"reason_code":"   "}'
+    )
+
+    assert report.reason_code == "PLAN_CONFORMANCE_REPORTED"
+
+
+@pytest.mark.unit
 def test_parse_conformance_report_filters_blank_gap_items() -> None:
     report = parse_conformance_report(
         '{"status":"needs_iteration","summary":"check","gaps":["  fix tests  "," ",""]}'
@@ -190,3 +199,29 @@ def test_conformance_retry_prompt_steers_agent_to_finish_remaining_gaps() -> Non
     assert "- Add regression test" in prompt
     assert "- Wire retry endpoint" in prompt
     assert "Do not restart from scratch" in prompt
+
+
+@pytest.mark.unit
+def test_conformance_retry_prompt_defaults_when_evidence_omits_artifacts_and_gaps() -> None:
+    prompt = build_conformance_retry_prompt(
+        task_prompt="Finish the lease mount slice.",
+        evidence={"summary": ""},
+    )
+
+    assert "Plan conformance was not satisfied." in prompt
+    assert "- Re-check the saved plan." in prompt
+    assert "- Plan artifacts were not recorded." in prompt
+
+
+@pytest.mark.unit
+def test_conformance_retry_prompt_truncates_long_evidence_text() -> None:
+    prompt = build_conformance_retry_prompt(
+        task_prompt="Finish the lease mount slice.",
+        evidence={
+            "summary": "s" * 6000,
+            "gaps": ["g" * 6000],
+        },
+    )
+
+    assert ("s" * 997) + "..." in prompt
+    assert ("g" * 997) + "..." in prompt

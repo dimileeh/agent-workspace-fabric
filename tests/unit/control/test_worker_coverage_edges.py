@@ -18,6 +18,8 @@ from awf.control.worker import (
     WorkerConfig,
     _ActiveExecutionCandidate,
     _execution_claim_is_stale,
+    _json_datetime,
+    _monitor_claim_is_stale,
     _stale_active_execution_failure_message,
 )
 from awf.db.base import Base
@@ -539,6 +541,20 @@ def test_execution_claim_is_stale_handles_missing_and_naive_datetimes() -> None:
         ),
         cutoff,
     )
+
+
+@pytest.mark.unit
+def test_monitor_claim_staleness_and_json_datetime_handle_naive_datetimes() -> None:
+    cutoff = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+
+    assert _monitor_claim_is_stale(
+        SimpleNamespace(
+            monitor_claimed_by="worker",
+            monitor_claim_expires_at=datetime(2026, 4, 27, 11, 59),
+        ),
+        cutoff,
+    )
+    assert _json_datetime(datetime(2026, 4, 27, 12, 1)) == "2026-04-27T12:01:00+00:00"
 
 
 @pytest.mark.unit

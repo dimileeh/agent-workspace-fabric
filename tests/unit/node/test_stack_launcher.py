@@ -40,7 +40,15 @@ class _RecordingAuthMountResolver:
     def __init__(self) -> None:
         self.workspace_ids: list[str] = []
 
-    def resolve(self, *, workspace_id: str) -> tuple[AuthMount, ...]:
+    def resolve(
+        self,
+        *,
+        workspace_id: str,
+        suppressed_targets: frozenset[str] = frozenset(),
+        suppressed_providers: frozenset[str] = frozenset(),
+    ) -> tuple[AuthMount, ...]:
+        del suppressed_targets
+        del suppressed_providers
         self.workspace_ids.append(workspace_id)
         return (
             AuthMount(
@@ -56,11 +64,51 @@ class _RecordingAuthMountResolver:
         )
 
 
+class _SuppressibleAuthMountResolver:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, frozenset[str], frozenset[str]]] = []
+
+    def resolve(
+        self,
+        *,
+        workspace_id: str,
+        suppressed_targets: frozenset[str] = frozenset(),
+        suppressed_providers: frozenset[str] = frozenset(),
+    ) -> tuple[AuthMount, ...]:
+        self.calls.append((workspace_id, suppressed_targets, suppressed_providers))
+        mounts = []
+        if "/home/agent/.config/gh" not in suppressed_targets and "github" not in suppressed_providers:
+            mounts.append(
+                AuthMount(
+                    source="/host/home/.config/gh",
+                    target="/home/agent/.config/gh",
+                    mode="ro",
+                )
+            )
+        if "/home/agent/.codex" not in suppressed_targets:
+            mounts.append(
+                AuthMount(
+                    source="/host/work/auth/ws_launcher/codex",
+                    target="/home/agent/.codex",
+                    mode="rw",
+                )
+            )
+        return tuple(mounts)
+
+
 class _EmptyAuthMountResolver:
     def __init__(self) -> None:
         self.workspace_ids: list[str] = []
 
-    def resolve(self, *, workspace_id: str) -> tuple[AuthMount, ...]:
+    def resolve(
+        self,
+        *,
+        workspace_id: str,
+        suppressed_targets: frozenset[str] = frozenset(),
+        suppressed_providers: frozenset[str] = frozenset(),
+    ) -> tuple[AuthMount, ...]:
+        del suppressed_targets
+        del suppressed_providers
         self.workspace_ids.append(workspace_id)
         return ()
 
@@ -69,7 +117,15 @@ class _FailingAuthMountResolver:
     def __init__(self) -> None:
         self.workspace_ids: list[str] = []
 
-    def resolve(self, *, workspace_id: str) -> tuple[AuthMount, ...]:
+    def resolve(
+        self,
+        *,
+        workspace_id: str,
+        suppressed_targets: frozenset[str] = frozenset(),
+        suppressed_providers: frozenset[str] = frozenset(),
+    ) -> tuple[AuthMount, ...]:
+        del suppressed_targets
+        del suppressed_providers
         self.workspace_ids.append(workspace_id)
         raise RuntimeError("auth mount resolution failed")
 
@@ -103,6 +159,29 @@ class _DeclaredLeaseResolver:
                 "targets": ["OPENAI_API_KEY", "/home/agent/.config/gh"],
             },
             satisfied_legacy_targets=frozenset({"/home/agent/.config/gh"}),
+            satisfied_legacy_providers=frozenset({"github"}),
+        )
+
+
+class _ProviderDeclaredLeaseResolver:
+    def resolve(
+        self,
+        profile: WorkspaceProfile,
+        *,
+        workspace_id: str,
+    ) -> LocalSecretLeaseResolution:
+        del profile, workspace_id
+        return LocalSecretLeaseResolution(
+            environment=(("GH_TOKEN", "${AWF_GITHUB_TOKEN}"),),
+            metadata={
+                "schema": "secret_lease_mount_metadata.v1",
+                "mount_plan": "profile_declared_secret_leases",
+                "env_count": 1,
+                "mount_count": 0,
+                "providers": ["github"],
+                "targets": ["GH_TOKEN"],
+            },
+            satisfied_legacy_providers=frozenset({"github"}),
         )
 
 
@@ -610,6 +689,85 @@ async def test_compose_stack_launcher_uses_declared_leases_before_legacy_auth_mo
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_suppresses_satisfied_legacy_targets_before_resolution() -> None:
+    compose = _RecordingCompose()
+    declared_resolver = _DeclaredLeaseResolver()
+    auth_mount_resolver = _SuppressibleAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=declared_resolver,
+        auth_mount_resolver=auth_mount_resolver,
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="declared-leases"),
+        )
+    )
+
+    assert auth_mount_resolver.calls == [
+        ("ws_launcher", frozenset({"/home/agent/.config/gh"}), frozenset({"github"}))
+    ]
+    assert compose.specs[0].auth_mounts == (
+        AuthMount(
+            source="/host/awf/git/mirrors/repo.git",
+            target="/host/awf/git/mirrors/repo.git",
+            mode="rw",
+        ),
+        AuthMount(
+            source="/host/home/.config/gh",
+            target="/home/agent/.config/gh",
+            mode="ro",
+        ),
+        AuthMount(
+            source="/host/work/auth/ws_launcher/codex",
+            target="/home/agent/.codex",
+            mode="rw",
+        ),
+    )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_suppresses_satisfied_legacy_providers_before_resolution() -> None:
+    compose = _RecordingCompose()
+    auth_mount_resolver = _SuppressibleAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=_ProviderDeclaredLeaseResolver(),
+        auth_mount_resolver=auth_mount_resolver,
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="declared-github-provider"),
+        )
+    )
+
+    assert auth_mount_resolver.calls == [
+        ("ws_launcher", frozenset(), frozenset({"github"}))
+    ]
+    assert compose.specs[0].auth_mounts == (
+        AuthMount(
+            source="/host/awf/git/mirrors/repo.git",
+            target="/host/awf/git/mirrors/repo.git",
+            mode="rw",
+        ),
+        AuthMount(
+            source="/host/work/auth/ws_launcher/codex",
+            target="/home/agent/.codex",
+            mode="rw",
+        ),
+    )
+    assert dict(compose.specs[0].agent_environment)["GH_TOKEN"] == "${AWF_GITHUB_TOKEN}"
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_fails_secret_lease_resolution_before_compose_up() -> None:
     compose = _RecordingCompose()
     declared_resolver = _FailingDeclaredLeaseResolver()
@@ -733,7 +891,11 @@ async def test_compose_stack_launcher_resolves_service_auth_mounts_in_thread(
     func, args, kwargs = calls[0]
     assert func == auth_mount_resolver.resolve
     assert args == ()
-    assert kwargs == {"workspace_id": "ws_launcher"}
+    assert kwargs == {
+        "workspace_id": "ws_launcher",
+        "suppressed_targets": frozenset(),
+        "suppressed_providers": frozenset(),
+    }
     func, args, kwargs = calls[1]
     assert func == stack_launcher_mod.profile_services
     assert args == (request.profile,)

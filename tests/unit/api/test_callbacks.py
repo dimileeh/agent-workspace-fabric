@@ -236,6 +236,20 @@ def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "hostname",
+    ["0x7f.0x0.0x0.0x1", "0x.0.0.1", "0xgg.0.0.1", "127..0.1"],
+)
+def test_legacy_ipv4_literal_detection_handles_hex_and_malformed_labels(hostname: str) -> None:
+    result = api_schemas._looks_like_legacy_ipv4_literal(hostname)
+
+    if hostname == "0x7f.0x0.0x0.0x1":
+        assert result is True
+    else:
+        assert result is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "event_type",
     [
         "workspace.internal_secret",

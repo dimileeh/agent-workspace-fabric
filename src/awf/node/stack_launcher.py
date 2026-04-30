@@ -89,15 +89,22 @@ class ComposeStackLauncher:
             )
             auth_mounts.extend(secret_lease_resolution.mounts)
 
+        satisfied_targets = (
+            secret_lease_resolution.satisfied_legacy_targets
+            if secret_lease_resolution is not None
+            else frozenset()
+        )
+        satisfied_providers = (
+            secret_lease_resolution.satisfied_legacy_providers
+            if secret_lease_resolution is not None
+            else frozenset()
+        )
         if self._auth_mount_resolver is not None:
             legacy_mounts = await asyncio.to_thread(
                 self._auth_mount_resolver.resolve,
                 workspace_id=request.workspace_id,
-            )
-            satisfied_targets = (
-                secret_lease_resolution.satisfied_legacy_targets
-                if secret_lease_resolution is not None
-                else frozenset()
+                suppressed_targets=satisfied_targets,
+                suppressed_providers=satisfied_providers,
             )
             auth_mounts.extend(
                 mount for mount in legacy_mounts if mount.target not in satisfied_targets
