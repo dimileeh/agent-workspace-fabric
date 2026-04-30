@@ -7,6 +7,7 @@ REST + MCP stay in lockstep. Keep them narrow: business objects live in
 
 from __future__ import annotations
 
+import ipaddress
 from datetime import datetime
 from typing import Annotated, Any, Literal
 from urllib.parse import urlsplit
@@ -55,6 +56,44 @@ WorkspaceOverlapPathMatchReasonCode = Literal[
 CallbackEventType = Annotated[str, Field(min_length=1, max_length=64)]
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
+
+
+def _looks_like_legacy_ipv4_literal(hostname: str) -> bool:
+    labels = hostname.split(".")
+    if not labels:
+        return False
+
+    for label in labels:
+        if not label:
+            return False
+        lower_label = label.lower()
+        if lower_label.startswith("0x"):
+            hex_digits = lower_label[2:]
+            if not hex_digits or any(
+                character not in "0123456789abcdef" for character in hex_digits
+            ):
+                return False
+            continue
+        if not lower_label.isdigit():
+            return False
+
+    return True
+
+
+def _is_public_callback_target_host(hostname: str) -> bool:
+    normalized = hostname.rstrip(".").lower()
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        if normalized == "localhost" or normalized.endswith(
+            (".localhost", ".local", ".localdomain")
+        ):
+            return False
+        if "." not in normalized:
+            return False
+        return not _looks_like_legacy_ipv4_literal(normalized)
+
+    return address.is_global and not address.is_multicast
 
 
 class MergeCandidateReadinessResponse(BaseModel):
@@ -1069,6 +1108,8 @@ class CallbackSubscriptionCreateRequest(BaseModel):
             raise ValueError("target_url must not include userinfo credentials")
         if parsed.fragment:
             raise ValueError("target_url must not include a fragment")
+        if not _is_public_callback_target_host(parsed.hostname):
+            raise ValueError("target_url must use a public host")
         return value
 
     @field_validator("event_types")

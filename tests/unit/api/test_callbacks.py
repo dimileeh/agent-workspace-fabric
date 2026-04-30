@@ -95,6 +95,44 @@ async def test_register_callback_validates_url_events_and_extra_fields(
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    "target_url",
+    [
+        "http://localhost/events",
+        "http://localhost./events",
+        "http://awf.localhost/events",
+        "http://operator.local/events",
+        "http://operator.localdomain/events",
+        "http://internal/events",
+        "http://127.0.0.1/events",
+        "http://127.1/events",
+        "http://0177.0.0.1/events",
+        "http://0x7f000001/events",
+        "http://2130706433/events",
+        "http://10.0.0.5/events",
+        "http://172.16.0.5/events",
+        "http://192.168.0.5/events",
+        "http://169.254.169.254/latest/meta-data",
+        "http://[::1]/events",
+        "http://[fe80::1]/events",
+    ],
+)
+async def test_register_callback_rejects_internal_target_hosts_without_insert(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    target_url: str,
+) -> None:
+    response = await client.post(
+        "/v1/callbacks",
+        json={**_VALID_BODY, "target_url": target_url},
+        headers={"Idempotency-Key": f"callback-internal-{target_url}"},
+    )
+
+    assert response.status_code == 422
+    assert await _subscription_count(engine) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     "event_type",
     [
         "workspace.internal_secret",
