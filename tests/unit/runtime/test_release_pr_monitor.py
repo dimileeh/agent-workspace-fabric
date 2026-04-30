@@ -23,6 +23,10 @@ class _StubAdapter(AgentAdapter):
         super().__init__(runner=None)  # type: ignore[arg-type]
 
     @property
+    def provider(self) -> str:
+        return "fake"
+
+    @property
     def name(self) -> AgentRuntime:  # type: ignore[override]
         return AgentRuntime.claude_code
 

@@ -55,6 +55,10 @@ class _NoOpAdapter(AgentAdapter):
         self._runtime = runtime
 
     @property
+    def provider(self) -> str:
+        return "fake"
+
+    @property
     def name(self) -> AgentRuntime:  # type: ignore[override]
         return self._runtime
 
@@ -98,6 +102,10 @@ def _make_noop_factory(runtime_value: AgentRuntime) -> type[AgentAdapter]:
         ) -> None:
             # runner / defaults accepted for signature compat, unused.
             self._runtime = runtime_value
+
+        @property
+        def provider(self) -> str:
+            return "fake"
 
         @property
         def name(self) -> AgentRuntime:

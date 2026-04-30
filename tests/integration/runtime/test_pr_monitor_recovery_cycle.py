@@ -57,6 +57,10 @@ class _FakeAdapter(AgentAdapter):
         self.workspace_ids = []
 
     @property
+    def provider(self) -> str:
+        return "fake"
+
+    @property
     def name(self) -> AgentRuntime:  # type: ignore[override]
         return AgentRuntime.claude_code
 

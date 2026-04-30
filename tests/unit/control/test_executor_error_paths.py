@@ -487,6 +487,10 @@ class TestUnexpectedErrorDuringAgentRun:
                 pass
 
             @property
+            def provider(self) -> str:
+                return "fake"
+
+            @property
             def name(self) -> AgentRuntime:
                 return AgentRuntime.codex
 
@@ -783,6 +787,10 @@ class TestAgentWatchdogConfig:
         captured: dict[str, Any] = {}
 
         class _Adapter:
+            @property
+            def provider(self) -> str:
+                return "fake"
+
             @property
             def name(self) -> AgentRuntime:
                 return AgentRuntime.codex
