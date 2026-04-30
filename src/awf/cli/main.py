@@ -179,16 +179,25 @@ def init(
                 )
             )
 
-            def _collect_cached_service_status(
+            async def _collect_cached_service_status(
                 settings: ServiceSettings,
                 *,
                 strict_providers: Iterable[str] | None = None,
                 provider_environ: Mapping[str, str] | None = None,
-            ) -> asyncio.Task[dict[str, object]]:
+            ) -> dict[str, object]:
                 _ = settings, strict_providers, provider_environ
-                return service_status_task
+                try:
+                    return await service_status_task
+                except Exception as exc:
+                    return {
+                        "service": settings.service_name,
+                        "status": "fail",
+                        "checks": {},
+                        "agent_readiness": {"status": "fail"},
+                        "detail": str(exc),
+                    }
 
-            return await asyncio.gather(
+            service_status_result, doctor_report = await asyncio.gather(
                 service_status_task,
                 collect_doctor_report(
                     settings,
@@ -197,7 +206,23 @@ def init(
                     environ=os.environ,
                     status_collector=_collect_cached_service_status,
                 ),
+                return_exceptions=True,
             )
+
+            if isinstance(service_status_result, Exception):
+                service_status = {
+                    "service": settings.service_name,
+                    "status": "fail",
+                    "checks": {},
+                    "agent_readiness": {"status": "fail"},
+                    "detail": str(service_status_result),
+                }
+            else:
+                service_status = service_status_result
+            if isinstance(doctor_report, Exception):
+                raise doctor_report
+
+            return service_status, doctor_report
 
         service_status, doctor_report = asyncio.run(_collect_reports())
         preview = preview_project_onboarding(
