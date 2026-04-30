@@ -50,7 +50,7 @@ Status values:
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
 | P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | - | running | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` was propagated to AWF API/worker service env. |
-| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8210d159580747f88c691ef5` | - | running | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` was propagated to AWF API/worker service env. |
+| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | - | running | Codex `gpt-5.3-codex-spark`; fresh restart after Gemini violated the planning-only phase in `ws_8210d159580747f88c691ef5`. |
 | P1 Workspace Services And Realistic Project Profiles | Strengthen DinD compose profile execution | `ws_58551268828945cfb52fe01e` | [#156](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/156) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on per-workspace DinD Compose execution, health waits, cleanup, and structured failures. |
 | P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on v1/legacy response compatibility until documented v2 cutover. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_05365f752ad742abb7c134af` | [#160](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/160) | monitoring_pr | Codex `gpt-5.3-codex-spark`; fresh restart after OpenCode GLM stalled in conformance. |
@@ -145,6 +145,7 @@ Status values:
 | P1 API Contract Completion | External operator callback subscriptions | `ws_0e2fc82ece7541659287e063` | failed | Agent produced local commits and passed validation/coverage, but exhausted the Plan -> Execute -> Compare iteration budget with one remaining conformance gap: event type validation was prefix-based and still allowed internal-looking namespaced event types such as `workspace.internal_secret`. Recover by redispatching a narrow callback hardening/completion slice or salvaging the preserved worktree branch. |
 | P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification via Gemini 3.1 | `ws_033d1772828042c9afa6a491` | failed | No-work Gemini auth failure: container had copied `~/.gemini` files but no Gemini/Google auth env; Gemini CLI 0.39.1 selected API-key auth and exited 41 `AGENT_AUTH_FAILED` requiring `GEMINI_API_KEY`. |
 | P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_927647b0535242c58879f7b8` | failed | Same no-work Gemini auth failure as `ws_033d1772828042c9afa6a491`; retry only after Gemini container auth/readiness is fixed or with a different provider/model. |
+| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_8210d159580747f88c691ef5` | superseded | Gemini produced a useful local commit but did so during AWF's planning-only phase, touching `src/awf/cli/main.py` and `tests/unit/cli/test_init.py` before execution was allowed. AWF correctly failed the workspace for planning scope violation; retried fresh with Codex Spark as `ws_8c9f0ae88d5c477aac382158`. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via Gemini | `ws_19b11c564c3343c0965eee45` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_5031649e68b34b108f23782b`. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via OpenCode GLM | `ws_5031649e68b34b108f23782b` | superseded | Made a local implementation commit and passed broad service/db/api validation, but stalled during conformance JSON generation after a misleading narrow-subset coverage failure; operator stopped it and restarted from scratch with Codex `gpt-5.3-codex-spark` as `ws_05365f752ad742abb7c134af`. |
 | P1 MCP And Project Onboarding Client Parity | MCP operator parity tools via Gemini | `ws_7c8ec611a3d14b6cb4612344` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_1e79f6b47faf44d0bf8de3f0`. |
@@ -215,6 +216,21 @@ Status values:
 - [x] Add recovery for active PR workspaces after AWF service restart.
 - [x] Add console controls for safe remonitor/refresh/revalidate once API semantics are stable.
 - [x] Classify unsatisfied plan conformance failures with structured gaps, retry carry-forward, and salvage hints.
+
+## P0: Planning Phase Scope Enforcement
+
+- [ ] Make the planning-stage agent prompt/system prompt unambiguous that the
+  agent must create or update only the configured plan file, must not edit
+  source/tests/docs outside that plan artifact, must not run implementation
+  commands, and must stop after writing the plan.
+- [ ] Add regression tests proving the planning phase rejects out-of-scope file
+  edits with a structured reason such as `AGENT_PLAN_PHASE_SCOPE_VIOLATION`,
+  preserves the worktree/branch for salvage, and records an actionable retry or
+  fallback recommendation.
+- [ ] Add an automated recovery path for planning-scope violations: either
+  discard and retry planning with an approved fallback model or intentionally
+  promote/salvage the preserved branch only when policy says the premature
+  implementation is acceptable.
 
 ## P0: Reliability, Cleanup, And SLOs
 
