@@ -322,6 +322,11 @@ def build_mcp_server(
             default=True,
             description="Also stop the workspace compose stack after requesting cancellation.",
         ),
+        idempotency_key: str | None = Field(
+            default=None,
+            max_length=128,
+            description="Optional idempotency key for safe retries after timeout or dropped response.",
+        ),
     ) -> StructuredToolResult:
         """Operator control: cancel a workspace; this is not shell access."""
         try:
@@ -329,6 +334,7 @@ def build_mcp_server(
                 workspace_id,
                 reason=reason,
                 stop_stack=stop_stack,
+                idempotency_key=idempotency_key,
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
@@ -341,10 +347,15 @@ def build_mcp_server(
             default=None,
             description="Optional operator reason to record with the stop request.",
         ),
+        idempotency_key: str | None = Field(
+            default=None,
+            max_length=128,
+            description="Optional idempotency key for safe retries after timeout or dropped response.",
+        ),
     ) -> StructuredToolResult:
         """Operator control: stop a workspace stack; this is not shell access."""
         try:
-            result = await service.stop_workspace(workspace_id, reason=reason)
+            result = await service.stop_workspace(workspace_id, reason=reason, idempotency_key=idempotency_key)
         except WorkspaceControlError as exc:
             return _tool_error(exc)
         return _tool_result(result.model_dump(mode="json"))
@@ -364,6 +375,11 @@ def build_mcp_server(
             default=True,
             description="Remove the workspace git worktree during cleanup.",
         ),
+        idempotency_key: str | None = Field(
+            default=None,
+            max_length=128,
+            description="Optional idempotency key for safe retries after timeout or dropped response.",
+        ),
     ) -> StructuredToolResult:
         """Operator control: destroy workspace resources; this is not shell access."""
         try:
@@ -372,6 +388,7 @@ def build_mcp_server(
                 force=force,
                 remove_volumes=remove_volumes,
                 remove_worktree=remove_worktree,
+                idempotency_key=idempotency_key,
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
@@ -797,12 +814,18 @@ def build_mcp_server(
             max_length=1024,
             description="Optional operator reason to record with the remonitor request.",
         ),
+        idempotency_key: str | None = Field(
+            default=None,
+            max_length=128,
+            description="Optional idempotency key for safe retries after timeout or dropped response.",
+        ),
     ) -> StructuredToolResult:
         """Operator control: re-trigger PR monitor for a workspace; this is not shell access."""
         try:
             result = await service.remonitor_workspace(
                 workspace_id,
                 reason=reason,
+                idempotency_key=idempotency_key,
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)
@@ -822,6 +845,11 @@ def build_mcp_server(
             le=3,
             description="Optional validation tier hint.",
         ),
+        idempotency_key: str | None = Field(
+            default=None,
+            max_length=128,
+            description="Optional idempotency key for safe retries after timeout or dropped response.",
+        ),
     ) -> StructuredToolResult:
         """Operator control: request workspace re-validation; this is not shell access."""
         try:
@@ -829,6 +857,7 @@ def build_mcp_server(
                 workspace_id,
                 reason=reason,
                 requested_tier=requested_tier,
+                idempotency_key=idempotency_key,
             )
         except WorkspaceControlError as exc:
             return _tool_error(exc)

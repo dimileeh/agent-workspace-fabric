@@ -288,6 +288,8 @@ class TestToolRegistration:
         remonitor_required = tools["awf_remonitor_workspace"].inputSchema.get("required", [])
         assert "workspace_id" in remonitor_required
         assert remonitor_props["reason"]["default"] is None
+        assert "idempotency_key" in remonitor_props
+        assert remonitor_props["idempotency_key"]["default"] is None
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
         assert "workspace_id" in validate_props
@@ -295,6 +297,8 @@ class TestToolRegistration:
         assert "workspace_id" in validate_required
         assert validate_props["reason"]["default"] is None
         assert validate_props["requested_tier"]["default"] is None
+        assert "idempotency_key" in validate_props
+        assert validate_props["idempotency_key"]["default"] is None
 
 
 class TestOperationTools:
@@ -398,6 +402,7 @@ class _RecordingControlService:
         *,
         reason: str | None,
         stop_stack: bool,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -406,6 +411,7 @@ class _RecordingControlService:
                     "workspace_id": workspace_id,
                     "reason": reason,
                     "stop_stack": stop_stack,
+                    "idempotency_key": idempotency_key,
                 },
             )
         )
@@ -422,8 +428,9 @@ class _RecordingControlService:
         workspace_id: str,
         *,
         reason: str | None,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
-        self.calls.append(("stop", {"workspace_id": workspace_id, "reason": reason}))
+        self.calls.append(("stop", {"workspace_id": workspace_id, "reason": reason, "idempotency_key": idempotency_key}))
         return WorkspaceControlResponse(
             workspace_id=workspace_id,
             operation_id="op_stop",
@@ -439,6 +446,7 @@ class _RecordingControlService:
         force: bool,
         remove_volumes: bool,
         remove_worktree: bool,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -448,6 +456,7 @@ class _RecordingControlService:
                     "force": force,
                     "remove_volumes": remove_volumes,
                     "remove_worktree": remove_worktree,
+                    "idempotency_key": idempotency_key,
                 },
             )
         )
@@ -467,8 +476,9 @@ class _FailingControlService(_RecordingControlService):
         *,
         reason: str | None,
         stop_stack: bool,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
-        del workspace_id, reason, stop_stack
+        del workspace_id, reason, stop_stack, idempotency_key
         raise WorkspaceControlError(error_code="NOPE", message="cancel refused")
 
     async def stop_workspace(
@@ -476,8 +486,9 @@ class _FailingControlService(_RecordingControlService):
         workspace_id: str,
         *,
         reason: str | None,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
-        del workspace_id, reason
+        del workspace_id, reason, idempotency_key
         raise WorkspaceControlError(error_code="NOPE", message="stop refused")
 
 
@@ -506,6 +517,7 @@ class TestWorkspaceControls:
                     "workspace_id": "ws_control",
                     "reason": "stale task",
                     "stop_stack": False,
+                    "idempotency_key": None,
                 },
             )
         ]
@@ -534,7 +546,7 @@ class TestWorkspaceControls:
         )
 
         assert service.calls == [
-            ("stop", {"workspace_id": "ws_control", "reason": "free local resources"})
+            ("stop", {"workspace_id": "ws_control", "reason": "free local resources", "idempotency_key": None})
         ]
         assert payload == {
             "workspace_id": "ws_control",
@@ -570,6 +582,7 @@ class TestWorkspaceControls:
                     "force": True,
                     "remove_volumes": False,
                     "remove_worktree": False,
+                    "idempotency_key": None,
                 },
             )
         ]

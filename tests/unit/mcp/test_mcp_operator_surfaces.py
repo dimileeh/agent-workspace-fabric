@@ -1615,6 +1615,43 @@ class TestMcpOperatorSurfaceParity:
         assert result.structuredContent["error_code"] == "WORKSPACE_STATE_NOT_REMONITORABLE"
 
     @pytest.mark.unit
+    async def test_remonitor_workspace_with_idempotency_key_replays_on_duplicate(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        workspace_id = await _workspace(
+            operator_stack.factory,
+            title="Remonitor idempotency",
+            status=WorkspaceStatus.monitoring_pr,
+        )
+
+        first = await _call(
+            operator_stack.mcp,
+            "awf_remonitor_workspace",
+            {"workspace_id": workspace_id, "reason": "first call", "idempotency_key": "remonitor-mcp-1"},
+        )
+        assert isinstance(first, dict)
+        first_op_id = first["operation_id"]
+
+        second = await _call(
+            operator_stack.mcp,
+            "awf_remonitor_workspace",
+            {"workspace_id": workspace_id, "reason": "first call", "idempotency_key": "remonitor-mcp-1"},
+        )
+        assert isinstance(second, dict)
+        assert second["operation_id"] == first_op_id
+
+        async with operator_stack.factory() as session:
+            from awf.db.repositories import OperationRepository
+
+            ops = await OperationRepository(session).list_for_workspace(
+                workspace_id,
+                operation_type=OperationType.remonitor,
+            )
+        remonitor_ops = [o for o in ops if o.idempotency_key == "remonitor-mcp-1"]
+        assert len(remonitor_ops) == 1
+
+    @pytest.mark.unit
     async def test_request_workspace_validation_tool_returns_operation_response(
         self,
         operator_stack: OperatorStack,
