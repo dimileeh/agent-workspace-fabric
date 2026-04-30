@@ -60,6 +60,10 @@ class TestUp:
         assert "--project-name" in cmd and spec.project_name() in cmd
         assert "--file" in cmd
         assert "up" in cmd and "-d" in cmd and "--wait" in cmd
+        assert "--remove-orphans" in cmd
+        assert "--wait-timeout" in cmd and "300" in cmd
+        assert "--remove-orphans" in cmd
+        assert "--wait-timeout" in cmd and "300" in cmd
 
     @pytest.mark.unit
     async def test_up_without_wait_omits_wait_flag(
@@ -92,7 +96,7 @@ class TestUp:
         assert exc.value.operation == "up"
         assert exc.value.returncode == 1
         assert "daemon unreachable" in exc.value.stderr
-        assert exc.value.reason_code == "COMPOSE_COMMAND_FAILED"
+        assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
 
     @pytest.mark.unit
     async def test_up_renders_compose_file_before_running(
@@ -137,7 +141,10 @@ class TestEnsureProjectUp:
             str(compose_file),
             "up",
             "-d",
+            "--remove-orphans",
             "--wait",
+            "--wait-timeout",
+            "300",
         )
         assert not (tmp_path / "work" / "compose" / "ws_persisted").exists()
 
@@ -169,6 +176,7 @@ class TestDown:
 
         cmd = mock_exec.call_args[0]
         assert "down" in cmd and "-v" in cmd
+        assert "--remove-orphans" in cmd
 
     @pytest.mark.unit
     async def test_down_project_uses_supplied_compose_file_path(
@@ -192,6 +200,7 @@ class TestDown:
         assert "--project-name" in cmd and "awf_ws_custom" in cmd
         assert "--file" in cmd and str(compose_file) in cmd
         assert "down" in cmd and "-v" in cmd
+        assert "--remove-orphans" in cmd
 
     @pytest.mark.unit
     async def test_down_without_volumes_omits_v(
