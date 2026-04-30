@@ -210,7 +210,8 @@ def init(
                 return_exceptions=True,
             )
 
-            if isinstance(service_status_result, Exception):
+            service_status: dict[str, object]
+            if isinstance(service_status_result, BaseException):
                 service_status = {
                     "service": service_name,
                     "status": "fail",
@@ -220,7 +221,7 @@ def init(
                 }
             else:
                 service_status = service_status_result
-            if isinstance(doctor_report, Exception):
+            if isinstance(doctor_report, BaseException):
                 raise doctor_report
 
             return service_status, doctor_report
