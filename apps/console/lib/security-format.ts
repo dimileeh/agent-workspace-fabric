@@ -38,7 +38,7 @@ export function extractProfileEgress(
     return { mode: "unavailable", allowlist: [] };
   }
   const rawMode = typeof egressObj.mode === "string" ? egressObj.mode : "";
-  const mode = VALID_EGRESS_MODES.has(rawMode) ? (rawMode as ProfileEgress["mode"]) : "open";
+  const mode = VALID_EGRESS_MODES.has(rawMode) ? (rawMode as ProfileEgress["mode"]) : "unavailable";
   const allowlist = Array.isArray(egressObj.allowlist)
     ? egressObj.allowlist.filter((item): item is string => typeof item === "string")
     : [];
