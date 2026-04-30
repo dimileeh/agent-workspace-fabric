@@ -645,10 +645,18 @@ class TestMcpOperatorSurfaceParity:
             "version": "test",
         }
 
-        def sync_readiness(settings: Settings) -> dict[str, Any]:
+        def sync_readiness(
+            settings: Settings,
+            *,
+            validated_strict_providers: set[Any] | None = None,
+        ) -> dict[str, Any]:
             return expected_readiness
 
-        async def async_readiness(settings: Settings) -> dict[str, Any]:
+        async def async_readiness(
+            settings: Settings,
+            *,
+            validated_strict_providers: set[Any] | None = None,
+        ) -> dict[str, Any]:
             return expected_readiness
 
         def sync_health() -> dict[str, Any]:
@@ -765,6 +773,32 @@ class TestMcpOperatorSurfaceParity:
             session_factory=resource_stack.factory,
         )
         assert fallback_result["agent_readiness"]["strict_providers"] == []
+
+    @pytest.mark.unit
+    async def test_readiness_provider_receives_strict_providers(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        from awf.service.provider_readiness import validate_provider_names
+
+        captured: dict[str, Any] = {}
+        strict = validate_provider_names(["github"])
+
+        def capturing_readiness(
+            settings: Settings,
+            *,
+            validated_strict_providers: set[Any] | None = None,
+        ) -> dict[str, Any]:
+            captured["providers"] = validated_strict_providers
+            return {"service": "awf", "status": "ok", "checks": {}}
+
+        result = await mcp_server._provided_readiness(
+            readiness_provider=capturing_readiness,
+            settings=resource_stack.settings,
+            validated_strict_providers=strict,
+        )
+        assert result["status"] == "ok"
+        assert captured["providers"] == strict
 
     @pytest.mark.unit
     async def test_read_only_operator_tools_use_shared_services_not_route_handlers(

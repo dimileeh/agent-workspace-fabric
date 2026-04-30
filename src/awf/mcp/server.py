@@ -15,7 +15,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any
+from typing import Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
@@ -77,10 +77,13 @@ RuntimeHealthSummaryProvider = Callable[
     [Settings, AsyncSession, OrphanResourceSummary],
     WorkspaceRuntimeHealthSummary | Awaitable[WorkspaceRuntimeHealthSummary],
 ]
-ReadinessProvider = Callable[
-    [Settings],
-    dict[str, Any] | Awaitable[dict[str, Any]],
-]
+class ReadinessProvider(Protocol):
+    def __call__(
+        self,
+        settings: Settings,
+        *,
+        validated_strict_providers: set[ProviderName] | None = None,
+    ) -> dict[str, Any] | Awaitable[dict[str, Any]]: ...
 HealthProvider = Callable[
     [],
     dict[str, Any] | Awaitable[dict[str, Any]],
@@ -915,7 +918,10 @@ async def _provided_readiness(
     validated_strict_providers: set[ProviderName] | None = None,
 ) -> dict[str, Any]:
     if readiness_provider is not None:
-        result = readiness_provider(settings)
+        result = readiness_provider(
+            settings,
+            validated_strict_providers=validated_strict_providers,
+        )
         if inspect.isawaitable(result):
             return await result
         return result
