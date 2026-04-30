@@ -47,6 +47,8 @@ from awf.service.target_branch_monitor import (
 )
 
 _log = get_logger(__name__)
+_AGENT_RUNTIME_UID = 1000
+_AGENT_RUNTIME_GID = 1000
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,12 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
     git_env = _service_git_environment(host_home, github_token=settings.github_token)
     _apply_service_git_environment(git_env)
-    git = GitManager(work_dir / "git", env=git_env)
+    git = GitManager(
+        work_dir / "git",
+        env=git_env,
+        worktree_owner_uid=_AGENT_RUNTIME_UID,
+        worktree_owner_gid=_AGENT_RUNTIME_GID,
+    )
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runner = AsyncioSubprocessRunner()
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
@@ -240,6 +247,13 @@ def _service_git_environment(host_home: Path, *, github_token: str | None = None
         # service container. Forward an explicit service token to gh subprocesses.
         env["GH_TOKEN"] = github_token
         env["GITHUB_TOKEN"] = github_token
+        _add_git_config_entries(
+            env,
+            (
+                ("credential.https://github.com.helper", "!gh auth git-credential"),
+                ("url.https://github.com/.insteadOf", "git@github.com:"),
+            ),
+        )
     ssh_command = ["ssh"]
     if ssh_auth_sock := os.environ.get("SSH_AUTH_SOCK"):
         env["SSH_AUTH_SOCK"] = ssh_auth_sock
@@ -269,6 +283,18 @@ def _apply_service_git_environment(env: dict[str, str]) -> None:
     """Apply host git/SSH settings to subprocesses launched by the worker."""
 
     os.environ.update(env)
+
+
+def _add_git_config_entries(
+    env: dict[str, str],
+    entries: tuple[tuple[str, str], ...],
+) -> None:
+    start_index = int(env.get("GIT_CONFIG_COUNT", "0"))
+    for offset, (key, value) in enumerate(entries):
+        index = start_index + offset
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    env["GIT_CONFIG_COUNT"] = str(start_index + len(entries))
 
 
 async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:
