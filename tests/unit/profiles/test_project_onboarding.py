@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 import yaml
 
+import awf.profiles.onboarding as onboarding_module
 from awf.profiles.models import DockerMode, WorkspaceProfile
 from awf.profiles.onboarding import (
     PreviewDiagnostics,
@@ -31,6 +32,11 @@ def test_detects_generic_template_for_unknown_repo(tmp_path: Path) -> None:
     assert preview.draft.template == "generic"
     assert preview.draft.profile.confidence == "low"
     assert preview.diagnostics.missing_validation_commands
+
+
+@pytest.mark.unit
+def test_compose_web_port_scheme_ignores_non_numeric_ports() -> None:
+    assert onboarding_module._compose_web_port_scheme("not-a-port") is None
 
 
 @pytest.mark.unit

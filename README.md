@@ -178,7 +178,9 @@ A `WorkspaceProfile` can describe:
 - `planning`: optional Plan -> Execute -> Compare policy and artifact paths.
 - `validation`: health checks, artifact paths, timeout and tier hints.
 - `monitor`: PR-monitor policy such as initial review grace.
-- `secrets`: named mounts or env leases.
+- `secrets`: named mount or env leases. In local mode, declare explicit
+  `provider: env`, `provider: github`, `provider: host-file`, or
+  `provider: local-auth` refs instead of broad host-home mounts.
 - `security`: local egress policy, related security declarations, and profile lint policy for credential mounts.
 - `ports`: endpoint names exposed to agents or tests.
 
@@ -712,12 +714,16 @@ containers. The local stack defaults this to `${HOME}/.awf/service`, overridable
 with `AWF_HOST_WORK_DIR=/absolute/path`.
 
 The worker also needs host-visible credential paths so workspace stacks can bind
-the same auth into agent containers. Local service mode mounts only the known
-credential paths under `${AWF_HOST_HOME:-${HOME}}` into the API and worker
-containers, rather than mounting the whole home directory. It also forwards
-Docker Desktop's `/run/host-services/ssh-auth.sock` so service-worker Git
-operations can use the operator's loaded SSH keys. Set `AWF_HOST_HOME` if the
-shell running Docker Compose does not expose the operator home as `${HOME}`.
+the same auth into agent containers. The preferred path is profile-declared
+local secret leases under `secrets`: env leases render only Compose
+placeholders, and mount leases bind exact read-only files or known local auth
+paths. Local service mode still mounts only the known credential paths under
+`${AWF_HOST_HOME:-${HOME}}` into the API and worker containers so legacy
+providers that need per-workspace writable copies can be seeded. It does not
+mount the whole home directory. It also forwards Docker Desktop's
+`/run/host-services/ssh-auth.sock` so service-worker Git operations can use the
+operator's loaded SSH keys. Set `AWF_HOST_HOME` if the shell running Docker
+Compose does not expose the operator home as `${HOME}`.
 
 Credential values used by Compose interpolation must be present in the shell
 that starts the stack or in a Compose env file such as `docker/compose/.env`.
@@ -1234,6 +1240,38 @@ auth into the agent container:
   per-workspace isolated auth directories for OpenCode/Ollama runs.
 - selected provider environment variables.
 
+Prefer declaring the credentials a workspace needs in the profile:
+
+```yaml
+secrets:
+  - name: github-token
+    kind: env
+    target: GH_TOKEN
+    provider: github
+    ref: token
+  - name: openai-token
+    kind: env
+    target: OPENAI_API_KEY
+    provider: env
+    ref: env/OPENAI_API_KEY
+  - name: github-cli-config
+    kind: mount
+    target: /home/agent/.config/gh
+    provider: local-auth
+    ref: .config/gh
+```
+
+Local env leases support `provider: env` with `ref: NAME` or `ref: env/NAME`.
+GitHub env leases use the first available `AWF_GITHUB_TOKEN`, `GH_TOKEN`, or
+`GITHUB_TOKEN` and expose `GH_TOKEN` plus `GITHUB_TOKEN` placeholders inside the
+agent container. Local mount leases support `provider: host-file` /
+`provider: local-file` for exact existing host files, and
+`provider: local-auth` / `provider: auth` for known read-only auth refs such as
+`.config/gh`, `.config/gcloud`, `.gitconfig`, and `.ssh`. AWF records lease
+issue/mount/expiry/revoke metadata, provider names, targets, counts, and compose
+paths. It does not persist or log secret values, and this local slice does not
+broker Vault, AWS, GCP Secret Manager, or other cloud secrets.
+
 Codex auth is intentionally isolated per workspace because a live host
 `~/.codex` contains state and locks that can collide with Codex Desktop.
 OpenCode/Ollama auth is isolated for the same reason: the agent can refresh
@@ -1248,14 +1286,15 @@ the worker copies only Codex `auth.json`, `config.toml`, `installation_id`, and
 launching the workspace stack. AWF does not copy `~/.ollama/models`; workspace
 OpenCode runs talk to the host Ollama daemon through `host.docker.internal`.
 
-Profiles should prefer declared `secrets` over host-home bind mounts. Profile
-lint blocks profile-declared service volumes that mount `${HOME}`,
+Profile lint blocks profile-declared service volumes that mount `${HOME}`,
 `${AWF_HOST_HOME}`, `~`, `/home/<user>`, or `/Users/<user>` into broad auth
-locations such as `/home/agent` or `/root`. The only local-development
-compatibility exception is the credential path list above, mounted read-only;
-set `security.host_home_auth_mounts.mode: warn` to allow those narrow mounts
-with a structured warning. Writable host-home credential mounts are rejected;
-seed writable auth into AWF's per-workspace auth directory instead.
+locations such as `/home/agent` or `/root`. Declared local-file lease refs that
+point at those broad host-home roots are also rejected. The only
+local-development compatibility exception is the credential path list above,
+mounted read-only; set `security.host_home_auth_mounts.mode: warn` to allow
+those narrow mounts with a structured warning. Writable host-home credential
+mounts and writable declared local auth leases are rejected; seed writable auth
+into AWF's per-workspace auth directory instead.
 
 Readiness checks use the same service-visible signals without reading secret
 file contents:

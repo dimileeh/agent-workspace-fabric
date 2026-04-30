@@ -1,0 +1,422 @@
+"""Resolve profile-declared local secret leases into compose-safe inputs."""
+
+from __future__ import annotations
+
+import os
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, NoReturn
+
+from awf.common.immutability import frozen_mapping
+from awf.node.compose_manager import AuthMount
+from awf.profiles.models import ProfileSecret, WorkspaceProfile
+
+SECRET_LEASE_PROVIDER_UNSUPPORTED = "SECRET_LEASE_PROVIDER_UNSUPPORTED"
+SECRET_LEASE_SOURCE_MISSING = "SECRET_LEASE_SOURCE_MISSING"
+SECRET_LEASE_SOURCE_TOO_BROAD = "SECRET_LEASE_SOURCE_TOO_BROAD"
+SECRET_LEASE_SOURCE_INVALID = "SECRET_LEASE_SOURCE_INVALID"
+SECRET_LEASE_TARGET_MISMATCH = "SECRET_LEASE_TARGET_MISMATCH"
+SECRET_LEASE_TARGET_KIND_MISMATCH = "SECRET_LEASE_TARGET_KIND_MISMATCH"
+SECRET_LEASE_WRITABLE_UNSUPPORTED = "SECRET_LEASE_WRITABLE_UNSUPPORTED"
+
+_ENV_PROVIDERS = frozenset(("env",))
+_GITHUB_PROVIDERS = frozenset(("github",))
+_LOCAL_FILE_PROVIDERS = frozenset(("local-file", "host-file"))
+_LOCAL_AUTH_PROVIDERS = frozenset(("local-auth", "auth"))
+_SUPPORTED_PROVIDERS = (
+    _ENV_PROVIDERS | _GITHUB_PROVIDERS | _LOCAL_FILE_PROVIDERS | _LOCAL_AUTH_PROVIDERS
+)
+_GITHUB_TOKEN_SOURCE_NAMES = ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+_GITHUB_TOKEN_TARGET_NAMES = frozenset(("GH_TOKEN", "GITHUB_TOKEN"))
+_ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+_HOME_ROOT_RE = re.compile(r"^/(?:home|Users)/[^/]+/?$")
+
+_KNOWN_LOCAL_AUTH_REFS: dict[str, tuple[str, str]] = {
+    "gh": (".config/gh", "/home/agent/.config/gh"),
+    ".config/gh": (".config/gh", "/home/agent/.config/gh"),
+    "gcloud": (".config/gcloud", "/home/agent/.config/gcloud"),
+    ".config/gcloud": (".config/gcloud", "/home/agent/.config/gcloud"),
+    "gitconfig": (".gitconfig", "/home/agent/.gitconfig"),
+    ".gitconfig": (".gitconfig", "/home/agent/.gitconfig"),
+    "ssh": (".ssh", "/home/agent/.ssh"),
+    ".ssh": (".ssh", "/home/agent/.ssh"),
+}
+_SAFE_SECRET_MOUNT_PREFIXES = ("/run/awf/secrets/", "/run/secrets/")
+
+
+class SecretLeaseResolutionError(ValueError):
+    """Structured local secret lease resolution failure.
+
+    The exception deliberately omits provider refs and source values. Those can
+    be secret-adjacent paths or tokens; callers should rely on ``reason_code``,
+    ``secret_name``, ``provider``, and ``target`` for diagnostics.
+    """
+
+    def __init__(
+        self,
+        *,
+        reason_code: str,
+        secret_name: str,
+        provider: str | None,
+        target: str,
+        kind: str | None = None,
+    ) -> None:
+        self.reason_code = reason_code
+        self.secret_name = secret_name
+        self.provider = provider
+        self.target = target
+        self.kind = kind
+        provider_label = provider or "unspecified"
+        kind_label = f", kind={kind}" if kind else ""
+        super().__init__(
+            f"{reason_code}: secret={secret_name}, provider={provider_label}, "
+            f"target={target}{kind_label}"
+        )
+
+
+@dataclass(frozen=True)
+class LocalSecretLeaseResolution:
+    """Compose inputs derived from profile-declared local secret leases."""
+
+    environment: tuple[tuple[str, str], ...] = ()
+    mounts: tuple[AuthMount, ...] = ()
+    metadata: Mapping[str, Any] = field(default_factory=dict)
+    satisfied_legacy_targets: frozenset[str] = frozenset()
+    satisfied_legacy_providers: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", frozen_mapping(self.metadata))
+
+
+@dataclass(frozen=True)
+class LocalSecretLeaseMountResolver:
+    """Resolve local-mode profile secret declarations.
+
+    This resolver never returns secret values. Env leases become Compose
+    placeholders like ``${OPENAI_API_KEY}``; mount leases become exact read-only
+    bind mounts; metadata contains only counts, providers, targets, and omitted
+    optional declarations.
+    """
+
+    host_home: Path
+    work_dir: Path
+    host_env: Mapping[str, str] | None = None
+
+    def resolve(
+        self,
+        profile: WorkspaceProfile,
+        *,
+        workspace_id: str,
+    ) -> LocalSecretLeaseResolution:
+        del workspace_id  # reserved for future per-workspace local lease materialization
+        source_env = os.environ if self.host_env is None else self.host_env
+        env: dict[str, str] = {}
+        mounts: list[AuthMount] = []
+        providers: list[str] = []
+        targets: list[str] = []
+        omitted_optional: list[dict[str, str]] = []
+        satisfied_legacy_targets: set[str] = set()
+        satisfied_legacy_providers: set[str] = set()
+        skipped_unresolved_count = 0
+
+        for secret in profile.secrets:
+            provider = _normalized_provider(secret)
+            if provider is None:
+                skipped_unresolved_count += 1
+                continue
+            if provider not in _SUPPORTED_PROVIDERS:
+                self._raise(
+                    SECRET_LEASE_PROVIDER_UNSUPPORTED,
+                    secret,
+                    provider=provider,
+                )
+
+            if provider in _ENV_PROVIDERS:
+                pair = self._resolve_env_secret(
+                    secret,
+                    source_env=source_env,
+                    provider=provider,
+                    omitted_optional=omitted_optional,
+                )
+                if pair is None:
+                    continue
+                _append_env_pair(env, pair)
+                _append_unique(providers, provider)
+                _append_unique(targets, pair[0])
+                continue
+
+            if provider in _GITHUB_PROVIDERS:
+                pairs = self._resolve_github_secret(
+                    secret,
+                    source_env=source_env,
+                    provider=provider,
+                    omitted_optional=omitted_optional,
+                )
+                if not pairs:
+                    continue
+                for pair in pairs:
+                    _append_env_pair(env, pair)
+                    _append_unique(targets, pair[0])
+                _append_unique(providers, provider)
+                satisfied_legacy_providers.add("github")
+                continue
+
+            if provider in _LOCAL_FILE_PROVIDERS:
+                mount = self._resolve_local_file_secret(
+                    secret,
+                    provider=provider,
+                    omitted_optional=omitted_optional,
+                )
+                if mount is None:
+                    continue
+                mounts.append(mount)
+                _append_unique(providers, provider)
+                _append_unique(targets, mount.target)
+                continue
+
+            mount = self._resolve_local_auth_secret(
+                secret,
+                provider=provider,
+                omitted_optional=omitted_optional,
+            )
+            if mount is None:
+                continue
+            mounts.append(mount)
+            _append_unique(providers, provider)
+            _append_unique(targets, mount.target)
+            if mount.target in _known_local_auth_targets():
+                satisfied_legacy_targets.add(mount.target)
+            if mount.target == "/home/agent/.config/gh":
+                satisfied_legacy_providers.add("github")
+
+        metadata: dict[str, Any] = {
+            "schema": "secret_lease_mount_metadata.v1",
+            "mount_plan": "profile_declared_secret_leases",
+            "env_count": len(env),
+            "mount_count": len(mounts),
+            "providers": providers,
+            "targets": targets,
+        }
+        if omitted_optional:
+            metadata["omitted_optional_count"] = len(omitted_optional)
+            metadata["omitted_optional"] = omitted_optional
+        if skipped_unresolved_count:
+            metadata["skipped_unresolved_count"] = skipped_unresolved_count
+        return LocalSecretLeaseResolution(
+            environment=tuple(env.items()),
+            mounts=tuple(mounts),
+            metadata=metadata,
+            satisfied_legacy_targets=frozenset(satisfied_legacy_targets),
+            satisfied_legacy_providers=frozenset(satisfied_legacy_providers),
+        )
+
+    def _resolve_env_secret(
+        self,
+        secret: ProfileSecret,
+        *,
+        source_env: Mapping[str, str],
+        provider: str,
+        omitted_optional: list[dict[str, str]],
+    ) -> tuple[str, str] | None:
+        if secret.kind != "env":
+            self._raise(SECRET_LEASE_TARGET_KIND_MISMATCH, secret, provider=provider)
+        env_name = _env_ref_name(secret.ref)
+        if env_name is None:
+            self._raise(SECRET_LEASE_SOURCE_INVALID, secret, provider=provider)
+        if not source_env.get(env_name):
+            self._missing(secret, provider=provider, omitted_optional=omitted_optional)
+            return None
+        return (secret.target, f"${{{env_name}}}")
+
+    def _resolve_github_secret(
+        self,
+        secret: ProfileSecret,
+        *,
+        source_env: Mapping[str, str],
+        provider: str,
+        omitted_optional: list[dict[str, str]],
+    ) -> tuple[tuple[str, str], ...]:
+        if secret.kind != "env":
+            self._raise(SECRET_LEASE_TARGET_KIND_MISMATCH, secret, provider=provider)
+        if secret.target not in _GITHUB_TOKEN_TARGET_NAMES:
+            self._raise(SECRET_LEASE_TARGET_MISMATCH, secret, provider=provider)
+        source_name = next((name for name in _GITHUB_TOKEN_SOURCE_NAMES if source_env.get(name)), None)
+        if source_name is None:
+            self._missing(secret, provider=provider, omitted_optional=omitted_optional)
+            return ()
+        placeholder = f"${{{source_name}}}"
+        return (("GH_TOKEN", placeholder), ("GITHUB_TOKEN", placeholder))
+
+    def _resolve_local_file_secret(
+        self,
+        secret: ProfileSecret,
+        *,
+        provider: str,
+        omitted_optional: list[dict[str, str]],
+    ) -> AuthMount | None:
+        if secret.kind != "mount":
+            self._raise(SECRET_LEASE_TARGET_KIND_MISMATCH, secret, provider=provider)
+        self._validate_read_only_mount(secret, provider=provider)
+        source = self._local_file_source(secret, provider=provider)
+        if not source.exists():
+            self._missing(secret, provider=provider, omitted_optional=omitted_optional)
+            return None
+        if not source.is_file():
+            self._raise(SECRET_LEASE_SOURCE_INVALID, secret, provider=provider)
+        return AuthMount(source=str(source), target=secret.target, mode="ro")
+
+    def _resolve_local_auth_secret(
+        self,
+        secret: ProfileSecret,
+        *,
+        provider: str,
+        omitted_optional: list[dict[str, str]],
+    ) -> AuthMount | None:
+        if secret.kind != "mount":
+            self._raise(SECRET_LEASE_TARGET_KIND_MISMATCH, secret, provider=provider)
+        self._validate_read_only_mount(secret, provider=provider)
+        relative_source, expected_target = self._local_auth_source_and_target(
+            secret,
+            provider=provider,
+        )
+        if secret.target != expected_target and not _is_safe_secret_target(secret.target):
+            self._raise(SECRET_LEASE_TARGET_MISMATCH, secret, provider=provider)
+        source = self.host_home.expanduser() / relative_source
+        if not source.exists():
+            self._missing(secret, provider=provider, omitted_optional=omitted_optional)
+            return None
+        return AuthMount(source=str(source), target=secret.target, mode="ro")
+
+    def _validate_read_only_mount(self, secret: ProfileSecret, *, provider: str) -> None:
+        if secret.mode != "ro":
+            self._raise(SECRET_LEASE_WRITABLE_UNSUPPORTED, secret, provider=provider)
+
+    def _local_file_source(self, secret: ProfileSecret, *, provider: str) -> Path:
+        ref = (secret.ref or "").strip()
+        if not ref:
+            self._raise(SECRET_LEASE_SOURCE_INVALID, secret, provider=provider)
+        if _source_ref_is_too_broad(ref):
+            self._raise(SECRET_LEASE_SOURCE_TOO_BROAD, secret, provider=provider)
+        source = Path(ref).expanduser()
+        if not source.is_absolute():
+            self._raise(SECRET_LEASE_SOURCE_INVALID, secret, provider=provider)
+        return source
+
+    def _local_auth_source_and_target(
+        self,
+        secret: ProfileSecret,
+        *,
+        provider: str,
+    ) -> tuple[str, str]:
+        ref = _local_auth_ref(secret.ref)
+        if ref is None:
+            self._raise(SECRET_LEASE_SOURCE_INVALID, secret, provider=provider)
+        if _source_ref_is_too_broad(ref):
+            self._raise(SECRET_LEASE_SOURCE_TOO_BROAD, secret, provider=provider)
+        known = _KNOWN_LOCAL_AUTH_REFS.get(ref)
+        if known is None:
+            self._raise(SECRET_LEASE_SOURCE_INVALID, secret, provider=provider)
+        return known
+
+    def _missing(
+        self,
+        secret: ProfileSecret,
+        *,
+        provider: str,
+        omitted_optional: list[dict[str, str]],
+    ) -> None:
+        if secret.required:
+            self._raise(SECRET_LEASE_SOURCE_MISSING, secret, provider=provider)
+        omitted_optional.append(
+            {
+                "secret_name": secret.name,
+                "provider": provider,
+                "target": secret.target,
+                "kind": secret.kind,
+                "reason_code": SECRET_LEASE_SOURCE_MISSING,
+            }
+        )
+
+    def _raise(
+        self,
+        reason_code: str,
+        secret: ProfileSecret,
+        *,
+        provider: str | None,
+    ) -> NoReturn:
+        raise SecretLeaseResolutionError(
+            reason_code=reason_code,
+            secret_name=secret.name,
+            provider=provider,
+            target=secret.target,
+            kind=secret.kind,
+        )
+
+
+def _normalized_provider(secret: ProfileSecret) -> str | None:
+    if secret.provider is None and secret.ref is None:
+        return None
+    if secret.provider is None:
+        return None
+    provider = secret.provider.strip().lower()
+    return provider or None
+
+
+def _env_ref_name(ref: str | None) -> str | None:
+    if ref is None:
+        return None
+    stripped = ref.strip()
+    if stripped.startswith("env/"):
+        stripped = stripped[len("env/") :]
+    if not _ENV_NAME_RE.fullmatch(stripped):
+        return None
+    return stripped
+
+
+def _local_auth_ref(ref: str | None) -> str | None:
+    if ref is None:
+        return None
+    stripped = ref.strip().strip("/")
+    for prefix in ("local-auth/", "auth/"):
+        if stripped.startswith(prefix):
+            stripped = stripped[len(prefix) :]
+            break
+    return stripped or None
+
+
+def _source_ref_is_too_broad(ref: str) -> bool:
+    stripped = ref.strip().rstrip("/")
+    if stripped in {
+        "~",
+        "$HOME",
+        "${HOME}",
+        "$AWF_HOST_HOME",
+        "${AWF_HOST_HOME}",
+        "/home",
+        "/Users",
+    }:
+        return True
+    if stripped.startswith(("~/", "$HOME/", "${HOME}/", "$AWF_HOST_HOME/", "${AWF_HOST_HOME}/")):
+        return True
+    return bool(_HOME_ROOT_RE.fullmatch(stripped))
+
+
+def _is_safe_secret_target(target: str) -> bool:
+    return target.startswith(_SAFE_SECRET_MOUNT_PREFIXES)
+
+
+def _known_local_auth_targets() -> frozenset[str]:
+    return frozenset(target for _, target in _KNOWN_LOCAL_AUTH_REFS.values())
+
+
+def _append_env_pair(env: dict[str, str], pair: tuple[str, str]) -> None:
+    key, value = pair
+    if key not in env:
+        env[key] = value
+
+
+def _append_unique(items: list[str], value: str) -> None:
+    if value not in items:
+        items.append(value)

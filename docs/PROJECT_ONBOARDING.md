@@ -113,6 +113,33 @@ submits it.
 
 Generated profiles must not contain raw secrets. Use environment placeholders
 such as `${POSTGRES_PASSWORD}` and declare expected secrets under `secrets`
-with `kind: env` or `kind: mount`. Add provider references only when the secret
-broker or local operator policy is ready; do not paste token values into
-`.awf/workspace.yml`.
+with `kind: env` or `kind: mount`. Prefer declared local leases over host-home
+service volumes:
+
+```yaml
+secrets:
+  - name: github-token
+    kind: env
+    target: GH_TOKEN
+    provider: github
+    ref: token
+  - name: provider-token
+    kind: env
+    target: OPENAI_API_KEY
+    provider: env
+    ref: env/OPENAI_API_KEY
+  - name: github-cli-config
+    kind: mount
+    target: /home/agent/.config/gh
+    provider: local-auth
+    ref: .config/gh
+```
+
+Local-mode refs currently support `provider: env` with `ref: NAME` or
+`ref: env/NAME`, `provider: github` backed by `AWF_GITHUB_TOKEN`, `GH_TOKEN`, or
+`GITHUB_TOKEN`, exact existing files via `provider: host-file` /
+`provider: local-file`, and known read-only auth refs via
+`provider: local-auth` / `provider: auth`. Do not point local-file refs at
+`${HOME}`, `${AWF_HOST_HOME}`, `~`, `/home/<user>`, or `/Users/<user>` roots.
+Do not paste token values into `.awf/workspace.yml`. AWF records sanitized lease
+metadata only; this local path does not implement a cloud secret broker.

@@ -155,6 +155,45 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_accepts_declared_provider_github_and_local_auth_leases() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "declared-local-leases",
+            "secrets": [
+                {
+                    "name": "github-token",
+                    "kind": "env",
+                    "target": "GITHUB_TOKEN",
+                    "provider": "github",
+                    "ref": "token",
+                },
+                {
+                    "name": "openai-token",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "env",
+                    "ref": "OPENAI_API_KEY",
+                },
+                {
+                    "name": "github-cli-config",
+                    "kind": "mount",
+                    "target": "/home/agent/.config/gh",
+                    "provider": "local-auth",
+                    "ref": ".config/gh",
+                },
+            ],
+        }
+    )
+
+    assert [secret.provider for secret in profile.secrets] == [
+        "github",
+        "env",
+        "local-auth",
+    ]
+    assert profile.secrets[2].mode == "ro"
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_database_hooks() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -448,8 +487,9 @@ def test_http_healthcheck_public_targets_redact_url_userinfo() -> None:
     [
         {"name": "missing-target"},
         {"name": "both", "command": "curl localhost", "url": "http://localhost/health"},
-        {"name": "ftp", "url": "ftp://localhost/health"},
         {"name": "kind-mismatch", "kind": "http", "command": "curl localhost"},
+        {"name": "ftp", "url": "ftp://localhost/health"},
+        {"name": "method-type", "url": "http://localhost/health", "method": 123},
         {"name": "status", "url": "http://localhost/health", "expected_status": 99},
         {"name": "interval", "url": "http://localhost/health", "interval_seconds": 0},
     ],
