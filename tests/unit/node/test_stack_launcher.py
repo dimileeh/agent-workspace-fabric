@@ -768,6 +768,39 @@ async def test_compose_stack_launcher_suppresses_satisfied_legacy_providers_befo
 
 
 @pytest.mark.unit
+async def test_compose_stack_launcher_filters_satisfied_provider_targets_after_resolution() -> None:
+    compose = _RecordingCompose()
+    auth_mount_resolver = _RecordingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=_ProviderDeclaredLeaseResolver(),
+        auth_mount_resolver=auth_mount_resolver,
+    )
+
+    await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="declared-github-provider"),
+        )
+    )
+
+    assert compose.specs[0].auth_mounts == (
+        AuthMount(
+            source="/host/awf/git/mirrors/repo.git",
+            target="/host/awf/git/mirrors/repo.git",
+            mode="rw",
+        ),
+        AuthMount(
+            source="/host/work/auth/ws_launcher/codex",
+            target="/home/agent/.codex",
+            mode="rw",
+        ),
+    )
+
+
+@pytest.mark.unit
 async def test_compose_stack_launcher_fails_secret_lease_resolution_before_compose_up() -> None:
     compose = _RecordingCompose()
     declared_resolver = _FailingDeclaredLeaseResolver()

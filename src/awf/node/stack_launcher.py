@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Protocol
 
 from awf.common.git_identity import DEFAULT_GIT_AUTHOR_EMAIL, DEFAULT_GIT_AUTHOR_NAME
-from awf.node.auth_mounts import WorkspaceAuthMountResolver
+from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_targets
 from awf.node.compose_manager import (
     AuthMount,
     ComposeManager,
@@ -99,6 +99,9 @@ class ComposeStackLauncher:
             if secret_lease_resolution is not None
             else frozenset()
         )
+        suppressed_legacy_targets = satisfied_targets | legacy_provider_targets(
+            satisfied_providers
+        )
         if self._auth_mount_resolver is not None:
             legacy_mounts = await asyncio.to_thread(
                 self._auth_mount_resolver.resolve,
@@ -107,7 +110,9 @@ class ComposeStackLauncher:
                 suppressed_providers=satisfied_providers,
             )
             auth_mounts.extend(
-                mount for mount in legacy_mounts if mount.target not in satisfied_targets
+                mount
+                for mount in legacy_mounts
+                if mount.target not in suppressed_legacy_targets
             )
         services = await asyncio.to_thread(
             profile_services,

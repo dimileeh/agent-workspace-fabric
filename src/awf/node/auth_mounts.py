@@ -84,7 +84,7 @@ def resolve_service_auth_mounts(
     """
 
     normalized_home = host_home.expanduser()
-    suppressed_target_set = frozenset(suppressed_targets) | _targets_for_legacy_providers(
+    suppressed_target_set = frozenset(suppressed_targets) | legacy_provider_targets(
         suppressed_providers
     )
     base_mounts = _build_host_auth_mounts(
@@ -191,7 +191,9 @@ def _workspace_auth_mounts(
     return tuple(mounts)
 
 
-def _targets_for_legacy_providers(providers: Collection[str]) -> frozenset[str]:
+def legacy_provider_targets(providers: Collection[str]) -> frozenset[str]:
+    """Return legacy mount targets covered by provider-level suppression."""
+
     targets: set[str] = set()
     for provider in providers:
         targets.update(_LEGACY_PROVIDER_TARGETS.get(provider, ()))
