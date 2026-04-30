@@ -973,7 +973,7 @@ export function ConsoleDashboard() {
                 />
                 <SecretsLeasesPanel
                   resolvedProfile={detail.workspace?.resolved_profile ?? null}
-                  secretLeases={detail.workspace?.secret_leases ?? []}
+                  secretLeases={detail.workspace?.secret_leases ?? null}
                 />
                 <OperationsPanel operations={detail.operations} />
               </div>
@@ -3472,17 +3472,19 @@ function SecretsLeasesPanel({
   secretLeases,
 }: {
   resolvedProfile: Record<string, unknown> | null;
-  secretLeases: WorkspaceSecretLease[];
+  secretLeases: WorkspaceSecretLease[] | null | undefined;
 }) {
   const secrets = extractProfileSecrets(resolvedProfile);
-  const readiness = summarizeSecretLeaseReadiness(secretLeases);
-  const credentialReadiness = summarizeProviderCredentialReadiness(secrets, secretLeases);
+  const leasesUnavailable = secretLeases == null;
+  const leaseArray = secretLeases ?? [];
+  const readiness = summarizeSecretLeaseReadiness(leaseArray);
+  const credentialReadiness = summarizeProviderCredentialReadiness(secrets, leaseArray);
   const mountSecrets = secrets.filter((s) => s.kind === "mount").length;
   const envSecrets = secrets.filter((s) => s.kind === "env").length;
 
   return (
     <Panel title="Secrets & Leases" icon={<KeyRound size={16} aria-hidden />}>
-      {secrets.length === 0 && secretLeases.length === 0 ? (
+      {secrets.length === 0 && leasesUnavailable ? (
         <MutedLine>No secret policy or leases reported for this workspace.</MutedLine>
       ) : (
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
@@ -3502,7 +3504,7 @@ function SecretsLeasesPanel({
           ) : (
             <QueueChip label="Secrets declared" value="none" tone="neutral" />
           )}
-          {secretLeases.length > 0 ? (
+          {leaseArray.length > 0 ? (
             <>
               <QueueChip
                 label="Leases mounted"
@@ -3521,17 +3523,19 @@ function SecretsLeasesPanel({
               ) : null}
             </>
           ) : (
-            <QueueChip label="Leases" value="unavailable" tone="neutral" />
+            <QueueChip label="Leases" value={leasesUnavailable ? "unavailable" : "none"} tone="neutral" />
           )}
           {secrets.length > 0 ? (
             <QueueChip
               label="Provider readiness"
-              value={credentialReadiness.label}
-              tone={credentialReadiness.tone}
+              value={leasesUnavailable ? "unavailable" : credentialReadiness.label}
+              tone={leasesUnavailable ? "neutral" : credentialReadiness.tone}
               detail={
-                credentialReadiness.missingProviders.length > 0
-                  ? `missing: ${credentialReadiness.missingProviders.join(", ")}`
-                  : undefined
+                leasesUnavailable
+                  ? "lease data not yet reported"
+                  : credentialReadiness.missingProviders.length > 0
+                    ? `missing: ${credentialReadiness.missingProviders.join(", ")}`
+                    : undefined
               }
             />
           ) : null}
