@@ -23,6 +23,7 @@ import {
   RefreshCw,
   Search,
   Server,
+  Shield,
   Terminal,
   X,
   XCircle,
@@ -66,6 +67,14 @@ import {
 } from "@/lib/operation-format";
 import { summarizeCoordinationWarnings } from "@/lib/coordination-format";
 import {
+  extractProfileSecrets,
+  extractProfileSecurity,
+  formatHostHomeMountPolicy,
+  summarizeEgressStatus,
+  summarizeProviderCredentialReadiness,
+  summarizeSecretLeaseReadiness,
+} from "@/lib/security-format";
+import {
   getWorkspaceOperatorControls,
   summarizeWorkspaceOperatorFailure,
   summarizeWorkspaceOperatorSuccess,
@@ -80,6 +89,7 @@ import type {
   Operation,
   CapacityDimension,
   ConcurrencyLane,
+  PolicyFinding,
   ResourceSaturationSummary,
   RuntimeService,
   Workspace,
@@ -90,6 +100,7 @@ import type {
   WorkspaceLogStream,
   WorkspaceOverview,
   WorkspaceRuntime,
+  WorkspaceSecretLease,
   WorkspaceControlResponse,
   WorkspaceOperatorAction,
   WorkspaceOperatorRequest,
@@ -955,6 +966,14 @@ export function ConsoleDashboard() {
                   )}
                 />
                 <RuntimePanel runtime={detail.runtime} />
+                <SecurityEgressPanel
+                  resolvedProfile={detail.workspace?.resolved_profile ?? null}
+                  policyFindings={detail.workspace?.policy_findings ?? []}
+                />
+                <SecretsLeasesPanel
+                  resolvedProfile={detail.workspace?.resolved_profile ?? null}
+                  secretLeases={detail.workspace?.secret_leases ?? []}
+                />
                 <OperationsPanel operations={detail.operations} />
               </div>
               <div className="grid min-w-0 gap-4">
@@ -3396,6 +3415,128 @@ function LogOutput({
     >
       {value || "No log data loaded."}
     </pre>
+  );
+}
+
+function SecurityEgressPanel({
+  resolvedProfile,
+  policyFindings,
+}: {
+  resolvedProfile: Record<string, unknown> | null;
+  policyFindings: PolicyFinding[];
+}) {
+  const security = extractProfileSecurity(resolvedProfile);
+  const egressStatus = summarizeEgressStatus(security.egress);
+  const mountPolicy = formatHostHomeMountPolicy(security.host_home_auth_mounts);
+  const secretCount = extractProfileSecrets(resolvedProfile).length;
+  const activeFindings = policyFindings.filter((finding) => finding.status === "active");
+
+  return (
+    <Panel title="Security & Egress" icon={<Shield size={16} aria-hidden />}>
+      <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+        <QueueChip
+          label="Egress"
+          value={egressStatus.label}
+          detail={egressStatus.detail}
+          tone={egressStatus.tone}
+        />
+        <QueueChip
+          label="Host-home mounts"
+          value={mountPolicy.label}
+          tone={mountPolicy.tone}
+        />
+        <QueueChip
+          label="Secrets declared"
+          value={secretCount === 0 ? "none" : String(secretCount)}
+          tone={secretCount > 0 ? "info" : "neutral"}
+        />
+        <QueueChip
+          label="Policy findings"
+          value={activeFindings.length === 0 ? "none" : String(activeFindings.length)}
+          detail={activeFindings.length > 0 ? activeFindings.map((f) => f.reason_code).join(", ") : undefined}
+          tone={activeFindings.length > 0 ? "warn" : "neutral"}
+        />
+      </div>
+      {security.egress.mode === "allowlist" && security.egress.allowlist.length > 0 ? (
+        <div className="mt-2 text-[11px] text-slate-500">
+          Allowed: {security.egress.allowlist.join(", ")}
+        </div>
+      ) : null}
+    </Panel>
+  );
+}
+
+function SecretsLeasesPanel({
+  resolvedProfile,
+  secretLeases,
+}: {
+  resolvedProfile: Record<string, unknown> | null;
+  secretLeases: WorkspaceSecretLease[];
+}) {
+  const secrets = extractProfileSecrets(resolvedProfile);
+  const readiness = summarizeSecretLeaseReadiness(secretLeases);
+  const credentialReadiness = summarizeProviderCredentialReadiness(secrets, secretLeases);
+  const mountSecrets = secrets.filter((s) => s.kind === "mount").length;
+  const envSecrets = secrets.filter((s) => s.kind === "env").length;
+
+  return (
+    <Panel title="Secrets & Leases" icon={<Shield size={16} aria-hidden />}>
+      {secrets.length === 0 && secretLeases.length === 0 ? (
+        <MutedLine>No secret policy or leases reported for this workspace.</MutedLine>
+      ) : (
+        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
+          {secrets.length > 0 ? (
+            <>
+              <QueueChip
+                label="Mount secrets"
+                value={String(mountSecrets)}
+                tone={mountSecrets > 0 ? "info" : "neutral"}
+              />
+              <QueueChip
+                label="Env secrets"
+                value={String(envSecrets)}
+                tone={envSecrets > 0 ? "info" : "neutral"}
+              />
+            </>
+          ) : (
+            <QueueChip label="Secrets declared" value="none" tone="neutral" />
+          )}
+          {secretLeases.length > 0 ? (
+            <>
+              <QueueChip
+                label="Leases mounted"
+                value={`${readiness.mounted}/${readiness.total}`}
+                tone={readiness.allReady ? "good" : "warn"}
+                detail={readiness.allReady ? "all mounted" : undefined}
+              />
+              {readiness.issued > 0 ? (
+                <QueueChip label="Issued" value={String(readiness.issued)} tone="info" />
+              ) : null}
+              {readiness.expired > 0 ? (
+                <QueueChip label="Expired" value={String(readiness.expired)} tone="bad" />
+              ) : null}
+              {readiness.revoked > 0 ? (
+                <QueueChip label="Revoked" value={String(readiness.revoked)} tone="bad" />
+              ) : null}
+            </>
+          ) : (
+            <QueueChip label="Leases" value="unavailable" tone="neutral" />
+          )}
+          {secrets.length > 0 ? (
+            <QueueChip
+              label="Provider readiness"
+              value={credentialReadiness.label}
+              tone={credentialReadiness.tone}
+              detail={
+                credentialReadiness.missingProviders.length > 0
+                  ? `missing: ${credentialReadiness.missingProviders.join(", ")}`
+                  : undefined
+              }
+            />
+          ) : null}
+        </div>
+      )}
+    </Panel>
   );
 }
 

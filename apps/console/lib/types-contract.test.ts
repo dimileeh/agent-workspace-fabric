@@ -1,5 +1,10 @@
 import type {
+  HostHomeAuthMountPolicy,
   Operation,
+  PolicyFinding,
+  ProfileEgress,
+  ProfileSecret,
+  ProfileSecurity,
   ValidationFreshnessSummary,
   ValidationFreshnessStatus,
   ValidationRunSummary,
@@ -13,6 +18,7 @@ import type {
   WorkspaceOverview,
   WorkspaceRecoverySummary,
   WorkspaceRuntime,
+  WorkspaceSecretLease,
 } from "./types";
 
 type Equal<Left, Right> =
@@ -226,3 +232,87 @@ type WorkspaceOperatorRequestShape = Expect<
 export const workspaceOperatorActionUnionIsExplicit: WorkspaceOperatorActionUnionIsExplicit = true;
 export const workspaceControlResponseShape: WorkspaceControlResponseShape = true;
 export const workspaceOperatorRequestShape: WorkspaceOperatorRequestShape = true;
+
+type WorkspaceSecretLeaseShape = Expect<
+  Equal<
+    WorkspaceSecretLease,
+    {
+      lease_id: string;
+      secret_name: string;
+      kind: string;
+      target: string;
+      status: string;
+      provider: string | null;
+      ref_digest: string | null;
+      issued_at: string;
+      mounted_at: string | null;
+      expires_at: string | null;
+      revoked_at: string | null;
+    }
+  >
+>;
+
+type ProfileSecretShape = Expect<
+  Equal<
+    ProfileSecret,
+    {
+      name: string;
+      target: string;
+      kind: "mount" | "env";
+      mode: "ro" | "rw";
+      required: boolean;
+      provider: string | null;
+    }
+  >
+>;
+
+type ProfileEgressShape = Expect<
+  Equal<
+    ProfileEgress,
+    {
+      mode: "open" | "allowlist" | "offline" | "mirrored";
+      allowlist: string[];
+    }
+  >
+>;
+
+type HostHomeAuthMountPolicyShape = Expect<
+  Equal<
+    HostHomeAuthMountPolicy,
+    {
+      mode: "block" | "warn";
+    }
+  >
+>;
+
+type ProfileSecurityShape = Expect<
+  Equal<
+    ProfileSecurity,
+    {
+      egress: ProfileEgress;
+      host_home_auth_mounts: HostHomeAuthMountPolicy;
+    }
+  >
+>;
+
+type WorkspaceIncludesSecretLeases = Expect<
+  Equal<
+    Pick<Workspace, "secret_leases">,
+    { secret_leases: WorkspaceSecretLease[] }
+  >
+>;
+
+type WorkspaceIncludesPolicyFindings = Expect<
+  Equal<
+    Pick<Workspace, "policy_findings">,
+    { policy_findings: PolicyFinding[] }
+  >
+>;
+
+export const workspaceSecretLeaseShape: WorkspaceSecretLeaseShape = true;
+export const profileSecretShape: ProfileSecretShape = true;
+export const profileEgressShape: ProfileEgressShape = true;
+export const hostHomeAuthMountPolicyShape: HostHomeAuthMountPolicyShape = true;
+export const profileSecurityShape: ProfileSecurityShape = true;
+export const workspaceIncludesSecretLeases: WorkspaceIncludesSecretLeases = true;
+export const workspaceIncludesPolicyFindings: WorkspaceIncludesPolicyFindings = true;
