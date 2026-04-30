@@ -93,6 +93,7 @@ def profile_services(
                 for source, target in s.volumes
             ),
             privileged=s.privileged,
+            required=s.required,
         )
         for s in profile.services
     )

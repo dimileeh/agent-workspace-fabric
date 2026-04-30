@@ -11,6 +11,7 @@ from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_tar
 from awf.node.compose_manager import (
     AuthMount,
     ComposeManager,
+    ComposeOperationError,
     ComposeProjectPaths,
     WorkspaceComposeSpec,
 )
@@ -38,7 +39,7 @@ class WorkspaceStackLaunchRequest:
 class WorkspaceStackLauncher(Protocol):
     """Small seam for provisioning tests to avoid requiring Docker."""
 
-    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths: ...
+    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None: ...
 
 
 class WorkspaceSecretLeaseResolver(Protocol):
@@ -50,6 +51,11 @@ class WorkspaceSecretLeaseResolver(Protocol):
         *,
         workspace_id: str,
     ) -> LocalSecretLeaseResolution: ...
+
+
+class WorkspaceServiceExecutionError(Exception):
+    """Raised when profile-declared workspace services fail to start."""
+    pass
 
 
 class ComposeStackLauncher:
@@ -68,7 +74,7 @@ class ComposeStackLauncher:
         self._auth_mount_resolver = auth_mount_resolver
         self._secret_lease_resolver = secret_lease_resolver
 
-    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths:
+    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
         layout = request.layout
         profile = request.profile
         egress_plan = local_egress_plan(profile.security.egress)
@@ -139,7 +145,18 @@ class ComposeStackLauncher:
             network_internal=egress_plan.network_internal,
             host_gateway_enabled=egress_plan.host_gateway_enabled,
         )
-        paths = await self._compose.up(spec, wait=True)
+        try:
+            paths = await self._compose.up(spec, wait=True)
+        except ComposeOperationError as e:
+            if e.reason_code == "DOCKER_UNAVAILABLE":
+                required_services = [s.name for s in spec.services if s.required]
+                if spec.docker_mode == "dind":
+                    required_services.append("docker")
+                if not required_services:
+                    return None
+                msg = f"DOCKER_UNAVAILABLE: Cannot start workspace agent container and required services: {required_services}"
+                raise WorkspaceServiceExecutionError(msg) from e
+            raise
         if secret_lease_resolution is None:
             return paths
         return ComposeProjectPaths(
