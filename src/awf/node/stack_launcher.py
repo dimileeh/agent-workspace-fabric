@@ -39,7 +39,7 @@ class WorkspaceStackLaunchRequest:
 class WorkspaceStackLauncher(Protocol):
     """Small seam for provisioning tests to avoid requiring Docker."""
 
-    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths: ...
+    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None: ...
 
 
 class WorkspaceSecretLeaseResolver(Protocol):
@@ -74,7 +74,7 @@ class ComposeStackLauncher:
         self._auth_mount_resolver = auth_mount_resolver
         self._secret_lease_resolver = secret_lease_resolver
 
-    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths:
+    async def launch(self, request: WorkspaceStackLaunchRequest) -> ComposeProjectPaths | None:
         layout = request.layout
         profile = request.profile
         egress_plan = local_egress_plan(profile.security.egress)
@@ -150,9 +150,9 @@ class ComposeStackLauncher:
         except ComposeOperationError as e:
             if e.reason_code == "DOCKER_UNAVAILABLE":
                 required_services = [s.name for s in spec.services if s.required]
-                msg = "DOCKER_UNAVAILABLE: Cannot start workspace agent container"
-                if required_services:
-                    msg += f" and required services: {required_services}"
+                if not required_services:
+                    return None
+                msg = f"DOCKER_UNAVAILABLE: Cannot start workspace agent container and required services: {required_services}"
                 raise WorkspaceServiceExecutionError(msg) from e
             raise
         if secret_lease_resolution is None:
