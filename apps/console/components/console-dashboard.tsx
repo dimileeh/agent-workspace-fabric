@@ -104,6 +104,111 @@ type WorkspaceSortKey = "created_at" | "updated_at";
 type SortDirection = "asc" | "desc";
 type MergeQueueStatus = "loading" | "success" | "error";
 
+const emptyCapacityDimension: CapacityDimension = {
+  limit: null,
+  reserved: 0,
+  available: null,
+  available_after_next_default: null,
+  reason_code: null,
+};
+
+function fallbackCapacityDimension(
+  dimension: Partial<CapacityDimension> | null | undefined,
+): CapacityDimension {
+  return {
+    limit: dimension?.limit ?? null,
+    reserved: dimension?.reserved ?? 0,
+    available: dimension?.available ?? null,
+    available_after_next_default: dimension?.available_after_next_default ?? null,
+    reason_code: dimension?.reason_code ?? null,
+  };
+}
+
+function fallbackResourceSaturation(
+  saturation: Partial<ResourceSaturationSummary>,
+): ResourceSaturationSummary {
+  return {
+    generated_at: saturation.generated_at ?? new Date().toISOString(),
+    workspace_counts: {
+      by_status: saturation.workspace_counts?.by_status ?? {},
+      active_total: saturation.workspace_counts?.active_total ?? 0,
+      requested: saturation.workspace_counts?.requested ?? 0,
+      provisioning: saturation.workspace_counts?.provisioning ?? 0,
+      ready: saturation.workspace_counts?.ready ?? 0,
+      running: saturation.workspace_counts?.running ?? 0,
+      validating: saturation.workspace_counts?.validating ?? 0,
+      pushing: saturation.workspace_counts?.pushing ?? 0,
+      monitoring_pr: saturation.workspace_counts?.monitoring_pr ?? 0,
+      destroying: saturation.workspace_counts?.destroying ?? 0,
+      completed: saturation.workspace_counts?.completed ?? 0,
+      failed: saturation.workspace_counts?.failed ?? 0,
+      cancelled: saturation.workspace_counts?.cancelled ?? 0,
+      destroyed: saturation.workspace_counts?.destroyed ?? 0,
+    },
+    worker: {
+      max_concurrent_provisions: saturation.worker?.max_concurrent_provisions ?? 0,
+      max_concurrent_executions: saturation.worker?.max_concurrent_executions ?? 0,
+    },
+    resource_defaults: {
+      steady_cpu: saturation.resource_defaults?.steady_cpu ?? 0,
+      steady_memory_gb: saturation.resource_defaults?.steady_memory_gb ?? 0,
+      peak_cpu: saturation.resource_defaults?.peak_cpu ?? 0,
+      peak_memory_gb: saturation.resource_defaults?.peak_memory_gb ?? 0,
+    },
+    reserved_resources: {
+      active_workspace_count: saturation.reserved_resources?.active_workspace_count ?? 0,
+      steady_cpu: saturation.reserved_resources?.steady_cpu ?? 0,
+      steady_memory_gb: saturation.reserved_resources?.steady_memory_gb ?? 0,
+      peak_cpu: saturation.reserved_resources?.peak_cpu ?? 0,
+      peak_memory_gb: saturation.reserved_resources?.peak_memory_gb ?? 0,
+      disk_mb: saturation.reserved_resources?.disk_mb ?? 0,
+      dind_slots: saturation.reserved_resources?.dind_slots ?? 0,
+    },
+    capacity: {
+      steady_cpu: fallbackCapacityDimension(saturation.capacity?.steady_cpu),
+      peak_cpu: fallbackCapacityDimension(saturation.capacity?.peak_cpu),
+      steady_memory_gb: fallbackCapacityDimension(saturation.capacity?.steady_memory_gb),
+      peak_memory_gb: fallbackCapacityDimension(saturation.capacity?.peak_memory_gb),
+      disk_mb: fallbackCapacityDimension(saturation.capacity?.disk_mb),
+      dind_slots: fallbackCapacityDimension(saturation.capacity?.dind_slots),
+      pressure_reasons: saturation.capacity?.pressure_reasons ?? [],
+    },
+    concurrency: {
+      provision: {
+        limit: saturation.concurrency?.provision?.limit ?? 0,
+        in_use: saturation.concurrency?.provision?.in_use ?? 0,
+        queued: saturation.concurrency?.provision?.queued ?? 0,
+        available: saturation.concurrency?.provision?.available ?? 0,
+      },
+      execution: {
+        limit: saturation.concurrency?.execution?.limit ?? 0,
+        in_use: saturation.concurrency?.execution?.in_use ?? 0,
+        queued: saturation.concurrency?.execution?.queued ?? 0,
+        available: saturation.concurrency?.execution?.available ?? 0,
+      },
+    },
+    disk: {
+      path: saturation.disk?.path ?? "",
+      checked_path: saturation.disk?.checked_path ?? "",
+      total_bytes: saturation.disk?.total_bytes ?? 0,
+      used_bytes: saturation.disk?.used_bytes ?? 0,
+      free_bytes: saturation.disk?.free_bytes ?? 0,
+      percent_free: saturation.disk?.percent_free ?? 0,
+      threshold_bytes: saturation.disk?.threshold_bytes ?? 0,
+      ok: saturation.disk?.ok ?? true,
+      status: saturation.disk?.status ?? "unknown",
+      reason: saturation.disk?.reason ?? "DISK_UNKNOWN",
+      detail: saturation.disk?.detail ?? null,
+    },
+    admission: {
+      ok: saturation.admission?.ok ?? true,
+      status: saturation.admission?.status ?? "unknown",
+      reason: saturation.admission?.reason ?? "ADMISSION_UNKNOWN",
+      detail: saturation.admission?.detail ?? null,
+    },
+  };
+}
+
 type DetailState = {
   workspace: Workspace | null;
   runtime: WorkspaceRuntime | null;
@@ -254,7 +359,7 @@ export function ConsoleDashboard() {
       return;
     }
     setResourceError(null);
-    setResourceSaturation(result.data);
+    setResourceSaturation(fallbackResourceSaturation(result.data));
   }, []);
 
   const loadWorkspaceSummary = useCallback(async () => {
@@ -2388,20 +2493,21 @@ function ResourceDimensionMeter({
   unit,
 }: {
   label: string;
-  dimension: CapacityDimension;
+  dimension?: CapacityDimension | null;
   unit: CapacityUnit;
 }) {
-  const limit = dimension.limit;
+  const safeDimension = dimension ?? emptyCapacityDimension;
+  const limit = safeDimension.limit;
   const hasLimit = limit !== null && limit > 0;
-  const fill = hasLimit ? Math.min(100, Math.max(0, (dimension.reserved / limit) * 100)) : 0;
-  const tone = dimension.reason_code ? (dimension.reason_code.endsWith("_UNKNOWN") ? "warn" : "bad") : "good";
+  const fill = hasLimit ? Math.min(100, Math.max(0, (safeDimension.reserved / limit) * 100)) : 0;
+  const tone = safeDimension.reason_code ? (safeDimension.reason_code.endsWith("_UNKNOWN") ? "warn" : "bad") : "good";
 
   return (
     <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(tone)}`}>
       <div className="flex items-center justify-between gap-2">
         <span className="font-semibold text-slate-900">{label}</span>
         <span className="mono text-slate-700">
-          {formatCapacityValue(dimension.reserved, unit)}
+          {formatCapacityValue(safeDimension.reserved, unit)}
           {hasLimit ? ` / ${formatCapacityValue(limit, unit)}` : " / unknown"}
         </span>
       </div>
@@ -2409,10 +2515,10 @@ function ResourceDimensionMeter({
         <div className={`h-full ${toneFillClass(tone)}`} style={{ width: `${fill}%` }} />
       </div>
       <div className="mt-2 flex flex-wrap gap-x-3 gap-y-1 text-slate-700">
-        <span>{formatCapacityValue(dimension.available, unit)} available</span>
-        <span>{formatCapacityValue(dimension.available_after_next_default, unit)} after next</span>
+        <span>{formatCapacityValue(safeDimension.available, unit)} available</span>
+        <span>{formatCapacityValue(safeDimension.available_after_next_default, unit)} after next</span>
       </div>
-      {dimension.reason_code ? <div className="mono mt-1 truncate text-[11px]">{dimension.reason_code}</div> : null}
+      {safeDimension.reason_code ? <div className="mono mt-1 truncate text-[11px]">{safeDimension.reason_code}</div> : null}
     </div>
   );
 }

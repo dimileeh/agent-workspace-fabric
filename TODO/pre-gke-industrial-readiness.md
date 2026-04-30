@@ -49,16 +49,29 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Security, Secrets, And Egress Policy | Profile lint for unsafe secret mounts | `ws_d14e2177bdc24746b552918b` | _pending_ | running | Codex/gpt-5.5, auto-merge enabled; reject/warn unsafe secret targets and broad host-home auth mounts. |
-| P1 Security, Secrets, And Egress Policy | Local egress policy enforcement | `ws_830a162773f845adb14caed9` | _pending_ | running | Codex/gpt-5.5, auto-merge enabled; enforce profile egress policy in local Docker mode. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Operator-visible advisory overlap graph | `ws_0bb96ca3f38142288e51ef2f` | _pending_ | running | Codex/gpt-5.5, auto-merge enabled; expose overlap visibility without blocking workspace launch. |
-| P1 API Contract Completion | Normalized list pagination envelopes | `ws_49f61dfb52e74dc9836aad50` | _pending_ | running | Codex/gpt-5.5, auto-merge enabled; make list API envelopes consistent and backward-compatible. |
-| P1 Local Packaging And Upgrade Path | Local backup, upgrade, and recovery runbook | `ws_f3145b63327c482aaaa37c10` | _pending_ | running | Documents local image versioning, Postgres backup/restore, rollback, disaster recovery, and `scripts/run_awf.py` compatibility with README contract tests. |
+| P1 API Contract Completion | Callback event allowlist recovery | `ws_0f8c4dba48874f59ba3729f3` | [#149](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/149) | merged | Recovered failed `ws_0e2fc82ece7541659287e063`, reused the salvage branch, and finished exact public callback event allowlist validation. |
+| P0 Operation And Recovery Truth | Plan conformance failure recovery | `ws_ebdc016deac8454688bce7a2` | [#148](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/148) | merged | Adds `PLAN_CONFORMANCE_UNSATISFIED` evidence, retry gap carry-forward, salvage hints, and env-configurable planning iterations defaulting to 3. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Security, Secrets, And Egress Policy | Local secret lease lifecycle records | `ws_60b4cd270bf34577bba32d28` | [#147](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/147) | merged | Records declared secret lease issue/mount/expiry/revoke metadata and audit events. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Local resource reservation accounting | `ws_a65f1a826823480a8c7cb197` | [#146](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/146) | merged | Finishes CPU, memory, disk, and DinD reservation accounting in local scheduling/status surfaces. |
+| P1 Workspace Services And Realistic Project Profiles | Redis app worker sidecar fixture | `ws_3dc7afc7f7f746f2b4e1dc44` | [#145](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/145) | merged | Adds a generic Redis/app/worker/service sidecar fixture with health and validation coverage. |
+| P1 MCP And Project Onboarding Client Parity | MCP operator surface parity tools | `ws_f3005ee402404cff84ce9bb1` | [#144](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/144) | merged | Adds MCP tools and parity tests for high-value read-only operator surfaces. |
+| P1 API Contract Completion | Artifact download semantics | `ws_2b64c3dbbc8943cebc184f18` | [#143](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/143) | merged | Adds safe token-protected artifact read/download semantics for AWF-managed artifact paths. |
+| P1 MCP And Project Onboarding Client Parity | Project onboarding profile init and smoke guide | `ws_1f1b857f2e1d4e9db2fc6052` | [#142](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/142) | merged | Adds `docs/PROJECT_ONBOARDING.md`, profile init/preview support, templates, smoke request shape, and regression tests. |
+| P1 Workspace Services And Realistic Project Profiles | Node browser workspace fixture | `ws_3a9ea5a336e04ee18849a367` | [#141](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/141) | merged | Adds a generic Node/browser validation fixture with service health and Playwright-style browser checks. |
+| P1 Security, Secrets, And Egress Policy | PR/control audit event trail | `ws_9965559b81b24ee89ad6c3b3` | [#140](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/140) | merged | Adds durable structured audit events for PR creation, push/publication, merge, comment resolution, and destructive controls. |
+| P1 Workspace Services And Realistic Project Profiles | Service health waits before validation | `ws_b4a9cc4b906b489ba770f9cc` | [#138](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/138) | merged | Adds profile health checks that gate validation with structured failures. |
+| P1 Workspace Services And Realistic Project Profiles | Python service plus Postgres fixture | `ws_bccf2e2aa51540f38c2db104` | [#137](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/137) | merged | Adds generic DB-backed fixture/profile coverage with deterministic Docker skips. |
+| P1 Security, Secrets, And Egress Policy | Provider least-privilege readiness diagnostics | `ws_e022c0672fb44022994eb276` | [#139](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/139) | merged | Exposes provider credential scope warnings without reading secret values. |
+| P1 Security, Secrets, And Egress Policy | Profile lint for unsafe secret mounts | `ws_d14e2177bdc24746b552918b` | [#134](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/134) | merged | Rejects/warns unsafe secret targets and broad host-home auth mounts. |
+| P1 API Contract Completion | Normalized list pagination envelopes | `ws_49f61dfb52e74dc9836aad50` | [#136](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/136) | merged | Normalizes list pagination envelope behavior while preserving backward-compatible response fields. |
+| P1 Security, Secrets, And Egress Policy | Local egress policy enforcement | `ws_830a162773f845adb14caed9` | [#135](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/135) | merged | Adds local Docker-mode egress policy enforcement with tests for open/restricted modes. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Operator-visible advisory overlap graph | `ws_0bb96ca3f38142288e51ef2f` | [#133](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/133) | merged | Exposes advisory overlap visibility without blocking workspace launch. |
+| P1 Local Packaging And Upgrade Path | Local backup, upgrade, and recovery runbook | `ws_f3145b63327c482aaaa37c10` | [#132](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/132) | merged | Documents local image versioning, Postgres backup/restore, rollback, disaster recovery, and `scripts/run_awf.py` compatibility. |
 | P0 Operation And Recovery Truth | Safe console recovery controls | `ws_3407ebb7411448af9db52daf` | [#131](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/131) | merged | Adds safe remonitor/refresh/revalidate controls using stable recovery APIs. |
 | P0 Operation And Recovery Truth | Terminal-state stale callback guard | `ws_caa5d122e46d47d1a696cf0b` | [#129](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/129) | merged | Prevents cancelled/destroyed/completed workspaces from advancing after stale callbacks. |
 | P1 Operator Console Completion | PR monitor transitions visible as operations | `ws_5eac8b3526704e77ad477d0c` | [#130](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/130) | merged | Exposes monitor wait/recovery/merge transitions as durable operations and console entries. |
@@ -118,6 +131,7 @@ Status values:
 | P0 Merge Safety And PR Monitor Correctness | Manual-merge monitor waits for observed human merge before completion | `ws_f1f2e2ff3de14f34ae1dcccd` | superseded | Failed profile resolution because local AWF service image was older than merged profile schema from PR #97; service was rebuilt and retried as `ws_f9644d6f9c904c42ae964035`. |
 | P0 Reliability, Cleanup, And SLOs | Orphan AWF resource detection and cleanup readiness reporting | `ws_04560f5cfd914095b357cdcb` | failed | PR [#98](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/98) repeatedly hit monitor-driven stale rebase recovery; local AWF now has a rebase-recovery fix, and the slice was retried as `ws_5605c5ca71c942d999f5b78f`. |
 | P0 Operation And Recovery Truth | Persist operation audit details and log stream references | `ws_83f4e614951446cf883f5c09` | failed | PR [#101](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/101) merged, so no feature retry is needed; the workspace failure exposed the stale-rebase recovery bug fixed locally before service rebuild. |
+| P1 API Contract Completion | External operator callback subscriptions | `ws_0e2fc82ece7541659287e063` | failed | Agent produced local commits and passed validation/coverage, but exhausted the Plan -> Execute -> Compare iteration budget with one remaining conformance gap: event type validation was prefix-based and still allowed internal-looking namespaced event types such as `workspace.internal_secret`. Recover by redispatching a narrow callback hardening/completion slice or salvaging the preserved worktree branch. |
 
 ## Foundations Already In Place
 
@@ -183,6 +197,7 @@ Status values:
 - [x] Add recovery for stranded workspaces whose containers exited but DB state is active.
 - [x] Add recovery for active PR workspaces after AWF service restart.
 - [x] Add console controls for safe remonitor/refresh/revalidate once API semantics are stable.
+- [x] Classify unsatisfied plan conformance failures with structured gaps, retry carry-forward, and salvage hints.
 
 ## P0: Reliability, Cleanup, And SLOs
 
@@ -209,21 +224,21 @@ Status values:
 ## P1: Security, Secrets, And Egress Policy
 
 - [ ] Replace broad static auth mounts with declared secret leases where possible.
-- [ ] Track secret lease issue, mount, expiry, revoke, and audit events.
-- [ ] Revoke workspace secrets when workspace reaches terminal cleanup.
+- [x] Track secret lease issue, mount, expiry, revoke, and audit events.
+- [x] Revoke workspace secrets when workspace reaches terminal cleanup.
 - [x] Redact known token patterns from persisted logs and artifacts.
-- [ ] Add profile lint failures for unsafe secret targets and broad host-home mounts.
-- [ ] Enforce egress policy at Docker network/profile level in local mode.
-- [ ] Add provider-specific least-privilege credential checks for Codex, Claude, Gemini, OpenCode/Ollama, GitHub, and Docker.
-- [ ] Add audit trails for PR creation, push, merge, comment resolution, and destructive operations.
+- [x] Add profile lint failures for unsafe secret targets and broad host-home mounts.
+- [x] Enforce egress policy at Docker network/profile level in local mode.
+- [x] Add provider-specific least-privilege credential checks for Codex, Claude, Gemini, OpenCode/Ollama, GitHub, and Docker.
+- [x] Add audit trails for PR creation, push, merge, comment resolution, and destructive operations.
 
 ## P1: Workspace Services And Realistic Project Profiles
 
 - [ ] Strengthen Docker Compose profile execution inside per-workspace DinD.
-- [ ] Add integration fixtures for Python service plus Postgres.
-- [ ] Add integration fixtures for Node/Next.js plus browser/Playwright validation.
-- [ ] Add Redis/app/worker/service sidecar examples.
-- [ ] Add health-check wait semantics before validation.
+- [x] Add integration fixtures for Python service plus Postgres.
+- [x] Add integration fixtures for Node/Next.js plus browser/Playwright validation.
+- [x] Add Redis/app/worker/service sidecar examples.
+- [x] Add health-check wait semantics before validation.
 - [ ] Add profile-defined app endpoints exposed to agents and validation commands.
 - [ ] Add database refresh/generation hooks for DB-backed profiles.
 - [ ] Add migration-chain validation for Python/Alembic workloads.
@@ -231,9 +246,9 @@ Status values:
 ## P1: Scheduler, Reservations, And Advisory Overlap Graph
 
 - [ ] Keep workspace/task submission non-blocking when owned paths overlap.
-- [ ] Add an operator-visible overlap graph for running and queued workspaces.
+- [x] Add an operator-visible overlap graph for running and queued workspaces.
 - [ ] Use overlap graph to warn agents in prompts and stale policy, not to prevent parallel work.
-- [ ] Finish resource reservation accounting for CPU, memory, disk, and DinD pressure.
+- [x] Finish resource reservation accounting for CPU, memory, disk, and DinD pressure.
 - [ ] Add fairness and starvation prevention for long-lived queues.
 - [ ] Add task class bias and priority scoring as described in the PRD.
 - [ ] Add human-escalation boost and retry-aware queue scoring.
@@ -241,14 +256,41 @@ Status values:
 
 ## P1: API Contract Completion
 
-- [ ] Normalize pagination envelopes across list APIs.
+- [x] Normalize pagination envelopes across list APIs.
 - [x] Add explicit idempotency support to every mutating endpoint.
 - [x] Add optimistic concurrency or version checks to mutating workspace/candidate operations.
-- [ ] Add callbacks/webhook support for external operators.
+- [x] Add callbacks/webhook support for external operators.
 - [x] Add first-class operation endpoints for rebase, validate, refresh, and make-canonical.
-- [ ] Add artifact listing and download semantics beyond metadata.
+- [x] Add artifact listing and download semantics beyond metadata.
 - [x] Add failure analysis API with root cause, evidence links, and suggested recovery actions.
 - [ ] Keep old compatibility endpoints stable until a documented v2 API cutover.
+
+## P1: MCP And Project Onboarding Client Parity
+
+Decision: keep the REST API as the canonical AWF control-plane contract, keep the
+CLI as operator convenience over that API, and make MCP a first-class parity
+client for agent orchestrators. Project onboarding should be a repeatable AWF
+workflow, not a one-off LLM guess: an agent-facing guide plus profile templates
+and a CLI-assisted inspect/preview/smoke path. New-computer setup should be
+absurdly easy: install AWF, run `awf init`, start the local service, then ask a
+coding agent in any project to use AWF for a feature.
+
+- [ ] Define the primary install path: package-manager install such as `uv tool install aira-awf`/`uv pip install aira-awf`, with git clone as the contributor path.
+- [ ] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
+- [ ] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
+- [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
+- [ ] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
+- [ ] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
+- [ ] Add MCP tools for merge queue, task attempts, validation provenance, stale reasons, artifacts, metrics, locks/overlap graph, and service health/status.
+- [ ] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics.
+- [ ] Keep MCP read/control scoped: expose AWF-managed runtime snapshots, logs, operations, and controls, but do not expose arbitrary shell or unrestricted Docker exec.
+- [ ] Add contract tests proving MCP tool payloads stay aligned with the corresponding REST API schemas and reason codes.
+- [x] Add `docs/PROJECT_ONBOARDING.md` for Codex, Claude Code, Gemini, OpenCode, OpenClaw, and human operators.
+- [x] Add `awf project init` or `awf profile init` to inspect a repository and generate a draft `.awf/workspace.yml`.
+- [x] Add profile templates for common project shapes: generic, Python, Node/Next.js, Docker Compose, Python+Postgres, Node+browser/Playwright, and multi-service app.
+- [x] Make onboarding run `awf profile preview` automatically and report missing services, secrets, ports, validation commands, and health checks.
+- [x] Add an optional smoke-workspace generator that creates a tiny no-op/check-only AWF workspace request from the generated profile.
+- [x] Add regression tests for onboarding detection, generated profile validity, preview output, and smoke request shape.
 
 ## P1: Operator Console Completion
 
@@ -259,7 +301,7 @@ Status values:
 - [ ] Show estimated cost only when reliable pricing metadata is configured.
 - [x] Add merge queue blocker drill-down.
 - [x] Add stale reason and recovery action drill-down.
-- [ ] Add safe remonitor/refresh/revalidate controls after API hardening.
+- [x] Add safe remonitor/refresh/revalidate controls after API hardening.
 - [ ] Add security/secret/egress status panels.
 
 ## P1: Local Packaging And Upgrade Path
