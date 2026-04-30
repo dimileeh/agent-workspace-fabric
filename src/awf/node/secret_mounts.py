@@ -9,6 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, NoReturn
 
+from awf.common.immutability import frozen_mapping
 from awf.node.compose_manager import AuthMount
 from awf.profiles.models import ProfileSecret, WorkspaceProfile
 
@@ -81,9 +82,12 @@ class LocalSecretLeaseResolution:
 
     environment: tuple[tuple[str, str], ...] = ()
     mounts: tuple[AuthMount, ...] = ()
-    metadata: dict[str, Any] = field(default_factory=dict)
+    metadata: Mapping[str, Any] = field(default_factory=dict)
     satisfied_legacy_targets: frozenset[str] = frozenset()
     satisfied_legacy_providers: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "metadata", frozen_mapping(self.metadata))
 
 
 @dataclass(frozen=True)

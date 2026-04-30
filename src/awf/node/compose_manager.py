@@ -18,12 +18,14 @@ from __future__ import annotations
 
 import asyncio
 import secrets
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
+from awf.common.immutability import frozen_mapping
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
@@ -167,7 +169,14 @@ class WorkspaceComposeSpec:
 class ComposeProjectPaths:
     project_dir: Path
     compose_file: Path
-    secret_lease_mount_metadata: dict[str, Any] = field(default_factory=dict)
+    secret_lease_mount_metadata: Mapping[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "secret_lease_mount_metadata",
+            frozen_mapping(self.secret_lease_mount_metadata),
+        )
 
 
 class ComposeManager:

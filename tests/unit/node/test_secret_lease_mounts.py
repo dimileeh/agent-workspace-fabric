@@ -73,6 +73,32 @@ def test_env_provider_exposes_placeholder_without_secret_value(tmp_path: Path) -
 
 
 @pytest.mark.unit
+def test_resolution_metadata_cannot_be_mutated_after_creation(tmp_path: Path) -> None:
+    resolver = _resolver(tmp_path)
+
+    resolution = resolver.resolve(
+        _profile(
+            {
+                "name": "optional-openai",
+                "kind": "env",
+                "target": "OPENAI_API_KEY",
+                "provider": "env",
+                "ref": "env/OPENAI_API_KEY",
+                "required": False,
+            }
+        ),
+        workspace_id="ws_secret",
+    )
+
+    with pytest.raises(TypeError):
+        resolution.metadata["extra"] = "injected"
+    with pytest.raises(AttributeError):
+        resolution.metadata["providers"].append("injected")
+    with pytest.raises(TypeError):
+        resolution.metadata["omitted_optional"][0]["secret_name"] = "changed"
+
+
+@pytest.mark.unit
 def test_github_provider_prefers_awf_token_and_exposes_standard_placeholders(
     tmp_path: Path,
 ) -> None:
@@ -265,7 +291,7 @@ def test_optional_missing_source_is_omitted_with_sanitized_metadata(tmp_path: Pa
             "target": "OPENAI_API_KEY",
             "kind": "env",
             "reason_code": "SECRET_LEASE_SOURCE_MISSING",
-        }
+        },
     ]
     assert "OPENAI_API_KEY" in json.dumps(resolution.metadata, default=str)
     assert "env/OPENAI_API_KEY" not in json.dumps(resolution.metadata, default=str)

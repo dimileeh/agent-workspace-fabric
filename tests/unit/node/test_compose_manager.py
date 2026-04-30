@@ -15,6 +15,7 @@ import yaml
 from awf.node.compose_manager import (
     CompanionService,
     ComposeManager,
+    ComposeProjectPaths,
     ComposeService,
     WorkspaceComposeSpec,
 )
@@ -36,6 +37,26 @@ def _spec(tmp_path: Path, **overrides: object) -> WorkspaceComposeSpec:
     }
     base.update(overrides)
     return WorkspaceComposeSpec(**base)  # type: ignore[arg-type]
+
+
+@pytest.mark.unit
+def test_compose_project_paths_secret_metadata_cannot_be_mutated() -> None:
+    paths = ComposeProjectPaths(
+        project_dir=Path("/tmp/compose/ws_secret"),
+        compose_file=Path("/tmp/compose/ws_secret/compose.yml"),
+        secret_lease_mount_metadata={
+            "providers": ["env"],
+            "omitted_optional": [{"secret_name": "optional-openai"}],
+        },
+    )
+
+    with pytest.raises(TypeError):
+        paths.secret_lease_mount_metadata["extra"] = "injected"
+    with pytest.raises(AttributeError):
+        paths.secret_lease_mount_metadata["providers"].append("injected")
+    omitted_optional = paths.secret_lease_mount_metadata["omitted_optional"]
+    with pytest.raises(TypeError):
+        omitted_optional[0]["secret_name"] = "changed"
 
 
 class TestRender:
