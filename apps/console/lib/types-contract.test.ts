@@ -239,9 +239,9 @@ type WorkspaceSecretLeaseShape = Expect<
     {
       lease_id: string;
       secret_name: string;
-      kind: string;
+      kind: "mount" | "env";
       target: string;
-      status: string;
+      status: "issued" | "mounted" | "expired" | "revoked";
       provider: string | null;
       ref_digest: string | null;
       issued_at: string;

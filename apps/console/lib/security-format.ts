@@ -32,8 +32,8 @@ export function extractProfileSecrets(
 export function extractProfileEgress(
   profile: Record<string, unknown> | null | undefined,
 ): ProfileEgress {
-  const egress = (profile as Record<string, unknown> | null | undefined)?.security as Record<string, unknown> | null | undefined;
-  const egressObj = egress?.egress as Record<string, unknown> | null | undefined;
+  const security = (profile as Record<string, unknown> | null | undefined)?.security as Record<string, unknown> | null | undefined;
+  const egressObj = security?.egress as Record<string, unknown> | null | undefined;
   if (!egressObj || typeof egressObj !== "object") {
     return { mode: "unavailable", allowlist: [] };
   }
@@ -157,9 +157,10 @@ export function summarizeProviderCredentialReadiness(
     const matchingLease = leaseByName.get(secret.name);
     if (matchingLease && (matchingLease.status === "mounted" || matchingLease.status === "issued")) {
       leasedProviders.add(secret.name);
-    } else if (secret.provider) {
-      if (!missingProviders.includes(secret.provider)) {
-        missingProviders.push(secret.provider);
+    } else {
+      const missing = secret.provider ?? secret.name;
+      if (!missingProviders.includes(missing)) {
+        missingProviders.push(missing);
       }
     }
   }
@@ -168,8 +169,10 @@ export function summarizeProviderCredentialReadiness(
   const label =
     missingProviders.length > 0
       ? `${leased}/${declared} — missing providers`
-      : `${leased}/${declared} ready`;
-  const tone = missingProviders.length > 0 ? "warn" : "good";
+      : leased === declared
+        ? "all ready"
+        : `${leased}/${declared} ready`;
+  const tone = leased === declared && missingProviders.length === 0 ? "good" : "warn";
 
   return { declared, leased, missingProviders, label, tone };
 }

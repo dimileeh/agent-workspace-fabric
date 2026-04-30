@@ -24,6 +24,7 @@ import {
   Search,
   Server,
   Shield,
+  KeyRound,
   Terminal,
   X,
   XCircle,
@@ -3480,7 +3481,7 @@ function SecretsLeasesPanel({
   const envSecrets = secrets.filter((s) => s.kind === "env").length;
 
   return (
-    <Panel title="Secrets & Leases" icon={<Shield size={16} aria-hidden />}>
+    <Panel title="Secrets & Leases" icon={<KeyRound size={16} aria-hidden />}>
       {secrets.length === 0 && secretLeases.length === 0 ? (
         <MutedLine>No secret policy or leases reported for this workspace.</MutedLine>
       ) : (
