@@ -247,6 +247,13 @@ def _service_git_environment(host_home: Path, *, github_token: str | None = None
         # service container. Forward an explicit service token to gh subprocesses.
         env["GH_TOKEN"] = github_token
         env["GITHUB_TOKEN"] = github_token
+        _add_git_config_entries(
+            env,
+            (
+                ("credential.https://github.com.helper", "!gh auth git-credential"),
+                ("url.https://github.com/.insteadOf", "git@github.com:"),
+            ),
+        )
     ssh_command = ["ssh"]
     if ssh_auth_sock := os.environ.get("SSH_AUTH_SOCK"):
         env["SSH_AUTH_SOCK"] = ssh_auth_sock
@@ -276,6 +283,18 @@ def _apply_service_git_environment(env: dict[str, str]) -> None:
     """Apply host git/SSH settings to subprocesses launched by the worker."""
 
     os.environ.update(env)
+
+
+def _add_git_config_entries(
+    env: dict[str, str],
+    entries: tuple[tuple[str, str], ...],
+) -> None:
+    start_index = int(env.get("GIT_CONFIG_COUNT", "0"))
+    for offset, (key, value) in enumerate(entries):
+        index = start_index + offset
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
+    env["GIT_CONFIG_COUNT"] = str(start_index + len(entries))
 
 
 async def run_worker(settings: ServiceSettings, *, once: bool = False) -> None:
