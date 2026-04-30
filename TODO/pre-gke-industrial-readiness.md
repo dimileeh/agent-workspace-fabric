@@ -49,11 +49,13 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | - | running | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` was propagated to AWF API/worker service env. |
+| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8210d159580747f88c691ef5` | - | running | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` was propagated to AWF API/worker service env. |
 | P1 Workspace Services And Realistic Project Profiles | Strengthen DinD compose profile execution | `ws_58551268828945cfb52fe01e` | [#156](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/156) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on per-workspace DinD Compose execution, health waits, cleanup, and structured failures. |
 | P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on v1/legacy response compatibility until documented v2 cutover. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_5031649e68b34b108f23782b` | - | running | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_19b11c564c3343c0965eee45`. |
-| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_1e79f6b47faf44d0bf8de3f0` | - | running | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_7c8ec611a3d14b6cb4612344`. |
-| P1 Operator Console Completion | Security and egress status panels | `ws_ac64156e08454928985982eb` | - | running | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_8a8b09feb61d4af188473bd6`. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_05365f752ad742abb7c134af` | [#160](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/160) | monitoring_pr | Codex `gpt-5.3-codex-spark`; fresh restart after OpenCode GLM stalled in conformance. |
+| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_1e79f6b47faf44d0bf8de3f0` | [#159](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/159) | monitoring_pr | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_7c8ec611a3d14b6cb4612344`. |
+| P1 Operator Console Completion | Security and egress status panels | `ws_ac64156e08454928985982eb` | [#158](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/158) | monitoring_pr | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_8a8b09feb61d4af188473bd6`. |
 
 ### Completed Slices
 
@@ -141,7 +143,10 @@ Status values:
 | P0 Reliability, Cleanup, And SLOs | Orphan AWF resource detection and cleanup readiness reporting | `ws_04560f5cfd914095b357cdcb` | failed | PR [#98](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/98) repeatedly hit monitor-driven stale rebase recovery; local AWF now has a rebase-recovery fix, and the slice was retried as `ws_5605c5ca71c942d999f5b78f`. |
 | P0 Operation And Recovery Truth | Persist operation audit details and log stream references | `ws_83f4e614951446cf883f5c09` | failed | PR [#101](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/101) merged, so no feature retry is needed; the workspace failure exposed the stale-rebase recovery bug fixed locally before service rebuild. |
 | P1 API Contract Completion | External operator callback subscriptions | `ws_0e2fc82ece7541659287e063` | failed | Agent produced local commits and passed validation/coverage, but exhausted the Plan -> Execute -> Compare iteration budget with one remaining conformance gap: event type validation was prefix-based and still allowed internal-looking namespaced event types such as `workspace.internal_secret`. Recover by redispatching a narrow callback hardening/completion slice or salvaging the preserved worktree branch. |
+| P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification via Gemini 3.1 | `ws_033d1772828042c9afa6a491` | failed | No-work Gemini auth failure: container had copied `~/.gemini` files but no Gemini/Google auth env; Gemini CLI 0.39.1 selected API-key auth and exited 41 `AGENT_AUTH_FAILED` requiring `GEMINI_API_KEY`. |
+| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_927647b0535242c58879f7b8` | failed | Same no-work Gemini auth failure as `ws_033d1772828042c9afa6a491`; retry only after Gemini container auth/readiness is fixed or with a different provider/model. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via Gemini | `ws_19b11c564c3343c0965eee45` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_5031649e68b34b108f23782b`. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via OpenCode GLM | `ws_5031649e68b34b108f23782b` | superseded | Made a local implementation commit and passed broad service/db/api validation, but stalled during conformance JSON generation after a misleading narrow-subset coverage failure; operator stopped it and restarted from scratch with Codex `gpt-5.3-codex-spark` as `ws_05365f752ad742abb7c134af`. |
 | P1 MCP And Project Onboarding Client Parity | MCP operator parity tools via Gemini | `ws_7c8ec611a3d14b6cb4612344` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_1e79f6b47faf44d0bf8de3f0`. |
 | P1 Operator Console Completion | Security and egress status panels via Gemini | `ws_8a8b09feb61d4af188473bd6` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_ac64156e08454928985982eb`. |
 
@@ -268,6 +273,16 @@ Status values:
 
 ## P1: Provider Resilience And Automated Fallback Recovery
 
+- [ ] Detect no-output or over-duration stalls in Plan -> Execute -> Compare
+  subphases, especially conformance/report generation, and classify them with
+  structured reason codes such as `AGENT_STALLED_IN_CONFORMANCE` instead of
+  leaving the workspace indefinitely `running` or collapsing it into generic
+  `agent_failure`.
+- [ ] Recover stalled conformance attempts by preserving the worktree, local
+  commits, validation logs, and saved plan; then either retry only the
+  conformance/report phase with an approved fallback model or proceed to
+  validation when the implementation is complete and the missing artifact is
+  limited to the conformance JSON.
 - [ ] Detect provider-capacity and quota markers from agent CLIs, including
   `RESOURCE_EXHAUSTED`, `MODEL_CAPACITY_EXHAUSTED`, `RetryableQuotaError`,
   provider HTTP 429s, and equivalent OpenCode/Ollama, Codex, Claude, and
@@ -292,6 +307,14 @@ Status values:
   automatically, non-transient agent failures do not loop forever, and fallback
   attempts inherit validation, owned paths, profile, auto-merge, and monitor
   policy correctly.
+
+## P1: Control-Plane Restart Recovery Hardening
+
+- [ ] When a restarted worker recovers a persisted `monitoring_pr` workspace,
+  clear or expire irrelevant stale execution claims from the previous worker,
+  preserve the active monitor claim, emit an explicit recovery event, and prove
+  with regression tests that PR monitoring continues without duplicate monitor
+  loops or misleading execution-capacity reservations.
 
 ## P1: API Contract Completion
 
@@ -341,7 +364,14 @@ coding agent in any project to use AWF for a feature.
 - [x] Add merge queue blocker drill-down.
 - [x] Add stale reason and recovery action drill-down.
 - [x] Add safe remonitor/refresh/revalidate controls after API hardening.
+- [ ] Add live workspace activity signals such as `last_activity_at`,
+  `last_log_at`, active agent/conformance/validation subphase, and stale-running
+  warnings so operators can distinguish a genuinely working agent from a
+  stuck `running` workspace whose row `updated_at` has not changed.
 - [ ] Add security/secret/egress status panels.
+- [ ] Restructure the wide-screen console so global dashboard panes stay
+  stable, while workspace-specific panes open in a dismissible embedded
+  inspector that can be closed to reset the selected workspace.
 
 ## P1: Local Packaging And Upgrade Path
 
