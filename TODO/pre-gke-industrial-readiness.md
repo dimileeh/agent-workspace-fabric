@@ -49,18 +49,20 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | - | running | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` was propagated to AWF API/worker service env. |
-| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | - | running | Codex `gpt-5.3-codex-spark`; fresh restart after Gemini violated the planning-only phase in `ws_8210d159580747f88c691ef5`. |
-| P1 Workspace Services And Realistic Project Profiles | Strengthen DinD compose profile execution | `ws_58551268828945cfb52fe01e` | [#156](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/156) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on per-workspace DinD Compose execution, health waits, cleanup, and structured failures. |
-| P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on v1/legacy response compatibility until documented v2 cutover. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_05365f752ad742abb7c134af` | [#160](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/160) | monitoring_pr | Codex `gpt-5.3-codex-spark`; fresh restart after OpenCode GLM stalled in conformance. |
+| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope violation reason | `ws_90f9152eefb54c899fccbd9b` | - | running | Codex `gpt-5.3-codex-spark`; hardens planning prompt, structured `AGENT_PLAN_PHASE_SCOPE_VIOLATION`, salvage details, and tests after Gemini planned-and-implemented in the planning phase. |
+| P1 Provider Resilience And Automated Fallback Recovery | No-work failed idle container cleanup | `ws_cfee1e44d23a41a2aae90c8c` | - | provisioning | Codex `gpt-5.3-codex-spark`; cleans terminal no-work containers after retained logs/artifacts while preserving salvage evidence. |
+| P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | [#162](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/162) | monitoring_pr | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` was propagated to AWF API/worker service env. |
+| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | [#161](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/161) | monitoring_pr | Codex `gpt-5.3-codex-spark`; fresh restart after Gemini violated the planning-only phase in `ws_8210d159580747f88c691ef5`. |
 | P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_1e79f6b47faf44d0bf8de3f0` | [#159](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/159) | monitoring_pr | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_7c8ec611a3d14b6cb4612344`. |
-| P1 Operator Console Completion | Security and egress status panels | `ws_ac64156e08454928985982eb` | [#158](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/158) | monitoring_pr | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_8a8b09feb61d4af188473bd6`. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_05365f752ad742abb7c134af` | [#160](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/160) | merged | Adds scheduler decision-record planning/docs slice after the OpenCode GLM attempt stalled in conformance. |
+| P1 Operator Console Completion | Security and egress status panels | `ws_ac64156e08454928985982eb` | [#158](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/158) | merged | Adds console security and egress status panels via OpenCode GLM retry. |
+| P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | merged | Guards v1/legacy response compatibility until documented v2 cutover. |
+| P1 Workspace Services And Realistic Project Profiles | Strengthen DinD compose profile execution | `ws_58551268828945cfb52fe01e` | [#156](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/156) | merged | Strengthens per-workspace DinD Compose execution, health waits, cleanup, and structured failures. |
 | P1 MCP And Project Onboarding Client Parity | AWF doctor diagnostics | `ws_7d33a6f9a0b24eea91058a9e` | [#155](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/155) | merged | Adds plain-language local diagnostics for Docker, API, worker, auth, provider readiness, ports, disk, stale containers, and env/config issues. |
 | P1 Security, Secrets, And Egress Policy | Replace broad auth mounts with secret leases | `ws_22fc3239a5bd4d93b82ff003` | [#154](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/154) | merged | Adds declared secret lease mounts and safer local auth handling while preserving compatibility. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Agent overlap warning prompts | `ws_9d924227c4744603aeed80cf` | [#153](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/153) | merged | Includes advisory overlap graph warnings in agent prompts without blocking launch. |
@@ -267,7 +269,7 @@ Status values:
 
 ## P1: Workspace Services And Realistic Project Profiles
 
-- [ ] Strengthen Docker Compose profile execution inside per-workspace DinD.
+- [x] Strengthen Docker Compose profile execution inside per-workspace DinD.
 - [x] Add integration fixtures for Python service plus Postgres.
 - [x] Add integration fixtures for Node/Next.js plus browser/Playwright validation.
 - [x] Add Redis/app/worker/service sidecar examples.
@@ -384,7 +386,7 @@ coding agent in any project to use AWF for a feature.
   `last_log_at`, active agent/conformance/validation subphase, and stale-running
   warnings so operators can distinguish a genuinely working agent from a
   stuck `running` workspace whose row `updated_at` has not changed.
-- [ ] Add security/secret/egress status panels.
+- [x] Add security/secret/egress status panels.
 - [ ] Restructure the wide-screen console so global dashboard panes stay
   stable, while workspace-specific panes open in a dismissible embedded
   inspector that can be closed to reset the selected workspace.
