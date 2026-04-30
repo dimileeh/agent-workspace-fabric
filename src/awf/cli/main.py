@@ -160,6 +160,13 @@ def init(
 
     repository = path.expanduser().resolve()
 
+    if not repository.exists():
+        typer.echo(f"error: project path does not exist: {repository}", err=True)
+        raise typer.Exit(code=2)
+    if not repository.is_dir():
+        typer.echo(f"error: project path is not a directory: {repository}", err=True)
+        raise typer.Exit(code=2)
+
     try:
         settings = resolve_service_settings()
 

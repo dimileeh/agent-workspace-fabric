@@ -81,6 +81,44 @@ def test_init_is_safe_by_default_and_idempotent(
 
 
 @pytest.mark.unit
+def test_init_invalid_project_path_is_reported_without_service_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = tmp_path / "does-not-exist"
+
+    def _fail_to_resolve_service_settings() -> object:
+        raise AssertionError("should not resolve settings")
+
+    async def _fail_to_collect_service_status(
+        *_args: object, **_kwargs: object
+    ) -> dict[str, object]:
+        raise AssertionError("should not collect service status")
+
+    def _fail_to_collect_doctor_report(
+        *_args: object, **_kwargs: object,
+    ) -> object:
+        raise AssertionError("should not collect doctor report")
+
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        _fail_to_resolve_service_settings,
+    )
+    monkeypatch.setattr(
+        "awf.service.status.collect_service_status",
+        _fail_to_collect_service_status,
+    )
+    monkeypatch.setattr(
+        "awf.service.doctor.collect_doctor_report",
+        _fail_to_collect_doctor_report,
+    )
+
+    result = _runner.invoke(app, ["init", str(missing)])
+
+    assert result.exit_code == 2, result.output
+    assert f"error: project path does not exist: {missing}" in result.output
+
+
+@pytest.mark.unit
 def test_init_prints_clear_next_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _stub_local_prerequisites(monkeypatch)
 
