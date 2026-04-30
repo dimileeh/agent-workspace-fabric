@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-04-29
+Last updated: 2026-04-30
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust industrial system that is ready for a
@@ -53,6 +53,7 @@ Status values:
 | P1 Workspace Services And Realistic Project Profiles | Profile-defined app endpoints | `ws_0a911b1614e54418a2ce6877` | [#152](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/152) | monitoring_pr | Codex/gpt-5.5; profile app endpoint metadata for agents, validation, API, and console-safe detail. |
 | P1 Workspace Services And Realistic Project Profiles | Database refresh hooks | `ws_0fdabcdbbf884682ae033426` | [#151](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/151) | validating | Codex/gpt-5.5; DB-backed profile refresh/generation hooks with durable logs and structured failures. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Agent overlap warning prompts | `ws_9d924227c4744603aeed80cf` | [#153](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/153) | monitoring_pr | Codex/gpt-5.5; include advisory overlap graph warnings in agent prompts without blocking launch. |
+| P1 MCP And Project Onboarding Client Parity | AWF doctor diagnostics | `ws_7d33a6f9a0b24eea91058a9e` | _pending_ | running | Codex/gpt-5.5; plain-language local diagnostics for Docker, API, worker, auth, provider readiness, ports, disk, stale containers, and env/config issues. |
 
 ### Completed Slices
 
