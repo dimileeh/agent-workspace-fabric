@@ -64,6 +64,7 @@ import {
   formatOperationFailure,
   formatOperationTitle,
 } from "@/lib/operation-format";
+import { summarizeCoordinationWarnings } from "@/lib/coordination-format";
 import {
   getWorkspaceOperatorControls,
   summarizeWorkspaceOperatorFailure,
@@ -1290,6 +1291,7 @@ function WorkspaceList({
     <div className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden">
       {items.map((item) => {
         const recoveryBadge = formatRecoveryBadge(item.recovery, item.status);
+        const coordinationSummary = summarizeCoordinationWarnings(item.coordination_warnings);
         return (
           <div
             key={item.workspace_id}
@@ -1335,6 +1337,15 @@ function WorkspaceList({
                     <span className="truncate">{recoveryBadge}</span>
                   </span>
                 ) : null}
+                {coordinationSummary.count > 0 ? (
+                  <span
+                    title={coordinationSummary.detail}
+                    className="inline-flex h-6 max-w-44 items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2 text-[11px] font-medium text-amber-900"
+                  >
+                    <AlertCircle size={12} aria-hidden />
+                    <span className="truncate">{coordinationSummary.label}</span>
+                  </span>
+                ) : null}
                 {item.pr_url ? <SmallExternalAnchor href={item.pr_url} label="PR" /> : null}
               </div>
             </div>
@@ -1370,6 +1381,7 @@ function TaskDetailsModal({
   workspace: WorkspaceOverview;
   onClose: () => void;
 }) {
+  const coordinationSummary = summarizeCoordinationWarnings(workspace.coordination_warnings);
   return (
     <div className="fixed inset-0 z-50 grid bg-slate-950/45 p-3 sm:p-6" role="dialog" aria-modal="true">
       <div className="m-auto grid max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-md border border-slate-300 bg-white shadow-xl">
@@ -1404,6 +1416,9 @@ function TaskDetailsModal({
             <Fact label="Repository" value={workspace.repo_url} />
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
+          {coordinationSummary.count > 0 ? (
+            <CoordinationWarningBlock warnings={workspace.coordination_warnings} />
+          ) : null}
           <section className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 p-3">
             <div className="text-xs font-semibold text-slate-500">Prompt sent to AWF</div>
             <TaskPromptBody prompt={workspace.task_prompt} />
@@ -1501,6 +1516,8 @@ function WorkspaceSummary({
 }) {
   const canRetry = overview.status === "failed" || overview.status === "cancelled";
   const recovery = workspace?.recovery ?? overview.recovery ?? null;
+  const coordinationWarnings =
+    workspace?.coordination_warnings ?? overview.coordination_warnings ?? [];
 
   return (
     <Panel
@@ -1555,6 +1572,7 @@ function WorkspaceSummary({
         {recovery && overview.status !== "completed" ? (
           <RecoveryCallout recovery={recovery} status={overview.status} />
         ) : null}
+        <CoordinationWarningBlock warnings={coordinationWarnings} />
         {overview.failure_reason || overview.failure_message ? (
           <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
             <div className="font-semibold">{overview.failure_reason ?? "failure"}</div>
@@ -1839,6 +1857,31 @@ function RecoveryCallout({
         <Fact label="Started" value={formatDateTime(recovery.started_at)} />
       </div>
       <div className="mt-2 text-xs text-amber-900">{callout.body}</div>
+    </div>
+  );
+}
+
+function CoordinationWarningBlock({
+  warnings,
+}: {
+  warnings: Workspace["coordination_warnings"] | WorkspaceOverview["coordination_warnings"];
+}) {
+  const summary = summarizeCoordinationWarnings(warnings);
+  if (summary.count === 0) {
+    return null;
+  }
+  return (
+    <div className="rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-950">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <div className="flex min-w-0 items-center gap-2 font-semibold">
+          <AlertCircle size={14} aria-hidden />
+          <span className="truncate">Coordination</span>
+        </div>
+        <span className="rounded-md border border-amber-300 bg-white/70 px-2 py-0.5 text-[11px] text-amber-900">
+          {summary.label}
+        </span>
+      </div>
+      <div className="mt-2 text-xs text-amber-900">{summary.detail}</div>
     </div>
   );
 }

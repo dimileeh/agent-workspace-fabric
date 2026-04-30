@@ -102,6 +102,33 @@ class _CoverageValidation:
         return self.coverage
 
 
+def _coordination_task_policy() -> dict[str, object]:
+    return {
+        "coordination": {
+            "warnings": [
+                {
+                    "warning_code": "OWNED_PATH_OVERLAP_RISK",
+                    "message": "Owned paths overlap active workspaces.",
+                    "severity": "advisory",
+                    "blocks_launch": False,
+                    "workspace_ids": ["ws_existing"],
+                    "overlaps": [
+                        {
+                            "workspace_id": "ws_existing",
+                            "existing_path": "src/awf/service/**",
+                            "requested_path": "src/awf/service/workspaces.py",
+                        }
+                    ],
+                    "stale_policy_context": {
+                        "trigger_type": "path_overlap",
+                        "stale_reason_code": "STALE_OVERLAP",
+                    },
+                }
+            ]
+        }
+    }
+
+
 def _executor_with_runner(
     runner: FakeCommandRunner,
     tmp_path: Path,
@@ -312,6 +339,92 @@ async def test_baseline_coverage_preflight_returns_logged_policy_result(
 
     assert result is baseline
     assert validation.calls == ["baseline_coverage"]
+
+
+@pytest.mark.unit
+async def test_planning_required_prompts_include_coordination_warning(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_coord_plan.md\n",
+    )  # dirty after planning
+    runner.queue_result(returncode=0, stdout="")  # committed paths since baseline
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n")  # before compare
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n")  # after compare
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-coordination",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(
+            id="ws_coord_plan",
+            task_prompt="do overlapping work",
+            task_policy=_coordination_task_policy(),
+        ),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 3
+    assert "Coordination warnings" in adapter.prompts[0]
+    assert "Coordination warnings" in adapter.prompts[1]
+    assert "OWNED_PATH_OVERLAP_RISK" in adapter.prompts[0]
+    assert "ws_existing" in adapter.prompts[1]
+    assert "STALE_OVERLAP" in adapter.prompts[1]
+
+
+@pytest.mark.unit
+async def test_planning_disabled_direct_prompt_includes_coordination_warning(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    adapter = _PlanningAdapter("done")
+    profile = WorkspaceProfile.model_validate({"name": "direct-coordination"})
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(
+            id="ws_coord_direct",
+            task_prompt="do overlapping work",
+            task_policy=_coordination_task_policy(),
+        ),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 1
+    assert adapter.prompts[0] != "do overlapping work"
+    assert "Coordination warnings" in adapter.prompts[0]
+    assert "OWNED_PATH_OVERLAP_RISK" in adapter.prompts[0]
+    assert "src/awf/service/** -> src/awf/service/workspaces.py" in adapter.prompts[0]
+    assert "do overlapping work" in adapter.prompts[0]
 
 
 @pytest.mark.unit

@@ -17,6 +17,7 @@ from awf.runtime.planning import (
     build_planning_prompt,
     changed_paths_from_porcelain,
     parse_conformance_report,
+    render_coordination_warning_section,
     render_workspace_path,
 )
 
@@ -144,6 +145,77 @@ def test_prompts_reference_plan_and_report_paths() -> None:
     assert str(plan) in execution_prompt
     assert str(report) in conformance_prompt
     assert '"status"' in conformance_prompt
+
+
+@pytest.mark.unit
+def test_coordination_warning_renders_in_planning_and_execution_prompts() -> None:
+    warning = {
+        "warning_code": "OWNED_PATH_OVERLAP_RISK",
+        "message": "Owned paths overlap active workspaces.",
+        "severity": "advisory",
+        "blocks_launch": False,
+        "workspace_ids": ["ws_existing"],
+        "overlaps": [
+            {
+                "workspace_id": "ws_existing",
+                "existing_path": "src/awf/service/**",
+                "requested_path": "src/awf/service/workspaces.py",
+            }
+        ],
+        "stale_policy_context": {
+            "trigger_type": "path_overlap",
+            "stale_reason_code": "STALE_OVERLAP",
+        },
+    }
+
+    planning_prompt = build_planning_prompt(
+        task_prompt="Add coordination metadata.",
+        plan_path=Path("docs/awf-plans/ws_new.md"),
+        coordination_warnings=(warning,),
+    )
+    execution_prompt = build_execution_prompt(
+        task_prompt="Add coordination metadata.",
+        plan_path=Path("docs/awf-plans/ws_new.md"),
+        iteration=0,
+        gaps=(),
+        coordination_warnings=(warning,),
+    )
+
+    for prompt in (planning_prompt, execution_prompt):
+        assert "Coordination warnings" in prompt
+        assert "OWNED_PATH_OVERLAP_RISK" in prompt
+        assert "ws_existing" in prompt
+        assert "src/awf/service/** -> src/awf/service/workspaces.py" in prompt
+        assert "advisory and does not block launch" in prompt
+        assert "STALE_OVERLAP" in prompt
+        assert "rebase/revalidation" in prompt
+
+
+@pytest.mark.unit
+def test_empty_coordination_warnings_do_not_change_prompt_shape() -> None:
+    plan = Path("docs/awf-plans/ws_empty.md")
+
+    assert build_planning_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+    ) == build_planning_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        coordination_warnings=(),
+    )
+    assert build_execution_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        iteration=0,
+        gaps=(),
+    ) == build_execution_prompt(
+        task_prompt="Add metrics",
+        plan_path=plan,
+        iteration=0,
+        gaps=(),
+        coordination_warnings=(),
+    )
+    assert render_coordination_warning_section(()) == ""
 
 
 @pytest.mark.unit

@@ -23,6 +23,7 @@ from awf.api.schemas import (
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
+from awf.service.coordination import coordination_warnings_from_task_policy
 
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
@@ -288,6 +289,7 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         lifecycle=observability["lifecycle"],
         llm_usage=observability["llm_usage"],
         recovery=observability["recovery"],
+        coordination_warnings=coordination_warnings_from_task_policy(ws.task_policy),
         status=WorkspaceStatus(ws.status),
         current_phase=ws.status,
         active_operation=active_operation.type if active_operation is not None else None,
