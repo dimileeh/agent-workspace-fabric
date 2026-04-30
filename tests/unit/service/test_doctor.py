@@ -303,6 +303,121 @@ def test_doctor_maps_plain_language_failures(tmp_path: Path) -> None:
 
 @pytest.mark.unit
 @pytest.mark.parametrize(
+    ("reason", "expected_message", "expected_action"),
+    [
+        (
+            "DOCKER_CLI_NOT_FOUND",
+            "Docker CLI is not installed or is not on PATH.",
+            "Install Docker Desktop or make the docker CLI available to the AWF service environment.",
+        ),
+        (
+            "DOCKER_SOCKET_UNREACHABLE",
+            "Docker socket is not reachable.",
+            "Start Docker Desktop or verify AWF_DOCKER_HOST.",
+        ),
+    ],
+)
+def test_doctor_maps_docker_availability_reasons_to_operator_output(
+    tmp_path: Path,
+    reason: str,
+    expected_message: str,
+    expected_action: str,
+) -> None:
+    from awf.service.doctor import collect_doctor_report, render_doctor_pretty
+
+    status = _green_status()
+    checks = status["checks"]
+    assert isinstance(checks, dict)
+    checks["docker"] = {
+        "ok": False,
+        "status": "fail",
+        "reason": reason,
+        "detail": "low-level Docker failure",
+    }
+
+    async def _collector(_settings: ServiceSettings, **_kwargs: object) -> dict[str, object]:
+        return status
+
+    report = asyncio.run(
+        collect_doctor_report(
+            _settings(tmp_path),
+            status_collector=_collector,
+            run_subprocess=_worker_running,
+            socket_connector=_connect_ok,
+            environ={},
+        )
+    )
+
+    docker = _diagnostics_by_id(report)["docker"]
+    pretty = render_doctor_pretty(report)
+
+    assert docker["reason"] == reason
+    assert docker["message"] == expected_message
+    assert docker["action"] == expected_action
+    assert f"reason: {reason}" in pretty
+    assert f"action: {expected_action}" in pretty
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("reason", "expected_message", "expected_action"),
+    [
+        (
+            "GITHUB_TOKEN_ENV_MISSING",
+            "No service-visible GitHub token was found.",
+            "Set AWF_GITHUB_TOKEN from `gh auth token` before starting the service.",
+        ),
+        (
+            "GITHUB_CLI_NOT_FOUND",
+            "GitHub token is present, but the gh CLI is not installed.",
+            "Install gh in the service image or rebuild the local service image.",
+        ),
+    ],
+)
+def test_doctor_maps_github_readiness_reasons_to_operator_output(
+    tmp_path: Path,
+    reason: str,
+    expected_message: str,
+    expected_action: str,
+) -> None:
+    from awf.service.doctor import collect_doctor_report, render_doctor_pretty
+
+    status = _green_status()
+    readiness = status["agent_readiness"]
+    assert isinstance(readiness, dict)
+    providers = readiness["providers"]
+    assert isinstance(providers, dict)
+    providers["github"] = {
+        "ok": False,
+        "status": "fail",
+        "reason": reason,
+    }
+
+    async def _collector(_settings: ServiceSettings, **_kwargs: object) -> dict[str, object]:
+        return status
+
+    report = asyncio.run(
+        collect_doctor_report(
+            _settings(tmp_path),
+            status_collector=_collector,
+            run_subprocess=_worker_running,
+            socket_connector=_connect_ok,
+            environ={},
+        )
+    )
+
+    github = _diagnostics_by_id(report)["github"]
+    pretty = render_doctor_pretty(report)
+
+    assert github["reason"] == reason
+    assert github["message"] == expected_message
+    assert github["action"] == expected_action
+    assert f"reason: {reason}" in pretty
+    assert f"action: {expected_action}" in pretty
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
     ("worker_stdout", "expected_reason"),
     [
         ("[]", "WORKER_CONTAINER_MISSING"),
