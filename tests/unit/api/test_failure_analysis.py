@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 
 
 async def _workspace(
@@ -46,6 +47,45 @@ async def _workspace(
         workspace.pr_url = pr_url
         if task_policy is not None:
             workspace.task_policy = task_policy
+        await session.commit()
+        return workspace.id
+
+
+async def _conformance_failed_workspace(engine: AsyncEngine, *, updated_at: datetime) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/failures-api.git",
+            branch_base="main",
+            task_title="Finish plan conformance",
+            task_prompt="Finish the saved plan.",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "plan conformance was not satisfied"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            payload={
+                "details": {
+                    "conformance": {
+                        "summary": "Still missing work.",
+                        "gaps": ["Add focused retry test"],
+                        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+                        "iterations_used": 0,
+                        "max_iterations": 0,
+                        "plan_path": "docs/awf-plans/ws.md",
+                        "report_path": "docs/awf-plans/ws.conformance.json",
+                    }
+                },
+                "salvage": {"branch_name": "awf/ws_conformance"},
+            },
+        )
+        workspace.updated_at = updated_at
         await session.commit()
         return workspace.id
 
@@ -223,3 +263,28 @@ async def test_api_route_serialization(
     assert cluster["actionable_next_action"] == "Review fix loop configuration or git identity"
     assert cluster["count"] == 1
     assert workspace in cluster["sample_workspace_ids"]
+
+
+@pytest.mark.unit
+async def test_failure_summary_endpoint_exposes_conformance_details(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    now = datetime.now(UTC)
+    workspace_id = await _conformance_failed_workspace(
+        engine,
+        updated_at=now - timedelta(minutes=3),
+    )
+
+    response = await client.get("/v1/metrics/failures/summary")
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["latest_examples"][0]["workspace_id"] == workspace_id
+    assert body["latest_examples"][0]["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
+    assert body["latest_examples"][0]["details"]["conformance"]["gaps"] == [
+        "Add focused retry test"
+    ]
+    assert body["latest_examples"][0]["salvage"] == {"branch_name": "awf/ws_conformance"}
+    assert body["root_cause_clusters"][0]["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
+    assert body["root_cause_clusters"][0]["likely_cause"] == "Plan Conformance Unsatisfied"

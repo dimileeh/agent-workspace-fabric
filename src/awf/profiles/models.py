@@ -273,7 +273,7 @@ class ProfilePlanning(BaseModel):
         default="docs/awf-plans/{workspace_id}.conformance.json",
         max_length=512,
     )
-    max_iterations: int = Field(default=1, ge=0, le=5)
+    max_iterations: int = Field(default=3, ge=0, le=5)
     enforce_plan_only_changes: bool = True
     fail_on_unexplained_deviation: bool = True
 

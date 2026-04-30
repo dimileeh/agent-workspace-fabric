@@ -11,7 +11,7 @@ awf:
     required: true
     plan_path: docs/awf-plans/{workspace_id}.md
     conformance_report_path: docs/awf-plans/{workspace_id}.conformance.json
-    max_iterations: 2
+    max_iterations: 3
     enforce_plan_only_changes: true
     fail_on_unexplained_deviation: true
   monitor:

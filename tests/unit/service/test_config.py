@@ -46,6 +46,27 @@ def test_agent_watchdog_settings_flow_from_settings_to_service_settings() -> Non
 
 
 @pytest.mark.unit
+def test_planning_max_iterations_default_is_three_and_in_payload() -> None:
+    settings = resolve_service_settings(Settings(_env_file=None), environ={})
+    payload = service_config_payload(settings)
+
+    assert Settings(_env_file=None).planning_max_iterations_default == 3
+    assert settings.planning_max_iterations_default == 3
+    assert payload["planning_max_iterations_default"] == 3
+
+
+@pytest.mark.unit
+def test_planning_max_iterations_default_flows_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWF_PLANNING_MAX_ITERATIONS_DEFAULT", "4")
+
+    settings = resolve_service_settings(Settings(_env_file=None), environ=os.environ)
+
+    assert settings.planning_max_iterations_default == 4
+
+
+@pytest.mark.unit
 def test_min_free_disk_threshold_defaults_to_conservative_10_gib_payload() -> None:
     settings = resolve_service_settings(Settings(_env_file=None), environ={})
     payload = service_config_payload(settings)
@@ -154,6 +175,7 @@ def test_local_service_compose_sets_stable_worker_node_id_for_control_plane_serv
     for service_name in ("api", "worker", "migrate"):
         service = compose["services"][service_name]
         assert service["environment"]["AWF_WORKER_NODE_ID"] == "local"
+        assert service["environment"]["AWF_PLANNING_MAX_ITERATIONS_DEFAULT"].endswith(":-3}")
         assert service["environment"]["AWF_GITHUB_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
         assert service["environment"]["GH_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")
         assert service["environment"]["GITHUB_TOKEN"].startswith("${AWF_GITHUB_TOKEN:-")

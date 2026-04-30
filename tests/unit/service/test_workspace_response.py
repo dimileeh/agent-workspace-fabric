@@ -9,6 +9,7 @@ import pytest
 
 from awf.api.schemas import WorkspaceResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.service.validation_observability import (
     _loaded_collection,
     _profile_requested_validation_tier,
@@ -245,6 +246,85 @@ def test_workspace_response_includes_compact_secret_lease_status() -> None:
     assert response.secret_leases[0].secret_name == "api-token"
     assert response.secret_leases[0].status == "mounted"
     assert response.secret_leases[0].ref_digest == "sha256:" + "1" * 64
+
+
+@pytest.mark.unit
+def test_workspace_response_includes_conformance_failure_details_and_salvage() -> None:
+    now = datetime(2026, 4, 29, 13, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_conformance_failed",
+        status=WorkspaceStatus.failed.value,
+        version=4,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws_conformance_failed",
+        base_commit="abc123",
+        task_title="Expose conformance failure",
+        task_prompt="Exercise workspace_response failure details.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref=None,
+        requested_profile=None,
+        resolved_profile=None,
+        test_commands=[],
+        requires_database=False,
+        node_id="local",
+        compose_project_name="awf_ws_conformance_failed",
+        compose_file_path="/tmp/compose.yml",
+        pr_url=None,
+        failure_reason="agent_failure",
+        failure_message="plan conformance was not satisfied after 0 iteration(s): add tests",
+        active_policy_findings=[],
+        operations=[],
+        events=[
+            SimpleNamespace(
+                id="evt_failed",
+                workspace_id="ws_conformance_failed",
+                event_type="workspace.state_changed",
+                old_state=WorkspaceStatus.running.value,
+                new_state=WorkspaceStatus.failed.value,
+                reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+                payload={
+                    "details": {
+                        "conformance": {
+                            "summary": "Still incomplete.",
+                            "gaps": ["Add tests"],
+                            "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+                            "iterations_used": 0,
+                            "max_iterations": 0,
+                            "plan_path": "docs/awf-plans/ws.md",
+                            "report_path": "docs/awf-plans/ws.conformance.json",
+                        }
+                    },
+                    "salvage": {
+                        "hint": "Workspace worktree and branch were preserved for salvage.",
+                        "worktree_path": "/worktrees/ws_conformance_failed",
+                        "branch_name": "awf/ws_conformance_failed",
+                        "remote_push_branch": "awf/ws_conformance_failed",
+                    },
+                },
+                occurred_at=now,
+            )
+        ],
+        secret_leases=[],
+        created_at=now,
+        updated_at=now,
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.failure_details is not None
+    assert response.failure_details.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert response.failure_details.conformance is not None
+    assert response.failure_details.conformance.gaps == ["Add tests"]
+    assert response.failure_details.salvage is not None
+    assert response.failure_details.salvage.worktree_path == "/worktrees/ws_conformance_failed"
 
 
 @pytest.mark.unit

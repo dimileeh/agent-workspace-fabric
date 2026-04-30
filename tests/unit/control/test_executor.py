@@ -29,6 +29,7 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -629,6 +630,74 @@ class TestHappyPath:
         ]
         assert len(adapter_prompts) == 5
         assert "Iteration 1" in adapter_prompts[3]
+
+    @pytest.mark.unit
+    async def test_planning_profile_failure_records_conformance_evidence_and_salvage(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 0,
+                },
+            },
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(
+            returncode=0,
+            stdout='{"status":"needs_iteration","summary":"still short","gaps":["add tests"]}',
+        )
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                f"?? docs/awf-plans/{ws_id}.md\n"
+                f"?? docs/awf-plans/{ws_id}.conformance.json\n"
+                " M src/x.py\n"
+            ),
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            assert ws.failure_message == (
+                "plan conformance was not satisfied after 0 iteration(s): add tests"
+            )
+            failed_event = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            )
+            assert failed_event.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+            assert failed_event.payload is not None
+            assert failed_event.payload["details"]["conformance"]["gaps"] == ["add tests"]
+            assert (
+                failed_event.payload["details"]["conformance"]["reason_code"]
+                == PLAN_CONFORMANCE_UNSATISFIED
+            )
+            assert failed_event.payload["salvage"] == {
+                "hint": "Workspace worktree and branch were preserved for salvage.",
+                "worktree_path": str(_test_worktrees_root(factory) / ws_id),
+                "branch_name": f"awf/{ws_id}",
+                "remote_push_branch": f"awf/{ws_id}",
+            }
 
     @pytest.mark.unit
     async def test_planning_profile_fails_when_plan_phase_changes_code(

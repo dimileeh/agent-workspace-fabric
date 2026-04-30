@@ -147,6 +147,15 @@ class Settings(BaseSettings):
             "Default: 900 seconds."
         ),
     )
+    planning_max_iterations_default: int = Field(
+        default=3,
+        ge=0,
+        le=5,
+        description=(
+            "Default plan-conformance remediation iterations when a workspace "
+            "profile omits planning.max_iterations. Explicit profile values win."
+        ),
+    )
 
     # Workspace resource defaults (overridable per-request)
     workspace_steady_cpu: float = Field(default=3.0, gt=0)

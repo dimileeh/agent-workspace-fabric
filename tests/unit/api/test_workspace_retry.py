@@ -7,9 +7,10 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.workspaces as workspaces_route
-from awf.db.enums import WorkspaceStatus
+from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 
 _V2_RETRY_BODY = {
     "repo": {
@@ -75,6 +76,44 @@ async def _create_cancelled_workspace(client: AsyncClient, engine: AsyncEngine) 
     return workspace_id
 
 
+async def _create_conformance_failed_workspace(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> str:
+    created = await client.post("/v2/workspaces", json=_V2_RETRY_BODY)
+    assert created.status_code == 202
+    workspace_id = str(created.json()["workspace_id"])
+
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "plan conformance was not satisfied"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            payload={
+                "details": {
+                    "conformance": {
+                        "summary": "Missing planned test coverage.",
+                        "gaps": ["Add retry API regression test"],
+                        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+                        "iterations_used": 0,
+                        "max_iterations": 0,
+                        "plan_path": "docs/awf-plans/ws_old.md",
+                        "report_path": "docs/awf-plans/ws_old.conformance.json",
+                    }
+                }
+            },
+        )
+        await session.commit()
+    return workspace_id
+
+
 @pytest.mark.unit
 async def test_retry_endpoint_creates_new_requested_workspace(
     client: AsyncClient,
@@ -118,6 +157,24 @@ async def test_retry_endpoint_creates_new_requested_workspace(
     assert retried_body["test_commands"] == _V2_RETRY_BODY["validation"]["commands"]
     assert retried_body["failure_reason"] is None
     assert retried_body["failure_message"] is None
+
+
+@pytest.mark.unit
+async def test_retry_endpoint_enriches_prompt_for_conformance_unsatisfied(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    original_id = await _create_conformance_failed_workspace(client, engine)
+
+    response = await client.post(f"/v1/workspaces/{original_id}/retry")
+
+    assert response.status_code == 202
+    retried = await client.get(f"/v1/workspaces/{response.json()['new_workspace_id']}")
+    assert retried.status_code == 200
+    body = retried.json()
+    assert _V2_RETRY_BODY["task"]["prompt"] in body["task_prompt"]
+    assert "finish the remaining plan-conformance gaps" in body["task_prompt"]
+    assert "Add retry API regression test" in body["task_prompt"]
 
 
 @pytest.mark.unit

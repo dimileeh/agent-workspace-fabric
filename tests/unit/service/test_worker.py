@@ -22,6 +22,7 @@ def _settings(
     *,
     database_url: str | None = None,
     github_token: str | None = None,
+    planning_max_iterations_default: int = 4,
 ) -> ServiceSettings:
     return ServiceSettings(
         service_name="awf",
@@ -39,6 +40,7 @@ def _settings(
         worker_max_concurrent_executions=4,
         agent_wall_timeout_seconds=111,
         agent_idle_timeout_seconds=22,
+        planning_max_iterations_default=planning_max_iterations_default,
         node_id="node-1",
     )
 
@@ -202,6 +204,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["executor_config"].compose_projects_root == work_dir / "compose"
     assert created["executor_config"].agent_wall_timeout_seconds == 111
     assert created["executor_config"].agent_idle_timeout_seconds == 22
+    assert created["executor_config"].planning_max_iterations_default == 4
     assert created["worker_config"].poll_interval_seconds == 0.25
     assert created["worker_config"].max_concurrent_provisions == 2
     assert created["worker_config"].max_concurrent_executions == 4
