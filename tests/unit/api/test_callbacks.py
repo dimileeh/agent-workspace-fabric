@@ -138,9 +138,9 @@ async def test_register_callback_accepts_exact_public_event_types(
     assert response.status_code == 201
     body = response.json()
     assert body["event_types"] == [
-        "merge.candidate_updated",
         "operation.state_changed",
         "workspace.state_changed",
+        "merge.candidate_updated",
     ]
     assert "secret" not in body
     assert "headers" not in body

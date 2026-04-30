@@ -22,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from awf import __version__
 from awf.api.routes import (
     artifacts,
+    callbacks,
     controls,
     events,
     health,
@@ -108,6 +109,7 @@ def create_app(*, use_lifespan: bool = True) -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(callbacks.router)
     app.include_router(workspaces.router)
     app.include_router(workspaces.router_v2)
     app.include_router(events.router)

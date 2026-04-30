@@ -20,7 +20,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["7b8c9d0e1f2a"]
+    assert script.get_heads() == ["8c9d0e1f2a3b"]
 
 
 @pytest.mark.unit
@@ -74,8 +74,20 @@ def test_alembic_upgrade_head_creates_scheduler_record_tables(
         secret_lease_indexes = {
             row[1] for row in conn.execute("PRAGMA index_list(workspace_secret_leases)")
         }
+        callback_subscription_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(callback_subscriptions)")
+        }
+        callback_delivery_columns = {
+            row[1] for row in conn.execute("PRAGMA table_info(callback_deliveries)")
+        }
 
-    assert {"queue_decisions", "resource_reservations", "policy_findings"} <= tables
+    assert {
+        "queue_decisions",
+        "resource_reservations",
+        "policy_findings",
+        "callback_subscriptions",
+        "callback_deliveries",
+    } <= tables
     assert {
         "id",
         "workspace_id",
@@ -151,3 +163,26 @@ def test_alembic_upgrade_head_creates_scheduler_record_tables(
         "ix_workspace_secret_leases_workspace_status",
         "ix_workspace_secret_leases_status_expires",
     } <= secret_lease_indexes
+    assert {
+        "id",
+        "name",
+        "target_url",
+        "event_types",
+        "enabled",
+        "idempotency_key",
+        "request_hash",
+        "disabled_at",
+    } <= callback_subscription_columns
+    assert {
+        "id",
+        "subscription_id",
+        "event_kind",
+        "event_type",
+        "source_id",
+        "dedupe_key",
+        "envelope",
+        "idempotency_key",
+        "status",
+        "attempt_count",
+        "next_attempt_at",
+    } <= callback_delivery_columns
