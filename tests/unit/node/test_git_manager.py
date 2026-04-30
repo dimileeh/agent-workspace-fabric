@@ -9,6 +9,7 @@ typical hardware) and each test gets an isolated ``tmp_path``.
 from __future__ import annotations
 
 import asyncio
+import os
 import subprocess
 from pathlib import Path
 
@@ -176,6 +177,34 @@ class TestAddWorktree:
                 new_branch="awf/ws_missing",
             )
         assert exc.value.reason_code == "GIT_BASE_BRANCH_MISSING"
+
+    @pytest.mark.unit
+    async def test_prepares_mirror_and_worktree_for_agent_user(
+        self, origin_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        chowned: list[tuple[Path, int, int]] = []
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.setattr(
+            os,
+            "chown",
+            lambda path, uid, gid: chowned.append((Path(path), uid, gid)),
+        )
+        manager = GitManager(
+            tmp_path / "awf-work",
+            worktree_owner_uid=1000,
+            worktree_owner_gid=1000,
+        )
+
+        layout = await manager.add_worktree(
+            workspace_id="ws_agent_owner",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_agent_owner",
+        )
+
+        assert (layout.worktree_path, 1000, 1000) in chowned
+        assert (layout.mirror_path, 1000, 1000) in chowned
+        assert (layout.worktree_path / "README.md", 1000, 1000) in chowned
 
 
 class TestRemoveWorktree:
