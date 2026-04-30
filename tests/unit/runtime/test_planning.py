@@ -227,6 +227,7 @@ def test_empty_coordination_warnings_do_not_change_prompt_shape() -> None:
 def test_coordination_warning_renderer_sanitizes_legacy_warning_shapes() -> None:
     rendered = render_coordination_warning_section(
         (
+            "legacy warning",
             {
                 "warning_code": 42,
                 "message": "",
@@ -257,6 +258,7 @@ def test_coordination_warning_renderer_sanitizes_legacy_warning_shapes() -> None
     )
 
     assert "COORDINATION_WARNING (advisory; blocks_launch=true): COORDINATION_WARNING" in rendered
+    assert "legacy warning" not in rendered
     assert "OWNED_PATH_OVERLAP_RISK (advisory; blocks_launch=false)" in rendered
     assert "Workspaces:" not in rendered
     assert "ws_valid: src/** -> src/app.py" in rendered

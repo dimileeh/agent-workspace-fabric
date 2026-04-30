@@ -56,13 +56,13 @@ def render_workspace_path(template: str, *, workspace_id: str) -> Path:
 
 
 def render_coordination_warning_section(
-    coordination_warnings: Sequence[Mapping[str, Any]] = (),
+    coordination_warnings: Sequence[object] = (),
 ) -> str:
     warnings: list[dict[str, Any]] = []
     for warning in coordination_warnings:
-        normalized = _normalized_coordination_warning(warning)
-        if normalized is not None:
-            warnings.append(normalized)
+        if not isinstance(warning, Mapping):
+            continue
+        warnings.append(_normalized_coordination_warning(warning))
     if not warnings:
         return ""
 
@@ -323,7 +323,7 @@ def _reason_code_from_payload(value: Any) -> str:
 
 def _normalized_coordination_warning(
     warning: Mapping[str, Any],
-) -> dict[str, Any] | None:
+) -> dict[str, Any]:
     warning_code = _safe_warning_text(warning.get("warning_code")) or "COORDINATION_WARNING"
     message = _safe_warning_text(warning.get("message")) or warning_code
     severity = _safe_warning_text(warning.get("severity")) or "advisory"
