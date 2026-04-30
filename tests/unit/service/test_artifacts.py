@@ -7,10 +7,13 @@ from typing import Any
 
 import pytest
 
-from awf.service import artifacts as artifacts_service
 from awf.service.artifacts import (
     ArtifactNotFoundError,
     ArtifactPathError,
+    _artifact_id,
+    _artifact_kind,
+    _is_symlink,
+    _resolve_artifact_root,
     artifact_id,
     artifact_kind,
     get_downloadable_artifact,
@@ -220,24 +223,15 @@ class TestArtifactService:
         assert items[0].content_type == "text/plain"
 
     @pytest.mark.unit
-    def test_artifact_compatibility_helpers_delegate_to_public_helpers(self) -> None:
-        assert artifacts_service._artifact_id("ws_artifacts", "reports/summary.json") == (
-            artifact_id("ws_artifacts", "reports/summary.json")
-        )
-        assert artifacts_service._artifact_kind(Path("summary.json")) == artifact_kind(
-            Path("summary.json")
-        )
-
-    @pytest.mark.unit
-    def test_artifact_root_resolve_to_non_directory_fails_closed(
+    def test_resolved_artifact_root_must_remain_a_directory(
         self,
         monkeypatch: pytest.MonkeyPatch,
         tmp_path: Path,
     ) -> None:
         artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
         artifact_dir.mkdir(parents=True)
-        resolved_file = tmp_path / "resolved-file"
-        resolved_file.write_text("not a directory\n", encoding="utf-8")
+        resolved_file = tmp_path / "not-a-directory"
+        resolved_file.write_text("file\n", encoding="utf-8")
         original_resolve = Path.resolve
 
         def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
@@ -248,22 +242,29 @@ class TestArtifactService:
         monkeypatch.setattr(Path, "resolve", resolve_candidate)
 
         with pytest.raises(ArtifactNotFoundError):
-            artifacts_service._resolve_artifact_root(artifact_dir)
+            _resolve_artifact_root(artifact_dir)
 
     @pytest.mark.unit
-    def test_artifact_symlink_probe_fails_closed(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> None:
-        problem_path = tmp_path / "problem"
-        original_is_symlink = Path.is_symlink
+    def test_artifact_private_aliases_match_public_helpers(self, tmp_path: Path) -> None:
+        report = tmp_path / "report.txt"
 
-        def is_symlink_candidate(self: Path) -> bool:
-            if self == problem_path:
-                raise OSError("stat failed")
-            return original_is_symlink(self)
+        assert _artifact_id("ws_artifacts", "reports/summary.json") == artifact_id(
+            "ws_artifacts",
+            "reports/summary.json",
+        )
+        assert _artifact_id("ws_artifacts", "report.txt") == artifact_id(
+            "ws_artifacts",
+            "report.txt",
+        )
+        assert _artifact_kind(Path("summary.json")) == artifact_kind(
+            Path("summary.json")
+        )
+        assert _artifact_kind(report) == artifact_kind(report) == "txt"
 
-        monkeypatch.setattr(Path, "is_symlink", is_symlink_candidate)
+    @pytest.mark.unit
+    def test_symlink_probe_fails_closed_when_filesystem_raises(self) -> None:
+        class _UnstatablePath:
+            def is_symlink(self) -> bool:
+                raise OSError("cannot stat")
 
-        assert artifacts_service._is_symlink(problem_path) is True
+        assert _is_symlink(_UnstatablePath()) is True  # type: ignore[arg-type]

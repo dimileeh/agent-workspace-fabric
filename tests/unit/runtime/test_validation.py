@@ -10,6 +10,7 @@ import pytest
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
 from awf.profiles.models import ProfileHealthCheck, WorkspaceProfile
+from awf.runtime import validation as validation_module
 from awf.runtime.logs import CommandLogSinks, LogStore
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -27,6 +28,10 @@ from awf.runtime.validation_identity import (
     environment_identity_digest,
     environment_identity_inputs,
     resolved_profile_digest,
+)
+from awf.service.alembic_resolver import (
+    AlembicGraphValidationResult,
+    AlembicGraphValidationStatus,
 )
 
 _COMPOSE_PROJECT = "awf_ws_val"
@@ -273,6 +278,30 @@ def test_environment_identity_digest_changes_for_healthcheck_wait_policy(
     assert environment_identity_digest(_identity_profile()) != environment_identity_digest(
         _identity_profile(validation={"healthchecks": [healthcheck]})
     )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "alembic_policy",
+    [
+        {"enabled": True},
+        {"enabled": True, "config_path": "db/alembic.ini"},
+        {"enabled": True, "script_location": "db/migrations"},
+        {"enabled": True, "fail_on_unconfigured": False},
+    ],
+)
+def test_environment_identity_digest_changes_for_alembic_validation_policy(
+    alembic_policy: dict[str, object],
+) -> None:
+    profile = _identity_profile(validation={"alembic": alembic_policy})
+
+    assert environment_identity_digest(_identity_profile()) != environment_identity_digest(profile)
+    assert environment_identity_inputs(profile)["validation"]["alembic"] == {
+        "enabled": alembic_policy.get("enabled", False),
+        "config_path": alembic_policy.get("config_path", "alembic.ini"),
+        "script_location": alembic_policy.get("script_location"),
+        "fail_on_unconfigured": alembic_policy.get("fail_on_unconfigured", True),
+    }
 
 
 @pytest.mark.unit
@@ -1180,6 +1209,77 @@ class TestMigration:
         assert result.all_passed
         assert len(fake.calls) == 2
         assert "alembic upgrade head" in fake.calls[1].args[-1]
+
+    @pytest.mark.unit
+    async def test_alembic_policy_metadata_serializes_non_json_detail_values(
+        self,
+        runner: tuple[FakeCommandRunner, ValidationRunner],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _fake, val = runner
+        metadata_path = tmp_path / "migrations" / "versions"
+        graph_result = AlembicGraphValidationResult(
+            status=AlembicGraphValidationStatus.passed,
+            reason_code="ALEMBIC_GRAPH_OK",
+            heads=("head_1",),
+        )
+
+        def fake_validate_alembic_migration_chain(
+            repo_path: Path,
+            policy: object,
+        ) -> AlembicGraphValidationResult:
+            del repo_path, policy
+            return graph_result
+
+        def fake_alembic_policy_metadata(
+            result: AlembicGraphValidationResult,
+            *,
+            policy: object,
+        ) -> dict[str, object]:
+            del policy
+            assert result is graph_result
+            return {
+                "status": "passed",
+                "reason_code": "ALEMBIC_GRAPH_OK",
+                "heads": ["head_1"],
+                "message": None,
+                "details": {"script_location": metadata_path},
+                "findings": [],
+                "policy": {"enabled": True},
+            }
+
+        monkeypatch.setattr(
+            validation_module,
+            "validate_alembic_migration_chain",
+            fake_validate_alembic_migration_chain,
+        )
+        monkeypatch.setattr(
+            validation_module,
+            "alembic_policy_metadata",
+            fake_alembic_policy_metadata,
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "alembic-policy-metadata",
+                "validation": {"alembic": {"enabled": True}},
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_alembic_metadata",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            worktree_path=tmp_path,
+        )
+
+        assert result.all_passed
+        assert len(result.commands) == 1
+        command = result.commands[0]
+        assert str(metadata_path) in command.stdout_path.read_text(encoding="utf-8")
+        assert command.stderr_path.read_text(encoding="utf-8") == ""
 
     @pytest.mark.unit
     async def test_migration_not_run_if_first_command_fails(
