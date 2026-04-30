@@ -396,7 +396,7 @@ class WorkspaceService:
         *,
         reason: str | None = None,
         requested_tier: int | None = None,
-    ) -> Any:
+    ) -> Operation:
         async with self._factory() as s:
             result = await self._controls(s).request_validate_workspace(
                 workspace_id,
