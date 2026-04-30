@@ -94,6 +94,12 @@ def render_coordination_warning_section(
                 f"  - {overlap['workspace_id']}: {overlap['existing_path']} -> "
                 f"{overlap['requested_path']}"
             )
+        if warning["overlaps_truncated"]:
+            lines.append(
+                "  - Overlap list truncated: "
+                f"showing {len(warning['overlaps'])} of {warning['overlap_count']} "
+                "total overlaps."
+            )
         context = warning["stale_policy_context"]
         trigger_type = context.get("trigger_type")
         stale_reason_code = context.get("stale_reason_code")
@@ -331,6 +337,7 @@ def _normalized_coordination_warning(
     severity = _safe_warning_text(warning.get("severity")) or "advisory"
     workspace_ids = _safe_warning_strings(warning.get("workspace_ids"))
     overlaps = _safe_warning_overlaps(warning.get("overlaps"))
+    overlap_count = _safe_warning_int(warning.get("overlap_count"))
     context = _safe_warning_context(warning.get("stale_policy_context"))
     return {
         "warning_code": warning_code,
@@ -339,6 +346,8 @@ def _normalized_coordination_warning(
         "blocks_launch": _safe_warning_bool(warning.get("blocks_launch")),
         "workspace_ids": workspace_ids,
         "overlaps": overlaps,
+        "overlap_count": max(overlap_count if overlap_count is not None else len(overlaps), len(overlaps)),
+        "overlaps_truncated": _safe_warning_bool(warning.get("overlaps_truncated")),
         "stale_policy_context": context,
     }
 
@@ -381,6 +390,12 @@ def _safe_warning_context(value: object) -> dict[str, str]:
 
 def _safe_warning_bool(value: object) -> bool:
     return value if isinstance(value, bool) else False
+
+
+def _safe_warning_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return max(0, value)
 
 
 def _safe_warning_text(value: object) -> str | None:

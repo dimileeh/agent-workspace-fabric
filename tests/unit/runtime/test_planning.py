@@ -308,6 +308,35 @@ def test_coordination_warning_renderer_bounds_direct_overlap_payloads() -> None:
 
 
 @pytest.mark.unit
+def test_coordination_warning_renderer_surfaces_truncated_overlap_count() -> None:
+    rendered = render_coordination_warning_section(
+        (
+            {
+                "warning_code": "OWNED_PATH_OVERLAP_RISK",
+                "message": "Coordinate around active work.",
+                "severity": "advisory",
+                "overlap_count": 5,
+                "overlaps_truncated": True,
+                "overlaps": [
+                    {
+                        "workspace_id": "ws_one",
+                        "existing_path": "src/awf/**",
+                        "requested_path": "src/awf/runtime/planning.py",
+                    },
+                    {
+                        "workspace_id": "ws_two",
+                        "existing_path": "tests/**",
+                        "requested_path": "tests/unit/runtime/test_planning.py",
+                    },
+                ],
+            },
+        )
+    )
+
+    assert "Overlap list truncated: showing 2 of 5 total overlaps." in rendered
+
+
+@pytest.mark.unit
 def test_conformance_retry_prompt_bounds_text_and_handles_missing_artifacts() -> None:
     prompt = build_conformance_retry_prompt(
         task_prompt="finish the slice",
