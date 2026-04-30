@@ -218,10 +218,7 @@ def _lint_secret(secret: ProfileSecret, *, index: int) -> tuple[ProfileLintFindi
                     },
                 )
             )
-        if (
-            not _declared_local_auth_target_is_allowed(secret)
-            and _secret_mount_target_is_too_broad(secret.target)
-        ):
+        if _declared_secret_mount_target_is_too_broad(secret):
             findings.append(
                 ProfileLintFinding(
                     reason_code=SECRET_TARGET_TOO_BROAD,
@@ -276,6 +273,13 @@ def _declared_local_lease_source_is_too_broad(secret: ProfileSecret) -> bool:
     if provider not in _LOCAL_LEASE_SOURCE_PROVIDERS or secret.ref is None:
         return False
     return _local_lease_source_ref_is_too_broad(secret.ref)
+
+
+def _declared_secret_mount_target_is_too_broad(secret: ProfileSecret) -> bool:
+    return (
+        not _declared_local_auth_target_is_allowed(secret)
+        and _secret_mount_target_is_too_broad(secret.target)
+    )
 
 
 def _declared_local_auth_target_is_allowed(secret: ProfileSecret) -> bool:
