@@ -6,6 +6,7 @@ import hashlib
 import json
 from typing import Any
 
+from awf.profiles.compose import profile_app_endpoint_environment, resolve_app_endpoints
 from awf.profiles.models import (
     ProfileCommand,
     ProfileCoverage,
@@ -56,6 +57,10 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
             "startup_timeout_seconds": profile.docker.startup_timeout_seconds,
         },
         "services": [_service_identity(service) for service in _sorted_services(profile.services)],
+        "app_endpoints": list(resolve_app_endpoints(profile)),
+        "generated_endpoint_environment": _environment_entries(
+            dict(profile_app_endpoint_environment(profile))
+        ),
         "validation": {
             "healthchecks": [
                 _healthcheck_identity(healthcheck)

@@ -9,6 +9,7 @@ import pytest
 
 from awf.api.schemas import WorkspaceResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.service.validation_observability import (
     _loaded_collection,
@@ -246,6 +247,183 @@ def test_workspace_response_includes_compact_secret_lease_status() -> None:
     assert response.secret_leases[0].secret_name == "api-token"
     assert response.secret_leases[0].status == "mounted"
     assert response.secret_leases[0].ref_digest == "sha256:" + "1" * 64
+
+
+@pytest.mark.unit
+def test_workspace_response_includes_sanitized_app_endpoint_metadata() -> None:
+    now = datetime(2026, 4, 29, 12, 30, tzinfo=UTC)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "endpoint-profile",
+            "runtime": {
+                "environment": {
+                    "SECRET_URL": "http://user:password@app:3000/secret?token=abc"
+                }
+            },
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {
+                    "name": "app",
+                    "service": "app",
+                    "port": 3000,
+                    "path": "/",
+                    "health": {"path": "/healthz"},
+                    "visibility": "agent",
+                },
+                {
+                    "name": "operator_notes",
+                    "service": "app",
+                    "port": 3000,
+                    "path": "/operator",
+                    "visibility": "console",
+                },
+                {
+                    "name": "internal_metrics",
+                    "service": "app",
+                    "port": 3000,
+                    "path": "/metrics",
+                    "visibility": "internal",
+                },
+            ],
+            "secrets": [
+                {
+                    "name": "api-token",
+                    "target": "API_TOKEN",
+                    "kind": "env",
+                    "provider": "vault",
+                    "ref": "secret/data/api-token",
+                }
+            ],
+        }
+    )
+    workspace = SimpleNamespace(
+        id="ws_endpoint_metadata",
+        status=WorkspaceStatus.ready.value,
+        version=2,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws_endpoint_metadata",
+        base_commit="abc123",
+        task_title="Expose app endpoints",
+        task_prompt="Exercise endpoint projection.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref="inline",
+        requested_profile=None,
+        resolved_profile=profile.model_dump(mode="json", by_alias=True),
+        test_commands=[],
+        requires_database=False,
+        node_id="local",
+        compose_project_name="awf_ws_endpoint_metadata",
+        compose_file_path="/tmp/compose.yml",
+        pr_url=None,
+        failure_reason=None,
+        failure_message=None,
+        active_policy_findings=[],
+        operations=[],
+        events=[],
+        secret_leases=[],
+        created_at=now,
+        updated_at=now,
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+    payload = [endpoint.model_dump(mode="json") for endpoint in response.app_endpoints]
+
+    assert payload == [
+        {
+            "name": "app",
+            "service": "app",
+            "scheme": "http",
+            "port": 3000,
+            "path": "/",
+            "internal_url": "http://app:3000/",
+            "visibility": "agent",
+            "health": {
+                "path": "/healthz",
+                "method": "GET",
+                "expected_status": 200,
+                "internal_url": "http://app:3000/healthz",
+            },
+        },
+        {
+            "name": "operator_notes",
+            "service": "app",
+            "scheme": "http",
+            "port": 3000,
+            "path": "/operator",
+            "internal_url": "http://app:3000/operator",
+            "visibility": "console",
+            "health": None,
+        },
+    ]
+    rendered = str(payload)
+    assert "internal_metrics" not in rendered
+    assert "user:password" not in rendered
+    assert "token=abc" not in rendered
+    assert "secret/data/api-token" not in rendered
+
+
+@pytest.mark.unit
+def test_workspace_response_omits_app_endpoint_metadata_from_malformed_profile() -> None:
+    now = datetime(2026, 4, 29, 12, 45, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_bad_endpoint_profile",
+        status=WorkspaceStatus.ready.value,
+        version=2,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws_bad_endpoint_profile",
+        base_commit="abc123",
+        task_title="Ignore malformed endpoints",
+        task_prompt="Exercise endpoint projection failure handling.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref="inline",
+        requested_profile=None,
+        resolved_profile={
+            "name": "malformed-endpoints",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {
+                    "name": "app",
+                    "service": "app",
+                    "port": 3000,
+                    "path": "http://user:password@app:3000/secret?token=abc",
+                }
+            ],
+        },
+        test_commands=[],
+        requires_database=False,
+        node_id="local",
+        compose_project_name="awf_ws_bad_endpoint_profile",
+        compose_file_path="/tmp/compose.yml",
+        pr_url=None,
+        failure_reason=None,
+        failure_message=None,
+        active_policy_findings=[],
+        operations=[],
+        events=[],
+        secret_leases=[],
+        created_at=now,
+        updated_at=now,
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.app_endpoints == []
 
 
 @pytest.mark.unit

@@ -209,6 +209,24 @@ export interface ValidationFreshnessSummary {
   latest_validation: ValidationRunSummary | null;
 }
 
+export interface WorkspaceAppEndpointHealth {
+  path: string;
+  method: "GET" | "HEAD";
+  expected_status: number;
+  internal_url: string;
+}
+
+export interface WorkspaceAppEndpoint {
+  name: string;
+  service: string;
+  scheme: "http" | "https";
+  port: number;
+  path: string;
+  internal_url: string;
+  visibility: "agent" | "validation" | "console";
+  health: WorkspaceAppEndpointHealth | null;
+}
+
 export type StaleReasonCode =
   | "STALE_TARGET_ADVANCED"
   | "STALE_OVERLAP"
@@ -337,6 +355,7 @@ export interface Workspace {
   llm_usage: LlmUsageSummary;
   recovery?: WorkspaceRecoverySummary | null;
   validation_provenance?: ValidationFreshnessSummary | null;
+  app_endpoints: WorkspaceAppEndpoint[];
   env_profile: string | null;
   profile_ref: string | null;
   requested_profile: Record<string, unknown> | null;
@@ -369,6 +388,7 @@ export interface WorkspaceRuntime {
   compose_project_name: string | null;
   stack_state: string;
   services: RuntimeService[];
+  app_endpoints: WorkspaceAppEndpoint[];
   logs_available: boolean;
   control_available: boolean;
   reason: string | null;

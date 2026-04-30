@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
 
+from pydantic import ValidationError
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -18,6 +19,7 @@ from awf.api.schemas import (
     OwnedPathOverlapResponse,
     RuntimeServiceResponse,
     ValidationFreshnessSummaryResponse,
+    WorkspaceAppEndpointResponse,
     WorkspaceControlResponse,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
@@ -45,6 +47,7 @@ from awf.db.repositories import (
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
+from awf.profiles.compose import resolve_app_endpoints
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
@@ -372,6 +375,7 @@ class WorkspaceService:
                 return None
             compose_project_name = workspace.compose_project_name
             runtime_workspace = runtime_workspace_from_workspace(workspace)
+            app_endpoints = _workspace_app_endpoint_responses(workspace)
 
         snapshot = await self._runtime_inspector.inspect(compose_project_name)
         finding = classify_runtime_snapshot(runtime_workspace, snapshot)
@@ -400,6 +404,7 @@ class WorkspaceService:
                 if finding is not None
                 else None
             ),
+            app_endpoints=app_endpoints,
         )
 
     async def list_operations(
@@ -801,9 +806,26 @@ def workspace_response(
     computed_fields["secret_leases"] = [
         workspace_secret_lease_response(lease) for lease in _loaded_secret_leases(workspace)
     ]
+    computed_fields["app_endpoints"] = _workspace_app_endpoint_responses(workspace)
     return WorkspaceResponse.model_validate(
         _WorkspaceResponseSource(workspace, computed_fields)
     )
+
+
+def _workspace_app_endpoint_responses(
+    workspace: Workspace,
+) -> list[WorkspaceAppEndpointResponse]:
+    raw_profile = getattr(workspace, "resolved_profile", None)
+    if not isinstance(raw_profile, Mapping):
+        return []
+    try:
+        profile = WorkspaceProfile.model_validate(raw_profile)
+    except ValidationError:
+        return []
+    return [
+        WorkspaceAppEndpointResponse.model_validate(endpoint)
+        for endpoint in resolve_app_endpoints(profile, include_internal=False)
+    ]
 
 
 def _loaded_secret_leases(workspace: Workspace) -> list[WorkspaceSecretLease]:

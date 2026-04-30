@@ -64,6 +64,51 @@ _V2_MINIMAL_BODY = {
 }
 
 
+def _endpoint_profile_body() -> dict[str, object]:
+    return {
+        "name": "api-endpoints",
+        "runtime": {
+            "environment": {
+                "SECRET_URL": "http://user:password@app:3000/secret?token=abc"
+            }
+        },
+        "services": [{"name": "app", "image": "example/app:latest"}],
+        "app_endpoints": [
+            {
+                "name": "app",
+                "service": "app",
+                "port": 3000,
+                "path": "/",
+                "health": {"path": "/healthz"},
+                "visibility": "agent",
+            },
+            {
+                "name": "operator_notes",
+                "service": "app",
+                "port": 3000,
+                "path": "/operator",
+                "visibility": "console",
+            },
+            {
+                "name": "internal_metrics",
+                "service": "app",
+                "port": 3000,
+                "path": "/metrics",
+                "visibility": "internal",
+            },
+        ],
+        "secrets": [
+            {
+                "name": "api-token",
+                "target": "API_TOKEN",
+                "kind": "env",
+                "provider": "vault",
+                "ref": "secret/data/api-token",
+            }
+        ],
+    }
+
+
 def _v2_body(
     *,
     repo_url: str = "git@github.com:example/app.git",
@@ -817,6 +862,57 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert listed.status_code == 200
         assert listed.json()[0]["task_class"] == "refactor_task"
         assert listed.json()[0]["owned_paths"] == ["src/awf/**/*.py", "tests/unit/**"]
+
+    @pytest.mark.unit
+    async def test_get_workspace_exposes_sanitized_app_endpoint_metadata(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "workspace": {"profile_ref": "inline", "profile": _endpoint_profile_body()},
+        }
+
+        create = await client.post("/v2/workspaces", json=payload)
+        assert create.status_code == 202
+
+        ws_id = create.json()["workspace_id"]
+        response = await client.get(f"/v1/workspaces/{ws_id}")
+
+        assert response.status_code == 200
+        body = response.json()
+        assert body["app_endpoints"] == [
+            {
+                "name": "app",
+                "service": "app",
+                "scheme": "http",
+                "port": 3000,
+                "path": "/",
+                "internal_url": "http://app:3000/",
+                "visibility": "agent",
+                "health": {
+                    "path": "/healthz",
+                    "method": "GET",
+                    "expected_status": 200,
+                    "internal_url": "http://app:3000/healthz",
+                },
+            },
+            {
+                "name": "operator_notes",
+                "service": "app",
+                "scheme": "http",
+                "port": 3000,
+                "path": "/operator",
+                "internal_url": "http://app:3000/operator",
+                "visibility": "console",
+                "health": None,
+            },
+        ]
+        rendered = str(body["app_endpoints"])
+        assert "internal_metrics" not in rendered
+        assert "user:password" not in rendered
+        assert "token=abc" not in rendered
+        assert "secret/data/api-token" not in rendered
 
     @pytest.mark.unit
     async def test_persists_agent_model_override_in_task_policy(

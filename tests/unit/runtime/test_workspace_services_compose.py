@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,11 @@ import yaml
 from awf.node.compose_manager import ComposeManager, ComposeProjectPaths, WorkspaceComposeSpec
 from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
-from awf.profiles.compose import AGENT_AUTH_ENV_VARS
+from awf.profiles.compose import (
+    AGENT_AUTH_ENV_VARS,
+    profile_agent_environment,
+    resolve_app_endpoints,
+)
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import ProfileResolver
 
@@ -65,6 +70,73 @@ def _load_node_browser_profile() -> WorkspaceProfile:
 def _clear_host_auth(monkeypatch: pytest.MonkeyPatch) -> None:
     for name in (*AGENT_AUTH_ENV_VARS, "AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"):
         monkeypatch.delenv(name, raising=False)
+
+
+@pytest.mark.unit
+def test_resolve_app_endpoints_generates_deterministic_internal_urls() -> None:
+    endpoints = {
+        endpoint["name"]: endpoint
+        for endpoint in resolve_app_endpoints(_load_node_browser_profile())
+    }
+
+    assert endpoints == {
+        "app": {
+            "name": "app",
+            "service": "app",
+            "scheme": "http",
+            "port": 3000,
+            "path": "/",
+            "internal_url": "http://app:3000/",
+            "visibility": "agent",
+            "health": {
+                "path": "/healthz",
+                "method": "GET",
+                "expected_status": 200,
+                "internal_url": "http://app:3000/healthz",
+            },
+        },
+        "browser_validation": {
+            "name": "browser_validation",
+            "service": "browser",
+            "scheme": "http",
+            "port": 9323,
+            "path": "/validate",
+            "internal_url": "http://browser:9323/validate",
+            "visibility": "validation",
+            "health": {
+                "path": "/healthz",
+                "method": "GET",
+                "expected_status": 200,
+                "internal_url": "http://browser:9323/healthz",
+            },
+        },
+        "operator_notes": {
+            "name": "operator_notes",
+            "service": "app",
+            "scheme": "http",
+            "port": 3000,
+            "path": "/operator",
+            "internal_url": "http://app:3000/operator",
+            "visibility": "console",
+            "health": None,
+        },
+    }
+
+
+@pytest.mark.unit
+def test_profile_agent_environment_exposes_only_agent_and_validation_app_endpoints() -> None:
+    env = dict(profile_agent_environment(_load_node_browser_profile()))
+
+    assert env["AWF_APP_ENDPOINT_APP_URL"] == "http://app:3000/"
+    assert env["AWF_APP_ENDPOINT_BROWSER_VALIDATION_URL"] == (
+        "http://browser:9323/validate"
+    )
+    assert "AWF_APP_ENDPOINT_OPERATOR_NOTES_URL" not in env
+
+    endpoints = json.loads(env["AWF_APP_ENDPOINTS_JSON"])
+    assert [endpoint["name"] for endpoint in endpoints] == ["app", "browser_validation"]
+    assert endpoints[0]["internal_url"] == "http://app:3000/"
+    assert endpoints[1]["health"]["internal_url"] == "http://browser:9323/healthz"
 
 
 async def _launched_spec(
@@ -337,10 +409,13 @@ async def test_stack_launcher_builds_node_next_browser_profile_service_spec_from
     assert spec.worktree_host_path == _NODE_BROWSER_FIXTURE
     assert spec.agent_runtime_image == "node:22-bookworm-slim"
     assert spec.docker_mode == "none"
-    assert dict(spec.agent_environment) == {
-        "APP_BASE_URL": "http://app:3000",
-        "BROWSER_VALIDATE_URL": "http://browser:9323/validate",
-    }
+    agent_environment = dict(spec.agent_environment)
+    assert agent_environment["APP_BASE_URL"] == "http://app:3000"
+    assert agent_environment["BROWSER_VALIDATE_URL"] == "http://browser:9323/validate"
+    assert agent_environment["AWF_APP_ENDPOINT_APP_URL"] == "http://app:3000/"
+    assert agent_environment["AWF_APP_ENDPOINT_BROWSER_VALIDATION_URL"] == (
+        "http://browser:9323/validate"
+    )
 
     services = {service.name: service for service in spec.services}
     assert set(services) == {"app", "browser"}
@@ -400,6 +475,14 @@ async def test_rendered_node_next_browser_compose_expresses_browser_validation_s
     agent = parsed["services"]["agent"]
     assert agent["environment"]["APP_BASE_URL"] == "http://app:3000"
     assert agent["environment"]["BROWSER_VALIDATE_URL"] == "http://browser:9323/validate"
+    assert agent["environment"]["AWF_APP_ENDPOINT_APP_URL"] == "http://app:3000/"
+    assert agent["environment"]["AWF_APP_ENDPOINT_BROWSER_VALIDATION_URL"] == (
+        "http://browser:9323/validate"
+    )
+    assert [
+        endpoint["name"]
+        for endpoint in json.loads(agent["environment"]["AWF_APP_ENDPOINTS_JSON"])
+    ] == ["app", "browser_validation"]
     assert agent["depends_on"] == {
         "app": {"condition": "service_healthy"},
         "browser": {"condition": "service_healthy"},

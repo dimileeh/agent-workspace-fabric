@@ -11,7 +11,7 @@ from __future__ import annotations
 import re
 from enum import StrEnum
 from typing import Annotated, Any, Literal
-from urllib.parse import urlparse
+from urllib.parse import urlparse, urlsplit
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -21,6 +21,15 @@ class DockerMode(StrEnum):
 
     none = "none"
     dind = "dind"
+
+
+class EndpointVisibility(StrEnum):
+    """Where a profile app endpoint should be exposed."""
+
+    agent = "agent"
+    validation = "validation"
+    console = "console"
+    internal = "internal"
 
 
 class ProfileRuntime(BaseModel):
@@ -319,6 +328,76 @@ class ProfileService(BaseModel):
         return self
 
 
+class ProfileAppEndpointHealth(BaseModel):
+    """Health metadata for a profile-defined app endpoint."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    path: Annotated[str, Field(min_length=1, max_length=2048)]
+    method: Literal["GET", "HEAD"] = "GET"
+    expected_status: int = Field(default=200, ge=100, le=599)
+
+    @field_validator("method", mode="before")
+    @classmethod
+    def _normalize_method(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.upper()
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        return _validate_endpoint_url_path(value, field_name="health path")
+
+
+class ProfileAppEndpoint(BaseModel):
+    """A named internal service endpoint for agents, validation, or the console."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")]
+    service: Annotated[str, Field(min_length=1, max_length=64, pattern=r"^[a-zA-Z0-9_.-]+$")]
+    scheme: Literal["http", "https"] = "http"
+    port: int = Field(ge=1, le=65535)
+    path: Annotated[str, Field(default="/", min_length=1, max_length=2048)] = "/"
+    health: ProfileAppEndpointHealth | None = None
+    visibility: EndpointVisibility = EndpointVisibility.agent
+
+    @field_validator("scheme", mode="before")
+    @classmethod
+    def _normalize_scheme(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.lower()
+        return value
+
+    @field_validator("visibility", mode="before")
+    @classmethod
+    def _normalize_visibility(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.lower()
+        return value
+
+    @field_validator("path")
+    @classmethod
+    def _validate_path(cls, value: str) -> str:
+        return _validate_endpoint_url_path(value, field_name="endpoint path")
+
+
+def _validate_endpoint_url_path(value: str, *, field_name: str) -> str:
+    if value.strip() != value:
+        raise ValueError(f"{field_name} must be a URL path")
+    parsed = urlsplit(value)
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or not parsed.path.startswith("/")
+        or parsed.query
+        or parsed.fragment
+    ):
+        raise ValueError(f"{field_name} must be a URL path")
+    return value
+
+
 class ProfileSecret(BaseModel):
     """A named secret mount or env lease the profile expects."""
 
@@ -427,6 +506,30 @@ class WorkspaceProfile(BaseModel):
     secrets: list[ProfileSecret] = Field(default_factory=list)
     security: ProfileSecurity = Field(default_factory=ProfileSecurity)
     ports: dict[str, str] = Field(default_factory=dict)
+    app_endpoints: list[ProfileAppEndpoint] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _validate_app_endpoints(self) -> WorkspaceProfile:
+        if not self.app_endpoints:
+            return self
+
+        service_names = {service.name for service in self.services}
+        seen_names: set[str] = set()
+        seen_env_names: set[str] = set()
+        for endpoint in self.app_endpoints:
+            normalized_name = endpoint.name.lower()
+            if normalized_name in seen_names:
+                raise ValueError(f"duplicate app endpoint name: {endpoint.name}")
+            seen_names.add(normalized_name)
+
+            env_name = _normalized_endpoint_env_name(endpoint.name)
+            if env_name in seen_env_names:
+                raise ValueError(f"duplicate app endpoint environment name: {endpoint.name}")
+            seen_env_names.add(env_name)
+
+            if endpoint.service not in service_names:
+                raise ValueError(f"unknown app endpoint service: {endpoint.service}")
+        return self
 
     def with_validation_commands(self, commands: list[str]) -> WorkspaceProfile:
         """Return a copy with request-supplied validation commands appended."""
@@ -440,6 +543,10 @@ class WorkspaceProfile(BaseModel):
             deep=True,
             update={"phases": self.phases.model_copy(update={"validate_commands": phase_commands})},
         )
+
+
+def _normalized_endpoint_env_name(name: str) -> str:
+    return re.sub(r"[^a-zA-Z0-9]+", "_", name).strip("_").upper()
 
 
 class ProfileResolution(BaseModel):

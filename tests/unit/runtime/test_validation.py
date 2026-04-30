@@ -142,6 +142,19 @@ def _identity_profile(**overrides: object) -> WorkspaceProfile:
     return WorkspaceProfile.model_validate(body)
 
 
+def _identity_profile_with_endpoint(**endpoint_overrides: object) -> WorkspaceProfile:
+    endpoint: dict[str, object] = {
+        "name": "api",
+        "service": "api",
+        "port": 8000,
+        "path": "/",
+        "health": {"path": "/health", "expected_status": 200},
+        "visibility": "agent",
+    }
+    endpoint.update(endpoint_overrides)
+    return _identity_profile(app_endpoints=[endpoint])
+
+
 @pytest.mark.unit
 def test_environment_identity_digest_is_stable_across_mapping_and_service_order() -> None:
     first = _identity_profile()
@@ -340,6 +353,56 @@ def test_environment_identity_inputs_sanitize_environment_and_secret_values() ->
             ),
         },
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "endpoint_override",
+    [
+        {"path": "/ready"},
+        {"service": "postgres", "port": 5432},
+        {"port": 8001},
+        {"health": {"path": "/ready", "expected_status": 204}},
+        {"visibility": "validation"},
+    ],
+)
+def test_environment_identity_digest_changes_for_app_endpoint_inputs(
+    endpoint_override: dict[str, object],
+) -> None:
+    assert environment_identity_digest(_identity_profile_with_endpoint()) != (
+        environment_identity_digest(_identity_profile_with_endpoint(**endpoint_override))
+    )
+
+
+@pytest.mark.unit
+def test_environment_identity_inputs_include_app_endpoints_and_generated_endpoint_env() -> None:
+    inputs = environment_identity_inputs(_identity_profile_with_endpoint())
+
+    assert inputs["app_endpoints"] == [
+        {
+            "name": "api",
+            "service": "api",
+            "scheme": "http",
+            "port": 8000,
+            "path": "/",
+            "internal_url": "http://api:8000/",
+            "visibility": "agent",
+            "health": {
+                "path": "/health",
+                "method": "GET",
+                "expected_status": 200,
+                "internal_url": "http://api:8000/health",
+            },
+        }
+    ]
+    assert [entry["name"] for entry in inputs["generated_endpoint_environment"]] == [
+        "AWF_APP_ENDPOINTS_JSON",
+        "AWF_APP_ENDPOINT_API_URL",
+    ]
+    assert all(
+        entry["value_sha256"].startswith("sha256:")
+        for entry in inputs["generated_endpoint_environment"]
+    )
 
 
 class TestHappyPath:

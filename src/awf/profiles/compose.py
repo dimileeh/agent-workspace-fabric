@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import os
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlunsplit
 
 from awf.node.compose_manager import ComposeService
 from awf.profiles.lint import profile_service_volume_lint_errors
-from awf.profiles.models import ProfileLintFinding, WorkspaceProfile
+from awf.profiles.models import (
+    EndpointVisibility,
+    ProfileAppEndpoint,
+    ProfileLintFinding,
+    WorkspaceProfile,
+    _normalized_endpoint_env_name,
+)
 
 AGENT_AUTH_ENV_VARS = (
     # Codex/OpenAI static-token fallback auth. Prefer isolated ~/.codex copies
@@ -119,7 +128,84 @@ def _resolve_workspace_path(value: str, *, base_path: Path | None) -> str:
 
 
 def profile_agent_environment(profile: WorkspaceProfile) -> tuple[tuple[str, str], ...]:
-    return tuple(profile.runtime.environment.items())
+    return (
+        *profile.runtime.environment.items(),
+        *profile_app_endpoint_environment(profile),
+    )
+
+
+def resolve_app_endpoints(
+    profile: WorkspaceProfile,
+    *,
+    include_internal: bool = True,
+) -> tuple[dict[str, Any], ...]:
+    """Resolve profile endpoints into deterministic internal service URLs."""
+
+    endpoints: list[dict[str, Any]] = []
+    for endpoint in profile.app_endpoints:
+        if not include_internal and endpoint.visibility is EndpointVisibility.internal:
+            continue
+        endpoints.append(_resolved_app_endpoint(endpoint))
+    return tuple(endpoints)
+
+
+def profile_app_endpoint_environment(
+    profile: WorkspaceProfile,
+) -> tuple[tuple[str, str], ...]:
+    endpoints = [
+        endpoint
+        for endpoint in resolve_app_endpoints(profile)
+        if endpoint["visibility"] in {"agent", "validation"}
+    ]
+    if not endpoints:
+        return ()
+
+    env: list[tuple[str, str]] = [
+        (
+            "AWF_APP_ENDPOINTS_JSON",
+            json.dumps(
+                endpoints,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+        )
+    ]
+    for endpoint in endpoints:
+        env.append(
+            (
+                f"AWF_APP_ENDPOINT_{_normalized_endpoint_env_name(str(endpoint['name']))}_URL",
+                str(endpoint["internal_url"]),
+            )
+        )
+    return tuple(env)
+
+
+def _resolved_app_endpoint(endpoint: ProfileAppEndpoint) -> dict[str, Any]:
+    internal_url = _endpoint_url(endpoint, endpoint.path)
+    return {
+        "name": endpoint.name,
+        "service": endpoint.service,
+        "scheme": endpoint.scheme,
+        "port": endpoint.port,
+        "path": endpoint.path,
+        "internal_url": internal_url,
+        "visibility": endpoint.visibility.value,
+        "health": (
+            {
+                "path": endpoint.health.path,
+                "method": endpoint.health.method,
+                "expected_status": endpoint.health.expected_status,
+                "internal_url": _endpoint_url(endpoint, endpoint.health.path),
+            }
+            if endpoint.health is not None
+            else None
+        ),
+    }
+
+
+def _endpoint_url(endpoint: ProfileAppEndpoint, path: str) -> str:
+    return urlunsplit((endpoint.scheme, f"{endpoint.service}:{endpoint.port}", path, "", ""))
 
 
 def agent_environment_with_github_token(
