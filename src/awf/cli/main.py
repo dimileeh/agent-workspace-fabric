@@ -210,6 +210,47 @@ def service_status(
         raise typer.Exit(code=1)
 
 
+@service_app.command("doctor")
+def service_doctor(
+    fmt: OutputFormat = typer.Option(OutputFormat.pretty, "--format"),
+    provider: list[str] = typer.Option(
+        [],
+        "--provider",
+        help=(
+            "Repeatable provider strictness check: github, codex, claude_code, "
+            "gemini, opencode, or docker."
+        ),
+    ),
+) -> None:
+    """Run operator-friendly local AWF diagnostics."""
+    from awf.service.config import resolve_service_settings
+    from awf.service.doctor import collect_doctor_report, render_doctor_pretty
+    from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    settings = resolve_service_settings()
+    report = asyncio.run(
+        collect_doctor_report(
+            settings,
+            strict_providers=strict_providers,
+            provider_environ=os.environ,
+            environ=os.environ,
+        )
+    )
+
+    if fmt == OutputFormat.json:
+        _emit(report.to_dict(), fmt)
+    else:
+        typer.echo(render_doctor_pretty(report), nl=False)
+    if report.status == "fail":
+        raise typer.Exit(code=1)
+
+
 @service_app.command("bootstrap")
 def service_bootstrap(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),

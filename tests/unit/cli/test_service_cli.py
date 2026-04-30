@@ -4,14 +4,17 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import subprocess
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import httpx
 import pytest
+import typer
 from sqlalchemy.engine import make_url
 from typer.testing import CliRunner
 
@@ -1156,6 +1159,244 @@ def test_service_status_provider_option_accepts_codex(
     assert result.exit_code == 1, result.output
     assert "agent_readiness.providers.codex.status: fail" in result.stdout
     assert "agent_readiness.security.reason_codes: ['CODEX_AUTH_MISSING']" in result.stdout
+
+
+@pytest.mark.unit
+def test_service_doctor_defaults_to_pretty_output_and_zero_exit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import doctor as doctor_mod
+
+    settings = object()
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+
+    report = SimpleNamespace(
+        status="ok",
+        to_dict=lambda: {
+            "service": "awf",
+            "status": "ok",
+            "summary": {"ok": 1, "warn": 0, "fail": 0},
+            "diagnostics": [
+                {
+                    "id": "docker",
+                    "label": "Docker",
+                    "status": "ok",
+                    "reason": "DOCKER_OK",
+                    "message": "Docker daemon is reachable.",
+                    "action": "No action required.",
+                    "source": "checks.docker",
+                    "metadata": {},
+                }
+            ],
+        }
+    )
+
+    async def _collect(received: object, **kwargs: object) -> object:
+        assert received is settings
+        assert kwargs["strict_providers"] == set()
+        assert kwargs["provider_environ"] is os.environ
+        assert kwargs["environ"] is os.environ
+        return report
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+    monkeypatch.setattr(doctor_mod, "render_doctor_pretty", lambda _report: "AWF doctor: ok\n")
+
+    result = _runner.invoke(app, ["service", "doctor"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "AWF doctor: ok\n"
+
+
+@pytest.mark.unit
+def test_service_doctor_json_output_is_structured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import doctor as doctor_mod
+
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    report = SimpleNamespace(
+        status="ok",
+        to_dict=lambda: {
+            "service": "awf",
+            "status": "ok",
+            "summary": {"ok": 1, "warn": 0, "fail": 0},
+            "diagnostics": [],
+        }
+    )
+
+    async def _collect(_settings: object, **_kwargs: object) -> object:
+        return report
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+
+    result = _runner.invoke(app, ["service", "doctor", "--format", "json"])
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout) == report.to_dict()
+
+
+@pytest.mark.unit
+def test_service_doctor_failing_diagnostics_exit_one(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import doctor as doctor_mod
+
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    report = SimpleNamespace(
+        status="fail",
+        to_dict=lambda: {
+            "service": "awf",
+            "status": "fail",
+            "summary": {"ok": 0, "warn": 0, "fail": 1},
+            "diagnostics": [
+                {
+                    "id": "docker",
+                    "label": "Docker",
+                    "status": "fail",
+                    "reason": "DOCKER_DAEMON_UNREACHABLE",
+                    "message": "Docker is installed but the daemon is not reachable.",
+                    "action": "Start Docker Desktop or verify AWF_DOCKER_HOST.",
+                    "source": "checks.docker",
+                    "metadata": {},
+                }
+            ],
+        }
+    )
+
+    async def _collect(_settings: object, **_kwargs: object) -> object:
+        return report
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+    monkeypatch.setattr(
+        doctor_mod,
+        "render_doctor_pretty",
+        lambda _report: (
+            "AWF doctor: fail\n"
+            "[fail] Docker: Docker is installed but the daemon is not reachable.\n"
+            "       reason: DOCKER_DAEMON_UNREACHABLE\n"
+            "       action: Start Docker Desktop or verify AWF_DOCKER_HOST.\n"
+        ),
+    )
+
+    result = _runner.invoke(app, ["service", "doctor"])
+
+    assert result.exit_code == 1
+    assert "DOCKER_DAEMON_UNREACHABLE" in result.stdout
+    assert "action: Start Docker Desktop" in result.stdout
+
+
+@pytest.mark.unit
+def test_service_doctor_preserves_typer_exit_from_collector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import doctor as doctor_mod
+
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+
+    async def _collect(_settings: object, **_kwargs: object) -> object:
+        raise typer.Exit(code=7)
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+
+    result = _runner.invoke(app, ["service", "doctor"])
+
+    assert result.exit_code == 7
+    assert "could not collect AWF doctor diagnostics" not in _combined_output(result)
+
+
+@pytest.mark.unit
+def test_service_doctor_does_not_mask_unexpected_collection_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import doctor as doctor_mod
+
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+
+    async def _collect(_settings: object, **_kwargs: object) -> object:
+        raise RuntimeError("diagnostic collector exploded")
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+
+    result = _runner.invoke(app, ["service", "doctor"])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, RuntimeError)
+    assert "could not collect AWF doctor diagnostics" not in _combined_output(result)
+
+
+@pytest.mark.unit
+def test_service_doctor_provider_options_are_validated_and_passed_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import doctor as doctor_mod
+
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+    report = SimpleNamespace(
+        status="ok",
+        to_dict=lambda: {
+            "service": "awf",
+            "status": "ok",
+            "summary": {"ok": 1, "warn": 0, "fail": 0},
+            "diagnostics": [],
+        }
+    )
+
+    async def _collect(_settings: object, **kwargs: object) -> object:
+        captured.update(kwargs)
+        return report
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+    monkeypatch.setattr(doctor_mod, "render_doctor_pretty", lambda _report: "AWF doctor: ok\n")
+
+    result = _runner.invoke(
+        app,
+        ["service", "doctor", "--provider", "github", "--provider", "codex"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert captured["strict_providers"] == {"github", "codex"}
+
+
+@pytest.mark.unit
+def test_service_doctor_unknown_provider_exits_two_without_traceback() -> None:
+    result = _runner.invoke(app, ["service", "doctor", "--provider", "bogus"])
+
+    output = _combined_output(result)
+    assert result.exit_code == 2
+    assert "unknown provider" in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.unit
+def test_service_doctor_does_not_change_status_pretty_output(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import status as status_mod
+
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+
+    async def _collect(_settings: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "service": "awf",
+            "status": "ok",
+            "checks": {"docker": {"ok": True, "status": "ok", "reason": "DOCKER_OK"}},
+        }
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(app, ["service", "status", "--format", "pretty"])
+
+    assert result.exit_code == 0, result.output
+    assert "checks.docker.reason: DOCKER_OK" in result.stdout
+    assert "AWF doctor:" not in result.stdout
 
 
 @pytest.mark.unit
