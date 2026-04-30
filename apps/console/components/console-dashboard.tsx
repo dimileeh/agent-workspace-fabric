@@ -2644,6 +2644,9 @@ function terminalLifecycleSourceStage(
 }
 
 function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
+  const services = Array.isArray(runtime?.services) ? runtime.services : [];
+  const appEndpoints = Array.isArray(runtime?.app_endpoints) ? runtime.app_endpoints : [];
+
   return (
     <Panel title="Runtime" icon={<Server size={16} aria-hidden />}>
       {!runtime ? (
@@ -2653,15 +2656,15 @@ function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
           <div className="grid gap-2 sm:grid-cols-3">
             <Fact label="Compose project" value={runtime.compose_project_name ?? "—"} mono />
             <Fact label="Stack" value={runtime.stack_state} />
-            <Fact label="Services" value={String(runtime.services.length)} />
+            <Fact label="Services" value={String(services.length)} />
           </div>
           {runtime.reason ? (
             <div className="rounded-md border border-amber-200 bg-amber-50 px-3 py-2 text-xs text-amber-900">
               {runtime.reason}
             </div>
           ) : null}
-          {runtime.app_endpoints.length > 0 ? (
-            <EndpointTable endpoints={runtime.app_endpoints} />
+          {appEndpoints.length > 0 ? (
+            <EndpointTable endpoints={appEndpoints} />
           ) : null}
           <div className="overflow-auto rounded-md border border-slate-200">
             <table className="w-full min-w-[720px] text-left text-xs">
@@ -2676,14 +2679,14 @@ function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
                 </tr>
               </thead>
               <tbody>
-                {runtime.services.length === 0 ? (
+                {services.length === 0 ? (
                   <tr>
                     <td colSpan={6} className="px-3 py-6 text-center text-slate-500">
                       No active containers reported.
                     </td>
                   </tr>
                 ) : (
-                  runtime.services.map((service) => <RuntimeRow key={service.name} item={service} />)
+                  services.map((service) => <RuntimeRow key={service.name} item={service} />)
                 )}
               </tbody>
             </table>
