@@ -383,7 +383,7 @@ export interface ProfileEgress {
 }
 
 export interface HostHomeAuthMountPolicy {
-  mode: "block" | "warn";
+  mode: "block" | "warn" | "unavailable";
 }
 
 export interface ProfileSecurity {

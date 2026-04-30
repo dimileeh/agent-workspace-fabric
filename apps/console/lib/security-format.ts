@@ -9,7 +9,7 @@ import type {
 type StatusTone = "neutral" | "info" | "good" | "warn" | "bad";
 
 const VALID_EGRESS_MODES = new Set(["open", "allowlist", "offline", "mirrored", "unavailable"]);
-const VALID_MOUNT_POLICY_MODES = new Set(["block", "warn"]);
+const VALID_MOUNT_POLICY_MODES = new Set(["block", "warn", "unavailable"]);
 
 export function extractProfileSecrets(
   profile: Record<string, unknown> | null | undefined,
@@ -51,7 +51,7 @@ export function extractHostHomeAuthMountPolicy(
   const security = (profile as Record<string, unknown> | null | undefined)?.security as Record<string, unknown> | null | undefined;
   const policy = security?.host_home_auth_mounts as Record<string, unknown> | null | undefined;
   if (!policy || typeof policy !== "object") {
-    return { mode: "block" };
+    return { mode: "unavailable" };
   }
   const rawMode = typeof policy.mode === "string" ? policy.mode : "";
   const mode = VALID_MOUNT_POLICY_MODES.has(rawMode)
@@ -126,6 +126,9 @@ export function formatHostHomeMountPolicy(policy: HostHomeAuthMountPolicy): {
 } {
   if (policy.mode === "block") {
     return { label: "blocked", tone: "good" };
+  }
+  if (policy.mode === "unavailable") {
+    return { label: "unavailable", tone: "neutral" };
   }
   return { label: "allowed (warn)", tone: "warn" };
 }

@@ -280,7 +280,7 @@ type HostHomeAuthMountPolicyShape = Expect<
   Equal<
     HostHomeAuthMountPolicy,
     {
-      mode: "block" | "warn";
+      mode: "block" | "warn" | "unavailable";
     }
   >
 >;
