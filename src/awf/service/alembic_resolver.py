@@ -118,6 +118,8 @@ class AlembicResolveResult:
 
 RevisionIdFactory = Callable[[Sequence[str]], str]
 RevisionReferenceType = Literal["down_revision", "dependencies"]
+_DETAIL_KEY_COLLISIONS_KEY = "detail_key_collisions"
+_FINDING_DETAILS_KEY = "finding_details"
 
 
 class AlembicMergeResolver:
@@ -374,9 +376,7 @@ def _unsafe_loaded_revision_graph(
         )
 
     if findings:
-        details: dict[str, object] = {}
-        for finding in findings:
-            details.update(dict(finding.details))
+        details = _merge_finding_details(findings)
         first = findings[0]
         return AlembicGraphValidationResult(
             status=AlembicGraphValidationStatus.failed,
@@ -388,6 +388,33 @@ def _unsafe_loaded_revision_graph(
         )
 
     return None
+
+
+def _merge_finding_details(findings: Sequence[AlembicGraphFinding]) -> dict[str, object]:
+    details: dict[str, object] = {}
+    detail_owners: dict[str, list[int]] = {}
+    for index, finding in enumerate(findings):
+        for key, value in finding.details.items():
+            detail_owners.setdefault(key, []).append(index)
+            details.setdefault(key, value)
+
+    colliding_keys = {key for key, owners in detail_owners.items() if len(owners) > 1}
+    if not colliding_keys:
+        return details
+
+    generated_keys = {_DETAIL_KEY_COLLISIONS_KEY, _FINDING_DETAILS_KEY}
+    ambiguous_keys = colliding_keys | (generated_keys & detail_owners.keys())
+    for key in ambiguous_keys:
+        details.pop(key, None)
+    details[_DETAIL_KEY_COLLISIONS_KEY] = sorted(ambiguous_keys)
+    details[_FINDING_DETAILS_KEY] = [
+        {
+            "reason_code": finding.reason_code,
+            "details": dict(finding.details),
+        }
+        for finding in findings
+    ]
+    return details
 
 
 def _branch_label_owners(revisions: Sequence[Script]) -> dict[str, list[str]]:

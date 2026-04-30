@@ -14,12 +14,14 @@ from alembic.script.revision import RevisionError
 
 import awf.service.alembic_resolver as alembic_resolver
 from awf.service.alembic_resolver import (
+    AlembicGraphFinding,
     AlembicGraphValidationResult,
     AlembicGraphValidationStatus,
     AlembicMergeResolver,
     AlembicResolveResult,
     AlembicResolveStatus,
     _as_revision_tuple,
+    _merge_finding_details,
     _relative_path,
     _render_merge_revision,
     _revision_reference_anomalies,
@@ -154,6 +156,39 @@ def test_alembic_graph_validation_reports_ambiguous_branch_label_references(
     assert result.to_dict()["details"]["ambiguous_dependencies"] == {
         "shared": ["base001", "other001"]
     }
+
+
+@pytest.mark.unit
+def test_merge_finding_details_preserves_colliding_keys_by_finding() -> None:
+    findings = (
+        AlembicGraphFinding(
+            reason_code="ALEMBIC_FIRST",
+            message="first finding",
+            details={"shared": ["first"], "first_only": True},
+        ),
+        AlembicGraphFinding(
+            reason_code="ALEMBIC_SECOND",
+            message="second finding",
+            details={"shared": ["second"], "second_only": True},
+        ),
+    )
+
+    details = _merge_finding_details(findings)
+
+    assert details["first_only"] is True
+    assert details["second_only"] is True
+    assert "shared" not in details
+    assert details["detail_key_collisions"] == ["shared"]
+    assert details["finding_details"] == [
+        {
+            "reason_code": "ALEMBIC_FIRST",
+            "details": {"shared": ["first"], "first_only": True},
+        },
+        {
+            "reason_code": "ALEMBIC_SECOND",
+            "details": {"shared": ["second"], "second_only": True},
+        },
+    ]
 
 
 @pytest.mark.unit
