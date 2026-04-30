@@ -1333,7 +1333,7 @@ Default agent models and effort are centralized in
 | --- | --- | --- |
 | `claude_code` | `claude-opus-4-7` | `xhigh` mapped to Claude Code `max` |
 | `codex` | `gpt-5.5` | `xhigh` via `model_reasoning_effort` |
-| `gemini` | `gemini-3-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking |
+| `gemini` | `gemini-3.1-pro-preview` | `xhigh` mapped to Gemini `HIGH` thinking |
 | `opencode` | `ollama/kimi-k2.6:cloud` | `xhigh` maps to OpenCode `--variant max --thinking` plus Ollama `think` |
 
 If a local subscription or provider account cannot use a default model, choose a
