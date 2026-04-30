@@ -52,8 +52,7 @@ class FakeAdapter(AgentAdapter):
         self.calls = []
         self.workspace_ids = []
 
-    @property
-    def provider(self) -> str:
+    def get_provider(self, model: str | None) -> str:
         return "fake"
 
     @property

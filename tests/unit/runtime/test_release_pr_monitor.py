@@ -22,8 +22,7 @@ class _StubAdapter(AgentAdapter):
     def __init__(self) -> None:
         super().__init__(runner=None)  # type: ignore[arg-type]
 
-    @property
-    def provider(self) -> str:
+    def get_provider(self, model: str | None) -> str:
         return "fake"
 
     @property

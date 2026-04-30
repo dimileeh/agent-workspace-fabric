@@ -411,8 +411,7 @@ class TestUnexpectedErrorDuringAgentRun:
             @property
             def name(self) -> AgentRuntime:
                 return AgentRuntime.gemini
-            @property
-            def provider(self) -> str:
+            def get_provider(self, model: str | None) -> str:
                 return "google"
             def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
                 return []
@@ -486,8 +485,7 @@ class TestUnexpectedErrorDuringAgentRun:
             ) -> None:
                 pass
 
-            @property
-            def provider(self) -> str:
+            def get_provider(self, model: str | None) -> str:
                 return "fake"
 
             @property
@@ -787,8 +785,7 @@ class TestAgentWatchdogConfig:
         captured: dict[str, Any] = {}
 
         class _Adapter:
-            @property
-            def provider(self) -> str:
+            def get_provider(self, model: str | None) -> str:
                 return "fake"
 
             @property

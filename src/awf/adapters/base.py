@@ -169,9 +169,8 @@ class AgentAdapter(ABC):
     @abstractmethod
     def name(self) -> AgentRuntime: ...
 
-    @property
     @abstractmethod
-    def provider(self) -> str: ...
+    def get_provider(self, model: str | None) -> str: ...
 
     @abstractmethod
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
@@ -299,7 +298,7 @@ class AgentAdapter(ABC):
             details: dict[str, str | bool] | None = None
             if reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED":
                 details = {
-                    "provider": self.provider,
+                    "provider": self.get_provider(model),
                     "model": model or self._default_model or "unknown",
                     "retryable": True,
                     "recommended_action": "Retry the workspace later or fallback to a different provider.",

@@ -19,8 +19,7 @@ class GeminiAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:
         return AgentRuntime.gemini
 
-    @property
-    def provider(self) -> str:
+    def get_provider(self, model: str | None) -> str:
         return "google"
 
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:

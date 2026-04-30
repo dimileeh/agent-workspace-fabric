@@ -54,8 +54,7 @@ class _NoOpAdapter(AgentAdapter):
     def __init__(self, *, runtime: AgentRuntime, **_: object) -> None:
         self._runtime = runtime
 
-    @property
-    def provider(self) -> str:
+    def get_provider(self, model: str | None) -> str:
         return "fake"
 
     @property
@@ -103,8 +102,7 @@ def _make_noop_factory(runtime_value: AgentRuntime) -> type[AgentAdapter]:
             # runner / defaults accepted for signature compat, unused.
             self._runtime = runtime_value
 
-        @property
-        def provider(self) -> str:
+        def get_provider(self, model: str | None) -> str:
             return "fake"
 
         @property

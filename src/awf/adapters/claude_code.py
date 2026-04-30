@@ -19,8 +19,7 @@ class ClaudeCodeAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:
         return AgentRuntime.claude_code
 
-    @property
-    def provider(self) -> str:
+    def get_provider(self, model: str | None) -> str:
         return "anthropic"
 
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
