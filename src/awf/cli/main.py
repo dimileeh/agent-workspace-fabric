@@ -13,11 +13,11 @@ friendly formatting is opt-in via ``--format pretty``.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Iterable, Mapping
 import json
 import os
 import sys
 import urllib.parse
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -177,6 +177,7 @@ def init(
                 strict_providers: Iterable[str] | None = None,
                 provider_environ: Mapping[str, str] | None = None,
             ) -> dict[str, object]:
+                _ = strict_providers, provider_environ
                 return await service_status_task
 
             return await asyncio.gather(
