@@ -107,6 +107,9 @@ _SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "kind",
     "target",
 )
+_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
+    "idempotency_key",
+)
 
 
 @dataclass(frozen=True)
@@ -184,6 +187,26 @@ def _secret_lease_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
             sqlite_insert(WorkspaceSecretLease)
             .on_conflict_do_nothing(index_elements=_SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS)
             .returning(WorkspaceSecretLease.id)
+        )
+    return None
+
+
+def _callback_subscription_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
+    if dialect_name == "postgresql":
+        return (
+            postgresql_insert(CallbackSubscription)
+            .on_conflict_do_nothing(
+                index_elements=_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS
+            )
+            .returning(CallbackSubscription.id)
+        )
+    if dialect_name == "sqlite":
+        return (
+            sqlite_insert(CallbackSubscription)
+            .on_conflict_do_nothing(
+                index_elements=_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS
+            )
+            .returning(CallbackSubscription.id)
         )
     return None
 
@@ -2978,19 +3001,43 @@ class CallbackSubscriptionRepository:
             return existing, False
 
         now = datetime.now(UTC)
-        subscription = CallbackSubscription(
-            id=new_callback_subscription_id(),
-            name=name,
-            target_url=target_url,
-            event_types=list(event_types),
-            enabled=enabled,
-            timeout_seconds=timeout_seconds,
-            max_attempts=max_attempts,
-            initial_backoff_seconds=initial_backoff_seconds,
-            idempotency_key=idempotency_key,
-            request_hash=request_hash,
-            disabled_at=None if enabled else now,
-        )
+        subscription_values: dict[str, Any] = {
+            "id": new_callback_subscription_id(),
+            "name": name,
+            "target_url": target_url,
+            "event_types": list(event_types),
+            "enabled": enabled,
+            "timeout_seconds": timeout_seconds,
+            "max_attempts": max_attempts,
+            "initial_backoff_seconds": initial_backoff_seconds,
+            "idempotency_key": idempotency_key,
+            "request_hash": request_hash,
+            "created_at": now,
+            "updated_at": now,
+            "disabled_at": None if enabled else now,
+        }
+        insert_if_absent = _callback_subscription_insert_if_absent_stmt(self._dialect_name)
+        if insert_if_absent is not None:
+            result = await self._session.execute(insert_if_absent.values(**subscription_values))
+            inserted_id = result.scalar_one_or_none()
+            if inserted_id is not None:
+                inserted = await self.get(inserted_id)
+                if inserted is None:
+                    raise RuntimeError("Inserted callback subscription could not be loaded.")
+                return inserted, True
+
+            existing = await self.get_by_idempotency_key(idempotency_key)
+            if existing is None:
+                raise RuntimeError(
+                    "Callback subscription insert conflicted but no row could be loaded."
+                )
+            if existing.request_hash != request_hash:
+                raise CallbackIdempotencyConflictError(
+                    "Idempotency-Key previously used with a different callback request."
+                )
+            return existing, False
+
+        subscription = CallbackSubscription(**subscription_values)
         self._session.add(subscription)
         await self._session.flush()
         return subscription, True

@@ -98,6 +98,46 @@ async def test_subscription_create_idempotent_persists_hash_and_detects_conflict
 
 
 @pytest.mark.unit
+async def test_subscription_create_idempotent_replays_after_duplicate_key_race(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    winner = await _subscription(
+        session,
+        idempotency_key="idem-race",
+        request_hash="hash-original",
+    )
+    repo = CallbackSubscriptionRepository(session)
+    original_get = repo.get_by_idempotency_key
+    lookups = 0
+
+    async def miss_once_then_get(key: str) -> CallbackSubscription | None:
+        nonlocal lookups
+        lookups += 1
+        if lookups == 1:
+            return None
+        return await original_get(key)
+
+    monkeypatch.setattr(repo, "get_by_idempotency_key", miss_once_then_get)
+
+    replay, was_created = await repo.create_idempotent(
+        name="operator",
+        target_url="https://operator.example.com/events",
+        event_types=["workspace.*"],
+        enabled=True,
+        timeout_seconds=10,
+        max_attempts=3,
+        initial_backoff_seconds=5,
+        idempotency_key="idem-race",
+        request_hash="hash-original",
+    )
+
+    assert was_created is False
+    assert replay.id == winner.id
+    assert lookups == 2
+
+
+@pytest.mark.unit
 async def test_subscription_list_can_filter_enabled(session: AsyncSession) -> None:
     repo = CallbackSubscriptionRepository(session)
     enabled = await _subscription(session, idempotency_key="enabled", enabled=True)
