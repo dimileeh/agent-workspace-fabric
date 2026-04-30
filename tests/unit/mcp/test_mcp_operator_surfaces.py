@@ -1416,7 +1416,7 @@ class TestMcpOperatorSurfaceParity:
         assert result.isError is True
         assert result.structuredContent == {
             "error_code": "INVALID_CURSOR",
-            "message": "Invalid workspace lock cursor.",
+            "message": "Invalid lock list cursor.",
             "detail": None,
         }
 

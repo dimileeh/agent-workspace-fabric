@@ -743,7 +743,7 @@ def build_mcp_server(
                     cursor=cursor,
                 )
             except InvalidWorkspaceLockCursorError:
-                return _error_result("INVALID_CURSOR", "Invalid workspace lock cursor.")
+                return _error_result("INVALID_CURSOR", "Invalid lock list cursor.")
         response = WorkspaceLockListResponse(
             items=[WorkspaceLockResponse.model_validate(row) for row in page.items],
             next_cursor=page.next_cursor,
