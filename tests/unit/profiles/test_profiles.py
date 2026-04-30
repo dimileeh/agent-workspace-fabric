@@ -60,6 +60,18 @@ def test_profile_schema_accepts_monitor_initial_review_grace() -> None:
 
 
 @pytest.mark.unit
+def test_profile_healthcheck_rejects_non_string_method() -> None:
+    with pytest.raises(ValidationError):
+        ProfileHealthCheck.model_validate(
+            {
+                "name": "api",
+                "url": "http://api:8080/healthz",
+                "method": 123,
+            }
+        )
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_non_check_reviewer_monitor_policy() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -894,6 +906,14 @@ def test_java_builtin_uses_worktree_build_tool_detection(tmp_path: Path) -> None
 
     assert profile is not None
     assert profile.phases.setup[0].command.startswith("./mvnw")
+
+
+@pytest.mark.unit
+def test_java_builtin_without_detected_build_tool_uses_default_profile(tmp_path: Path) -> None:
+    profile = get_builtin_profile("java", worktree_path=tmp_path)
+
+    assert profile is not None
+    assert profile.phases.setup[0].command == "mvn -B -DskipTests dependency:go-offline"
 
 
 @pytest.mark.unit

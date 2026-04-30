@@ -139,6 +139,29 @@ async def test_subscription_create_idempotent_replays_after_duplicate_key_race(
 
 
 @pytest.mark.unit
+async def test_subscription_create_idempotent_falls_back_without_conflict_helper(
+    session: AsyncSession,
+) -> None:
+    repo = CallbackSubscriptionRepository(session, dialect_name="unsupported")
+
+    created, was_created = await repo.create_idempotent(
+        name="operator",
+        target_url="https://operator.example.com/events",
+        event_types=["workspace.*"],
+        enabled=True,
+        timeout_seconds=10,
+        max_attempts=3,
+        initial_backoff_seconds=5,
+        idempotency_key="idem-fallback",
+        request_hash="hash-fallback",
+    )
+
+    assert was_created is True
+    assert created.idempotency_key == "idem-fallback"
+    assert created.disabled_at is None
+
+
+@pytest.mark.unit
 async def test_subscription_list_can_filter_enabled(session: AsyncSession) -> None:
     repo = CallbackSubscriptionRepository(session)
     enabled = await _subscription(session, idempotency_key="enabled", enabled=True)
@@ -389,6 +412,32 @@ async def test_delivery_enqueue_once_replays_after_duplicate_key_race(
     assert was_created is False
     assert replay.id == winner.id
     assert lookups == 2
+
+
+@pytest.mark.unit
+async def test_delivery_enqueue_once_falls_back_without_conflict_helper(
+    session: AsyncSession,
+) -> None:
+    subscription = await _subscription(session)
+    repo = CallbackDeliveryRepository(session, dialect_name="unsupported")
+    now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+
+    created, was_created = await repo.enqueue_once(
+        subscription=subscription,
+        event_kind="workspace",
+        event_type="workspace.state_changed",
+        source_id="evt_fallback",
+        dedupe_key="workspace:evt_fallback",
+        workspace_id="ws_fallback",
+        operation_id=None,
+        merge_candidate_id=None,
+        envelope={"event": {"type": "workspace.state_changed"}},
+        now=now,
+    )
+
+    assert was_created is True
+    assert created.subscription_id == subscription.id
+    assert created.envelope["delivery"]["dedupe_key"] == "workspace:evt_fallback"
 
 
 @pytest.mark.unit

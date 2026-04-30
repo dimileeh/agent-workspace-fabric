@@ -7,7 +7,15 @@ from pathlib import Path
 import pytest
 
 from awf.runtime.validation import (
+    HEALTHCHECK_COMMAND_FAILED,
+    HEALTHCHECK_INVALID_CONFIGURATION,
+    ProfileHealthCheck,
+    ValidationCommandResult,
     ValidationCoverageResult,
+    ValidationRunner,
+    _healthcheck_attempt_timeout,
+    _healthcheck_cli_args,
+    _healthcheck_failure_reason,
     _missing_line_count,
     _parse_term_missing_gaps,
 )
@@ -217,6 +225,78 @@ def test_coverage_result_metadata_omits_gaps_when_empty(tmp_path: Path) -> None:
     metadata = result.as_metadata()
 
     assert "gaps" not in metadata
+
+
+@pytest.mark.unit
+def test_healthcheck_helpers_cover_invalid_configuration_edges() -> None:
+    healthcheck = ProfileHealthCheck.model_construct(
+        name="broken",
+        kind=None,
+        command=None,
+        url=None,
+        method="GET",
+        expected_status=200,
+        timeout_seconds=30.0,
+        interval_seconds=1.0,
+        attempt_timeout_seconds=None,
+    )
+    latest = ValidationCommandResult(
+        command="invalid healthcheck",
+        returncode=2,
+        duration_seconds=0.1,
+        stdout_path=Path("/tmp/stdout"),
+        stderr_path=Path("/tmp/stderr"),
+    )
+
+    assert _healthcheck_cli_args(healthcheck) == [
+        "python",
+        "-c",
+        "import sys; print('invalid healthcheck configuration', file=sys.stderr); sys.exit(2)",
+    ]
+    assert _healthcheck_attempt_timeout(healthcheck, 0) == 0.001
+    assert _healthcheck_failure_reason(healthcheck, latest) == HEALTHCHECK_INVALID_CONFIGURATION
+
+    command_healthcheck = ProfileHealthCheck.model_validate(
+        {"name": "cmd", "command": "curl -f http://api/health"}
+    )
+    assert _healthcheck_failure_reason(command_healthcheck, latest) == HEALTHCHECK_COMMAND_FAILED
+
+
+@pytest.mark.unit
+async def test_healthcheck_stderr_append_skips_invalid_log_stream_id(tmp_path: Path) -> None:
+    class _LogStore:
+        def __init__(self) -> None:
+            self.append_calls = 0
+
+        async def append_to_stream(self, **_kwargs: object) -> None:
+            self.append_calls += 1
+
+    stderr_path = tmp_path / "health.stderr"
+    stderr_path.write_text("before", encoding="utf-8")
+    result = ValidationCommandResult(
+        command="curl -f http://api/health",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=tmp_path / "health.stdout",
+        stderr_path=stderr_path,
+        phase="healthcheck",
+        stream_ids={"stderr": "validation.01_healthcheck.stdout"},
+    )
+    log_store = _LogStore()
+    runner = ValidationRunner(
+        runner=object(),  # type: ignore[arg-type]
+        artifacts_dir=tmp_path,
+        log_store=log_store,  # type: ignore[arg-type]
+    )
+
+    await runner._append_healthcheck_stderr(  # noqa: SLF001
+        workspace_id="ws_health",
+        result=result,
+        diagnostic="\nhealthcheck failed\n",
+    )
+
+    assert stderr_path.read_text(encoding="utf-8").endswith("\nhealthcheck failed\n")
+    assert log_store.append_calls == 0
 
 
 @pytest.mark.unit

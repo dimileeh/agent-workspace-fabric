@@ -22,6 +22,7 @@ from awf.service.alembic_resolver import (
     _as_revision_tuple,
     _relative_path,
     _render_merge_revision,
+    _revision_reference_anomalies,
     _safe_heads,
     _sanitize_revision_id,
     validate_alembic_migration_graph,
@@ -169,6 +170,32 @@ def test_alembic_graph_validation_accepts_clean_single_head(tmp_path: Path) -> N
     assert result.findings == ()
     assert result.to_dict()["details"] == {}
     assert result.ok is True
+
+
+@pytest.mark.unit
+def test_revision_reference_anomalies_accept_single_owner_branch_label() -> None:
+    revisions = (
+        SimpleNamespace(revision="base001", down_revision=None, dependencies=None),
+        SimpleNamespace(revision="head001", down_revision="lineage", dependencies="lineage"),
+    )
+
+    missing_down, ambiguous_down = _revision_reference_anomalies(  # type: ignore[arg-type]
+        revisions=revisions,
+        revision_ids={"base001", "head001"},
+        branch_label_owners={"lineage": ["base001"]},
+        reference_type="down_revision",
+    )
+    missing_deps, ambiguous_deps = _revision_reference_anomalies(  # type: ignore[arg-type]
+        revisions=revisions,
+        revision_ids={"base001", "head001"},
+        branch_label_owners={"lineage": ["base001"]},
+        reference_type="dependencies",
+    )
+
+    assert missing_down == []
+    assert ambiguous_down == {}
+    assert missing_deps == []
+    assert ambiguous_deps == {}
 
 
 @pytest.mark.unit
