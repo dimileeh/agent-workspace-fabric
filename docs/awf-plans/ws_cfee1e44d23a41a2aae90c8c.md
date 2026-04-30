@@ -97,7 +97,7 @@ Some terminal workspaces can fail with no active work, leaving agent containers 
 - Overlap with active workspace control planes may cause stale state races; cleanup must strictly gate on terminal states.
 
 ### Assumptions
-- Existing workspace status semantics remain unchanged: `active`, `validating`, `pushing`, `monitoring_pr` are non-terminal and must not be removed.
+- Existing workspace status semantics remain unchanged: `requested`, `provisioning`, `ready`, `running`, `validating`, `pushing`, `monitoring_pr`, and `destroying` are non-terminal/protected and must not be removed.
 - Worktree preservation policy remains the default and can be changed only via explicit config/policy path.
 - Event/status output contract can be extended only via additive fields/reasons.
 
