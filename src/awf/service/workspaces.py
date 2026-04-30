@@ -956,6 +956,11 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
         "reason_code": reason_code,
         "message": message,
     }
+
+    for field in ("provider", "model", "retryable", "recommended_action"):
+        if field in details:
+            result[field] = details[field]
+
     conformance_payload = _compact_conformance_payload(conformance)
     if conformance_payload is not None:
         result["conformance"] = conformance_payload

@@ -22,6 +22,9 @@ class _StubAdapter(AgentAdapter):
     def __init__(self) -> None:
         super().__init__(runner=None)  # type: ignore[arg-type]
 
+    def get_provider(self, model: str | None) -> str:
+        return "fake"
+
     @property
     def name(self) -> AgentRuntime:  # type: ignore[override]
         return AgentRuntime.claude_code
