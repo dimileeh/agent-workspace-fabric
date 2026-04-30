@@ -3113,6 +3113,27 @@ class CallbackDeliveryRepository:
         await self._session.flush()
         return delivery
 
+    async def sync_envelope_delivery_metadata(
+        self,
+        delivery: CallbackDelivery,
+    ) -> CallbackDelivery:
+        envelope = dict(delivery.envelope)
+        delivery_metadata = dict(envelope.get("delivery", {}))
+        delivery_metadata.update(
+            {
+                "id": delivery.id,
+                "subscription_id": delivery.subscription_id,
+                "idempotency_key": delivery.idempotency_key,
+                "dedupe_key": delivery.dedupe_key,
+                "attempt_count": delivery.attempt_count,
+                "max_attempts": delivery.max_attempts,
+            }
+        )
+        envelope["delivery"] = delivery_metadata
+        delivery.envelope = envelope
+        await self._session.flush()
+        return delivery
+
     async def mark_succeeded(
         self,
         delivery: CallbackDelivery,

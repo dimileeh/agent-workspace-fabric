@@ -213,6 +213,7 @@ class CallbackDeliveryService:
                     continue
 
                 await repo.mark_attempt_started(delivery, now=self._clock())
+                await repo.sync_envelope_delivery_metadata(delivery)
                 try:
                     result = await self._http_poster(
                         subscription.target_url,

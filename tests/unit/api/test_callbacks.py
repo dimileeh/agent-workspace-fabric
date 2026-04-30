@@ -166,9 +166,18 @@ async def test_register_callback_idempotent_replay_returns_original_without_dupl
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "changed_body",
+    [
+        {**_VALID_BODY, "target_url": "https://operator.example.com/changed"},
+        {**_VALID_BODY, "event_types": ["workspace.*", "operation.*"]},
+        {**_VALID_BODY, "enabled": False},
+    ],
+)
 async def test_register_callback_same_key_with_changed_body_returns_conflict(
     client: AsyncClient,
     engine: AsyncEngine,
+    changed_body: dict[str, object],
 ) -> None:
     headers = {"Idempotency-Key": "callback-conflict"}
 
@@ -176,7 +185,7 @@ async def test_register_callback_same_key_with_changed_body_returns_conflict(
     before_count = await _subscription_count(engine)
     conflict = await client.post(
         "/v1/callbacks",
-        json={**_VALID_BODY, "target_url": "https://operator.example.com/changed"},
+        json=changed_body,
         headers=headers,
     )
     after_count = await _subscription_count(engine)

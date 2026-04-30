@@ -8,10 +8,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
+from awf.api.schemas import CallbackSubscriptionCreateRequest
 from awf.db.enums import CallbackDeliveryStatus, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import CallbackDelivery
+from awf.db.models import CallbackDelivery, MergeCandidate, WorkspaceEvent
 from awf.db.repositories import (
     CallbackDeliveryRepository,
     CallbackSubscriptionRepository,
@@ -22,9 +24,11 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.service import callbacks as callback_service_module
 from awf.service.callbacks import (
     CallbackDeliveryService,
     CallbackPostResult,
+    CallbackService,
 )
 
 
@@ -59,6 +63,57 @@ class _RecordingPoster:
         if self.exc is not None:
             raise self.exc
         return CallbackPostResult(status_code=self.status_code)
+
+
+@dataclass
+class _FakeHttpxPost:
+    url: str
+    json: dict[str, Any]
+    headers: dict[str, str]
+    timeout: float
+
+
+@dataclass
+class _FakeHttpxResponse:
+    status_code: int
+
+
+class _FakeAsyncClient:
+    instances: list[_FakeAsyncClient] = []
+
+    def __init__(self) -> None:
+        self.posts: list[_FakeHttpxPost] = []
+        self.exited = False
+        self.instances.append(self)
+
+    async def __aenter__(self) -> _FakeAsyncClient:
+        return self
+
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc: BaseException | None,
+        traceback: object | None,
+    ) -> None:
+        self.exited = True
+
+    async def post(
+        self,
+        url: str,
+        *,
+        json: dict[str, Any],
+        headers: dict[str, str],
+        timeout: float,
+    ) -> _FakeHttpxResponse:
+        self.posts.append(
+            _FakeHttpxPost(
+                url=url,
+                json=json,
+                headers=headers,
+                timeout=timeout,
+            )
+        )
+        return _FakeHttpxResponse(status_code=207)
 
 
 async def _register_subscription(
@@ -187,6 +242,147 @@ async def _get_delivery(
         return delivery
 
 
+WorkspaceEventSnapshot = tuple[
+    str,
+    str,
+    str,
+    str | None,
+    str | None,
+    str | None,
+    dict[str, Any] | None,
+    str,
+]
+
+
+async def _workspace_event_snapshots(session: AsyncSession) -> list[WorkspaceEventSnapshot]:
+    rows = list(
+        (
+            await session.execute(
+                select(WorkspaceEvent).order_by(
+                    WorkspaceEvent.occurred_at.asc(),
+                    WorkspaceEvent.id.asc(),
+                )
+            )
+        ).scalars()
+    )
+    return [
+        (
+            row.id,
+            row.workspace_id,
+            row.event_type,
+            row.old_state,
+            row.new_state,
+            row.reason_code,
+            row.payload,
+            row.occurred_at.replace(tzinfo=None).isoformat(),
+        )
+        for row in rows
+    ]
+
+
+async def _merge_candidate_snapshot(
+    session: AsyncSession,
+    candidate_id: str,
+) -> tuple[str, str, bool, bool, bool, bool, bool, bool, bool, str | None]:
+    candidate = await session.get(MergeCandidate, candidate_id)
+    assert candidate is not None
+    return (
+        candidate.id,
+        candidate.status,
+        candidate.ready,
+        candidate.manual_merge_required,
+        candidate.waiting_for_monitor,
+        candidate.failed_or_cancelled,
+        candidate.completed,
+        candidate.not_canonical,
+        candidate.stale,
+        candidate.stale_reason,
+    )
+
+
+@pytest.mark.unit
+async def test_callback_service_registers_and_lists_subscriptions(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = CallbackService(factory)
+    enabled = await service.register(
+        CallbackSubscriptionCreateRequest(
+            name="enabled callback",
+            target_url="https://operator.example.com/enabled",
+            event_types=["workspace.*"],
+        ),
+        idempotency_key="service-register-enabled",
+    )
+    disabled = await service.register(
+        CallbackSubscriptionCreateRequest(
+            name="disabled callback",
+            target_url="https://operator.example.com/disabled",
+            event_types=["merge.*"],
+            enabled=False,
+            max_attempts=2,
+        ),
+        idempotency_key="service-register-disabled",
+    )
+
+    all_subscriptions = await service.list(limit=10)
+    enabled_subscriptions = await service.list(enabled=True, limit=10)
+    disabled_subscriptions = await service.list(enabled=False, limit=10)
+
+    assert {subscription.id for subscription in all_subscriptions} == {
+        enabled.id,
+        disabled.id,
+    }
+    assert [subscription.id for subscription in enabled_subscriptions] == [enabled.id]
+    assert [subscription.id for subscription in disabled_subscriptions] == [disabled.id]
+    assert disabled.disabled_at is not None
+    assert disabled.max_attempts == 2
+
+
+@pytest.mark.unit
+async def test_enqueue_missing_callback_sources_is_a_safe_noop(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = CallbackDeliveryService(factory)
+
+    assert await service.enqueue_workspace_event("evt_missing") == []
+    assert await service.enqueue_operation_event(
+        "op_missing",
+        event_type="operation.state_changed",
+    ) == []
+    assert await service.enqueue_merge_event(
+        "mc_missing",
+        event_type="merge.candidate_updated",
+    ) == []
+
+
+@pytest.mark.unit
+async def test_default_httpx_poster_posts_json_with_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _FakeAsyncClient.instances = []
+    monkeypatch.setattr(callback_service_module.httpx, "AsyncClient", _FakeAsyncClient)
+
+    result = await callback_service_module._httpx_post_json(
+        "https://operator.example.com/events",
+        json={"event": {"type": "workspace.state_changed"}},
+        headers={"Idempotency-Key": "callback-delivery:test"},
+        timeout=3.5,
+    )
+
+    assert result == CallbackPostResult(status_code=207)
+    assert len(_FakeAsyncClient.instances) == 1
+    client = _FakeAsyncClient.instances[0]
+    assert client.exited
+    assert client.posts == [
+        _FakeHttpxPost(
+            url="https://operator.example.com/events",
+            json={"event": {"type": "workspace.state_changed"}},
+            headers={"Idempotency-Key": "callback-delivery:test"},
+            timeout=3.5,
+        )
+    ]
+
+
 @pytest.mark.unit
 async def test_workspace_event_envelope_is_sanitized_and_replay_safe(
     factory: async_sessionmaker[AsyncSession],
@@ -305,20 +501,28 @@ async def test_successful_delivery_posts_sanitized_json_and_marks_succeeded(
     assert len(poster.calls) == 1
     call = poster.calls[0]
     assert call.url == "https://operator.example.com/events"
-    assert call.json == delivery.envelope
     assert call.headers == {
         "Content-Type": "application/json",
         "User-Agent": "AWF-Callback-Delivery/1.0",
         "Idempotency-Key": delivery.idempotency_key,
     }
+    assert delivery.envelope["delivery"]["attempt_count"] == 0
+    assert call.json == {
+        **delivery.envelope,
+        "delivery": {
+            **delivery.envelope["delivery"],
+            "attempt_count": 1,
+        },
+    }
     stored = await _get_delivery(factory, delivery.id)
     assert stored.status == CallbackDeliveryStatus.succeeded.value
     assert stored.attempt_count == 1
+    assert stored.envelope["delivery"]["attempt_count"] == 1
     assert stored.delivered_at is not None
 
 
 @pytest.mark.unit
-async def test_disabled_callbacks_skip_without_mutating_workspace_state(
+async def test_disabled_callbacks_skip_without_mutating_awf_state_or_events(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with factory() as session:
@@ -329,6 +533,11 @@ async def test_disabled_callbacks_skip_without_mutating_workspace_state(
             idempotency_key="disabled-subscription",
         )
         workspace_id, event_id = await _seed_workspace_event(session)
+        _merge_workspace_id, _task_id, _attempt_id, candidate_id = await _seed_merge_candidate(
+            session
+        )
+        event_snapshots_before = await _workspace_event_snapshots(session)
+        candidate_snapshot_before = await _merge_candidate_snapshot(session, candidate_id)
         await session.commit()
 
     service = CallbackDeliveryService(factory)
@@ -362,17 +571,30 @@ async def test_disabled_callbacks_skip_without_mutating_workspace_state(
     assert stored.error_code == "CALLBACK_DISABLED"
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
+        event_snapshots_after = await _workspace_event_snapshots(session)
+        candidate_snapshot_after = await _merge_candidate_snapshot(session, candidate_id)
         assert workspace is not None
         assert workspace.status == WorkspaceStatus.provisioning.value
+        assert candidate_snapshot_after == candidate_snapshot_before
+        assert event_snapshots_after == event_snapshots_before
 
 
 @pytest.mark.unit
-async def test_failing_callbacks_record_retry_metadata_without_mutating_awf_state(
+async def test_failing_callbacks_record_retry_metadata_without_mutating_awf_state_or_events(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
     async with factory() as session:
-        await _register_subscription(session, event_types=["operation.*"], max_attempts=2)
+        await _register_subscription(
+            session,
+            event_types=["operation.*", "merge.*"],
+            max_attempts=2,
+        )
         workspace_id, operation_id = await _seed_operation(session)
+        _merge_workspace_id, _task_id, _attempt_id, candidate_id = await _seed_merge_candidate(
+            session
+        )
+        event_snapshots_before = await _workspace_event_snapshots(session)
+        candidate_snapshot_before = await _merge_candidate_snapshot(session, candidate_id)
         await session.commit()
     delivery = (
         await CallbackDeliveryService(factory).enqueue_operation_event(
@@ -380,28 +602,43 @@ async def test_failing_callbacks_record_retry_metadata_without_mutating_awf_stat
             event_type="operation.state_changed",
         )
     )[0]
+    merge_delivery = (
+        await CallbackDeliveryService(factory).enqueue_merge_event(
+            candidate_id,
+            event_type="merge.candidate_updated",
+        )
+    )[0]
 
     poster = _RecordingPoster(status_code=503)
     await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
 
+    assert [call.json["delivery"]["attempt_count"] for call in poster.calls] == [1, 1]
     retried = await _get_delivery(factory, delivery.id)
     assert retried.status == CallbackDeliveryStatus.pending.value
     assert retried.attempt_count == 1
+    assert retried.envelope["delivery"]["attempt_count"] == 1
     assert retried.response_status_code == 503
     assert retried.error_code == "CALLBACK_HTTP_503"
     assert retried.next_attempt_at is not None
     assert retried.next_attempt_at > retried.last_attempt_at
 
     poster.exc = RuntimeError("x" * 1000)
-    retried.next_attempt_at = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
     async with factory() as session:
-        session.add(retried)
+        repo = CallbackDeliveryRepository(session)
+        operation_retry = await repo.get(delivery.id)
+        merge_retry = await repo.get(merge_delivery.id)
+        assert operation_retry is not None
+        assert merge_retry is not None
+        operation_retry.next_attempt_at = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+        merge_retry.next_attempt_at = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
         await session.commit()
     await CallbackDeliveryService(factory, http_poster=poster).drain_due(limit=10)
 
+    assert [call.json["delivery"]["attempt_count"] for call in poster.calls] == [1, 1, 2, 2]
     failed = await _get_delivery(factory, delivery.id)
     assert failed.status == CallbackDeliveryStatus.failed.value
     assert failed.attempt_count == 2
+    assert failed.envelope["delivery"]["attempt_count"] == 2
     assert failed.error_code == "CALLBACK_REQUEST_FAILED"
     assert failed.error_message is not None
     assert len(failed.error_message) <= 512
@@ -409,7 +646,11 @@ async def test_failing_callbacks_record_retry_metadata_without_mutating_awf_stat
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         operation = await OperationRepository(session).get(operation_id)
+        event_snapshots_after = await _workspace_event_snapshots(session)
+        candidate_snapshot_after = await _merge_candidate_snapshot(session, candidate_id)
         assert workspace is not None
         assert operation is not None
         assert workspace.status == WorkspaceStatus.requested.value
         assert operation.status == OperationStatus.failed.value
+        assert candidate_snapshot_after == candidate_snapshot_before
+        assert event_snapshots_after == event_snapshots_before
