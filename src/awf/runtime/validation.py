@@ -482,7 +482,7 @@ class ValidationRunner:
                 and policy.fail_on_unconfigured
             )
 
-        rendered = json.dumps(metadata, sort_keys=True, indent=2) + "\n"
+        rendered = json.dumps(metadata, sort_keys=True, indent=2, default=str) + "\n"
         stdout = "" if policy_failed else rendered
         stderr = rendered if policy_failed else ""
         stdout_path = artifacts_dir / f"{label}.stdout"
