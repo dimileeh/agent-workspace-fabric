@@ -13,6 +13,7 @@ from awf.api.schemas import (
     CallbackSubscriptionListResponse,
     CallbackSubscriptionResponse,
 )
+from awf.common.config import Settings, get_settings
 from awf.service.callbacks import CallbackIdempotencyConflictError, CallbackService
 
 router = APIRouter(prefix="/v1/callbacks", tags=["callbacks"])
@@ -27,7 +28,9 @@ async def register_callback(
     payload: CallbackSubscriptionCreateRequest,
     idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
+    settings: Settings = Depends(get_settings),
 ) -> CallbackSubscriptionResponse:
+    _ensure_callbacks_enabled(settings)
     key = _require_idempotency_key(idempotency_key)
     try:
         subscription = await CallbackService(session_factory).register(
@@ -53,7 +56,9 @@ async def list_callbacks(
     enabled: Annotated[bool | None, Query()] = None,
     limit: Annotated[int, Query(ge=1, le=500)] = 50,
     session_factory: async_sessionmaker[AsyncSession] = Depends(get_db_session_factory),
+    settings: Settings = Depends(get_settings),
 ) -> CallbackSubscriptionListResponse:
+    _ensure_callbacks_enabled(settings)
     rows = await CallbackService(session_factory).list(enabled=enabled, limit=limit)
     return CallbackSubscriptionListResponse(
         items=[CallbackSubscriptionResponse.model_validate(row) for row in rows],
@@ -62,6 +67,17 @@ async def list_callbacks(
         limit=limit,
         cursor=None,
     )
+
+
+def _ensure_callbacks_enabled(settings: Settings) -> None:
+    if not settings.callbacks_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail={
+                "error_code": "CALLBACKS_DISABLED",
+                "message": "External callbacks are disabled by configuration.",
+            },
+        )
 
 
 def _require_idempotency_key(idempotency_key: str | None) -> str:

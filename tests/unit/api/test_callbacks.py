@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
+from collections.abc import AsyncIterator
+
 import pytest
-from httpx import AsyncClient
+from fastapi import FastAPI
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from awf.api.app import configure_database, create_app
+from awf.common.config import Settings, get_settings
 from awf.db.session import make_session_factory
 
 _VALID_BODY = {
@@ -25,6 +30,14 @@ async def _subscription_count(engine: AsyncEngine) -> int:
             await session.scalar(select(func.count()).select_from(CallbackSubscription))
             or 0
         )
+
+
+@pytest.fixture
+async def callback_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[FastAPI, AsyncClient]]:
+    app = create_app(use_lifespan=False)
+    configure_database(app, make_session_factory(engine))
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
+        yield app, c
 
 
 @pytest.mark.unit
@@ -91,6 +104,37 @@ async def test_register_callback_validates_url_events_and_extra_fields(
     )
 
     assert response.status_code == 422
+
+
+@pytest.mark.unit
+async def test_callbacks_endpoints_return_unavailable_when_disabled(
+    callback_app_and_client: tuple[FastAPI, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = callback_app_and_client
+    app.dependency_overrides[get_settings] = lambda: Settings(
+        _env_file=None,
+        callbacks_enabled=False,
+    )
+
+    register_response = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers={"Idempotency-Key": "callback-disabled"},
+    )
+    list_response = await client.get("/v1/callbacks")
+
+    assert register_response.status_code == 503
+    assert register_response.json()["detail"] == {
+        "error_code": "CALLBACKS_DISABLED",
+        "message": "External callbacks are disabled by configuration.",
+    }
+    assert list_response.status_code == 503
+    assert list_response.json()["detail"] == {
+        "error_code": "CALLBACKS_DISABLED",
+        "message": "External callbacks are disabled by configuration.",
+    }
+    assert await _subscription_count(engine) == 0
 
 
 @pytest.mark.unit
