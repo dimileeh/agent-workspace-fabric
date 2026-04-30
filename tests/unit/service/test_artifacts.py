@@ -155,10 +155,10 @@ class TestArtifactService:
             )
 
     @pytest.mark.unit
-    def test_download_rejects_directory_artifact_path(self, tmp_path: Path) -> None:
+    def test_directory_download_request_fails_closed(self, tmp_path: Path) -> None:
         artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
-        reports_dir = artifact_dir / "reports"
-        reports_dir.mkdir(parents=True)
+        report_dir = artifact_dir / "reports"
+        report_dir.mkdir(parents=True)
 
         with pytest.raises(ArtifactNotFoundError):
             get_downloadable_artifact(

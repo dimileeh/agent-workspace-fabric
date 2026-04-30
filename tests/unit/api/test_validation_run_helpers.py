@@ -6,6 +6,11 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
+from awf.api.schemas import (
+    _log_stream_ids,
+    _looks_like_legacy_ipv4_literal,
+    _merge_log_stream_ref_value,
+)
 from awf.api.validation_runs import (
     fresh_for_target,
     validation_coverage_fields,
@@ -167,3 +172,24 @@ def test_validation_freshness_status_maps_computed_freshness_to_reason() -> None
         "unknown",
         "validation_target_unknown",
     )
+
+
+@pytest.mark.unit
+def test_schema_private_helpers_handle_legacy_ipv4_and_stream_ref_edges() -> None:
+    class EmptySplitHostname(str):
+        def split(self, _separator: str | None = None, _maxsplit: int = -1) -> list[str]:
+            return []
+
+    assert not _looks_like_legacy_ipv4_literal(EmptySplitHostname("ignored"))
+    assert not _looks_like_legacy_ipv4_literal("127..1")
+    assert not _looks_like_legacy_ipv4_literal("0x")
+    assert not _looks_like_legacy_ipv4_literal("0xz")
+    assert _looks_like_legacy_ipv4_literal("0x7f.1")
+
+    assert _merge_log_stream_ref_value("validation.01.stdout", ["validation.01.stdout"]) == [
+        "validation.01.stdout"
+    ]
+    deep: object = "stream-deep"
+    for _ in range(70):
+        deep = {"child": deep}
+    assert _log_stream_ids(deep) == []

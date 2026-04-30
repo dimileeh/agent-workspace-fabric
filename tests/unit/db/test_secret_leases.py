@@ -98,6 +98,11 @@ def test_secret_lease_issue_insert_has_conflict_guard(
     assert "RETURNING" in sql
 
 
+@pytest.mark.unit
+def test_secret_lease_issue_insert_unsupported_dialect_has_no_conflict_guard() -> None:
+    assert _secret_lease_insert_if_absent_stmt("mysql") is None
+
+
 async def _events(session: AsyncSession, workspace_id: str) -> list[WorkspaceEvent]:
     rows = await session.execute(
         select(WorkspaceEvent)
@@ -182,6 +187,39 @@ async def test_issue_declared_leases_falls_back_without_conflict_helper(
     assert len(leases) == 1
     assert leases[0].secret_name == "api-token"
     assert leases[0].issued_at == now
+
+
+@pytest.mark.unit
+async def test_issue_declared_leases_fallback_accepts_optional_metadata(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    workspace = await _workspace(session)
+    repo = SecretLeaseRepository(session, dialect_name="unsupported")
+
+    leases = await repo.issue_declared_leases(
+        workspace,
+        leases=[
+            SecretLeaseIssue(
+                secret_name="fallback-token",
+                kind="env",
+                target="FALLBACK_TOKEN",
+                mode="ro",
+                required=True,
+                provider="env",
+                ref_digest=None,
+                expires_at=None,
+                issue_metadata={},
+            )
+        ],
+        now=now,
+    )
+
+    assert len(leases) == 1
+    assert leases[0].secret_name == "fallback-token"
+    assert leases[0].issued_at == now
+    assert leases[0].ref_digest is None
+    assert leases[0].expires_at is None
 
 
 @pytest.mark.unit

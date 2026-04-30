@@ -10,11 +10,13 @@ needed from that report.
 from __future__ import annotations
 
 import json
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 
 PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
 PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
@@ -55,7 +57,78 @@ def render_workspace_path(template: str, *, workspace_id: str) -> Path:
     return path
 
 
-def build_planning_prompt(*, task_prompt: str, plan_path: Path) -> str:
+def render_coordination_warning_section(
+    coordination_warnings: Sequence[object] = (),
+) -> str:
+    warnings: list[dict[str, Any]] = []
+    for warning in coordination_warnings:
+        if not isinstance(warning, Mapping):
+            continue
+        warnings.append(_normalized_coordination_warning(warning))
+    if not warnings:
+        return ""
+
+    lines = [
+        "### Coordination warnings",
+        "",
+        (
+            "Each warning is advisory and does not block launch. Coordinate around "
+            "the listed workspace ids and owned paths before editing overlapping files."
+        ),
+        (
+            "If target-branch changes land in these paths first, AWF stale policy may "
+            "require rebase/revalidation via `STALE_OVERLAP`."
+        ),
+        "",
+    ]
+    for warning in warnings:
+        blocks_launch = "true" if warning["blocks_launch"] else "false"
+        lines.append(
+            f"- {warning['warning_code']} ({warning['severity']}; blocks_launch={blocks_launch}): "
+            f"{warning['message']}"
+        )
+        if warning["workspace_ids"]:
+            lines.append(f"  - Workspaces: {', '.join(warning['workspace_ids'])}")
+        for overlap in warning["overlaps"]:
+            lines.append(
+                f"  - {overlap['workspace_id']}: {overlap['existing_path']} -> "
+                f"{overlap['requested_path']}"
+            )
+        if warning["overlaps_truncated"]:
+            lines.append(
+                "  - Overlap list truncated: "
+                f"showing {len(warning['overlaps'])} of {warning['overlap_count']} "
+                "total overlaps."
+            )
+        context = warning["stale_policy_context"]
+        trigger_type = context.get("trigger_type")
+        stale_reason_code = context.get("stale_reason_code")
+        if trigger_type or stale_reason_code:
+            lines.append(
+                f"  - Stale policy: {trigger_type or 'path_overlap'} / "
+                f"{stale_reason_code or 'STALE_OVERLAP'}"
+            )
+    return "\n".join(lines) + "\n\n"
+
+
+def build_agent_task_prompt(
+    *,
+    task_prompt: str,
+    coordination_warnings: Sequence[Mapping[str, Any]] = (),
+) -> str:
+    warning_section = render_coordination_warning_section(coordination_warnings)
+    if not warning_section:
+        return task_prompt
+    return f"{warning_section}### Task\n{task_prompt}\n"
+
+
+def build_planning_prompt(
+    *,
+    task_prompt: str,
+    plan_path: Path,
+    coordination_warnings: Sequence[Mapping[str, Any]] = (),
+) -> str:
+    warning_section = render_coordination_warning_section(coordination_warnings)
     return (
         "## Planning phase\n\n"
         "Create a concrete implementation plan for the task below.\n\n"
@@ -67,6 +140,7 @@ def build_planning_prompt(*, task_prompt: str, plan_path: Path) -> str:
         "- tests to write first;\n"
         "- validation commands;\n"
         "- risks, assumptions, and explicit non-goals.\n\n"
+        f"{warning_section}"
         f"### Task\n{task_prompt}\n"
     )
 
@@ -77,6 +151,7 @@ def build_execution_prompt(
     plan_path: Path,
     iteration: int,
     gaps: tuple[str, ...],
+    coordination_warnings: Sequence[Mapping[str, Any]] = (),
 ) -> str:
     if iteration == 0:
         instruction = (
@@ -91,11 +166,13 @@ def build_execution_prompt(
             "Keep changes scoped to the saved plan and explain unavoidable deviations in code/docs."
         )
 
+    warning_section = render_coordination_warning_section(coordination_warnings)
     return (
         "## Execution phase\n\n"
         f"Read `{plan_path.as_posix()}` and use it as the implementation contract.\n"
         f"{instruction}\n\n"
         "Do not switch branches, push, or open a PR. AWF owns branch and PR lifecycle.\n\n"
+        f"{warning_section}"
         f"### Task\n{task_prompt}\n"
     )
 
@@ -250,6 +327,82 @@ def _reason_code_from_payload(value: Any) -> str:
     if not normalized:
         return PLAN_CONFORMANCE_REPORTED
     return normalized[:128]
+
+
+def _normalized_coordination_warning(
+    warning: Mapping[str, Any],
+) -> dict[str, Any]:
+    warning_code = _safe_warning_text(warning.get("warning_code")) or "COORDINATION_WARNING"
+    message = _safe_warning_text(warning.get("message")) or warning_code
+    severity = _safe_warning_text(warning.get("severity")) or "advisory"
+    workspace_ids = _safe_warning_strings(warning.get("workspace_ids"))
+    overlaps = _safe_warning_overlaps(warning.get("overlaps"))
+    overlap_count = _safe_warning_int(warning.get("overlap_count"))
+    context = _safe_warning_context(warning.get("stale_policy_context"))
+    return {
+        "warning_code": warning_code,
+        "message": message,
+        "severity": severity,
+        "blocks_launch": _safe_warning_bool(warning.get("blocks_launch")),
+        "workspace_ids": workspace_ids,
+        "overlaps": overlaps,
+        "overlap_count": max(overlap_count if overlap_count is not None else len(overlaps), len(overlaps)),
+        "overlaps_truncated": _safe_warning_bool(warning.get("overlaps_truncated")),
+        "stale_policy_context": context,
+    }
+
+
+def _safe_warning_overlaps(value: object) -> list[dict[str, str]]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        return []
+    overlaps: list[dict[str, str]] = []
+    for item in value:
+        if len(overlaps) >= MAX_COORDINATION_WARNING_OVERLAPS:
+            break
+        if not isinstance(item, Mapping):
+            continue
+        workspace_id = _safe_warning_text(item.get("workspace_id"))
+        existing_path = _safe_warning_text(item.get("existing_path"))
+        requested_path = _safe_warning_text(item.get("requested_path"))
+        if workspace_id is None or existing_path is None or requested_path is None:
+            continue
+        overlaps.append(
+            {
+                "workspace_id": workspace_id,
+                "existing_path": existing_path,
+                "requested_path": requested_path,
+            }
+        )
+    return overlaps
+
+
+def _safe_warning_strings(value: object) -> list[str]:
+    if not isinstance(value, Sequence) or isinstance(value, str | bytes):
+        return []
+    return [item for item in value if isinstance(item, str) and item.strip()]
+
+
+def _safe_warning_context(value: object) -> dict[str, str]:
+    if not isinstance(value, Mapping):
+        return {}
+    return {str(key): item for key, item in value.items() if isinstance(item, str)}
+
+
+def _safe_warning_bool(value: object) -> bool:
+    return value if isinstance(value, bool) else False
+
+
+def _safe_warning_int(value: object) -> int | None:
+    if not isinstance(value, int) or isinstance(value, bool):
+        return None
+    return max(0, value)
+
+
+def _safe_warning_text(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    return text or None
 
 
 def _safe_conformance_text(value: object) -> str:
