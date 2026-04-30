@@ -556,6 +556,10 @@ class WorkspaceProfile(BaseModel):
             seen_names.add(normalized_name)
 
             env_name = _normalized_endpoint_env_name(endpoint.name)
+            if not env_name:
+                raise ValueError(
+                    f"app endpoint environment name cannot be empty: {endpoint.name}"
+                )
             if env_name in seen_env_names:
                 raise ValueError(f"duplicate app endpoint environment name: {endpoint.name}")
             seen_env_names.add(env_name)

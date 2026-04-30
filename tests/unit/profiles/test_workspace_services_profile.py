@@ -754,6 +754,20 @@ def test_app_endpoint_environment_names_must_be_unique() -> None:
 
 
 @pytest.mark.unit
+def test_app_endpoint_environment_names_must_not_be_empty() -> None:
+    with pytest.raises(ValueError, match="app endpoint environment name cannot be empty"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "empty-endpoint-env",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {"name": "_-.", "service": "api", "port": 8000, "path": "/"},
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
 def test_app_endpoint_ports_must_be_tcp_port_numbers() -> None:
     with pytest.raises(ValueError, match="less than or equal to 65535"):
         WorkspaceProfile.model_validate(
