@@ -108,7 +108,6 @@ def _run_terminal_workspace_compose_teardown(
         str(compose_path),
         "down",
         "--remove-orphans",
-        "--volumes",
     ]
     try:
         result = subprocess.run(
