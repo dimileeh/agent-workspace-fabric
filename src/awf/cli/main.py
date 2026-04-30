@@ -13,6 +13,7 @@ friendly formatting is opt-in via ``--format pretty``.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Iterable, Mapping
 import json
 import os
 import sys
@@ -153,7 +154,7 @@ def init(
     """Run local onboarding checks and print clear next steps for first setup."""
     from awf.profiles.onboarding import preview_project_onboarding
     from awf.service.config import resolve_service_settings
-    from awf.service.doctor import collect_doctor_report, render_doctor_pretty
+    from awf.service.doctor import DoctorReport, collect_doctor_report, render_doctor_pretty
     from awf.service.status import collect_service_status
 
     repository = path.expanduser().resolve()
@@ -161,7 +162,7 @@ def init(
     try:
         settings = resolve_service_settings()
 
-        async def _collect_reports() -> tuple[dict[str, object], object]:
+        async def _collect_reports() -> tuple[dict[str, object], DoctorReport]:
             service_status_task = asyncio.create_task(
                 collect_service_status(
                     settings,
@@ -172,8 +173,9 @@ def init(
 
             async def _collect_cached_service_status(
                 _settings: object,
-                *_args: object,
-                **_kwargs: object,
+                *,
+                strict_providers: Iterable[str] | None = None,
+                provider_environ: Mapping[str, str] | None = None,
             ) -> dict[str, object]:
                 return await service_status_task
 
