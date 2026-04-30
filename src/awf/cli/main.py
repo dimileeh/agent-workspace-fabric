@@ -169,6 +169,7 @@ def init(
 
     try:
         settings = resolve_service_settings()
+        service_name = getattr(settings, "service_name", "unknown")
 
         async def _collect_reports() -> tuple[dict[str, object], DoctorReport]:
             service_status_task = asyncio.create_task(
@@ -190,7 +191,7 @@ def init(
                     return await service_status_task
                 except Exception as exc:
                     return {
-                        "service": settings.service_name,
+                        "service": service_name,
                         "status": "fail",
                         "checks": {},
                         "agent_readiness": {"status": "fail"},
@@ -211,7 +212,7 @@ def init(
 
             if isinstance(service_status_result, Exception):
                 service_status = {
-                    "service": settings.service_name,
+                    "service": service_name,
                     "status": "fail",
                     "checks": {},
                     "agent_readiness": {"status": "fail"},
