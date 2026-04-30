@@ -109,10 +109,17 @@ class TestRedaction:
         assert redact_secrets("") == ""
 
 
-class TestCallbackEvents:
+class TestCallbackEventPolicy:
     @pytest.mark.unit
-    def test_public_callback_subscription_matching_contract(self) -> None:
-        assert is_valid_callback_subscription_event_type("workspace.*") is True
+    def test_subscription_event_type_validation_and_matching(self) -> None:
+        assert is_valid_callback_subscription_event_type("workspace.*")
+        assert is_valid_callback_subscription_event_type("workspace.created")
+        assert not is_valid_callback_subscription_event_type("internal.secret")
+
+        assert callback_subscription_matches_event_type(
+            "workspace.*",
+            "workspace.created",
+        )
         assert callback_subscription_matches_event_type(
             "workspace.*",
             "workspace.state_changed",
@@ -128,4 +135,12 @@ class TestCallbackEvents:
         assert not callback_subscription_matches_event_type(
             "merge.*",
             "workspace.created",
+        )
+        assert not callback_subscription_matches_event_type(
+            "workspace.created",
+            "operation.state_changed",
+        )
+        assert not callback_subscription_matches_event_type(
+            "workspace.*",
+            "internal.secret",
         )

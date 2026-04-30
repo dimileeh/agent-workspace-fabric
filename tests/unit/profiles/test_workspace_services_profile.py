@@ -265,6 +265,51 @@ def test_python_postgres_workspace_services_profile_preserves_service_schema() -
 
 
 @pytest.mark.unit
+def test_python_postgres_profile_declares_workspace_local_db_hooks() -> None:
+    profile = _load_postgres_profile()
+    rendered_profile = profile.model_dump_json()
+
+    assert [service.name for service in profile.services] == ["postgres", "app"]
+    assert profile.runtime.environment["DATABASE_URL"] == (
+        "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres:5432/awf"
+    )
+    assert [
+        (command.command, command.timeout_seconds)
+        for command in profile.database.generated_setup
+    ] == [
+        (
+            (
+                "python -c \"import os, urllib.request; "
+                "assert os.environ['DATABASE_URL'].startswith('postgresql://awf:'); "
+                "body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', "
+                "timeout=10).read().decode(); assert body == 'setup ok\\n', body; "
+                "print('generated setup ok')\""
+            ),
+            30,
+        )
+    ]
+    assert [
+        (command.command, command.timeout_seconds)
+        for command in profile.database.pre_validation_refresh
+    ] == [
+        (
+            (
+                "python -c \"import os, urllib.request; "
+                "assert os.environ['DATABASE_URL'].startswith('postgresql://awf:'); "
+                "body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', "
+                "timeout=10).read().decode(); assert body == 'setup ok\\n', body; "
+                "print('refresh ok')\""
+            ),
+            30,
+        )
+    ]
+    assert "DATABASE_URL" in rendered_profile
+    assert "AWF_DATABASE_URL" not in rendered_profile
+    assert "ServiceSettings" not in rendered_profile
+    assert "localhost:5433" not in rendered_profile
+
+
+@pytest.mark.unit
 def test_python_postgres_profile_services_resolves_worktree_paths_and_named_volume() -> None:
     profile = _load_postgres_profile()
 

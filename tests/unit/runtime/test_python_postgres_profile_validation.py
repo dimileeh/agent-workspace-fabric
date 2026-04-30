@@ -72,6 +72,7 @@ def test_python_postgres_fixture_uses_startup_tolerant_db_connect_timeout(
 async def test_python_postgres_profile_setup_runs_setup_phase(tmp_path: Path) -> None:
     fake = FakeCommandRunner()
     fake.queue_result(returncode=0, stdout="setup ok\n")
+    fake.queue_result(returncode=0, stdout="generated setup ok\n")
     validator = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
 
     result = await validator.run_profile_phases(
@@ -84,16 +85,19 @@ async def test_python_postgres_profile_setup_runs_setup_phase(tmp_path: Path) ->
 
     assert result.all_passed
     assert [(command.phase, command.stdout_path.name) for command in result.commands] == [
-        ("setup", "01_setup.stdout")
+        ("setup", "01_setup.stdout"),
+        ("db_generated_setup", "01_db_generated_setup.stdout"),
     ]
-    assert len(fake.calls) == 1
+    assert len(fake.calls) == 2
     assert "/setup" in fake.calls[0].args[-1]
-    assert "/healthz" not in fake.calls[0].args[-1]
+    assert "/setup" in fake.calls[1].args[-1]
+    assert all("/healthz" not in call.args[-1] for call in fake.calls)
 
 
 @pytest.mark.unit
 async def test_python_postgres_profile_healthchecks_are_opt_in(tmp_path: Path) -> None:
     fake = FakeCommandRunner()
+    fake.queue_result(returncode=0, stdout="refresh ok\n")
     fake.queue_result(returncode=0, stdout="validated awf-db-profile-fixture\n")
     validator = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
 
@@ -108,11 +112,13 @@ async def test_python_postgres_profile_healthchecks_are_opt_in(tmp_path: Path) -
 
     assert result.all_passed
     assert [(command.phase, command.stdout_path.name) for command in result.commands] == [
+        ("db_refresh", "01_db_refresh.stdout"),
         ("validate", "01_validate.stdout")
     ]
-    assert len(fake.calls) == 1
-    assert "/validate" in fake.calls[0].args[-1]
-    assert "/healthz" not in fake.calls[0].args[-1]
+    assert len(fake.calls) == 2
+    assert "/setup" in fake.calls[0].args[-1]
+    assert "/validate" in fake.calls[1].args[-1]
+    assert all("/healthz" not in call.args[-1] for call in fake.calls)
 
 
 @pytest.mark.unit
@@ -120,6 +126,7 @@ async def test_python_postgres_profile_healthchecks_precede_validate_phase(
     tmp_path: Path,
 ) -> None:
     fake = FakeCommandRunner()
+    fake.queue_result(returncode=0, stdout="refresh ok\n")
     fake.queue_result(returncode=0, stdout="ok\n")
     fake.queue_result(returncode=0, stdout="validated awf-db-profile-fixture\n")
     validator = ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts")
@@ -135,9 +142,11 @@ async def test_python_postgres_profile_healthchecks_precede_validate_phase(
 
     assert result.all_passed
     assert [(command.phase, command.stdout_path.name) for command in result.commands] == [
+        ("db_refresh", "01_db_refresh.stdout"),
         ("healthcheck", "01_healthcheck.stdout"),
         ("validate", "01_validate.stdout"),
     ]
-    assert len(fake.calls) == 2
-    assert "/healthz" in fake.calls[0].args[-1]
-    assert "/validate" in fake.calls[1].args[-1]
+    assert len(fake.calls) == 3
+    assert "/setup" in fake.calls[0].args[-1]
+    assert "/healthz" in fake.calls[1].args[-1]
+    assert "/validate" in fake.calls[2].args[-1]

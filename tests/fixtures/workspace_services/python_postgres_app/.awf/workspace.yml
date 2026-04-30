@@ -36,6 +36,15 @@ phases:
     - command: >-
         python -c "import os, urllib.request; body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/validate', timeout=10).read().decode(); assert body == 'validated awf-db-profile-fixture\n', body; print(body, end='')"
       timeout_seconds: 30
+database:
+  generated_setup:
+    - command: >-
+        python -c "import os, urllib.request; assert os.environ['DATABASE_URL'].startswith('postgresql://awf:'); body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', timeout=10).read().decode(); assert body == 'setup ok\n', body; print('generated setup ok')"
+      timeout_seconds: 30
+  pre_validation_refresh:
+    - command: >-
+        python -c "import os, urllib.request; assert os.environ['DATABASE_URL'].startswith('postgresql://awf:'); body=urllib.request.urlopen(os.environ['APP_BASE_URL'] + '/setup', timeout=10).read().decode(); assert body == 'setup ok\n', body; print('refresh ok')"
+      timeout_seconds: 30
 validation:
   healthchecks:
     - name: app

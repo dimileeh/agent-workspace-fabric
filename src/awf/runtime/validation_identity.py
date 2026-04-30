@@ -63,6 +63,15 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
         "generated_endpoint_environment": _environment_entries(
             dict(profile_app_endpoint_environment(profile, resolved_endpoints=app_endpoints))
         ),
+        "database": {
+            "generated_setup": [
+                _command_identity(command) for command in profile.database.generated_setup
+            ],
+            "pre_validation_refresh": [
+                _command_identity(command)
+                for command in profile.database.pre_validation_refresh
+            ],
+        },
         "validation": {
             "healthchecks": [
                 _healthcheck_identity(healthcheck)

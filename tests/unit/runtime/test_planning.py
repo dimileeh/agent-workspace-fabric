@@ -85,12 +85,16 @@ def test_satisfied_report_with_gaps_is_downgraded() -> None:
 def test_parse_conformance_report_defaults_and_aliases() -> None:
     satisfied = parse_conformance_report('{"status":"ok","summary":"","gaps":[]}')
     needs_iteration = parse_conformance_report('{"status":"unknown","summary":"","gaps":"rerun mypy"}')
+    blank_reason = parse_conformance_report(
+        '{"status":"needs_iteration","summary":"x","gaps":[],"reason_code":"  "}'
+    )
 
     assert satisfied.status == PlanConformanceStatus.satisfied
     assert satisfied.summary == "Plan satisfied."
     assert needs_iteration.status == PlanConformanceStatus.needs_iteration
     assert needs_iteration.summary == "Plan gaps remain."
     assert needs_iteration.gaps == ("rerun mypy",)
+    assert blank_reason.reason_code == "PLAN_CONFORMANCE_REPORTED"
 
 
 @pytest.mark.unit
@@ -195,7 +199,7 @@ def test_conformance_retry_prompt_steers_agent_to_finish_remaining_gaps() -> Non
 
 
 @pytest.mark.unit
-def test_conformance_retry_prompt_handles_missing_artifact_metadata() -> None:
+def test_conformance_retry_prompt_handles_missing_and_oversized_evidence() -> None:
     long_summary = "x" * (MAX_CONFORMANCE_TEXT_CHARS + 50)
     prompt = build_conformance_retry_prompt(
         task_prompt="Finish endpoint metadata coverage.",
