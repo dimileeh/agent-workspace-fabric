@@ -60,6 +60,11 @@ from awf.service.controls import (
     default_cleaner,
     stop_project_containers,
 )
+from awf.service.coordination import (
+    coordination_warnings_from_task_policy,
+    owned_path_overlap_coordination_warnings,
+    task_policy_with_coordination_warnings,
+)
 from awf.service.disk import DiskCheck
 from awf.service.resource_capacity import (
     ReservedResources,
@@ -540,6 +545,10 @@ async def create_workspace_v2_row(
         branch_base=payload.repo.base_branch,
         owned_paths=payload.task.owned_paths,
     )
+    task_policy = task_policy_with_coordination_warnings(
+        v2_task_policy_snapshot(payload),
+        owned_path_overlap_coordination_warnings(overlaps),
+    )
 
     requested_profile, resolved_profile = v2_profile_snapshots(payload)
     ws = await repo.create(
@@ -552,7 +561,7 @@ async def create_workspace_v2_row(
             payload.task.task_class.value if payload.task.task_class is not None else None
         ),
         owned_paths=payload.task.owned_paths,
-        task_policy=v2_task_policy_snapshot(payload),
+        task_policy=task_policy,
         auto_merge=payload.task.auto_merge,
         initial_review_grace_period_seconds=(
             payload.task.initial_review_grace_period_seconds
@@ -659,7 +668,10 @@ async def retry_workspace_row(
         task_external_id=source.task_external_id,
         task_class=source.task_class,
         owned_paths=list(source.owned_paths),
-        task_policy=deepcopy(source.task_policy),
+        task_policy=task_policy_with_coordination_warnings(
+            deepcopy(source.task_policy),
+            owned_path_overlap_coordination_warnings(overlaps),
+        ),
         auto_merge=source.auto_merge,
         initial_review_grace_period_seconds=(
             source.initial_review_grace_period_seconds
@@ -798,6 +810,9 @@ def workspace_response(
     )
     computed_fields["runtime_health"] = _workspace_runtime_health_from_events(workspace)
     computed_fields["failure_details"] = workspace_failure_details_payload(workspace)
+    computed_fields["coordination_warnings"] = coordination_warnings_from_task_policy(
+        workspace.task_policy
+    )
     computed_fields["secret_leases"] = [
         workspace_secret_lease_response(lease) for lease in _loaded_secret_leases(workspace)
     ]
