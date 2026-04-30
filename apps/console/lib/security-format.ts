@@ -145,18 +145,20 @@ export function summarizeProviderCredentialReadiness(
     };
   }
 
-  const leaseByName = new Map<string, WorkspaceSecretLease>();
+  const leaseByKey = new Map<string, WorkspaceSecretLease>();
   for (const lease of leases) {
-    leaseByName.set(lease.secret_name, lease);
+    const key = `${lease.secret_name}\0${lease.kind}\0${lease.target}`;
+    leaseByKey.set(key, lease);
   }
 
-  const leasedProviders = new Set<string>();
+  let leased = 0;
   const missingProviders: string[] = [];
 
   for (const secret of secrets) {
-    const matchingLease = leaseByName.get(secret.name);
+    const key = `${secret.name}\0${secret.kind}\0${secret.target}`;
+    const matchingLease = leaseByKey.get(key);
     if (matchingLease && (matchingLease.status === "mounted" || matchingLease.status === "issued")) {
-      leasedProviders.add(secret.name);
+      leased++;
     } else {
       const missing = secret.provider ?? secret.name;
       if (!missingProviders.includes(missing)) {
@@ -164,8 +166,6 @@ export function summarizeProviderCredentialReadiness(
       }
     }
   }
-
-  const leased = leasedProviders.size;
   const label =
     missingProviders.length > 0
       ? `${leased}/${declared} — missing providers`
