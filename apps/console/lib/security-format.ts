@@ -8,7 +8,7 @@ import type {
 
 type StatusTone = "neutral" | "info" | "good" | "warn" | "bad";
 
-const VALID_EGRESS_MODES = new Set(["open", "allowlist", "offline", "mirrored"]);
+const VALID_EGRESS_MODES = new Set(["open", "allowlist", "offline", "mirrored", "unavailable"]);
 const VALID_MOUNT_POLICY_MODES = new Set(["block", "warn"]);
 
 export function extractProfileSecrets(
@@ -35,7 +35,7 @@ export function extractProfileEgress(
   const egress = (profile as Record<string, unknown> | null | undefined)?.security as Record<string, unknown> | null | undefined;
   const egressObj = egress?.egress as Record<string, unknown> | null | undefined;
   if (!egressObj || typeof egressObj !== "object") {
-    return { mode: "open", allowlist: [] };
+    return { mode: "unavailable", allowlist: [] };
   }
   const rawMode = typeof egressObj.mode === "string" ? egressObj.mode : "";
   const mode = VALID_EGRESS_MODES.has(rawMode) ? (rawMode as ProfileEgress["mode"]) : "open";
@@ -115,6 +115,8 @@ export function summarizeEgressStatus(egress: ProfileEgress): {
         tone: "neutral",
         detail: `${egress.allowlist.length} mirror host${egress.allowlist.length === 1 ? "" : "s"}`,
       };
+    case "unavailable":
+      return { label: "unavailable", tone: "neutral", detail: "egress config not provided" };
   }
 }
 

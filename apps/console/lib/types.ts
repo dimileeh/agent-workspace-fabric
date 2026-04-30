@@ -378,7 +378,7 @@ export interface ProfileSecret {
 }
 
 export interface ProfileEgress {
-  mode: "open" | "allowlist" | "offline" | "mirrored";
+  mode: "open" | "allowlist" | "offline" | "mirrored" | "unavailable";
   allowlist: string[];
 }
 
