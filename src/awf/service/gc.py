@@ -23,7 +23,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
-from awf.runtime.inspection import RuntimeSnapshot, RuntimeService, RuntimeInspector
+from awf.runtime.inspection import RuntimeInspector, RuntimeService, RuntimeSnapshot
 from awf.service.secret_leases import (
     TERMINAL_GC_REVOKE_REASON,
     SecretLeaseService,
@@ -1089,9 +1089,7 @@ def _snapshot_has_no_work(snapshot: RuntimeSnapshot) -> bool:
 def _agent_service_has_no_work(service: RuntimeService) -> bool:
     if (service.state or "").lower() != "running":
         return True
-    if _container_command_is_idle(service.command):
-        return True
-    return False
+    return bool(_container_command_is_idle(service.command))
 
 
 def _container_command_is_idle(command: str | None) -> bool:
