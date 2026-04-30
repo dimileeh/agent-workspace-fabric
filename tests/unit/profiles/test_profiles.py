@@ -178,8 +178,10 @@ def test_profile_schema_accepts_alembic_validation_policy() -> None:
     [
         {"config_path": "/etc/alembic.ini"},
         {"config_path": "../alembic.ini"},
+        {"config_path": r"db\..\alembic.ini"},
         {"script_location": "/srv/migrations"},
         {"script_location": "db/../migrations"},
+        {"script_location": r"db\..\migrations"},
     ],
 )
 def test_profile_schema_rejects_unsafe_alembic_validation_paths(

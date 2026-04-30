@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 from enum import StrEnum
+from pathlib import PurePosixPath, PureWindowsPath
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
@@ -213,7 +214,15 @@ class ProfileAlembicValidation(BaseModel):
 
 
 def _validate_workspace_relative_path(field_name: str, value: str) -> None:
-    if value.startswith("/") or ".." in value.split("/"):
+    posix_path = PurePosixPath(value)
+    windows_path = PureWindowsPath(value)
+    if (
+        posix_path.is_absolute()
+        or windows_path.drive
+        or windows_path.root
+        or ".." in posix_path.parts
+        or ".." in windows_path.parts
+    ):
         raise ValueError(f"{field_name} must be a workspace-relative path")
 
 
