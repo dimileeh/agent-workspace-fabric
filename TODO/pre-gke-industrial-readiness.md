@@ -266,6 +266,33 @@ Status values:
 - [ ] Add human-escalation boost and retry-aware queue scoring.
 - [ ] Make scheduler decisions visible as durable records and console explanations.
 
+## P1: Provider Resilience And Automated Fallback Recovery
+
+- [ ] Detect provider-capacity and quota markers from agent CLIs, including
+  `RESOURCE_EXHAUSTED`, `MODEL_CAPACITY_EXHAUSTED`, `RetryableQuotaError`,
+  provider HTTP 429s, and equivalent OpenCode/Ollama, Codex, Claude, and
+  Gemini transient capacity errors.
+- [ ] Store structured provider failure reason codes such as
+  `AGENT_PROVIDER_CAPACITY_EXHAUSTED` instead of collapsing retryable provider
+  outages into generic `agent_failure`.
+- [ ] Add delayed retry/backoff for no-work provider failures, preserving
+  task/attempt lineage and making retry state visible in operations, events,
+  API responses, merge queue context, and console surfaces.
+- [ ] Add provider/model circuit breakers that pause new dispatches to a
+  failing provider/model after repeated transient capacity failures, with
+  configurable cooldown windows and operator-visible reason codes.
+- [ ] Add per-workspace fallback policy at creation time so a task can declare
+  approved fallback providers/models, for example Gemini -> OpenCode GLM or
+  Gemini -> Codex `gpt-5.5`, while preserving canonical task/attempt lineage
+  and recording why the fallback was selected.
+- [ ] Clean up no-work failed containers, networks, and pressure directories
+  after logs/artifacts are durably retained, without removing evidence needed
+  for failure analysis or retries.
+- [ ] Add TDD coverage proving provider-capacity failures retry or fallback
+  automatically, non-transient agent failures do not loop forever, and fallback
+  attempts inherit validation, owned paths, profile, auto-merge, and monitor
+  policy correctly.
+
 ## P1: API Contract Completion
 
 - [x] Normalize pagination envelopes across list APIs.
@@ -348,6 +375,8 @@ complete or consciously deferred.
 - [ ] Recovery operations are idempotent, observable, and restart-safe.
 - [ ] Cleanup is reliable and measured.
 - [ ] Secret and egress policy has real enforcement, not just schema.
+- [ ] Provider/model capacity failures are classified, retried or routed through
+  approved fallback policy, and cleaned up without manual intervention.
 - [ ] The console can explain every blocked workspace without reading raw logs.
 - [ ] AWF self-development passes 99%+ coverage with meaningful tests.
 - [ ] A Dockerized toy project with DB, app, and browser validation passes end to end.
