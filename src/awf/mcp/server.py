@@ -324,6 +324,7 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
+            min_length=1,
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
@@ -349,6 +350,7 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
+            min_length=1,
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
@@ -377,6 +379,7 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
+            min_length=1,
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
@@ -816,6 +819,7 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
+            min_length=1,
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),
@@ -847,6 +851,7 @@ def build_mcp_server(
         ),
         idempotency_key: str | None = Field(
             default=None,
+            min_length=1,
             max_length=128,
             description="Optional idempotency key for safe retries after timeout or dropped response.",
         ),

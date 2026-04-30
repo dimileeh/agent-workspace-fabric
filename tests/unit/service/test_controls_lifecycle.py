@@ -661,6 +661,25 @@ async def test_control_prepare_operation_rejects_missing_conflicting_and_stale_r
 
 
 @pytest.mark.unit
+async def test_control_prepare_operation_treats_blank_idempotency_key_as_absent(
+    session: AsyncSession,
+) -> None:
+    workspace = await _workspace(session, status=WorkspaceStatus.ready)
+    service, _stopper, _cleaner = _service(session)
+
+    await service.cancel_workspace(
+        workspace.id,
+        reason="blank-key-should-be-absent",
+        stop_stack=False,
+        idempotency_key="   ",
+    )
+
+    operations = await _operations(session, workspace.id)
+    assert len(operations) == 1
+    assert operations[0].idempotency_key is None
+
+
+@pytest.mark.unit
 async def test_control_require_workspace_reports_missing_workspace(
     session: AsyncSession,
 ) -> None:

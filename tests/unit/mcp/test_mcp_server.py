@@ -290,6 +290,8 @@ class TestToolRegistration:
         assert remonitor_props["reason"]["default"] is None
         assert "idempotency_key" in remonitor_props
         assert remonitor_props["idempotency_key"]["default"] is None
+        _ik_anyof = remonitor_props["idempotency_key"]["anyOf"]
+        assert any(s.get("minLength") == 1 for s in _ik_anyof if s.get("type") == "string")
 
         validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
         assert "workspace_id" in validate_props
@@ -299,6 +301,8 @@ class TestToolRegistration:
         assert validate_props["requested_tier"]["default"] is None
         assert "idempotency_key" in validate_props
         assert validate_props["idempotency_key"]["default"] is None
+        _vk_anyof = validate_props["idempotency_key"]["anyOf"]
+        assert any(s.get("minLength") == 1 for s in _vk_anyof if s.get("type") == "string")
 
 
 class TestOperationTools:
