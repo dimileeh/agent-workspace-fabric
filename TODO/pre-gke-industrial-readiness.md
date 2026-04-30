@@ -49,6 +49,11 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Workspace Services And Realistic Project Profiles | Strengthen DinD compose profile execution | `ws_58551268828945cfb52fe01e` | - | running | Gemini `gemini-3-pro-preview`; focused on per-workspace DinD Compose execution, health waits, cleanup, and structured failures. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_19b11c564c3343c0965eee45` | - | running | Gemini `gemini-3-pro-preview`; focused on starvation prevention and durable scheduler explanations. |
+| P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | - | running | Gemini `gemini-3-pro-preview`; focused on v1/legacy response compatibility until documented v2 cutover. |
+| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_7c8ec611a3d14b6cb4612344` | - | running | Gemini `gemini-3-pro-preview`; focused on read-only MCP parity for existing REST operator surfaces. |
+| P1 Operator Console Completion | Security and egress status panels | `ws_8a8b09feb61d4af188473bd6` | - | running | Gemini `gemini-3-pro-preview`; focused on console-safe secret, provider, and egress status visibility. |
 
 ### Completed Slices
 
