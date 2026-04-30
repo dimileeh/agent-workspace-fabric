@@ -34,6 +34,7 @@ from awf.api.schemas import (
 )
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
+from awf.common.redaction import redact_secrets
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceSecretLease
 from awf.db.repositories import (
@@ -871,13 +872,20 @@ def _sanitize_profile_string(value: str) -> str:
         return value
     if not parsed.scheme or not parsed.netloc:
         return value
-    if not (parsed.username or parsed.password or parsed.query or parsed.fragment):
+    sanitized_path = redact_secrets(parsed.path)
+    if not (
+        parsed.username
+        or parsed.password
+        or parsed.query
+        or parsed.fragment
+        or sanitized_path != parsed.path
+    ):
         return value
     return urlunsplit(
         (
             parsed.scheme,
             _sanitized_url_netloc(parsed),
-            parsed.path,
+            sanitized_path,
             "",
             "",
         )

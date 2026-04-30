@@ -395,6 +395,7 @@ def test_workspace_response_sanitizes_raw_profile_snapshots() -> None:
         ],
         "ports": {
             "admin": "http://operator:token@app:3000/admin?session=secret",
+            "token_endpoint": "https://api.example.com/oauth/token/ghp_abc123",
         },
         "app_endpoints": [
             {
@@ -471,6 +472,7 @@ def test_workspace_response_sanitizes_raw_profile_snapshots() -> None:
     assert "user:password" not in rendered
     assert "operator:token" not in rendered
     assert "token=abc" not in rendered
+    assert "ghp_abc123" not in rendered
     assert "session=secret" not in rendered
     assert "secret/data/api-token" not in rendered
 
@@ -499,6 +501,12 @@ def test_profile_snapshot_sanitizer_handles_malformed_and_portless_urls() -> Non
     assert (
         workspaces_service._sanitize_profile_string("http://app:3000/admin")
         == "http://app:3000/admin"
+    )
+    assert (
+        workspaces_service._sanitize_profile_string(
+            "https://api.example.com/oauth/token/ghp_abc123"
+        )
+        == "https://api.example.com/oauth/token/<redacted>"
     )
 
 
