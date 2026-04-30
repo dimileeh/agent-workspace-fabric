@@ -67,7 +67,7 @@ _CAPACITY_EXHAUSTED_MARKERS = (
     "http 429",
     "429 too many requests",
     " 429 ",
-    "rate limited",
+    "rate limit",
     "quota exhausted",
 )
 
