@@ -11,6 +11,7 @@ from awf.node.auth_mounts import WorkspaceAuthMountResolver, legacy_provider_tar
 from awf.node.compose_manager import (
     AuthMount,
     ComposeManager,
+    ComposeOperationError,
     ComposeProjectPaths,
     WorkspaceComposeSpec,
 )
@@ -50,6 +51,11 @@ class WorkspaceSecretLeaseResolver(Protocol):
         *,
         workspace_id: str,
     ) -> LocalSecretLeaseResolution: ...
+
+
+class WorkspaceServiceExecutionError(Exception):
+    """Raised when profile-declared workspace services fail to start."""
+    pass
 
 
 class ComposeStackLauncher:
@@ -139,7 +145,20 @@ class ComposeStackLauncher:
             network_internal=egress_plan.network_internal,
             host_gateway_enabled=egress_plan.host_gateway_enabled,
         )
-        paths = await self._compose.up(spec, wait=True)
+        try:
+            paths = await self._compose.up(spec, wait=True)
+        except ComposeOperationError as e:
+            if e.reason_code == "DOCKER_UNAVAILABLE":
+                required_services = [s.name for s in profile.services if s.required]
+                if not required_services:
+                    # Graceful skip for optional services when Docker is unavailable
+                    paths = self._compose.render(spec)
+                else:
+                    raise WorkspaceServiceExecutionError(
+                        f"DOCKER_UNAVAILABLE: Cannot start required workspace services: {required_services}"
+                    ) from e
+            else:
+                raise
         if secret_lease_resolution is None:
             return paths
         return ComposeProjectPaths(

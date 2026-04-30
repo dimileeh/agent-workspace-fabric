@@ -135,6 +135,7 @@ class ComposeService:
     command: str | None = None
     volumes: tuple[tuple[str, str], ...] = ()
     privileged: bool = False
+    required: bool = True
 
 
 @dataclass(frozen=True)
@@ -278,9 +279,9 @@ class ComposeManager:
     async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
         """Start the stack. With ``wait=True``, blocks until services are healthy."""
         paths = self.render(spec)
-        args = ["up", "-d"]
+        args = ["up", "-d", "--remove-orphans"]
         if wait:
-            args.append("--wait")
+            args.extend(["--wait", "--wait-timeout", "300"])
         await self._compose(spec.project_name(), paths.compose_file, args, operation="up")
         return paths
 
@@ -299,9 +300,9 @@ class ComposeManager:
         service restart. Re-rendering from a profile at resume time risks
         drifting from the stack the monitor originally owned.
         """
-        args = ["up", "-d"]
+        args = ["up", "-d", "--remove-orphans"]
         if wait:
-            args.append("--wait")
+            args.extend(["--wait", "--wait-timeout", "300"])
         _log.info(
             "compose.ensure_project_up",
             workspace_id=workspace_id,
@@ -335,7 +336,7 @@ class ComposeManager:
             _log.info("compose.down.noop", workspace_id=workspace_id)
             return
 
-        args = ["down"]
+        args = ["down", "--remove-orphans"]
         if remove_volumes:
             args.append("-v")
         await self._compose(project_name, compose_file, args, operation="down")
@@ -361,22 +362,38 @@ class ComposeManager:
             *args,
         ]
         _log.debug("compose.exec", operation=operation, cmd=cmd)
-        proc = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout_bytes, stderr_bytes = await proc.communicate()
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_bytes, stderr_bytes = await proc.communicate()
+        except FileNotFoundError as e:
+            raise ComposeOperationError(
+                operation=operation,
+                returncode=127,
+                stdout="",
+                stderr=str(e),
+                reason_code="DOCKER_UNAVAILABLE",
+            ) from e
+
         stdout = stdout_bytes.decode("utf-8", errors="replace")
         stderr = stderr_bytes.decode("utf-8", errors="replace")
 
         assert proc.returncode is not None
         if proc.returncode != 0:
+            reason_code = "COMPOSE_COMMAND_FAILED"
+            err_lower = stderr.lower()
+            if "daemon" in err_lower or "connect" in err_lower or "docker endpoint" in err_lower:
+                reason_code = "DOCKER_UNAVAILABLE"
+
             raise ComposeOperationError(
                 operation=operation,
                 returncode=proc.returncode,
                 stdout=stdout,
                 stderr=stderr,
+                reason_code=reason_code,
             )
 
     def _services_for(self, spec: WorkspaceComposeSpec) -> list[ComposeService]:
