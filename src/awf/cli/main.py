@@ -172,14 +172,14 @@ def init(
                 )
             )
 
-            async def _collect_cached_service_status(
-                _settings: ServiceSettings,
+            def _collect_cached_service_status(
+                settings: ServiceSettings,
                 *,
                 strict_providers: Iterable[str] | None = None,
                 provider_environ: Mapping[str, str] | None = None,
-            ) -> dict[str, object]:
-                _ = _settings, strict_providers, provider_environ
-                return await service_status_task
+            ) -> asyncio.Task[dict[str, object]]:
+                _ = settings, strict_providers, provider_environ
+                return service_status_task
 
             return await asyncio.gather(
                 service_status_task,
