@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from awf.runtime.planning import (
+    MAX_CONFORMANCE_TEXT_CHARS,
+    PLAN_CONFORMANCE_REPORTED,
     PLAN_CONFORMANCE_UNSATISFIED,
     PlanConformanceStatus,
     _gaps_from_payload,
@@ -404,17 +406,28 @@ def test_conformance_retry_prompt_steers_agent_to_finish_remaining_gaps() -> Non
 
 @pytest.mark.unit
 def test_conformance_retry_prompt_handles_missing_and_oversized_evidence() -> None:
+    long_summary = "x" * (MAX_CONFORMANCE_TEXT_CHARS + 50)
     prompt = build_conformance_retry_prompt(
-        task_prompt="Finish the DB hook profile work.",
+        task_prompt="Finish endpoint metadata coverage.",
         evidence={
-            "summary": "x" * 2000,
+            "summary": long_summary,
             "gaps": "not-a-list",
             "plan_path": "",
             "report_path": None,
         },
     )
 
+    assert ("x" * (MAX_CONFORMANCE_TEXT_CHARS - 3) + "...") in prompt
+    assert long_summary not in prompt
     assert "- Re-check the saved plan." in prompt
     assert "- Plan artifacts were not recorded." in prompt
-    assert ("x" * 1000) not in prompt
-    assert "..." in prompt
+
+
+@pytest.mark.unit
+def test_conformance_report_defaults_blank_reason_code() -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration","summary":"done","gaps":[],"reason_code":"   "}'
+    )
+
+    assert report.reason_code == PLAN_CONFORMANCE_REPORTED
+    assert report.summary == "done"

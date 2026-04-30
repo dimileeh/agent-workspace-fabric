@@ -27,6 +27,7 @@ from awf.profiles.registry import (
 from awf.profiles.resolver import (
     ProfileResolutionError,
     ProfileResolver,
+    _validation_error_message,
     resolve_workspace_profile,
 )
 
@@ -46,6 +47,19 @@ def test_profile_schema_accepts_minimal_valid_profile() -> None:
     assert profile.monitor.non_check_reviewer_logins == ["greptile-apps"]
     assert profile.phases.setup[0].command == "go mod download"
     assert profile.phases.validate_commands[0].command == "go test ./..."
+
+
+@pytest.mark.unit
+def test_validation_error_message_falls_back_when_pydantic_has_no_errors() -> None:
+    class EmptyValidationError:
+        def errors(self, *, include_input: bool = True) -> list[dict[str, object]]:
+            assert include_input is False
+            return []
+
+    assert (
+        _validation_error_message(EmptyValidationError())  # type: ignore[arg-type]
+        == "schema validation failed"
+    )
 
 
 @pytest.mark.unit
@@ -330,6 +344,74 @@ def test_profile_schema_accepts_http_healthcheck_without_shell_command() -> None
     assert healthcheck.expected_status == 200
     assert healthcheck.timeout_seconds == 60
     assert healthcheck.interval_seconds == 1
+
+
+@pytest.mark.unit
+def test_profile_schema_rejects_mismatched_healthcheck_kind() -> None:
+    with pytest.raises(ValidationError, match="healthcheck kind must match"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-health-kind",
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "kind": "http",
+                            "command": "curl -fsS http://api:8000/healthz",
+                        }
+                    ]
+                },
+            }
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "name": "bad-health-method",
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "api",
+                        "url": "http://api.example.test/healthz",
+                        "method": 123,
+                    }
+                ]
+            },
+        },
+        {
+            "name": "bad-endpoint-health-method",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {
+                    "name": "app",
+                    "service": "app",
+                    "port": 3000,
+                    "health": {"path": "/healthz", "method": 123},
+                }
+            ],
+        },
+        {
+            "name": "bad-endpoint-scheme",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {"name": "app", "service": "app", "scheme": 123, "port": 3000}
+            ],
+        },
+        {
+            "name": "bad-endpoint-visibility",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {"name": "app", "service": "app", "port": 3000, "visibility": 123}
+            ],
+        },
+    ],
+)
+def test_profile_schema_rejects_non_string_normalized_fields(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(payload)
 
 
 @pytest.mark.unit

@@ -241,6 +241,38 @@ class TestWorkspaceArtifacts:
         assert 'filename="stdout.txt"' in disposition
 
     @pytest.mark.unit
+    async def test_download_workspace_artifact_direct_uses_workspace_artifact_dir(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_direct_download"
+        artifact_dir.mkdir(parents=True)
+        report = artifact_dir / "report.txt"
+        report.write_text("report\n", encoding="utf-8")
+
+        async def require_workspace(session: object, workspace_id: str) -> None:
+            assert session is fake_session
+            assert workspace_id == "ws_direct_download"
+
+        fake_session = object()
+        monkeypatch.setattr(artifacts, "_require_workspace", require_workspace)
+        monkeypatch.setattr(
+            artifacts,
+            "_workspace_artifact_dir",
+            lambda _workspace_id: artifact_dir,
+        )
+
+        response = await artifacts.download_workspace_artifact(
+            "ws_direct_download",
+            path="report.txt",
+            session=fake_session,  # type: ignore[arg-type]
+        )
+
+        assert Path(response.path) == report
+        assert response.filename == "report.txt"
+
+    @pytest.mark.unit
     async def test_download_missing_artifact_returns_not_found_without_host_path(
         self,
         client: AsyncClient,

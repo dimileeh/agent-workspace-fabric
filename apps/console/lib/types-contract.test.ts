@@ -4,12 +4,15 @@ import type {
   ValidationFreshnessStatus,
   ValidationRunSummary,
   Workspace,
+  WorkspaceAppEndpoint,
+  WorkspaceAppEndpointHealth,
   WorkspaceCoordinationWarning,
   WorkspaceControlResponse,
   WorkspaceOperatorAction,
   WorkspaceOperatorRequest,
   WorkspaceOverview,
   WorkspaceRecoverySummary,
+  WorkspaceRuntime,
 } from "./types";
 
 type Equal<Left, Right> =
@@ -111,6 +114,47 @@ type ValidationRunSummaryIdentityFieldsArePresent = Expect<
 
 export const workspaceValidationProvenanceAllowsMissing: WorkspaceValidationProvenanceAllowsMissing = true;
 export const validationRunSummaryIdentityFieldsArePresent: ValidationRunSummaryIdentityFieldsArePresent = true;
+
+type WorkspaceAppEndpointHealthShape = Expect<
+  Equal<
+    WorkspaceAppEndpointHealth,
+    {
+      path: string;
+      method: "GET" | "HEAD";
+      expected_status: number;
+      internal_url: string;
+    }
+  >
+>;
+
+type WorkspaceAppEndpointShape = Expect<
+  Equal<
+    WorkspaceAppEndpoint,
+    {
+      name: string;
+      service: string;
+      scheme: "http" | "https";
+      port: number;
+      path: string;
+      internal_url: string;
+      visibility: "agent" | "validation" | "console";
+      health: WorkspaceAppEndpointHealth | null;
+    }
+  >
+>;
+
+type WorkspaceDetailIncludesAppEndpoints = Expect<
+  Equal<Pick<Workspace, "app_endpoints">, { app_endpoints: WorkspaceAppEndpoint[] }>
+>;
+
+type WorkspaceRuntimeIncludesAppEndpoints = Expect<
+  Equal<Pick<WorkspaceRuntime, "app_endpoints">, { app_endpoints: WorkspaceAppEndpoint[] }>
+>;
+
+export const workspaceAppEndpointHealthShape: WorkspaceAppEndpointHealthShape = true;
+export const workspaceAppEndpointShape: WorkspaceAppEndpointShape = true;
+export const workspaceDetailIncludesAppEndpoints: WorkspaceDetailIncludesAppEndpoints = true;
+export const workspaceRuntimeIncludesAppEndpoints: WorkspaceRuntimeIncludesAppEndpoints = true;
 
 type OperationAuditFieldsAreNullable = Expect<
   Equal<

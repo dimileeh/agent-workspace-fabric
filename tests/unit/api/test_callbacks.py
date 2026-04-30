@@ -23,6 +23,12 @@ _VALID_BODY = {
 }
 
 
+class _NoLegacyIPv4Labels:
+    def split(self, separator: str) -> list[str]:
+        assert separator == "."
+        return []
+
+
 async def _subscription_count(engine: AsyncEngine) -> int:
     from awf.db.models import CallbackSubscription
 
@@ -232,6 +238,16 @@ def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
         api_schemas.CallbackSubscriptionCreateRequest.model_validate(
             {**_VALID_BODY, "target_url": target_url}
         )
+
+
+@pytest.mark.unit
+def test_legacy_ipv4_literal_detector_rejects_malformed_legacy_hosts() -> None:
+    assert api_schemas._looks_like_legacy_ipv4_literal(  # type: ignore[arg-type]
+        _NoLegacyIPv4Labels()
+    ) is False
+    assert api_schemas._looks_like_legacy_ipv4_literal("192.168..1") is False
+    assert api_schemas._looks_like_legacy_ipv4_literal("0xg.168.1.1") is False
+    assert api_schemas._looks_like_legacy_ipv4_literal("0x7f.0.0.1") is True
 
 
 @pytest.mark.unit

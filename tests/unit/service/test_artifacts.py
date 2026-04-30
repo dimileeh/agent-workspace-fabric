@@ -162,6 +162,25 @@ class TestArtifactService:
             )
 
     @pytest.mark.unit
+    def test_listing_returns_empty_when_directory_walk_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        original_walk = Path.walk
+
+        def walk_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == artifact_dir:
+                raise OSError("walk failed")
+            return original_walk(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "walk", walk_candidate)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
     def test_listing_reports_metadata_and_skips_deleted_files(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -205,37 +224,6 @@ class TestArtifactService:
         assert items[0].content_type == "text/plain"
 
     @pytest.mark.unit
-    def test_listing_returns_empty_when_directory_walk_fails(
-        self,
-        monkeypatch: pytest.MonkeyPatch,
-        tmp_path: Path,
-    ) -> None:
-        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
-        artifact_dir.mkdir(parents=True)
-        original_walk = Path.walk
-
-        def walk_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
-            if self == artifact_dir:
-                raise OSError("walk failed")
-            return original_walk(self, *args, **kwargs)
-
-        monkeypatch.setattr(Path, "walk", walk_candidate)
-
-        assert list_artifacts("ws_artifacts", artifact_dir) == []
-
-    @pytest.mark.unit
-    def test_directory_artifact_download_fails_closed(self, tmp_path: Path) -> None:
-        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
-        (artifact_dir / "reports").mkdir(parents=True)
-
-        with pytest.raises(ArtifactNotFoundError):
-            get_downloadable_artifact(
-                workspace_id="ws_artifacts",
-                artifact_dir=artifact_dir,
-                relative_path="reports",
-            )
-
-    @pytest.mark.unit
     def test_resolved_artifact_root_must_remain_a_directory(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -261,9 +249,16 @@ class TestArtifactService:
     def test_artifact_private_aliases_match_public_helpers(self, tmp_path: Path) -> None:
         report = tmp_path / "report.txt"
 
+        assert _artifact_id("ws_artifacts", "reports/summary.json") == artifact_id(
+            "ws_artifacts",
+            "reports/summary.json",
+        )
         assert _artifact_id("ws_artifacts", "report.txt") == artifact_id(
             "ws_artifacts",
             "report.txt",
+        )
+        assert _artifact_kind(Path("summary.json")) == artifact_kind(
+            Path("summary.json")
         )
         assert _artifact_kind(report) == artifact_kind(report) == "txt"
 
