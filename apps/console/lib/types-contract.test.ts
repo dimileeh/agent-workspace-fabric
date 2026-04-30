@@ -6,6 +6,7 @@ import type {
   Workspace,
   WorkspaceAppEndpoint,
   WorkspaceAppEndpointHealth,
+  WorkspaceCoordinationWarning,
   WorkspaceControlResponse,
   WorkspaceOperatorAction,
   WorkspaceOperatorRequest,
@@ -34,6 +35,43 @@ type WorkspaceOverviewIncludesTaskPrompt = Expect<
 >;
 
 export const workspaceOverviewIncludesTaskPrompt: WorkspaceOverviewIncludesTaskPrompt = true;
+
+type CoordinationWarningShape = Expect<
+  Equal<
+    Pick<
+      WorkspaceCoordinationWarning,
+      "warning_code" | "severity" | "blocks_launch" | "workspace_ids" | "stale_policy_context"
+    >,
+    {
+      warning_code: string;
+      severity: "advisory";
+      blocks_launch: boolean;
+      workspace_ids: string[];
+      stale_policy_context: {
+        trigger_type?: string;
+        stale_reason_code?: string;
+      };
+    }
+  >
+>;
+
+type WorkspaceSurfacesIncludeCoordinationWarnings = Expect<
+  Equal<
+    Pick<Workspace, "coordination_warnings">,
+    { coordination_warnings: WorkspaceCoordinationWarning[] }
+  >
+>;
+
+type WorkspaceOverviewIncludesCoordinationWarnings = Expect<
+  Equal<
+    Pick<WorkspaceOverview, "coordination_warnings">,
+    { coordination_warnings: WorkspaceCoordinationWarning[] }
+  >
+>;
+
+export const coordinationWarningShape: CoordinationWarningShape = true;
+export const workspaceSurfacesIncludeCoordinationWarnings: WorkspaceSurfacesIncludeCoordinationWarnings = true;
+export const workspaceOverviewIncludesCoordinationWarnings: WorkspaceOverviewIncludesCoordinationWarnings = true;
 
 type WorkspaceValidationProvenanceAllowsMissing = Expect<
   Equal<

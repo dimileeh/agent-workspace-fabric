@@ -89,6 +89,29 @@ export interface ResourceReservationSummary {
   released_at: string | null;
 }
 
+export interface CoordinationOverlap {
+  workspace_id: string;
+  existing_path: string;
+  requested_path: string;
+  match_reason_code?: string | null;
+  explanation?: string | null;
+}
+
+export interface WorkspaceCoordinationWarning {
+  warning_code: string;
+  message: string;
+  severity: "advisory";
+  blocks_launch: boolean;
+  workspace_ids: string[];
+  overlaps: CoordinationOverlap[];
+  stale_policy_context: {
+    trigger_type?: string;
+    stale_reason_code?: string;
+  };
+  overlap_count: number;
+  overlaps_truncated: boolean;
+}
+
 export type ApiEnvelope<T> =
   | { ok: true; data: T }
   | { ok: false; status: number; message: string; errorCode?: string; detail?: unknown };
@@ -120,6 +143,7 @@ export interface WorkspaceOverview {
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
   recovery?: WorkspaceRecoverySummary | null;
+  coordination_warnings: WorkspaceCoordinationWarning[];
   status: WorkspaceStatus;
   current_phase: string;
   active_operation: string | null;
@@ -354,6 +378,7 @@ export interface Workspace {
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
   recovery?: WorkspaceRecoverySummary | null;
+  coordination_warnings: WorkspaceCoordinationWarning[];
   validation_provenance?: ValidationFreshnessSummary | null;
   app_endpoints: WorkspaceAppEndpoint[];
   env_profile: string | null;

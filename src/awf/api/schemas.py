@@ -417,6 +417,26 @@ class WorkspaceFailureDetailsResponse(BaseModel):
     salvage: WorkspaceFailureSalvageResponse | None = None
 
 
+class CoordinationOverlapResponse(BaseModel):
+    workspace_id: str
+    existing_path: str
+    requested_path: str
+    match_reason_code: str | None = None
+    explanation: str | None = None
+
+
+class WorkspaceCoordinationWarningResponse(BaseModel):
+    warning_code: str
+    message: str
+    severity: WorkspaceOverlapGraphSeverity = "advisory"
+    blocks_launch: bool = False
+    workspace_ids: list[str] = Field(default_factory=list)
+    overlaps: list[CoordinationOverlapResponse] = Field(default_factory=list)
+    stale_policy_context: dict[str, str] = Field(default_factory=dict)
+    overlap_count: int = 0
+    overlaps_truncated: bool = False
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -464,6 +484,9 @@ class WorkspaceResponse(BaseModel):
 
     latest_queue_decision: QueueDecisionSummaryResponse | None = None
     active_resource_reservation: ResourceReservationSummaryResponse | None = None
+    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(
+        default_factory=list
+    )
     policy_findings: list[PolicyFindingResponse] = Field(
         default_factory=list,
         validation_alias="active_policy_findings",
@@ -651,6 +674,9 @@ class WorkspaceOverviewResponse(BaseModel):
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()
     )
     recovery: WorkspaceRecoverySummaryResponse | None = None
+    coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(
+        default_factory=list
+    )
     status: WorkspaceStatus
     current_phase: str
     active_operation: str | None

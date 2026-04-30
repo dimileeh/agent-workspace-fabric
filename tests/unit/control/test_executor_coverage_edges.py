@@ -105,6 +105,33 @@ class _CoverageValidation:
         return self.coverage
 
 
+def _coordination_task_policy() -> dict[str, object]:
+    return {
+        "coordination": {
+            "warnings": [
+                {
+                    "warning_code": "OWNED_PATH_OVERLAP_RISK",
+                    "message": "Owned paths overlap active workspaces.",
+                    "severity": "advisory",
+                    "blocks_launch": False,
+                    "workspace_ids": ["ws_existing"],
+                    "overlaps": [
+                        {
+                            "workspace_id": "ws_existing",
+                            "existing_path": "src/awf/service/**",
+                            "requested_path": "src/awf/service/workspaces.py",
+                        }
+                    ],
+                    "stale_policy_context": {
+                        "trigger_type": "path_overlap",
+                        "stale_reason_code": "STALE_OVERLAP",
+                    },
+                }
+            ]
+        }
+    }
+
+
 def _executor_with_runner(
     runner: FakeCommandRunner,
     tmp_path: Path,
@@ -139,6 +166,22 @@ def test_failure_reason_for_phase_maps_setup_timeout_and_healthcheck() -> None:
         == FailureReason.service_startup_failure
     )
     assert _failure_reason_for_phase(None) == FailureReason.validation_failure
+
+
+@pytest.mark.unit
+def test_executor_small_helpers_handle_absent_optional_metadata(tmp_path: Path) -> None:
+    assert _raw_profile_has_explicit_planning_max_iterations(None) is False
+    assert _raw_profile_has_explicit_planning_max_iterations({"planning": []}) is False
+
+    salvage = _failure_salvage_payload(  # type: ignore[arg-type]
+        SimpleNamespace(branch_name=None, remote_push_branch=None),
+        worktree_path=tmp_path / "worktree",
+    )
+
+    assert salvage == {
+        "hint": "Workspace worktree and branch were preserved for salvage.",
+        "worktree_path": str(tmp_path / "worktree"),
+    }
 
 
 @pytest.mark.unit
@@ -475,6 +518,38 @@ async def test_baseline_coverage_preflight_returns_logged_policy_result(
 
 
 @pytest.mark.unit
+async def test_baseline_coverage_preflight_returns_passing_policy_result(
+    tmp_path: Path,
+) -> None:
+    baseline = _coverage(tmp_path, percent=100, minimum=99, status="passed")
+
+    validation = _CoverageValidation(baseline)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path, validation=validation)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "coverage-preflight-passing",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99,
+                    "enforce": True,
+                    "command": "pytest --cov=awf",
+                }
+            },
+        }
+    )
+
+    result = await executor._run_baseline_coverage_preflight(
+        workspace_id="ws_preflight_ok",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+    )
+
+    assert result is baseline
+    assert validation.calls == ["baseline_coverage"]
+
+
+@pytest.mark.unit
 async def test_baseline_coverage_preflight_returns_successful_result(tmp_path: Path) -> None:
     baseline = _coverage(
         tmp_path,
@@ -507,6 +582,92 @@ async def test_baseline_coverage_preflight_returns_successful_result(tmp_path: P
 
     assert result is baseline
     assert validation.calls == ["baseline_coverage"]
+
+
+@pytest.mark.unit
+async def test_planning_required_prompts_include_coordination_warning(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_coord_plan.md\n",
+    )  # dirty after planning
+    runner.queue_result(returncode=0, stdout="")  # committed paths since baseline
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n")  # before compare
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n")  # after compare
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-coordination",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(
+            id="ws_coord_plan",
+            task_prompt="do overlapping work",
+            task_policy=_coordination_task_policy(),
+        ),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 3
+    assert "Coordination warnings" in adapter.prompts[0]
+    assert "Coordination warnings" in adapter.prompts[1]
+    assert "OWNED_PATH_OVERLAP_RISK" in adapter.prompts[0]
+    assert "ws_existing" in adapter.prompts[1]
+    assert "STALE_OVERLAP" in adapter.prompts[1]
+
+
+@pytest.mark.unit
+async def test_planning_disabled_direct_prompt_includes_coordination_warning(
+    tmp_path: Path,
+) -> None:
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    adapter = _PlanningAdapter("done")
+    profile = WorkspaceProfile.model_validate({"name": "direct-coordination"})
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(
+            id="ws_coord_direct",
+            task_prompt="do overlapping work",
+            task_policy=_coordination_task_policy(),
+        ),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 1
+    assert adapter.prompts[0] != "do overlapping work"
+    assert "Coordination warnings" in adapter.prompts[0]
+    assert "OWNED_PATH_OVERLAP_RISK" in adapter.prompts[0]
+    assert "src/awf/service/** -> src/awf/service/workspaces.py" in adapter.prompts[0]
+    assert "do overlapping work" in adapter.prompts[0]
 
 
 @pytest.mark.unit
@@ -610,6 +771,58 @@ async def test_planning_required_rejects_extra_plan_phase_changes(tmp_path: Path
 
 
 @pytest.mark.unit
+async def test_planning_required_allows_extra_plan_changes_when_policy_disabled(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_plan_unenforced.md\n?? src/changed.py\n",
+    )
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_plan_unenforced.md\n?? src/changed.py\n",
+    )
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_plan_unenforced.md\n?? src/changed.py\n",
+    )
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan plus code",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-extra-unenforced",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "enforce_plan_only_changes": False,
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_plan_unenforced", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
+
+
+@pytest.mark.unit
 async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Path) -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="")  # before_plan (1)
@@ -657,6 +870,56 @@ async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Pa
         "conformance phase changed files outside `docs/awf-plans/ws_compare.json`: "
         "src/side_effect.py"
     )
+
+
+@pytest.mark.unit
+async def test_conformance_phase_allows_side_effects_when_deviation_policy_disabled(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare_unenforced.md\n")
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare_unenforced.md\n")
+    runner.queue_result(
+        returncode=0,
+        stdout=(
+            "?? docs/awf-plans/ws_compare_unenforced.md\n"
+            "?? docs/awf-plans/ws_compare_unenforced.json\n"
+            "?? src/side_effect.py\n"
+        ),
+    )
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan",
+        "implementation",
+        '{"status":"satisfied","summary":"done","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-conformance-unenforced",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "fail_on_unexplained_deviation": False,
+                "max_iterations": 0,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_compare_unenforced", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
 
 
 @pytest.mark.unit
@@ -1071,6 +1334,38 @@ def test_validation_failure_message_carries_healthcheck_context(tmp_path: Path) 
     assert "http://api:8080/healthz" in message
     assert "HEALTHCHECK_HTTP_STATUS_MISMATCH" in message
     assert "validation.01_healthcheck.stderr" in message
+
+
+@pytest.mark.unit
+def test_validation_failure_message_omits_missing_healthcheck_optional_context(
+    tmp_path: Path,
+) -> None:
+    stdout = tmp_path / "health-minimal.stdout"
+    stderr = tmp_path / "health-minimal.stderr"
+    stdout.write_text("", encoding="utf-8")
+    stderr.write_text("failed", encoding="utf-8")
+    failure = ValidationCommandResult(
+        command="GET http://api:8080/healthz expected 200",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        phase="healthcheck",
+        reason_code="HEALTHCHECK_HTTP_STATUS_MISMATCH",
+        stream_ids={},
+        metadata={
+            "healthcheck_name": "api",
+            "healthcheck_kind": "http",
+            "target": "http://api:8080/healthz",
+        },
+    )
+
+    message = _validation_failure_message(ValidationResult(commands=[failure]))
+
+    assert "health check api" in message
+    assert " after " not in message
+    assert " across " not in message
+    assert "; logs:" not in message
 
 
 @pytest.mark.unit

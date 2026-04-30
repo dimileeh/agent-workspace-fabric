@@ -767,6 +767,62 @@ def test_conformance_retry_context_ignores_non_mapping_evidence() -> None:
 
 
 @pytest.mark.unit
+def test_workspace_response_omits_empty_failed_event_details() -> None:
+    now = datetime(2026, 4, 29, 13, 30, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_empty_failure",
+        status=WorkspaceStatus.failed.value,
+        version=4,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws_empty_failure",
+        base_commit="abc123",
+        task_title="Ignore empty failure details",
+        task_prompt="Exercise empty failed event projection.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref=None,
+        requested_profile=None,
+        resolved_profile=None,
+        test_commands=[],
+        requires_database=False,
+        node_id="local",
+        compose_project_name="awf_ws_empty_failure",
+        compose_file_path="/tmp/compose.yml",
+        pr_url=None,
+        failure_reason=None,
+        failure_message=None,
+        active_policy_findings=[],
+        operations=[],
+        events=[
+            SimpleNamespace(
+                id="evt_empty_failed",
+                workspace_id="ws_empty_failure",
+                event_type="workspace.state_changed",
+                old_state=WorkspaceStatus.running.value,
+                new_state=WorkspaceStatus.failed.value,
+                reason_code=None,
+                payload={},
+                occurred_at=now,
+            )
+        ],
+        secret_leases=[],
+        created_at=now,
+        updated_at=now,
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.failure_details is None
+
+
+@pytest.mark.unit
 def test_workspace_validation_summary_ignores_other_attempt_runs() -> None:
     now = datetime(2026, 4, 27, 14, 0, tzinfo=UTC)
     workspace = SimpleNamespace(

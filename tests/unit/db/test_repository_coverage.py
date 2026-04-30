@@ -41,6 +41,7 @@ from awf.db.repositories import (
     _resolve_session_dialect_name,
     _secret_lease_insert_if_absent_stmt,
     _wildcard_prefixes_overlap,
+    owned_path_overlap_match,
     owned_paths_overlap,
     sync_candidate_readiness,
 )
@@ -1437,6 +1438,15 @@ def test_wildcard_prefix_helpers_cover_root_and_nested_prefixes() -> None:
     assert _wildcard_prefixes_overlap("", "src/") is True
     assert _wildcard_prefixes_overlap("src/", "src/awf/") is True
     assert _wildcard_prefixes_overlap("src/awf/", "tests/") is False
+
+
+@pytest.mark.unit
+def test_owned_path_overlap_match_reports_overlapping_wildcard_prefixes() -> None:
+    match = owned_path_overlap_match("src/awf/**", "src/awf/service/**")
+
+    assert match is not None
+    assert match.match_reason_code == "OWNED_PATH_WILDCARD_MATCH"
+    assert "Wildcard owned-path prefixes overlap" in match.explanation
 
 
 @pytest.mark.unit

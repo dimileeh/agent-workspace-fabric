@@ -82,6 +82,7 @@ from awf.runtime.logs import LogStore
 from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
     PlanConformanceReport,
+    build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
     build_execution_prompt,
@@ -113,6 +114,7 @@ from awf.runtime.validation_identity import (
     environment_identity_inputs,
     resolved_profile_digest,
 )
+from awf.service.coordination import coordination_warnings_from_task_policy
 
 
 class _MonitorRunnerProto(Protocol):
@@ -2109,11 +2111,17 @@ class WorkspaceExecutor:
         model: str | None,
     ) -> str | _PlanningRunFailure | None:
         planning = profile.planning
+        coordination_warnings = coordination_warnings_from_task_policy(
+            getattr(workspace, "task_policy", None)
+        )
         if not planning.required:
             await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
-                prompt=workspace.task_prompt,
+                prompt=build_agent_task_prompt(
+                    task_prompt=workspace.task_prompt,
+                    coordination_warnings=coordination_warnings,
+                ),
                 model=model,
                 workspace_id=workspace.id,
             )
@@ -2148,6 +2156,7 @@ class WorkspaceExecutor:
             prompt=build_planning_prompt(
                 task_prompt=workspace.task_prompt,
                 plan_path=plan_path,
+                coordination_warnings=coordination_warnings,
             ),
             model=model,
             workspace_id=workspace.id,
@@ -2180,6 +2189,7 @@ class WorkspaceExecutor:
                     plan_path=plan_path,
                     iteration=iteration,
                     gaps=gaps,
+                    coordination_warnings=coordination_warnings,
                 ),
                 model=model,
                 workspace_id=workspace.id,

@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 from sqlalchemy import event
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 import awf.db.repositories as repository_module
@@ -48,6 +49,31 @@ async def _subscription(
         request_hash=request_hash,
     )
     return subscription
+
+
+@pytest.mark.unit
+def test_callback_insert_helpers_cover_postgres_and_unsupported_dialects() -> None:
+    subscription_stmt = repository_module._callback_subscription_insert_if_absent_stmt(
+        "postgresql"
+    )
+    delivery_stmt = repository_module._callback_delivery_insert_if_absent_stmt("postgresql")
+
+    assert subscription_stmt is not None
+    assert delivery_stmt is not None
+    subscription_sql = str(subscription_stmt.compile(dialect=postgresql.dialect()))
+    delivery_sql = str(delivery_stmt.compile(dialect=postgresql.dialect()))
+    assert "ON CONFLICT" in subscription_sql
+    assert "ON CONFLICT" in delivery_sql
+    assert repository_module._callback_subscription_insert_if_absent_stmt("mysql") is None
+    assert repository_module._callback_delivery_insert_if_absent_stmt("mysql") is None
+
+    event_filter = repository_module._callback_subscription_event_type_filter(
+        ("workspace.state_changed",),
+        "postgresql",
+    )
+    assert "jsonb_array_elements_text" in str(
+        event_filter.compile(dialect=postgresql.dialect())
+    )
 
 
 @pytest.mark.unit
@@ -96,6 +122,29 @@ async def test_subscription_create_idempotent_persists_hash_and_detects_conflict
             idempotency_key="idem-subscription",
             request_hash="hash-changed",
         )
+
+
+@pytest.mark.unit
+async def test_subscription_create_idempotent_falls_back_without_insert_guard(
+    session: AsyncSession,
+) -> None:
+    repo = CallbackSubscriptionRepository(session)
+    repo._dialect_name = "mysql"
+
+    created, was_created = await repo.create_idempotent(
+        name="operator-fallback",
+        target_url="https://operator.example.com/events",
+        event_types=["workspace.*"],
+        enabled=True,
+        timeout_seconds=10,
+        max_attempts=3,
+        initial_backoff_seconds=5,
+        idempotency_key="idem-subscription-fallback",
+        request_hash="hash-fallback",
+    )
+
+    assert was_created is True
+    assert created.idempotency_key == "idem-subscription-fallback"
 
 
 @pytest.mark.unit
@@ -355,6 +404,36 @@ async def test_delivery_enqueue_once_deduplicates_subscription_source_event(
     assert replay.id == first.id
     assert first.idempotency_key == replay.idempotency_key
     assert first.envelope["delivery"]["idempotency_key"] == first.idempotency_key
+
+
+@pytest.mark.unit
+async def test_delivery_enqueue_once_falls_back_without_insert_guard(
+    session: AsyncSession,
+) -> None:
+    subscription = await _subscription(
+        session,
+        idempotency_key="callback-subscription-fallback",
+        request_hash="hash-delivery-fallback",
+    )
+    repo = CallbackDeliveryRepository(session)
+    repo._dialect_name = "mysql"
+    now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+
+    delivery, was_created = await repo.enqueue_once(
+        subscription=subscription,
+        event_kind="workspace",
+        event_type="workspace.state_changed",
+        source_id="evt_fallback",
+        dedupe_key="workspace:evt_fallback",
+        workspace_id="ws_fallback",
+        operation_id=None,
+        merge_candidate_id=None,
+        envelope={"event": {"type": "workspace.state_changed"}},
+        now=now,
+    )
+
+    assert was_created is True
+    assert delivery.source_id == "evt_fallback"
 
 
 @pytest.mark.unit
