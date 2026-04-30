@@ -914,12 +914,12 @@ async def _provided_readiness(
         detail="Readiness provider not configured; Docker-dependent checks unavailable via MCP.",
     )
     checks = {
-        "db": db_check.model_dump(mode="json"),
-        "docker_cli": degraded_check.model_dump(mode="json"),
-        "docker_daemon": degraded_check.model_dump(mode="json"),
-        "docker_compose": degraded_check.model_dump(mode="json"),
-        "agent_runtime_image": degraded_check.model_dump(mode="json"),
-        "orphan_resources": degraded_check.model_dump(mode="json"),
+        "db": db_check,
+        "docker_cli": degraded_check,
+        "docker_daemon": degraded_check,
+        "docker_compose": degraded_check,
+        "agent_runtime_image": degraded_check,
+        "orphan_resources": degraded_check,
     }
     all_ok = db_check.ok
     readiness = ReadyResponse(
