@@ -953,13 +953,14 @@ async def _provided_readiness(
         "agent_runtime_image": image_check,
         "orphan_resources": orphan_check,
     }
-    all_ok = all(c.ok for c in checks.values())
+    agent_readiness: dict[str, Any] = {"status": "degraded", "providers": {}}
+    overall_ok = all(c.ok for c in checks.values()) and agent_readiness["status"] == "ok"
     readiness = ReadyResponse(
         service="awf",
         version=__version__,
-        status="ok" if all_ok else "fail",
+        status="ok" if overall_ok else "fail",
         checks=checks,
-        agent_readiness={"status": "degraded", "providers": {}},
+        agent_readiness=agent_readiness,
     )
     return readiness.model_dump(mode="json")
 
