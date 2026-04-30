@@ -14,6 +14,7 @@ from typing import Any
 
 import httpx
 import pytest
+import typer
 from sqlalchemy.engine import make_url
 from typer.testing import CliRunner
 
@@ -1285,6 +1286,47 @@ def test_service_doctor_failing_diagnostics_exit_one(
     assert result.exit_code == 1
     assert "DOCKER_DAEMON_UNREACHABLE" in result.stdout
     assert "action: Start Docker Desktop" in result.stdout
+
+
+@pytest.mark.unit
+def test_service_doctor_preserves_typer_exit_from_collector(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import doctor as doctor_mod
+
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+
+    async def _collect(_settings: object, **_kwargs: object) -> object:
+        raise typer.Exit(code=7)
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+
+    result = _runner.invoke(app, ["service", "doctor"])
+
+    assert result.exit_code == 7
+    assert "could not collect AWF doctor diagnostics" not in _combined_output(result)
+
+
+@pytest.mark.unit
+def test_service_doctor_does_not_mask_unexpected_collection_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import doctor as doctor_mod
+
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+
+    async def _collect(_settings: object, **_kwargs: object) -> object:
+        raise RuntimeError("diagnostic collector exploded")
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect)
+
+    result = _runner.invoke(app, ["service", "doctor"])
+
+    assert result.exit_code == 1
+    assert isinstance(result.exception, RuntimeError)
+    assert "could not collect AWF doctor diagnostics" not in _combined_output(result)
 
 
 @pytest.mark.unit

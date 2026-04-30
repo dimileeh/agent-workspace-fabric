@@ -233,19 +233,15 @@ def service_doctor(
         typer.echo(f"error: {exc}", err=True)
         raise typer.Exit(code=2) from exc
 
-    try:
-        settings = resolve_service_settings()
-        report = asyncio.run(
-            collect_doctor_report(
-                settings,
-                strict_providers=strict_providers,
-                provider_environ=os.environ,
-                environ=os.environ,
-            )
+    settings = resolve_service_settings()
+    report = asyncio.run(
+        collect_doctor_report(
+            settings,
+            strict_providers=strict_providers,
+            provider_environ=os.environ,
+            environ=os.environ,
         )
-    except Exception as exc:
-        typer.echo(f"error: could not collect AWF doctor diagnostics: {exc}", err=True)
-        raise typer.Exit(code=2) from exc
+    )
 
     if fmt == OutputFormat.json:
         _emit(report.to_dict(), fmt)
