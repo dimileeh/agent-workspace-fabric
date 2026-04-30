@@ -82,10 +82,7 @@ def _run_terminal_workspace_compose_teardown(
     expectations when a terminal workspace is being removed.
     """
     compose_file = getattr(candidate, "compose", None)
-    if compose_file is None:
-        compose_path = None
-    else:
-        compose_path = getattr(compose_file, "path", None)
+    compose_path = None if compose_file is None else getattr(compose_file, "path", None)
     workspace_id = getattr(candidate, "workspace_id", None)
     if not isinstance(compose_path, Path) or not isinstance(workspace_id, str):
         return WorkspaceGCComposeTeardownResult(
