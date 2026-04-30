@@ -8,7 +8,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
+import awf.db.repositories as repository_module
 from awf.db.enums import CallbackDeliveryStatus
+from awf.db.models import CallbackSubscription
 from awf.db.repositories import (
     CallbackDeliveryRepository,
     CallbackIdempotencyConflictError,
@@ -30,12 +32,13 @@ async def _subscription(
     idempotency_key: str = "callback-subscription",
     request_hash: str = "hash-a",
     enabled: bool = True,
+    event_types: list[str] | None = None,
 ):
     repo = CallbackSubscriptionRepository(session)
     subscription, _created = await repo.create_idempotent(
         name="repo-test",
         target_url="https://operator.example.com/events",
-        event_types=["workspace.*"],
+        event_types=event_types or ["workspace.*"],
         enabled=enabled,
         timeout_seconds=10,
         max_attempts=3,
@@ -139,6 +142,59 @@ async def test_subscription_event_matching_uses_public_allowlist(
 
     assert {row.id for row in public_matches} == {wildcard.id, exact.id}
     assert internal_matches == []
+
+
+@pytest.mark.unit
+async def test_subscription_event_matching_filters_nonmatches_in_database(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    matching = await _subscription(
+        session,
+        idempotency_key="matching-workspace",
+        request_hash="matching-workspace",
+        event_types=["workspace.*"],
+    )
+    nonmatching = await _subscription(
+        session,
+        idempotency_key="nonmatching-operation",
+        request_hash="nonmatching-operation",
+        event_types=["operation.*"],
+    )
+    disabled_match = await _subscription(
+        session,
+        idempotency_key="disabled-workspace",
+        request_hash="disabled-workspace",
+        enabled=False,
+        event_types=["workspace.*"],
+    )
+    await session.flush()
+    session.expunge_all()
+
+    def fail_python_filtering(subscription_event_type: str, event_type: str) -> bool:
+        raise AssertionError(
+            "subscription event matching should be pushed into the database query"
+        )
+
+    monkeypatch.setattr(
+        repository_module,
+        "callback_subscription_matches_event_type",
+        fail_python_filtering,
+        raising=False,
+    )
+
+    rows = await CallbackSubscriptionRepository(session).list_enabled_for_event_type(
+        "workspace.state_changed"
+    )
+
+    loaded_subscription_ids = {
+        row.id
+        for row in session.identity_map.values()
+        if isinstance(row, CallbackSubscription)
+    }
+    assert [row.id for row in rows] == [matching.id]
+    assert nonmatching.id not in loaded_subscription_ids
+    assert disabled_match.id not in loaded_subscription_ids
 
 
 @pytest.mark.unit

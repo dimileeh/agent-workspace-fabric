@@ -19,6 +19,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +29,10 @@ from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
 from awf.common.audit import build_audit_payload, redact_audit_value
-from awf.common.callback_events import callback_subscription_matches_event_type
+from awf.common.callback_events import (
+    CALLBACK_EVENT_WILDCARDS,
+    PUBLIC_CALLBACK_EVENT_TYPES,
+)
 from awf.common.ids import (
     new_callback_delivery_id,
     new_callback_subscription_id,
@@ -182,6 +186,44 @@ def _secret_lease_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
             .returning(WorkspaceSecretLease.id)
         )
     return None
+
+
+def _callback_subscription_event_type_candidates(event_type: str) -> tuple[str, ...]:
+    if event_type not in PUBLIC_CALLBACK_EVENT_TYPES:
+        return ()
+
+    candidates = [event_type]
+    namespace, separator, _suffix = event_type.partition(".")
+    wildcard = f"{namespace}.*"
+    if separator and wildcard in CALLBACK_EVENT_WILDCARDS:
+        candidates.append(wildcard)
+    return tuple(candidates)
+
+
+def _callback_subscription_event_type_filter(
+    event_type_candidates: tuple[str, ...],
+    dialect_name: str | None,
+) -> ColumnElement[bool]:
+    event_type_values: Any
+    if dialect_name == "postgresql":
+        event_type_values = (
+            func.jsonb_array_elements_text(CallbackSubscription.event_types.cast(JSONB))
+            .table_valued("value")
+            .render_derived(name="callback_event_type")
+        )
+    else:
+        event_type_values = (
+            func.json_each(CallbackSubscription.event_types)
+            .table_valued("value")
+            .alias("callback_event_type")
+        )
+
+    return (
+        select(1)
+        .select_from(event_type_values)
+        .where(event_type_values.c.value.in_(event_type_candidates))
+        .exists()
+    )
 
 
 class TaskRepository:
@@ -2910,8 +2952,9 @@ class CallbackIdempotencyConflictError(ValueError):
 class CallbackSubscriptionRepository:
     """CRUD helpers for external callback registrations."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
     async def create_idempotent(
         self,
@@ -2978,20 +3021,22 @@ class CallbackSubscriptionRepository:
         self,
         event_type: str,
     ) -> builtins.list[CallbackSubscription]:
+        event_type_candidates = _callback_subscription_event_type_candidates(event_type)
+        if not event_type_candidates:
+            return []
+
         stmt = (
             select(CallbackSubscription)
-            .where(CallbackSubscription.enabled.is_(True))
+            .where(
+                CallbackSubscription.enabled.is_(True),
+                _callback_subscription_event_type_filter(
+                    event_type_candidates,
+                    self._dialect_name,
+                ),
+            )
             .order_by(CallbackSubscription.created_at.asc(), CallbackSubscription.id.asc())
         )
-        subscriptions = list((await self._session.execute(stmt)).scalars())
-        return [
-            subscription
-            for subscription in subscriptions
-            if any(
-                callback_subscription_matches_event_type(pattern, event_type)
-                for pattern in subscription.event_types
-            )
-        ]
+        return list((await self._session.execute(stmt)).scalars())
 
 
 class CallbackDeliveryRepository:
