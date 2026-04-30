@@ -735,6 +735,7 @@ def _port_diagnostic(
         "PORT_OPEN",
         source=source,
         metadata=metadata,
+        message_context={"endpoint": f"{host}:{port}"},
         secrets=secrets,
     )
 
@@ -825,8 +826,9 @@ def _simple_diagnostic(
     secrets: frozenset[str],
     detail: str | None = None,
     metadata: Mapping[str, object] | None = None,
+    message_context: Mapping[str, str] | None = None,
 ) -> DoctorDiagnostic:
-    text = _reason_text(reason, label=label, status=status)
+    text = _reason_text(reason, label=label, status=status, context=message_context)
     return DoctorDiagnostic(
         id=diagnostic_id,
         label=label,

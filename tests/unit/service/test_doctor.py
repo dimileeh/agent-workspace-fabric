@@ -183,7 +183,9 @@ def test_doctor_green_report_covers_operator_diagnostics(tmp_path: Path) -> None
     assert diagnostics["docker"]["source"] == "checks.docker"
     assert diagnostics["worker"]["reason"] == "WORKER_RUNNING"
     assert diagnostics["port.api"]["metadata"] == {"host": "localhost", "port": 8000}
+    assert diagnostics["port.api"]["message"] == "localhost:8000 is accepting connections."
     assert diagnostics["port.db"]["metadata"] == {"host": "localhost", "port": 5433}
+    assert diagnostics["port.db"]["message"] == "localhost:5433 is accepting connections."
     assert "AWF doctor: ok" in render_doctor_pretty(report)
     assert "[ok] Docker:" in render_doctor_pretty(report)
 
