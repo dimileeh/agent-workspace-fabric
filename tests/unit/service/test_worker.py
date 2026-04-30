@@ -78,9 +78,18 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["github_runner"] = runner
 
     class _GitManager:
-        def __init__(self, work_dir: Path, *, env: object | None = None) -> None:
+        def __init__(
+            self,
+            work_dir: Path,
+            *,
+            env: object | None = None,
+            worktree_owner_uid: int | None = None,
+            worktree_owner_gid: int | None = None,
+        ) -> None:
             created["git_work_dir"] = work_dir
             created["git_env"] = env
+            created["git_worktree_owner_uid"] = worktree_owner_uid
+            created["git_worktree_owner_gid"] = worktree_owner_gid
 
     class _ComposeManager:
         def __init__(self, *, work_dir: Path, template_path: Path) -> None:
@@ -210,6 +219,8 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["pr_creator_runner"] is created["executor_runner"]
     assert created["github_runner"] is created["executor_runner"]
     assert created["git_env"] == {"HOME": str(Path(settings.host_home).resolve())}
+    assert created["git_worktree_owner_uid"] == 1000
+    assert created["git_worktree_owner_gid"] == 1000
     assert created["applied_git_env"] == created["git_env"]
     assert created["executor_compose"] is created["stack_compose"]
     assert created["secret_resolver_host_home"] == Path(settings.host_home).resolve()
@@ -632,6 +643,26 @@ def test_service_git_environment_forwards_github_token_for_gh_cli(tmp_path: Path
 
     assert env["GH_TOKEN"] == "ghp_service_token"
     assert env["GITHUB_TOKEN"] == "ghp_service_token"
+
+
+@pytest.mark.unit
+def test_service_git_environment_configures_gh_credential_helper_for_git(
+    tmp_path: Path,
+) -> None:
+    env = worker_mod._service_git_environment(
+        tmp_path / "host-home",
+        github_token="ghp_service_token",
+    )
+
+    count = int(env["GIT_CONFIG_COUNT"])
+    entries = {
+        env[f"GIT_CONFIG_KEY_{index}"]: env[f"GIT_CONFIG_VALUE_{index}"]
+        for index in range(count)
+    }
+
+    assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
+    assert entries["url.https://github.com/.insteadOf"] == "git@github.com:"
+    assert all("ghp_service_token" not in value for value in entries.values())
 
 
 @pytest.mark.unit
