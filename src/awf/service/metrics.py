@@ -396,12 +396,18 @@ async def summarize_failure_analysis_for_session(
     window_start = generated_at - timedelta(hours=since_hours)
 
     reason_counts = await _count_failed_by_failure_reason(session, window_start=window_start)
+    failure_details_cache: dict[str, dict[str, Any]] = {}
+    clusters = await _cluster_root_causes(
+        session,
+        window_start=window_start,
+        failure_details_cache=failure_details_cache,
+    )
     latest_examples = await _latest_failed_workspace_examples(
         session,
         window_start=window_start,
         limit=failure_example_limit,
+        failure_details_cache=failure_details_cache,
     )
-    clusters = await _cluster_root_causes(session, window_start=window_start)
 
     return FailureAnalysisSummary(
         generated_at=generated_at,
@@ -414,7 +420,12 @@ async def summarize_failure_analysis_for_session(
     )
 
 
-async def _cluster_root_causes(session: AsyncSession, window_start: datetime) -> list[RootCauseCluster]:
+async def _cluster_root_causes(
+    session: AsyncSession,
+    window_start: datetime,
+    *,
+    failure_details_cache: dict[str, dict[str, Any]] | None = None,
+) -> list[RootCauseCluster]:
     stmt = select(
         Workspace.id,
         Workspace.agent,
@@ -430,12 +441,13 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
     )
     result = await session.execute(stmt)
     rows = result.all()
-    details_by_id = await _failure_details_by_workspace_id(
+    details_by_id = await _cached_failure_details_by_workspace_id(
         session,
         {
             row.id: row.failure_message
             for row in rows
         },
+        failure_details_cache=failure_details_cache,
     )
 
     clusters: dict[tuple[str, str | None, str, str | None, str, str], list[str]] = {}
@@ -670,6 +682,7 @@ async def _latest_failed_workspace_examples(
     *,
     window_start: datetime,
     limit: int,
+    failure_details_cache: dict[str, dict[str, Any]] | None = None,
 ) -> list[FailedWorkspaceExample]:
     stmt = (
         select(
@@ -696,12 +709,13 @@ async def _latest_failed_workspace_examples(
     )
     result = await session.execute(stmt)
     rows = result.all()
-    details_by_id = await _failure_details_by_workspace_id(
+    details_by_id = await _cached_failure_details_by_workspace_id(
         session,
         {
             row.id: row.failure_message
             for row in rows
         },
+        failure_details_cache=failure_details_cache,
     )
     examples: list[FailedWorkspaceExample] = []
     for row in rows:
@@ -764,6 +778,32 @@ async def _failure_details_by_workspace_id(
         if payload is not None:
             details[row.workspace_id] = payload
     return details
+
+
+async def _cached_failure_details_by_workspace_id(
+    session: AsyncSession,
+    failure_messages: dict[str, str | None],
+    *,
+    failure_details_cache: dict[str, dict[str, Any]] | None,
+) -> dict[str, dict[str, Any]]:
+    if failure_details_cache is None:
+        return await _failure_details_by_workspace_id(session, failure_messages)
+
+    missing_failure_messages = {
+        workspace_id: failure_message
+        for workspace_id, failure_message in failure_messages.items()
+        if workspace_id not in failure_details_cache
+    }
+    fetched_details = await _failure_details_by_workspace_id(
+        session,
+        missing_failure_messages,
+    )
+    for workspace_id in missing_failure_messages:
+        failure_details_cache[workspace_id] = fetched_details.get(workspace_id, {})
+    return {
+        workspace_id: failure_details_cache[workspace_id]
+        for workspace_id in failure_messages
+    }
 
 
 def _workspace_event_view(

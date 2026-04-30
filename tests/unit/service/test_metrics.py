@@ -513,6 +513,12 @@ async def test_failure_analysis_latest_examples_do_not_load_workspace_relationsh
         for statement in statements
         if any(table in statement for table in relationship_tables)
     ]
+    workspace_event_queries = [
+        statement
+        for statement in statements
+        if "from workspace_events" in statement
+    ]
+    assert len(workspace_event_queries) == 1
 
 
 @pytest.mark.unit
