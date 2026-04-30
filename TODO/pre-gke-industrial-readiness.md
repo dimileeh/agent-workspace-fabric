@@ -51,6 +51,9 @@ Status values:
 | --- | --- | --- | --- | --- | --- |
 | P1 Workspace Services And Realistic Project Profiles | Strengthen DinD compose profile execution | `ws_58551268828945cfb52fe01e` | [#156](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/156) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on per-workspace DinD Compose execution, health waits, cleanup, and structured failures. |
 | P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on v1/legacy response compatibility until documented v2 cutover. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_5031649e68b34b108f23782b` | - | running | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_19b11c564c3343c0965eee45`. |
+| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_1e79f6b47faf44d0bf8de3f0` | - | running | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_7c8ec611a3d14b6cb4612344`. |
+| P1 Operator Console Completion | Security and egress status panels | `ws_ac64156e08454928985982eb` | - | running | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_8a8b09feb61d4af188473bd6`. |
 
 ### Completed Slices
 
@@ -138,9 +141,9 @@ Status values:
 | P0 Reliability, Cleanup, And SLOs | Orphan AWF resource detection and cleanup readiness reporting | `ws_04560f5cfd914095b357cdcb` | failed | PR [#98](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/98) repeatedly hit monitor-driven stale rebase recovery; local AWF now has a rebase-recovery fix, and the slice was retried as `ws_5605c5ca71c942d999f5b78f`. |
 | P0 Operation And Recovery Truth | Persist operation audit details and log stream references | `ws_83f4e614951446cf883f5c09` | failed | PR [#101](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/101) merged, so no feature retry is needed; the workspace failure exposed the stale-rebase recovery bug fixed locally before service rebuild. |
 | P1 API Contract Completion | External operator callback subscriptions | `ws_0e2fc82ece7541659287e063` | failed | Agent produced local commits and passed validation/coverage, but exhausted the Plan -> Execute -> Compare iteration budget with one remaining conformance gap: event type validation was prefix-based and still allowed internal-looking namespaced event types such as `workspace.internal_secret`. Recover by redispatching a narrow callback hardening/completion slice or salvaging the preserved worktree branch. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via Gemini | `ws_19b11c564c3343c0965eee45` | failed | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; recover by retrying after provider backoff or dispatching a superseding workspace with an allowed fallback model. |
-| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools via Gemini | `ws_7c8ec611a3d14b6cb4612344` | failed | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; recover by retrying after provider backoff or dispatching a superseding workspace with an allowed fallback model. |
-| P1 Operator Console Completion | Security and egress status panels via Gemini | `ws_8a8b09feb61d4af188473bd6` | failed | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; recover by retrying after provider backoff or dispatching a superseding workspace with an allowed fallback model. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via Gemini | `ws_19b11c564c3343c0965eee45` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_5031649e68b34b108f23782b`. |
+| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools via Gemini | `ws_7c8ec611a3d14b6cb4612344` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_1e79f6b47faf44d0bf8de3f0`. |
+| P1 Operator Console Completion | Security and egress status panels via Gemini | `ws_8a8b09feb61d4af188473bd6` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_ac64156e08454928985982eb`. |
 
 ## Foundations Already In Place
 
@@ -263,6 +266,33 @@ Status values:
 - [ ] Add human-escalation boost and retry-aware queue scoring.
 - [ ] Make scheduler decisions visible as durable records and console explanations.
 
+## P1: Provider Resilience And Automated Fallback Recovery
+
+- [ ] Detect provider-capacity and quota markers from agent CLIs, including
+  `RESOURCE_EXHAUSTED`, `MODEL_CAPACITY_EXHAUSTED`, `RetryableQuotaError`,
+  provider HTTP 429s, and equivalent OpenCode/Ollama, Codex, Claude, and
+  Gemini transient capacity errors.
+- [ ] Store structured provider failure reason codes such as
+  `AGENT_PROVIDER_CAPACITY_EXHAUSTED` instead of collapsing retryable provider
+  outages into generic `agent_failure`.
+- [ ] Add delayed retry/backoff for no-work provider failures, preserving
+  task/attempt lineage and making retry state visible in operations, events,
+  API responses, merge queue context, and console surfaces.
+- [ ] Add provider/model circuit breakers that pause new dispatches to a
+  failing provider/model after repeated transient capacity failures, with
+  configurable cooldown windows and operator-visible reason codes.
+- [ ] Add per-workspace fallback policy at creation time so a task can declare
+  approved fallback providers/models, for example Gemini -> OpenCode GLM or
+  Gemini -> Codex `gpt-5.5`, while preserving canonical task/attempt lineage
+  and recording why the fallback was selected.
+- [ ] Clean up no-work failed containers, networks, and pressure directories
+  after logs/artifacts are durably retained, without removing evidence needed
+  for failure analysis or retries.
+- [ ] Add TDD coverage proving provider-capacity failures retry or fallback
+  automatically, non-transient agent failures do not loop forever, and fallback
+  attempts inherit validation, owned paths, profile, auto-merge, and monitor
+  policy correctly.
+
 ## P1: API Contract Completion
 
 - [x] Normalize pagination envelopes across list APIs.
@@ -345,6 +375,8 @@ complete or consciously deferred.
 - [ ] Recovery operations are idempotent, observable, and restart-safe.
 - [ ] Cleanup is reliable and measured.
 - [ ] Secret and egress policy has real enforcement, not just schema.
+- [ ] Provider/model capacity failures are classified, retried or routed through
+  approved fallback policy, and cleaned up without manual intervention.
 - [ ] The console can explain every blocked workspace without reading raw logs.
 - [ ] AWF self-development passes 99%+ coverage with meaningful tests.
 - [ ] A Dockerized toy project with DB, app, and browser validation passes end to end.
