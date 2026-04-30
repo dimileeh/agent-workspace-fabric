@@ -98,6 +98,24 @@ def _run_terminal_workspace_compose_teardown(
             status="skipped",
             reason_code="NO_COMPOSE_STACK",
         )
+    compose_file_path = compose_path
+    if compose_path.is_dir():
+        candidate_compose_paths = (
+            compose_path / "compose.yml",
+            compose_path / "compose.yaml",
+            compose_path / "docker-compose.yml",
+            compose_path / "docker-compose.yaml",
+        )
+        compose_file_path = next(
+            (path for path in candidate_compose_paths if path.exists()),
+            None,
+        )
+        if compose_file_path is None:
+            return WorkspaceGCComposeTeardownResult(
+                status="failed",
+                reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+                error="compose stack file not found",
+            )
 
     command = [
         "docker",
@@ -105,7 +123,7 @@ def _run_terminal_workspace_compose_teardown(
         "--project-name",
         f"awf_{candidate.workspace_id}",
         "--file",
-        str(compose_path),
+        str(compose_file_path),
         "down",
         "--remove-orphans",
     ]

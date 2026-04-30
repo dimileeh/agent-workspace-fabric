@@ -771,6 +771,47 @@ def test_service_gc_cli_execute_records_compose_teardown_failure(
     assert auth.exists()
 
 
+def test_service_gc_cli_execute_compose_teardown_uses_compose_file(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose = tmp_path / "compose" / "workspace-1"
+    compose_file = compose / "compose.yml"
+    compose_file.write_text("compose: {}\n", encoding="utf-8")
+    candidate = SimpleNamespace(
+        workspace_id="workspace-1",
+        compose=SimpleNamespace(path=compose),
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    import awf.cli.main as cli_main
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli_main.subprocess, "run", _run)
+
+    result = cli_main._run_terminal_workspace_compose_teardown(candidate)
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+    assert calls == [
+        (
+            [
+                "docker",
+                "compose",
+                "--project-name",
+                "awf_workspace-1",
+                "--file",
+                str(compose_file),
+                "down",
+                "--remove-orphans",
+            ],
+            {"check": False, "capture_output": True, "text": True},
+        )
+    ]
+
+
 @pytest.mark.unit
 def test_service_config_uses_postgres_default_and_redacts_secrets() -> None:
     from awf.service.config import (
