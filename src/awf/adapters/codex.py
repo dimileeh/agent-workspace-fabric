@@ -19,6 +19,10 @@ class CodexAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:
         return AgentRuntime.codex
 
+    @property
+    def provider(self) -> str:
+        return "openai"
+
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
         args = ["codex", "exec", "--dangerously-bypass-approvals-and-sandbox"]
         if model:

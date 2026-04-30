@@ -33,6 +33,10 @@ class OpenCodeAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:
         return AgentRuntime.opencode
 
+    @property
+    def provider(self) -> str:
+        return "ollama"
+
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
         selected_model = _qualified_model(model or OPENCODE_OLLAMA_CLOUD_MODELS[0])
         script = _opencode_launcher_script(effort=self._default_effort)

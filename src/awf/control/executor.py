@@ -598,6 +598,8 @@ class WorkspaceExecutor:
                     reason=recovery.get("reason"),
                 )
             agent_exit_note = None
+            agent_run_reason_code = None
+            agent_run_details = None
         except ComposeExecCleanupError as exc:
             _log.error(
                 "executor.exec_process_cleanup_failed",
@@ -631,6 +633,8 @@ class WorkspaceExecutor:
                 f"agent CLI exited {exc.result.returncode} ({exc.reason_code}); "
                 f"continuing to salvage any uncommitted work"
             )
+            agent_run_reason_code = exc.reason_code
+            agent_run_details = getattr(exc, "details", None)
             _log.warning(
                 "executor.agent_nonzero_exit_salvaging",
                 workspace_id=workspace_id,
@@ -897,6 +901,8 @@ class WorkspaceExecutor:
                         from_status=WorkspaceStatus.running,
                         failure_reason=FailureReason.agent_failure,
                         message=message,
+                        reason_code=agent_run_reason_code if agent_run_reason_code is not None else None,
+                        details=agent_run_details if agent_run_details is not None else None,
                     )
                     return
 

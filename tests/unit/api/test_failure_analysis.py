@@ -90,6 +90,39 @@ async def _conformance_failed_workspace(engine: AsyncEngine, *, updated_at: date
         return workspace.id
 
 
+async def _provider_capacity_exhausted_workspace(engine: AsyncEngine, *, updated_at: datetime) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/failures-api.git",
+            branch_base="main",
+            task_title="Provider capacity test",
+            task_prompt="Try to hit API.",
+            agent="gemini",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "quota exhausted"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            payload={
+                "details": {
+                    "provider": "google",
+                    "model": "gemini-1.5-pro",
+                    "retryable": True,
+                    "recommended_action": "Retry the workspace later or fallback to a different provider."
+                }
+            },
+        )
+        workspace.updated_at = updated_at
+        await session.commit()
+        return workspace.id
+
+
 @pytest.mark.unit
 async def test_failure_summary_endpoint_returns_console_payload(
     client: AsyncClient,
@@ -288,3 +321,39 @@ async def test_failure_summary_endpoint_exposes_conformance_details(
     assert body["latest_examples"][0]["salvage"] == {"branch_name": "awf/ws_conformance"}
     assert body["root_cause_clusters"][0]["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
     assert body["root_cause_clusters"][0]["likely_cause"] == "Plan Conformance Unsatisfied"
+
+
+@pytest.mark.unit
+async def test_failure_summary_endpoint_exposes_provider_capacity_exhausted(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    now = datetime.now(UTC)
+    workspace_id = await _provider_capacity_exhausted_workspace(
+        engine,
+        updated_at=now - timedelta(minutes=1),
+    )
+
+    response = await client.get("/v1/metrics/failures/summary")
+
+    assert response.status_code == 200
+    body = response.json()
+
+    # Find our cluster
+    cluster = next(
+        c for c in body["root_cause_clusters"]
+        if c["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    )
+    assert cluster["likely_cause"] == "Provider Capacity Exhausted"
+    assert cluster["actionable_next_action"] == "Retry the workspace later or fallback to a different provider."
+
+    # Find our example in latest_examples
+    example = next(
+        e for e in body["latest_examples"]
+        if e["workspace_id"] == workspace_id
+    )
+    assert example["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    assert example["details"]["provider"] == "google"
+    assert example["details"]["model"] == "gemini-1.5-pro"
+    assert example["details"]["retryable"] is True
+    assert example["details"]["recommended_action"] == "Retry the workspace later or fallback to a different provider."

@@ -956,6 +956,16 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
         "reason_code": reason_code,
         "message": message,
     }
+
+    if "provider" in details:
+        result["provider"] = details["provider"]
+    if "model" in details:
+        result["model"] = details["model"]
+    if "retryable" in details:
+        result["retryable"] = details["retryable"]
+    if "recommended_action" in details:
+        result["recommended_action"] = details["recommended_action"]
+
     conformance_payload = _compact_conformance_payload(conformance)
     if conformance_payload is not None:
         result["conformance"] = conformance_payload

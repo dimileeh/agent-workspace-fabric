@@ -60,6 +60,15 @@ _AUTH_FAILURE_MARKERS = (
     "401",
 )
 
+_CAPACITY_EXHAUSTED_MARKERS = (
+    "resource_exhausted",
+    "model_capacity_exhausted",
+    "retryablequotaerror",
+    "http 429",
+    "rate limit",
+    "quota exhausted",
+)
+
 
 # Prepended to every agent prompt. Encodes contract invariants the
 # agent must honour inside an AWF workspace. Kept short — most agent
@@ -112,10 +121,12 @@ class AgentRunError(Exception):
         agent: AgentRuntime,
         result: CommandResult,
         reason_code: str = "AGENT_CLI_FAILED",
+        details: dict[str, str | bool] | None = None,
     ) -> None:
         self.agent = agent
         self.result = result
         self.reason_code = reason_code
+        self.details = details or {}
         super().__init__(
             f"{agent.value} exited {result.returncode} ({reason_code}): "
             f"{result.stderr.strip() or result.stdout.strip() or '<no output>'}"
@@ -157,6 +168,10 @@ class AgentAdapter(ABC):
     @property
     @abstractmethod
     def name(self) -> AgentRuntime: ...
+
+    @property
+    @abstractmethod
+    def provider(self) -> str: ...
 
     @abstractmethod
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
@@ -281,10 +296,19 @@ class AgentAdapter(ABC):
                 stdout_bytes=len(result.stdout),
                 stderr_bytes=len(result.stderr),
             )
+            details: dict[str, str | bool] | None = None
+            if reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED":
+                details = {
+                    "provider": self.provider,
+                    "model": model or self._default_model or "unknown",
+                    "retryable": True,
+                    "recommended_action": "Retry the workspace later or fallback to a different provider.",
+                }
             raise AgentRunError(
                 agent=self.name,
                 result=result,
                 reason_code=reason_code,
+                details=details,
             )
 
         _log.info(
@@ -360,4 +384,6 @@ def _failure_reason_for_result(result: CommandResult) -> str:
     output = f"{result.stderr}\n{result.stdout}".lower()
     if any(marker in output for marker in _AUTH_FAILURE_MARKERS):
         return "AGENT_AUTH_FAILED"
+    if any(marker in output for marker in _CAPACITY_EXHAUSTED_MARKERS):
+        return "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
     return "AGENT_CLI_FAILED"
