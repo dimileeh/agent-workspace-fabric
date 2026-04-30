@@ -626,6 +626,17 @@ def _worker_diagnostic(
         )
 
     record = _worker_record(records)
+    if record is None:
+        return _simple_diagnostic(
+            "worker",
+            "Worker",
+            "fail",
+            "WORKER_CONTAINER_MISSING",
+            source="docker.compose.ps.worker",
+            metadata={"compose_file": str(compose_file), "service": "worker"},
+            secrets=secrets,
+        )
+
     state = _record_text(record, "State", "state")
     status_text = _record_text(record, "Status", "status")
     health = _record_text(record, "Health", "health")
@@ -987,13 +998,13 @@ def _parse_compose_ps(stdout: str) -> list[Mapping[str, object]] | None:
     return None
 
 
-def _worker_record(records: list[Mapping[str, object]]) -> Mapping[str, object]:
+def _worker_record(records: list[Mapping[str, object]]) -> Mapping[str, object] | None:
     for record in records:
         service = _record_text(record, "Service", "service")
         name = _record_text(record, "Name", "name")
         if service == "worker" or name.endswith("worker"):
             return record
-    return records[0]
+    return None
 
 
 def _record_text(record: Mapping[str, object], *keys: str) -> str:

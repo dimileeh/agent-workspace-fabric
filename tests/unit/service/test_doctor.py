@@ -664,7 +664,7 @@ def test_doctor_warns_when_only_non_strict_provider_credentials_are_missing(
         ("oserror", "WORKER_STATUS_UNAVAILABLE"),
         ("compose_failed", "WORKER_STATUS_UNAVAILABLE"),
         ("unhealthy", "WORKER_UNHEALTHY"),
-        ("fallback_record", "WORKER_RUNNING"),
+        ("non_worker_records", "WORKER_CONTAINER_MISSING"),
     ],
 )
 def test_doctor_worker_status_error_branches(
@@ -760,7 +760,7 @@ def test_doctor_helper_fallbacks_and_endpoint_parsing(
     assert doctor_mod._parse_compose_ps('{"Service":"api"}\nnot-json') is None
 
     fallback = {"Service": "api", "Name": "awf-api"}
-    assert doctor_mod._worker_record([fallback]) is fallback
+    assert doctor_mod._worker_record([fallback]) is None
     assert doctor_mod._record_text({}, "missing") == ""
     assert doctor_mod._exit_code_nonzero("not-int") is True
 
