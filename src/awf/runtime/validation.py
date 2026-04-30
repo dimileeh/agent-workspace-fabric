@@ -66,6 +66,13 @@ DATABASE_REFRESH_FAILED = "DATABASE_REFRESH_FAILED"
 DATABASE_REFRESH_TIMEOUT = "DATABASE_REFRESH_TIMEOUT"
 DB_GENERATED_SETUP_PHASE = "db_generated_setup"
 DB_REFRESH_PHASE = "db_refresh"
+_PROFILE_PHASE_EXECUTION_ORDER = {
+    "setup": 0,
+    "pre_agent": 1,
+    "post_agent": 2,
+    "validate": 3,
+    "cleanup": 4,
+}
 
 _HTTP_HEALTHCHECK_SCRIPT = (
     "import sys, urllib.error, urllib.request\n"
@@ -187,7 +194,13 @@ def profile_phase_command_plan(
 ) -> list[ProfileExecutionCommand]:
     """Return normal phase commands plus DB hooks in runtime execution order."""
     commands: list[ProfileExecutionCommand] = []
-    for phase in phase_names:
+    for phase in sorted(
+        phase_names,
+        key=lambda phase: _PROFILE_PHASE_EXECUTION_ORDER.get(
+            phase,
+            len(_PROFILE_PHASE_EXECUTION_ORDER),
+        ),
+    ):
         if phase == "setup":
             commands.extend(_phase_commands(profile, "setup"))
             commands.extend(

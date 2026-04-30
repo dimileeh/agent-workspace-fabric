@@ -21,6 +21,7 @@ from awf.runtime.validation import (
     _healthcheck_cli_args,
     _healthcheck_failure_reason,
     _parse_python_coverage_percent_from_files,
+    profile_phase_command_plan,
 )
 from awf.runtime.validation_identity import (
     environment_identity_digest,
@@ -370,6 +371,38 @@ def test_environment_identity_inputs_sanitize_environment_and_secret_values() ->
 
 
 class TestHappyPath:
+    @pytest.mark.unit
+    def test_profile_phase_command_plan_uses_runtime_phase_order(self) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "phase-order-test",
+                "phases": {
+                    "setup": ["python scripts/setup.py"],
+                    "pre_agent": ["python scripts/pre_agent.py"],
+                    "post_agent": ["ruff format --check"],
+                    "validate": ["pytest -q"],
+                },
+                "database": {
+                    "generated_setup": ["python scripts/db_generated_setup.py"],
+                    "pre_validation_refresh": ["python scripts/db_refresh.py"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(
+            profile,
+            ("validate", "pre_agent", "post_agent", "setup"),
+        )
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "python scripts/setup.py"),
+            ("db_generated_setup", "python scripts/db_generated_setup.py"),
+            ("pre_agent", "python scripts/pre_agent.py"),
+            ("post_agent", "ruff format --check"),
+            ("db_refresh", "python scripts/db_refresh.py"),
+            ("validate", "pytest -q"),
+        ]
+
     @pytest.mark.unit
     async def test_runs_each_test_command_in_order(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
