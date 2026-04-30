@@ -19,6 +19,7 @@ def _stub_local_prerequisites(
     *,
     service_status: str = "ok",
     doctor_status: str = "ok",
+    preview_smoke_payload: bool = False,
 ) -> None:
     async def _collect_service_status(
         _settings: object, **kwargs: object
@@ -40,6 +41,19 @@ def _stub_local_prerequisites(
         "awf.service.doctor.render_doctor_pretty",
         lambda report: f"AWF doctor: {getattr(report, 'status', 'unknown')}\n",
     )
+    if preview_smoke_payload:
+        def _preview_project_onboarding(
+            _path: Path, **_kwargs: object
+        ) -> object:
+            return SimpleNamespace(
+                draft=SimpleNamespace(template="generic"),
+                smoke_request={"dummy": "payload"},
+            )
+
+        monkeypatch.setattr(
+            "awf.profiles.onboarding.preview_project_onboarding",
+            _preview_project_onboarding,
+        )
 
 
 @pytest.mark.unit
@@ -151,7 +165,7 @@ def test_init_does_not_submit_workspace_request(
 
 @pytest.mark.unit
 def test_init_includes_smoke_workspace_hints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _stub_local_prerequisites(monkeypatch)
+    _stub_local_prerequisites(monkeypatch, preview_smoke_payload=True)
 
     result = _runner.invoke(
         app,
