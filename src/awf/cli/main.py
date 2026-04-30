@@ -15,6 +15,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import subprocess
 import sys
 import urllib.parse
 from enum import StrEnum
@@ -25,6 +26,7 @@ import httpx
 import typer
 
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.service.gc import WorkspaceGCComposeTeardownResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 app = typer.Typer(
@@ -68,6 +70,68 @@ def _api_token_option() -> Any:
         None,
         "--api-token",
         help="Bearer token override; defaults to AWF_API_TOKEN when set.",
+    )
+
+
+def _run_terminal_workspace_compose_teardown(
+    candidate: object,
+) -> WorkspaceGCComposeTeardownResult:
+    """Tear down the compose stack for a terminal workspace candidate.
+
+    This keeps the `service gc` cleanup command consistent with operational
+    expectations when a terminal workspace is being removed.
+    """
+    compose_file = getattr(candidate, "compose", None)
+    if (
+        compose_file is None
+        or not hasattr(compose_file, "path")
+        or not isinstance(compose_file.path, Path)
+    ):
+        return WorkspaceGCComposeTeardownResult(
+            status="failed",
+            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+            error="candidate.compose was missing expected shape",
+        )
+    compose_path = compose_file.path
+    if not compose_path.exists():
+        return WorkspaceGCComposeTeardownResult(
+            status="skipped",
+            reason_code="NO_COMPOSE_STACK",
+        )
+
+    command = [
+        "docker",
+        "compose",
+        "--project-name",
+        f"awf_{candidate.workspace_id}",
+        "--file",
+        str(compose_path),
+        "down",
+        "--remove-orphans",
+        "--volumes",
+    ]
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    except OSError as exc:
+        return WorkspaceGCComposeTeardownResult(
+            status="failed",
+            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+            error=str(exc),
+        )
+    if result.returncode == 0:
+        return WorkspaceGCComposeTeardownResult(
+            status="succeeded",
+            reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+        )
+    return WorkspaceGCComposeTeardownResult(
+        status="failed",
+        reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+        error=(result.stderr or result.stdout or "docker compose down failed")[:1000],
     )
 
 
@@ -430,6 +494,7 @@ def service_gc(
                 exclude_statuses=exclude_status or None,
                 execute=execute,
                 cleanup_enabled=settings.workspace_cleanup_enabled,
+                compose_teardown=_run_terminal_workspace_compose_teardown,
             )
             return result.to_dict()
         finally:

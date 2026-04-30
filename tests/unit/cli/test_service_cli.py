@@ -20,6 +20,7 @@ from typer.testing import CliRunner
 
 from awf.cli.main import app
 from awf.common.config import Settings
+from awf.service.gc import WorkspaceGCComposeTeardownResult
 from awf.service.target_branch_monitor import (
     TargetBranchMonitorResult,
     TargetBranchMonitorStatus,
@@ -86,6 +87,21 @@ def _create_gc_cli_workspace(
         return workspace_id
 
     return asyncio.run(_setup())
+
+
+def _mock_compose_teardown_succeeded(_candidate: object) -> WorkspaceGCComposeTeardownResult:
+    return WorkspaceGCComposeTeardownResult(
+        status="succeeded",
+        reason_code="DOCKER_COMPOSE_DOWN_SUCCEEDED",
+    )
+
+
+def _mock_compose_teardown_failed(_candidate: object) -> WorkspaceGCComposeTeardownResult:
+    return WorkspaceGCComposeTeardownResult(
+        status="failed",
+        reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+        error="compose teardown failed",
+    )
 
 
 @pytest.mark.unit
@@ -594,6 +610,13 @@ def test_service_gc_cli_execute_deletes_and_supports_pretty_output(
     _write_gc_file(auth / "codex" / "auth.json", "auth")
     monkeypatch.setenv("AWF_DATABASE_URL", db_url)
     monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+    import awf.cli.main as cli_main
+
+    monkeypatch.setattr(
+        cli_main,
+        "_run_terminal_workspace_compose_teardown",
+        _mock_compose_teardown_succeeded,
+    )
 
     result = _runner.invoke(
         app,
@@ -668,6 +691,13 @@ def test_service_gc_cli_execute_failures_exit_nonzero_with_reason_payload(
     worktree.write_text("not a directory", encoding="utf-8")
     monkeypatch.setenv("AWF_DATABASE_URL", db_url)
     monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+    import awf.cli.main as cli_main
+
+    monkeypatch.setattr(
+        cli_main,
+        "_run_terminal_workspace_compose_teardown",
+        _mock_compose_teardown_succeeded,
+    )
 
     result = _runner.invoke(
         app,
@@ -680,6 +710,65 @@ def test_service_gc_cli_execute_failures_exit_nonzero_with_reason_payload(
     assert payload["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
     assert payload["delete_errors"][0]["reason_code"] == "PATH_DELETE_FAILED"
     assert payload["candidates"][0]["paths"]["worktree"]["status"] == "failed"
+
+
+@pytest.mark.unit
+def test_service_gc_cli_execute_records_compose_teardown_failure(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    db_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
+    work_dir = tmp_path / "service"
+    workspace_id = _create_gc_cli_workspace(
+        db_url=db_url,
+        status="completed",
+        updated_at=datetime(2026, 1, 1, tzinfo=UTC),
+        pr=True,
+    )
+    worktree = work_dir / "git" / "worktrees" / workspace_id
+    compose = work_dir / "compose" / workspace_id
+    auth = work_dir / "auth" / workspace_id
+    _write_gc_file(worktree / "repo.txt", "repo")
+    _write_gc_file(compose / "compose.yml", "compose")
+    _write_gc_file(auth / "codex" / "auth.json", "auth")
+    monkeypatch.setenv("AWF_DATABASE_URL", db_url)
+    monkeypatch.setenv("AWF_WORK_DIR", str(work_dir))
+    import awf.cli.main as cli_main
+
+    monkeypatch.setattr(
+        cli_main,
+        "_run_terminal_workspace_compose_teardown",
+        _mock_compose_teardown_failed,
+    )
+
+    result = _runner.invoke(
+        app,
+        [
+            "service",
+            "gc",
+            "--execute",
+            "--min-age-hours",
+            "1",
+            "--format",
+            "json",
+        ],
+    )
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "partial"
+    assert payload["reason_code"] == "CLEANUP_EXECUTION_PARTIAL"
+    assert payload["delete_errors"][0]["kind"] == "compose_teardown"
+    assert payload["delete_errors"][0]["reason_code"] == "DOCKER_COMPOSE_DOWN_FAILED"
+    assert payload["candidates"][0]["compose_teardown"] == {
+        "status": "failed",
+        "reason_code": "DOCKER_COMPOSE_DOWN_FAILED",
+        "error": "compose teardown failed",
+    }
+    assert payload["candidates"][0]["paths"]["worktree"]["status"] == "skipped"
+    assert worktree.exists()
+    assert compose.exists()
+    assert auth.exists()
 
 
 @pytest.mark.unit
