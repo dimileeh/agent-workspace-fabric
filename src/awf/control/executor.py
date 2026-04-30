@@ -2230,7 +2230,7 @@ class WorkspaceExecutor:
             details={
                 "conformance": build_conformance_failure_evidence(
                     report=last_report,
-                    iterations_used=last_iteration,
+                    iterations_used=last_iteration + 1,
                     max_iterations=planning.max_iterations,
                     plan_path=plan_path,
                     report_path=report_path,

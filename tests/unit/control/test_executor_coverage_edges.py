@@ -516,7 +516,7 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
         "gaps": ["gap one"],
         "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
         "report_reason_code": "PLAN_CONFORMANCE_REPORTED",
-        "iterations_used": 0,
+        "iterations_used": 1,
         "max_iterations": 0,
         "plan_path": "docs/awf-plans/ws_unsat.md",
         "report_path": "docs/awf-plans/ws_unsat.json",
