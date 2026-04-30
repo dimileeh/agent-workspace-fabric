@@ -165,7 +165,7 @@ export function summarizeProviderCredentialReadiness(
   const leased = leasedProviders.size;
   const label =
     missingProviders.length > 0
-      ? `${leased}/${declared} ready`
+      ? `${leased}/${declared} — missing providers`
       : `${leased}/${declared} ready`;
   const tone = missingProviders.length > 0 ? "warn" : "good";
 
