@@ -24,7 +24,7 @@ operator:
 ```text
 Inspect this repository for AWF onboarding. Do not launch a workspace, push,
 open a PR, or start project services. Run `awf profile init . --format pretty`
-to preview a draft `.awf/workspace.yml`, review the diagnostics, then run
+to get a reviewable draft via `awf profile preview .`, then review the diagnostics and run
 `awf profile init . --write` only if the draft is useful. Keep secrets as
 profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
@@ -34,7 +34,7 @@ profile declarations or `${VAR}` placeholders; never write raw secret values.
 Preview only:
 
 ```bash
-awf profile init . --format pretty
+awf profile preview .
 ```
 
 Write a draft profile:
