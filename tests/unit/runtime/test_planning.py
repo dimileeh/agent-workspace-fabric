@@ -267,6 +267,22 @@ def test_coordination_warning_renderer_sanitizes_legacy_warning_shapes() -> None
 
 
 @pytest.mark.unit
+def test_coordination_warning_renderer_requires_bool_blocks_launch() -> None:
+    rendered = render_coordination_warning_section(
+        (
+            {
+                "warning_code": "OWNED_PATH_OVERLAP_RISK",
+                "message": "Coordinate around active work.",
+                "severity": "advisory",
+                "blocks_launch": "yes",
+            },
+        )
+    )
+
+    assert "OWNED_PATH_OVERLAP_RISK (advisory; blocks_launch=false)" in rendered
+
+
+@pytest.mark.unit
 def test_coordination_warning_renderer_bounds_direct_overlap_payloads() -> None:
     rendered = render_coordination_warning_section(
         (

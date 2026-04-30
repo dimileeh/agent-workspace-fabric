@@ -336,7 +336,7 @@ def _normalized_coordination_warning(
         "warning_code": warning_code,
         "message": message,
         "severity": severity,
-        "blocks_launch": bool(warning.get("blocks_launch", False)),
+        "blocks_launch": _safe_warning_bool(warning.get("blocks_launch")),
         "workspace_ids": workspace_ids,
         "overlaps": overlaps,
         "stale_policy_context": context,
@@ -377,6 +377,10 @@ def _safe_warning_context(value: object) -> dict[str, str]:
     if not isinstance(value, Mapping):
         return {}
     return {str(key): item for key, item in value.items() if isinstance(item, str)}
+
+
+def _safe_warning_bool(value: object) -> bool:
+    return value if isinstance(value, bool) else False
 
 
 def _safe_warning_text(value: object) -> str | None:
