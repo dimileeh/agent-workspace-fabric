@@ -912,8 +912,8 @@ class WorkspaceExecutor:
                         from_status=WorkspaceStatus.running,
                         failure_reason=FailureReason.agent_failure,
                         message=message,
-                        reason_code=agent_run_reason_code if agent_run_reason_code is not None else None,
-                        details=agent_run_details if agent_run_details is not None else None,
+                        reason_code=agent_run_reason_code,
+                        details=agent_run_details,
                     )
                     return
 
