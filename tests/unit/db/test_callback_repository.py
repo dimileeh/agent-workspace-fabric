@@ -335,6 +335,63 @@ async def test_delivery_enqueue_once_deduplicates_subscription_source_event(
 
 
 @pytest.mark.unit
+async def test_delivery_enqueue_once_replays_after_duplicate_key_race(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subscription = await _subscription(session)
+    repo = CallbackDeliveryRepository(session)
+    now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    winner, _created = await repo.enqueue_once(
+        subscription=subscription,
+        event_kind="workspace",
+        event_type="workspace.state_changed",
+        source_id="evt_race",
+        dedupe_key="workspace:evt_race",
+        workspace_id="ws_race",
+        operation_id=None,
+        merge_candidate_id=None,
+        envelope={"event": {"type": "workspace.state_changed"}},
+        now=now,
+    )
+    original_get = repo.get_by_dedupe_key
+    lookups = 0
+
+    async def miss_once_then_get(
+        *,
+        subscription_id: str,
+        dedupe_key: str,
+    ):
+        nonlocal lookups
+        lookups += 1
+        if lookups == 1:
+            return None
+        return await original_get(
+            subscription_id=subscription_id,
+            dedupe_key=dedupe_key,
+        )
+
+    monkeypatch.setattr(repo, "get_by_dedupe_key", miss_once_then_get)
+
+    replay, was_created = await repo.enqueue_once(
+        subscription=subscription,
+        event_kind="workspace",
+        event_type="workspace.state_changed",
+        source_id="evt_race",
+        dedupe_key="workspace:evt_race",
+        workspace_id="ws_race",
+        operation_id=None,
+        merge_candidate_id=None,
+        envelope={"event": {"type": "workspace.state_changed"}},
+        now=now,
+    )
+
+    assert was_created is False
+    assert replay.id == winner.id
+    assert lookups == 2
+
+
+@pytest.mark.unit
 async def test_due_delivery_query_returns_only_due_pending_rows_oldest_first(
     session: AsyncSession,
 ) -> None:

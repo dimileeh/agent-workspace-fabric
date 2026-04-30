@@ -110,6 +110,10 @@ _SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
 _CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "idempotency_key",
 )
+_CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
+    "subscription_id",
+    "dedupe_key",
+)
 
 
 @dataclass(frozen=True)
@@ -207,6 +211,22 @@ def _callback_subscription_insert_if_absent_stmt(dialect_name: str | None) -> An
                 index_elements=_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS
             )
             .returning(CallbackSubscription.id)
+        )
+    return None
+
+
+def _callback_delivery_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
+    if dialect_name == "postgresql":
+        return (
+            postgresql_insert(CallbackDelivery)
+            .on_conflict_do_nothing(index_elements=_CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS)
+            .returning(CallbackDelivery.id)
+        )
+    if dialect_name == "sqlite":
+        return (
+            sqlite_insert(CallbackDelivery)
+            .on_conflict_do_nothing(index_elements=_CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS)
+            .returning(CallbackDelivery.id)
         )
     return None
 
@@ -3089,8 +3109,9 @@ class CallbackSubscriptionRepository:
 class CallbackDeliveryRepository:
     """CRUD helpers for durable callback delivery records."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
         self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
 
     async def get(self, delivery_id: str) -> CallbackDelivery | None:
         stmt = (
@@ -3134,23 +3155,44 @@ class CallbackDeliveryRepository:
             "attempt_count": 0,
             "max_attempts": subscription.max_attempts,
         }
-        delivery = CallbackDelivery(
-            id=delivery_id,
-            subscription_id=subscription.id,
-            event_kind=event_kind_value,
-            event_type=event_type,
-            source_id=source_id,
-            dedupe_key=dedupe_key,
-            workspace_id=workspace_id,
-            operation_id=operation_id,
-            merge_candidate_id=merge_candidate_id,
-            envelope=delivery_envelope,
-            idempotency_key=idempotency_key,
-            status=CallbackDeliveryStatus.pending.value,
-            attempt_count=0,
-            max_attempts=subscription.max_attempts,
-            next_attempt_at=created_at,
-        )
+        delivery_values: dict[str, Any] = {
+            "id": delivery_id,
+            "subscription_id": subscription.id,
+            "event_kind": event_kind_value,
+            "event_type": event_type,
+            "source_id": source_id,
+            "dedupe_key": dedupe_key,
+            "workspace_id": workspace_id,
+            "operation_id": operation_id,
+            "merge_candidate_id": merge_candidate_id,
+            "envelope": delivery_envelope,
+            "idempotency_key": idempotency_key,
+            "status": CallbackDeliveryStatus.pending.value,
+            "attempt_count": 0,
+            "max_attempts": subscription.max_attempts,
+            "next_attempt_at": created_at,
+        }
+        insert_if_absent = _callback_delivery_insert_if_absent_stmt(self._dialect_name)
+        if insert_if_absent is not None:
+            result = await self._session.execute(insert_if_absent.values(**delivery_values))
+            inserted_id = result.scalar_one_or_none()
+            if inserted_id is not None:
+                inserted = await self.get(inserted_id)
+                if inserted is None:
+                    raise RuntimeError("Inserted callback delivery could not be loaded.")
+                return inserted, True
+
+            existing = await self.get_by_dedupe_key(
+                subscription_id=subscription.id,
+                dedupe_key=dedupe_key,
+            )
+            if existing is None:
+                raise RuntimeError(
+                    "Callback delivery insert conflicted but no row could be loaded."
+                )
+            return existing, False
+
+        delivery = CallbackDelivery(**delivery_values)
         self._session.add(delivery)
         await self._session.flush()
         return delivery, True
