@@ -23,9 +23,14 @@ operator:
 
 ```text
 Inspect this repository for AWF onboarding. Do not launch a workspace, push,
-open a PR, or start project services. Run `awf profile init . --format pretty`
-to get a reviewable draft via `awf profile preview .`, then review the diagnostics and run
-`awf profile init . --write` only if the draft is useful. Keep secrets as
+open a PR, or start project services. Start with:
+
+`awf init .`
+`awf profile preview .`
+`awf profile init . --write`
+
+or use `awf profile init . --include-smoke-request` for a local copy-paste smoke request
+payload (local-only, no submission). Keep secrets as
 profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
 
