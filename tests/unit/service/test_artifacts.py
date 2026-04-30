@@ -10,6 +10,12 @@ import pytest
 from awf.service.artifacts import (
     ArtifactNotFoundError,
     ArtifactPathError,
+    _artifact_id,
+    _artifact_kind,
+    _is_symlink,
+    _resolve_artifact_root,
+    artifact_id,
+    artifact_kind,
     get_downloadable_artifact,
     list_artifacts,
     workspace_artifact_dir,
@@ -184,3 +190,74 @@ class TestArtifactService:
         assert items[0].workspace_id == "ws_artifacts"
         assert items[0].kind == "txt"
         assert items[0].content_type == "text/plain"
+
+    @pytest.mark.unit
+    def test_listing_returns_empty_when_directory_walk_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        original_walk = Path.walk
+
+        def walk_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == artifact_dir:
+                raise OSError("walk failed")
+            return original_walk(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "walk", walk_candidate)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_directory_artifact_download_fails_closed(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        (artifact_dir / "reports").mkdir(parents=True)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_downloadable_artifact(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="reports",
+            )
+
+    @pytest.mark.unit
+    def test_resolved_artifact_root_must_remain_a_directory(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        resolved_file = tmp_path / "not-a-directory"
+        resolved_file.write_text("file\n", encoding="utf-8")
+        original_resolve = Path.resolve
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == artifact_dir:
+                return resolved_file
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        with pytest.raises(ArtifactNotFoundError):
+            _resolve_artifact_root(artifact_dir)
+
+    @pytest.mark.unit
+    def test_artifact_private_aliases_match_public_helpers(self, tmp_path: Path) -> None:
+        report = tmp_path / "report.txt"
+
+        assert _artifact_id("ws_artifacts", "report.txt") == artifact_id(
+            "ws_artifacts",
+            "report.txt",
+        )
+        assert _artifact_kind(report) == artifact_kind(report) == "txt"
+
+    @pytest.mark.unit
+    def test_symlink_probe_fails_closed_when_filesystem_raises(self) -> None:
+        class _UnstatablePath:
+            def is_symlink(self) -> bool:
+                raise OSError("cannot stat")
+
+        assert _is_symlink(_UnstatablePath()) is True  # type: ignore[arg-type]

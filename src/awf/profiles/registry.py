@@ -7,6 +7,7 @@ from pathlib import Path
 
 from awf.profiles.models import (
     DockerMode,
+    ProfileAlembicValidation,
     ProfileCommand,
     ProfileDocker,
     ProfileRuntime,
@@ -199,7 +200,10 @@ def aira_profile(*, source: str = "builtin:aira") -> WorkspaceProfile:
             "setup": ['uv pip install -e ".[dev]"', "alembic upgrade head"],
             "validate": ["pytest -q"],
         },
-        validation=ProfileValidation(requested_tier=1),
+        validation=ProfileValidation(
+            requested_tier=1,
+            alembic=ProfileAlembicValidation(enabled=True),
+        ),
     )
 
 

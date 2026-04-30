@@ -14,6 +14,7 @@ callers that pass raw command strings. New code should call
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import shlex
 import time
@@ -33,12 +34,20 @@ from awf.common.compose_exec import (
 )
 from awf.common.logging import get_logger
 from awf.profiles.models import (
+    ProfileAlembicValidation,
     ProfileCommand,
     ProfileCoverage,
     ProfileHealthCheck,
     WorkspaceProfile,
 )
+from awf.runtime.alembic_validation import (
+    ALEMBIC_MIGRATION_POLICY_COMMAND,
+    ALEMBIC_MIGRATION_POLICY_PHASE,
+    alembic_policy_metadata,
+    validate_alembic_migration_chain,
+)
 from awf.runtime.logs import LogStore
+from awf.service.alembic_resolver import AlembicGraphValidationStatus
 
 _log = get_logger(__name__)
 
@@ -222,10 +231,15 @@ class ValidationRunner:
         profile: WorkspaceProfile,
         phase_names: list[str] | tuple[str, ...],
         run_healthchecks: bool = False,
+        worktree_path: Path | None = None,
     ) -> ValidationResult:
         """Run the selected profile phases in order."""
+        requested_phases = set(phase_names)
         healthchecks = profile.validation.healthchecks if run_healthchecks else []
-        coverage = profile.validation.coverage if "validate" in set(phase_names) else None
+        coverage = profile.validation.coverage if "validate" in requested_phases else None
+        alembic_policy = (
+            profile.validation.alembic if "validate" in requested_phases else None
+        )
         return await self._run_commands(
             workspace_id=workspace_id,
             compose_project=compose_project,
@@ -235,6 +249,8 @@ class ValidationRunner:
             legacy_command_labels=False,
             retry_budget=profile.validation.retry_budget,
             coverage=coverage,
+            alembic_policy=alembic_policy,
+            worktree_path=worktree_path,
         )
 
     async def run_profile_coverage(
@@ -274,12 +290,35 @@ class ValidationRunner:
         legacy_command_labels: bool,
         retry_budget: int = 0,
         coverage: ProfileCoverage | None,
+        alembic_policy: ProfileAlembicValidation | None = None,
+        worktree_path: Path | None = None,
     ) -> ValidationResult:
         workspace_artifacts = self._artifacts_dir / workspace_id
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
 
         results: list[ValidationCommandResult] = []
         phase_indices: dict[str, int] = {}
+        if alembic_policy is not None and alembic_policy.enabled:
+            phase = ALEMBIC_MIGRATION_POLICY_PHASE
+            phase_indices[phase] = phase_indices.get(phase, 0) + 1
+            label = f"{phase_indices[phase]:02d}_{phase}"
+            result = await self._run_alembic_policy(
+                workspace_id=workspace_id,
+                policy=alembic_policy,
+                worktree_path=worktree_path,
+                label=label,
+                artifacts_dir=workspace_artifacts,
+            )
+            results.append(result)
+            if not result.ok:
+                _log.info(
+                    "validation.alembic_migration_policy_failed",
+                    workspace_id=workspace_id,
+                    reason_code=result.reason_code,
+                    returncode=result.returncode,
+                )
+                return ValidationResult(commands=results)
+
         for healthcheck in healthchecks:
             phase = "healthcheck"
             phase_indices[phase] = phase_indices.get(phase, 0) + 1
@@ -408,6 +447,88 @@ class ValidationRunner:
             )
 
         return ValidationResult(commands=results, coverage=coverage_result)
+
+    async def _run_alembic_policy(
+        self,
+        *,
+        workspace_id: str,
+        policy: ProfileAlembicValidation,
+        worktree_path: Path | None,
+        label: str,
+        artifacts_dir: Path,
+    ) -> ValidationCommandResult:
+        started = time.monotonic()
+        phase = ALEMBIC_MIGRATION_POLICY_PHASE
+        base_stream_id = f"validation.{label}"
+        stream_ids: dict[str, str | None] = {
+            "stdout": f"{base_stream_id}.stdout",
+            "stderr": f"{base_stream_id}.stderr",
+        }
+
+        if worktree_path is None:
+            metadata = _alembic_policy_missing_worktree_metadata(policy)
+            reason_code = "ALEMBIC_WORKTREE_REQUIRED"
+            policy_failed = True
+        else:
+            graph_result = await asyncio.to_thread(
+                validate_alembic_migration_chain,
+                worktree_path,
+                policy,
+            )
+            metadata = alembic_policy_metadata(graph_result, policy=policy)
+            reason_code = graph_result.reason_code
+            policy_failed = graph_result.status == AlembicGraphValidationStatus.failed or (
+                graph_result.status == AlembicGraphValidationStatus.unsupported
+                and policy.fail_on_unconfigured
+            )
+
+        rendered = json.dumps(metadata, sort_keys=True, indent=2, default=str) + "\n"
+        stdout = "" if policy_failed else rendered
+        stderr = rendered if policy_failed else ""
+        stdout_path = artifacts_dir / f"{label}.stdout"
+        stderr_path = artifacts_dir / f"{label}.stderr"
+        await asyncio.to_thread(
+            _write_alembic_policy_artifacts,
+            stdout_path,
+            stderr_path,
+            stdout,
+            stderr,
+        )
+
+        if self._log_store is not None:
+            sinks = await self._log_store.open_command_streams(
+                workspace_id=workspace_id,
+                base_stream_id=base_stream_id,
+                source="validation",
+                name=f"{phase} {label}",
+            )
+            try:
+                if stdout:
+                    await sinks.write_stdout(stdout)
+                if stderr:
+                    await sinks.write_stderr(stderr)
+            finally:
+                await sinks.close()
+
+        _log.info(
+            "validation.alembic_migration_policy_checked",
+            workspace_id=workspace_id,
+            reason_code=reason_code,
+            status=metadata.get("status"),
+            policy_failed=policy_failed,
+        )
+        return ValidationCommandResult(
+            command=ALEMBIC_MIGRATION_POLICY_COMMAND,
+            returncode=1 if policy_failed else 0,
+            duration_seconds=time.monotonic() - started,
+            stdout_path=stdout_path,
+            stderr_path=stderr_path,
+            phase=phase,
+            reason_code=reason_code,
+            stream_ids=stream_ids,
+            policy_failed=policy_failed,
+            metadata=metadata,
+        )
 
     async def _wait_for_healthcheck(
         self,
@@ -733,6 +854,41 @@ class ValidationRunner:
 
 def _compose_exec_timed_out(result: CommandResult) -> bool:
     return result.reason_code in {COMMAND_TIMEOUT_REASON, COMMAND_IDLE_TIMEOUT_REASON}
+
+
+def _alembic_policy_missing_worktree_metadata(
+    policy: ProfileAlembicValidation,
+) -> dict[str, object]:
+    return {
+        "status": "failed",
+        "reason_code": "ALEMBIC_WORKTREE_REQUIRED",
+        "heads": [],
+        "message": "Alembic migration-chain policy requires a workspace worktree path.",
+        "details": {},
+        "findings": [
+            {
+                "reason_code": "ALEMBIC_WORKTREE_REQUIRED",
+                "message": "Alembic migration-chain policy requires a workspace worktree path.",
+                "details": {},
+            }
+        ],
+        "policy": {
+            "enabled": policy.enabled,
+            "config_path": policy.config_path,
+            "script_location": policy.script_location,
+            "fail_on_unconfigured": policy.fail_on_unconfigured,
+        },
+    }
+
+
+def _write_alembic_policy_artifacts(
+    stdout_path: Path,
+    stderr_path: Path,
+    stdout: str,
+    stderr: str,
+) -> None:
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text(stderr, encoding="utf-8")
 
 
 def _display_command(cli_args: list[str]) -> str:
