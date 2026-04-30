@@ -54,6 +54,25 @@ async def test_register_callback_requires_idempotency_key(client: AsyncClient) -
 
 
 @pytest.mark.unit
+async def test_register_callback_rejects_oversized_idempotency_key(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    response = await client.post(
+        "/v1/callbacks",
+        json=_VALID_BODY,
+        headers={"Idempotency-Key": "k" * 129},
+    )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == {
+        "error_code": "INVALID_REQUEST",
+        "message": "Idempotency-Key header must be at most 128 characters.",
+    }
+    assert await _subscription_count(engine) == 0
+
+
+@pytest.mark.unit
 async def test_register_callback_persists_safe_public_contract(
     client: AsyncClient,
 ) -> None:

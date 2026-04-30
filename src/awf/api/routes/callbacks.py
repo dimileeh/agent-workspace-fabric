@@ -17,6 +17,7 @@ from awf.common.config import Settings, get_settings
 from awf.service.callbacks import CallbackIdempotencyConflictError, CallbackService
 
 router = APIRouter(prefix="/v1/callbacks", tags=["callbacks"])
+_IDEMPOTENCY_KEY_MAX_LENGTH = 128
 
 
 @router.post(
@@ -89,4 +90,13 @@ def _require_idempotency_key(idempotency_key: str | None) -> str:
                 "message": "Idempotency-Key header is required for this endpoint.",
             },
         )
-    return idempotency_key.strip()
+    key = idempotency_key.strip()
+    if len(key) > _IDEMPOTENCY_KEY_MAX_LENGTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail={
+                "error_code": "INVALID_REQUEST",
+                "message": "Idempotency-Key header must be at most 128 characters.",
+            },
+        )
+    return key
