@@ -369,6 +369,7 @@ class ProfileService(BaseModel):
     command: str | None = Field(default=None, max_length=4096)
     volumes: list[tuple[str, str]] = Field(default_factory=list)
     privileged: bool = False
+    required: bool = True
 
     @model_validator(mode="after")
     def _has_image_or_build(self) -> ProfileService:
