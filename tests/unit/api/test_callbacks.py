@@ -7,9 +7,11 @@ from collections.abc import AsyncIterator
 import pytest
 from fastapi import FastAPI
 from httpx import ASGITransport, AsyncClient
+from pydantic import ValidationError
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine
 
+from awf.api import schemas as api_schemas
 from awf.api.app import configure_database, create_app
 from awf.common.config import Settings, get_settings
 from awf.db.session import make_session_factory
@@ -157,6 +159,8 @@ async def test_callbacks_endpoints_return_unavailable_when_disabled(
         "http://192.168.0.5/events",
         "http://169.254.169.254/latest/meta-data",
         "http://[::1]/events",
+        "http://[::ffff:127.0.0.1]/events",
+        "http://[::ffff:169.254.169.254]/latest/meta-data",
         "http://[fe80::1]/events",
     ],
 )
@@ -173,6 +177,42 @@ async def test_register_callback_rejects_internal_target_hosts_without_insert(
 
     assert response.status_code == 422
     assert await _subscription_count(engine) == 0
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "target_url",
+    [
+        "http://[::ffff:127.0.0.1]/events",
+        "http://[::ffff:169.254.169.254]/latest/meta-data",
+    ],
+)
+def test_callback_target_rejects_ipv4_mapped_ipv6_when_runtime_marks_global(
+    monkeypatch: pytest.MonkeyPatch,
+    target_url: str,
+) -> None:
+    real_ip_address = api_schemas.ipaddress.ip_address
+
+    class LegacyIPv4MappedAddress:
+        is_global = True
+        is_multicast = False
+
+        def __init__(self, ipv4_mapped: object) -> None:
+            self.ipv4_mapped = ipv4_mapped
+
+    def legacy_ip_address(value: str) -> object:
+        address = real_ip_address(value)
+        ipv4_mapped = getattr(address, "ipv4_mapped", None)
+        if ipv4_mapped is None:
+            return address
+        return LegacyIPv4MappedAddress(ipv4_mapped)
+
+    monkeypatch.setattr(api_schemas.ipaddress, "ip_address", legacy_ip_address)
+
+    with pytest.raises(ValidationError, match="target_url must use a public host"):
+        api_schemas.CallbackSubscriptionCreateRequest.model_validate(
+            {**_VALID_BODY, "target_url": target_url}
+        )
 
 
 @pytest.mark.unit

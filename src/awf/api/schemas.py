@@ -93,7 +93,12 @@ def _is_public_callback_target_host(hostname: str) -> bool:
             return False
         return not _looks_like_legacy_ipv4_literal(normalized)
 
-    return address.is_global and not address.is_multicast
+    ipv4_mapped = getattr(address, "ipv4_mapped", None)
+    target_address: ipaddress.IPv4Address | ipaddress.IPv6Address = (
+        ipv4_mapped if isinstance(ipv4_mapped, ipaddress.IPv4Address) else address
+    )
+
+    return target_address.is_global and not target_address.is_multicast
 
 
 class MergeCandidateReadinessResponse(BaseModel):
