@@ -76,7 +76,9 @@ from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.logs import LogStore
 from awf.runtime.planning import (
+    PLAN_CONFORMANCE_UNSATISFIED,
     PlanConformanceReport,
+    build_conformance_failure_evidence,
     build_conformance_prompt,
     build_execution_prompt,
     build_planning_prompt,
@@ -152,6 +154,13 @@ class _RebaseRecoveryResult:
 class _PrReexecutionGuardResult:
     blocked: bool
     recovery: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _PlanningRunFailure:
+    message: str
+    reason_code: str | None = None
+    details: dict[str, Any] | None = None
 
 
 class _MonitorRebaseRecoveryError(RuntimeError):
@@ -275,6 +284,10 @@ class ExecutorConfig:
     coding CLI with a fix prompt (failing command + stdout/stderr tails)
     and re-validates. ``0`` disables the loop (single-shot legacy
     behaviour); the default mirrors the PR monitor's fix-cycle cap."""
+
+    planning_max_iterations_default: int = 3
+    """Default plan-conformance remediation iterations when a profile omits
+    planning.max_iterations. Explicit profile values win."""
 
 
 class WorkspaceExecutor:
@@ -471,7 +484,13 @@ class WorkspaceExecutor:
                 agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
                 agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
             )
-            profile = _profile_for_workspace(ws, worktree_path=worktree_path)
+            profile = _profile_for_workspace(
+                ws,
+                worktree_path=worktree_path,
+                planning_max_iterations_default=(
+                    self._config.planning_max_iterations_default
+                ),
+            )
             setup_result = await self._validation.run_profile_phases(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
@@ -516,7 +535,7 @@ class WorkspaceExecutor:
                     action="agent_run",
                 ):
                     return
-                planning_error = await self._run_agent_task_with_optional_planning(
+                planning_failure = await self._run_agent_task_with_optional_planning(
                     adapter=adapter,
                     workspace=ws,
                     profile=profile,
@@ -525,12 +544,30 @@ class WorkspaceExecutor:
                     worktree_path=worktree_path,
                     model=default_model,
                 )
-                if planning_error is not None:
+                if planning_failure is not None:
+                    failure_message = (
+                        planning_failure
+                        if isinstance(planning_failure, str)
+                        else planning_failure.message
+                    )
+                    reason_code = (
+                        None
+                        if isinstance(planning_failure, str)
+                        else planning_failure.reason_code
+                    )
+                    details = (
+                        None
+                        if isinstance(planning_failure, str)
+                        else planning_failure.details
+                    )
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
                         failure_reason=FailureReason.agent_failure,
-                        message=planning_error[:2000],
+                        message=failure_message[:2000],
+                        reason_code=reason_code,
+                        details=details,
+                        salvage=_failure_salvage_payload(ws, worktree_path=worktree_path),
                     )
                     return
             else:
@@ -971,7 +1008,11 @@ class WorkspaceExecutor:
             return
 
         max_fix_passes = self._config.max_validation_fix_passes
-        profile = _profile_for_workspace(ws, worktree_path=worktree_path)
+        profile = _profile_for_workspace(
+            ws,
+            worktree_path=worktree_path,
+            planning_max_iterations_default=self._config.planning_max_iterations_default,
+        )
         validation_commands = [
             command.command
             for _, command in profile.phases.commands_for(("post_agent", "validate"))
@@ -1751,6 +1792,9 @@ class WorkspaceExecutor:
                 profile = _profile_for_workspace(
                     ws,
                     worktree_path=self._config.worktrees_root / workspace_id,
+                    planning_max_iterations_default=(
+                        self._config.planning_max_iterations_default
+                    ),
                 )
                 monitor = _call_pr_monitor_factory(
                     self._pr_monitor_factory,
@@ -2053,7 +2097,7 @@ class WorkspaceExecutor:
         compose_file: Path,
         worktree_path: Path,
         model: str | None,
-    ) -> str | None:
+    ) -> str | _PlanningRunFailure | None:
         planning = profile.planning
         if not planning.required:
             await adapter.run(
@@ -2115,7 +2159,9 @@ class WorkspaceExecutor:
 
         gaps: tuple[str, ...] = ()
         last_report: PlanConformanceReport | None = None
+        last_iteration = 0
         for iteration in range(planning.max_iterations + 1):
+            last_iteration = iteration
             await adapter.run(
                 compose_project=compose_project,
                 compose_file=compose_file,
@@ -2174,9 +2220,22 @@ class WorkspaceExecutor:
         if last_report is None:  # pragma: no cover - defensive
             return "planning conformance did not run"
         gap_text = "; ".join(last_report.gaps) or last_report.summary
-        return (
+        message = (
             "plan conformance was not satisfied after "
             f"{planning.max_iterations} iteration(s): {gap_text}"
+        )
+        return _PlanningRunFailure(
+            message=message,
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            details={
+                "conformance": build_conformance_failure_evidence(
+                    report=last_report,
+                    iterations_used=last_iteration,
+                    max_iterations=planning.max_iterations,
+                    plan_path=plan_path,
+                    report_path=report_path,
+                )
+            },
         )
 
     async def _changed_paths(self, worktree_path: Path) -> set[Path]:
@@ -2395,6 +2454,8 @@ class WorkspaceExecutor:
         failure_reason: FailureReason,
         message: str,
         reason_code: str | None = None,
+        details: Mapping[str, Any] | None = None,
+        salvage: Mapping[str, Any] | None = None,
     ) -> None:
         async with self._session_factory() as session:
             repo = WorkspaceRepository(session)
@@ -2431,10 +2492,22 @@ class WorkspaceExecutor:
                     reason_code=EXEC_PROCESS_CLEANUP_FAILED,
                     payload={"message": safe_message[:1000]},
                 )
+            payload: dict[str, Any] | None = None
+            if details is not None or salvage is not None:
+                payload = {
+                    "failure_reason": failure_reason.value,
+                    "reason_code": reason_code or failure_reason.value.upper(),
+                    "message": safe_message,
+                }
+                if details is not None:
+                    payload["details"] = dict(details)
+                if salvage is not None:
+                    payload["salvage"] = dict(salvage)
             await repo.transition(
                 ws,
                 to=WorkspaceStatus.failed,
                 reason_code=reason_code or failure_reason.value.upper(),
+                payload=payload,
             )
             await session.commit()
 
@@ -3300,15 +3373,82 @@ def _nonblank_policy_string(policy: Mapping[str, Any], key: str) -> str | None:
     return None
 
 
-def _profile_for_workspace(ws: Workspace, *, worktree_path: Path) -> WorkspaceProfile:
+def _profile_for_workspace(
+    ws: Workspace,
+    *,
+    worktree_path: Path,
+    planning_max_iterations_default: int = 3,
+) -> WorkspaceProfile:
     if ws.resolved_profile:
-        return WorkspaceProfile.model_validate(ws.resolved_profile)
-    return resolve_workspace_profile(
+        profile = WorkspaceProfile.model_validate(ws.resolved_profile)
+        return _profile_with_planning_iteration_default(
+            profile,
+            planning_max_iterations_default,
+            raw_profile=ws.resolved_profile,
+        )
+    profile = resolve_workspace_profile(
         worktree_path=worktree_path,
         inline_profile=ws.requested_profile,
         profile_ref=ws.profile_ref or ws.env_profile or "auto",
         validation_commands=list(ws.test_commands),
     ).profile
+    return _profile_with_planning_iteration_default(
+        profile,
+        planning_max_iterations_default,
+        raw_profile=ws.requested_profile,
+    )
+
+
+def _profile_with_planning_iteration_default(
+    profile: WorkspaceProfile,
+    planning_max_iterations_default: int,
+    *,
+    raw_profile: Mapping[str, Any] | None = None,
+) -> WorkspaceProfile:
+    """Apply the settings default only when the profile omitted max_iterations."""
+
+    explicit = (
+        _raw_profile_has_explicit_planning_max_iterations(raw_profile)
+        if raw_profile is not None
+        else "max_iterations" in profile.planning.model_fields_set
+    )
+    if explicit or profile.planning.max_iterations == planning_max_iterations_default:
+        return profile
+    return profile.model_copy(
+        deep=True,
+        update={
+            "planning": profile.planning.model_copy(
+                update={"max_iterations": planning_max_iterations_default}
+            )
+        },
+    )
+
+
+def _raw_profile_has_explicit_planning_max_iterations(
+    raw_profile: Mapping[str, Any] | None,
+) -> bool:
+    if raw_profile is None:
+        return False
+    planning = raw_profile.get("planning")
+    return isinstance(planning, Mapping) and "max_iterations" in planning
+
+
+def _failure_salvage_payload(
+    workspace: Workspace,
+    *,
+    worktree_path: Path,
+) -> dict[str, str]:
+    branch_name = workspace.branch_name
+    remote_push_branch = workspace.remote_push_branch or branch_name
+    payload = {
+        "hint": "Workspace worktree and branch were preserved for salvage.",
+        "worktree_path": str(worktree_path),
+    }
+    if branch_name:
+        payload["branch_name"] = branch_name
+    if remote_push_branch:
+        payload["remote_push_branch"] = remote_push_branch
+    return payload
 
 
 def _agent_model_for_workspace(

@@ -327,6 +327,31 @@ class WorkspaceSecretLeaseListResponse(BaseModel):
     items: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
 
 
+class WorkspaceFailureConformanceResponse(BaseModel):
+    summary: str | None = None
+    gaps: list[str] = Field(default_factory=list)
+    reason_code: str | None = None
+    report_reason_code: str | None = None
+    iterations_used: int | None = None
+    max_iterations: int | None = None
+    plan_path: str | None = None
+    report_path: str | None = None
+
+
+class WorkspaceFailureSalvageResponse(BaseModel):
+    hint: str | None = None
+    worktree_path: str | None = None
+    branch_name: str | None = None
+    remote_push_branch: str | None = None
+
+
+class WorkspaceFailureDetailsResponse(BaseModel):
+    reason_code: str | None = None
+    message: str | None = None
+    conformance: WorkspaceFailureConformanceResponse | None = None
+    salvage: WorkspaceFailureSalvageResponse | None = None
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -370,6 +395,7 @@ class WorkspaceResponse(BaseModel):
     pr_url: str | None
     failure_reason: str | None
     failure_message: str | None
+    failure_details: WorkspaceFailureDetailsResponse | None = None
 
     latest_queue_decision: QueueDecisionSummaryResponse | None = None
     active_resource_reservation: ResourceReservationSummaryResponse | None = None

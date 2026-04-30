@@ -5,14 +5,17 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
+from typing import Any
 
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Operation, Workspace
+from awf.db.models import Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import ResourceReservationRepository
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
 from awf.service.resource_capacity import (
@@ -22,6 +25,7 @@ from awf.service.resource_capacity import (
     resource_capacity_summary,
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
+from awf.service.workspaces import workspace_failure_details_payload
 
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
 MIN_SUMMARY_WINDOW_HOURS = 1
@@ -107,6 +111,9 @@ class FailedWorkspaceExample:
     pr_url: str | None
     created_at: datetime
     updated_at: datetime
+    reason_code: str | None = None
+    details: dict[str, Any] = field(default_factory=dict)
+    salvage: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -114,10 +121,13 @@ class RootCauseCluster:
     agent: str
     agent_model: str | None
     failure_reason: str
+    reason_code: str | None
     likely_cause: str
     actionable_next_action: str
     count: int
     sample_workspace_ids: tuple[str, ...]
+    details: dict[str, Any] = field(default_factory=dict)
+    salvage: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -420,19 +430,43 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
     )
     result = await session.execute(stmt)
     rows = result.all()
+    details_by_id = await _failure_details_by_workspace_id(
+        session,
+        {
+            row.id: row.failure_message
+            for row in rows
+        },
+    )
 
-    clusters: dict[tuple[str, str | None, str, str, str], list[str]] = {}
+    clusters: dict[tuple[str, str | None, str, str | None, str, str], list[str]] = {}
+    cluster_details: dict[
+        tuple[str, str | None, str, str | None, str, str],
+        dict[str, Any],
+    ] = {}
+    cluster_salvage: dict[
+        tuple[str, str | None, str, str | None, str, str],
+        dict[str, Any] | None,
+    ] = {}
 
     for row in rows:
         agent = row.agent or "unknown"
-        agent_model = row.task_policy.get("agent_model") if row.task_policy else None
+        agent_model = (
+            row.task_policy.get("agent_model") if row.task_policy else None
+        )
         reason = row.failure_reason or UNKNOWN_FAILURE_REASON
         msg = row.failure_message or ""
+        details_payload = details_by_id.get(row.id, {})
+        specific_reason_code = _details_reason_code(details_payload)
 
         likely_cause = "Unknown Validation Failure"
         action = "Review validation logs"
 
-        if "AGENT_AUTH_FAILED" in msg:
+        if specific_reason_code == PLAN_CONFORMANCE_UNSATISFIED:
+            likely_cause = "Plan Conformance Unsatisfied"
+            action = (
+                "Retry with the final conformance gaps and finish the remaining planned work."
+            )
+        elif "AGENT_AUTH_FAILED" in msg:
             likely_cause = "Agent Auth Failed"
             action = "Check agent credentials"
         elif "GitHub auth/PR creation failed" in msg:
@@ -454,18 +488,23 @@ async def _cluster_root_causes(session: AsyncSession, window_start: datetime) ->
             likely_cause = "Unknown Agent Failure"
             action = "Review agent logs"
 
-        key = (agent, agent_model, reason, likely_cause, action)
+        key = (agent, agent_model, reason, specific_reason_code, likely_cause, action)
         clusters.setdefault(key, []).append(row.id)
+        cluster_details.setdefault(key, _details_only(details_payload))
+        cluster_salvage.setdefault(key, _salvage_only(details_payload))
 
     return [
         RootCauseCluster(
             agent=k[0],
             agent_model=k[1],
             failure_reason=k[2],
-            likely_cause=k[3],
-            actionable_next_action=k[4],
+            reason_code=k[3],
+            likely_cause=k[4],
+            actionable_next_action=k[5],
             count=len(wids),
             sample_workspace_ids=tuple(wids[:DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT]),
+            details=cluster_details.get(k, {}),
+            salvage=cluster_salvage.get(k),
         )
         for k, wids in clusters.items()
     ]
@@ -655,35 +694,99 @@ async def _latest_failed_workspace_examples(
         )
         .limit(limit)
     )
-    rows = await session.execute(stmt)
-    return [
-        FailedWorkspaceExample(
-            workspace_id=workspace_id,
-            title=title,
-            repo_url=repo_url,
-            branch_base=branch_base,
-            agent=agent,
-            status=status,
-            failure_reason=_normalize_failure_reason(failure_reason),
-            failure_message=failure_message,
-            pr_url=pr_url,
-            created_at=_to_utc(created_at),
-            updated_at=_to_utc(updated_at),
+    result = await session.execute(stmt)
+    rows = result.all()
+    details_by_id = await _failure_details_by_workspace_id(
+        session,
+        {
+            row.id: row.failure_message
+            for row in rows
+        },
+    )
+    examples: list[FailedWorkspaceExample] = []
+    for row in rows:
+        details_payload = details_by_id.get(row.id, {})
+        examples.append(
+            FailedWorkspaceExample(
+                workspace_id=row.id,
+                title=row.task_title,
+                repo_url=row.repo_url,
+                branch_base=row.branch_base,
+                agent=row.agent,
+                status=row.status,
+                failure_reason=_normalize_failure_reason(row.failure_reason),
+                failure_message=row.failure_message,
+                pr_url=row.pr_url,
+                created_at=_to_utc(row.created_at),
+                updated_at=_to_utc(row.updated_at),
+                reason_code=_details_reason_code(details_payload),
+                details=_details_only(details_payload),
+                salvage=_salvage_only(details_payload),
+            )
         )
-        for (
-            workspace_id,
-            title,
-            repo_url,
-            branch_base,
-            agent,
-            status,
-            failure_reason,
-            failure_message,
-            pr_url,
-            created_at,
-            updated_at,
-        ) in rows.all()
-    ]
+    return examples
+
+
+async def _failure_details_by_workspace_id(
+    session: AsyncSession,
+    failure_messages: dict[str, str | None],
+) -> dict[str, dict[str, Any]]:
+    if not failure_messages:
+        return {}
+    stmt = (
+        select(
+            WorkspaceEvent.workspace_id,
+            WorkspaceEvent.event_type,
+            WorkspaceEvent.new_state,
+            WorkspaceEvent.reason_code,
+            WorkspaceEvent.payload,
+            WorkspaceEvent.occurred_at,
+        )
+        .where(WorkspaceEvent.workspace_id.in_(failure_messages))
+        .where(WorkspaceEvent.event_type == "workspace.state_changed")
+        .where(WorkspaceEvent.new_state == WorkspaceStatus.failed.value)
+        .order_by(WorkspaceEvent.workspace_id, WorkspaceEvent.occurred_at.desc())
+    )
+    rows = (await session.execute(stmt)).all()
+    details: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        if row.workspace_id in details:
+            continue
+        workspace = _workspace_event_view(
+            workspace_id=row.workspace_id,
+            event_type=row.event_type,
+            new_state=row.new_state,
+            reason_code=row.reason_code,
+            payload=row.payload,
+            failure_message=failure_messages.get(row.workspace_id),
+        )
+        payload = workspace_failure_details_payload(workspace)
+        if payload is not None:
+            details[row.workspace_id] = payload
+    return details
+
+
+def _workspace_event_view(
+    *,
+    workspace_id: str,
+    event_type: str,
+    new_state: str | None,
+    reason_code: str | None,
+    payload: dict[str, Any] | None,
+    failure_message: str | None,
+) -> Any:
+    event = SimpleNamespace(
+        workspace_id=workspace_id,
+        event_type=event_type,
+        new_state=new_state,
+        reason_code=reason_code,
+        payload=payload,
+    )
+    return SimpleNamespace(
+        id=workspace_id,
+        failure_message=failure_message,
+        events=[event],
+    )
 
 
 async def _count_active_workspaces(session: AsyncSession) -> int:
@@ -779,6 +882,24 @@ def _normalize_failure_reason(reason: object) -> str:
     if normalized in _KNOWN_FAILURE_REASONS:
         return normalized
     return UNKNOWN_FAILURE_REASON
+
+
+def _details_reason_code(details_payload: dict[str, Any]) -> str | None:
+    value = details_payload.get("reason_code")
+    return value if isinstance(value, str) else None
+
+
+def _details_only(details_payload: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in details_payload.items()
+        if key not in {"reason_code", "message", "salvage"}
+    }
+
+
+def _salvage_only(details_payload: dict[str, Any]) -> dict[str, Any] | None:
+    value = details_payload.get("salvage")
+    return value if isinstance(value, dict) else None
 
 
 def _workspace_saturation_counts(status_counts: dict[str, int]) -> WorkspaceSaturationCounts:

@@ -49,6 +49,10 @@ from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.runtime.logs import read_log_chunk
+from awf.runtime.planning import (
+    PLAN_CONFORMANCE_UNSATISFIED,
+    build_conformance_retry_prompt,
+)
 from awf.service.controls import (
     CleanerFactory,
     ProjectStopper,
@@ -176,6 +180,13 @@ class WorkspaceRetryResult:
     new_workspace: Workspace
     operation: Operation
     attempt_number: int
+
+
+@dataclass(frozen=True)
+class _ConformanceRetryContext:
+    reason_code: str
+    evidence: Mapping[str, Any]
+    evidence_ref: dict[str, str]
 
 
 @dataclass(frozen=True)
@@ -624,6 +635,16 @@ async def retry_workspace_row(
     if WorkspaceStatus(source.status) not in RETRYABLE_WORKSPACE_STATUSES:
         raise WorkspaceRetryNotAllowedError(source)
 
+    conformance_context = _conformance_retry_context(source)
+    retried_prompt = (
+        build_conformance_retry_prompt(
+            task_prompt=source.task_prompt,
+            evidence=conformance_context.evidence,
+        )
+        if conformance_context is not None
+        else source.task_prompt
+    )
+
     overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=source.repo_url,
         branch_base=source.branch_base,
@@ -634,7 +655,7 @@ async def retry_workspace_row(
         repo_url=source.repo_url,
         branch_base=source.branch_base,
         task_title=source.task_title,
-        task_prompt=source.task_prompt,
+        task_prompt=retried_prompt,
         task_external_id=source.task_external_id,
         task_class=source.task_class,
         owned_paths=list(source.owned_paths),
@@ -666,17 +687,26 @@ async def retry_workspace_row(
     )
 
     operation_repo = OperationRepository(session)
+    operation_payload: dict[str, Any] = {"source_workspace_id": source.id}
+    if conformance_context is not None:
+        operation_payload["source_reason_code"] = conformance_context.reason_code
+        operation_payload["conformance_evidence_ref"] = (
+            conformance_context.evidence_ref
+        )
     operation = await operation_repo.create(
         workspace_id=retried.id,
         operation_type=OperationType.retry,
         status=OperationStatus.running,
-        payload={"source_workspace_id": source.id},
+        payload=operation_payload,
     )
     event_payload = {
         "source_workspace_id": source.id,
         "new_workspace_id": retried.id,
         "attempt_number": attempt.attempt_number,
     }
+    if conformance_context is not None:
+        event_payload["source_reason_code"] = conformance_context.reason_code
+        event_payload["conformance_evidence_ref"] = conformance_context.evidence_ref
     await repo.add_event(
         source,
         event_type="workspace.retry_requested",
@@ -697,7 +727,15 @@ async def retry_workspace_row(
             "new_workspace_id": retried.id,
             "attempt_number": attempt.attempt_number,
             "status": retried.status,
-        },
+        }
+        | (
+            {
+                "source_reason_code": conformance_context.reason_code,
+                "conformance_evidence_ref": conformance_context.evidence_ref,
+            }
+            if conformance_context is not None
+            else {}
+        ),
     )
     await session.flush()
     return WorkspaceRetryResult(
@@ -759,6 +797,7 @@ def workspace_response(
         else validation_provenance_unavailable(workspace)
     )
     computed_fields["runtime_health"] = _workspace_runtime_health_from_events(workspace)
+    computed_fields["failure_details"] = workspace_failure_details_payload(workspace)
     computed_fields["secret_leases"] = [
         workspace_secret_lease_response(lease) for lease in _loaded_secret_leases(workspace)
     ]
@@ -775,6 +814,104 @@ def _loaded_secret_leases(workspace: Workspace) -> list[WorkspaceSecretLease]:
     if "secret_leases" in state.unloaded:
         return []
     return list(getattr(workspace, "secret_leases", []))
+
+
+def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | None:
+    event = _latest_failed_state_event(workspace)
+    if event is None:
+        return None
+    payload = event.payload if isinstance(event.payload, dict) else {}
+    reason_code = _payload_str(payload, "reason_code") or event.reason_code
+    message = _payload_str(payload, "message") or workspace.failure_message
+    details = payload.get("details")
+    if not isinstance(details, Mapping):
+        details = {}
+    conformance = details.get("conformance")
+    if not isinstance(conformance, Mapping):
+        conformance = payload.get("conformance")
+    salvage = payload.get("salvage")
+
+    result: dict[str, Any] = {
+        "reason_code": reason_code,
+        "message": message,
+    }
+    conformance_payload = _compact_conformance_payload(conformance)
+    if conformance_payload is not None:
+        result["conformance"] = conformance_payload
+    salvage_payload = _compact_salvage_payload(salvage)
+    if salvage_payload is not None:
+        result["salvage"] = salvage_payload
+    if result["reason_code"] is None and result["message"] is None and len(result) == 2:
+        return None
+    return result
+
+
+def _latest_failed_state_event(workspace: Workspace) -> Any | None:
+    for event in reversed(getattr(workspace, "events", []) or []):
+        if (
+            getattr(event, "event_type", None) == "workspace.state_changed"
+            and getattr(event, "new_state", None) == WorkspaceStatus.failed.value
+        ):
+            return event
+    return None
+
+
+def _compact_conformance_payload(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    payload: dict[str, Any] = {}
+    for key in (
+        "summary",
+        "reason_code",
+        "report_reason_code",
+        "plan_path",
+        "report_path",
+    ):
+        item = value.get(key)
+        if isinstance(item, str):
+            payload[key] = item
+    gaps = value.get("gaps")
+    if isinstance(gaps, list):
+        payload["gaps"] = [gap for gap in gaps if isinstance(gap, str)]
+    for key in ("iterations_used", "max_iterations"):
+        item = value.get(key)
+        if isinstance(item, int):
+            payload[key] = item
+    return payload or None
+
+
+def _compact_salvage_payload(value: object) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    payload = {
+        key: item
+        for key in ("hint", "worktree_path", "branch_name", "remote_push_branch")
+        if isinstance((item := value.get(key)), str) and item
+    }
+    return payload or None
+
+
+def _payload_str(payload: Mapping[str, Any], key: str) -> str | None:
+    value = payload.get(key)
+    return value if isinstance(value, str) else None
+
+
+def _conformance_retry_context(workspace: Workspace) -> _ConformanceRetryContext | None:
+    details = workspace_failure_details_payload(workspace)
+    if details is None or details.get("reason_code") != PLAN_CONFORMANCE_UNSATISFIED:
+        return None
+    evidence = details.get("conformance")
+    if not isinstance(evidence, Mapping):
+        return None
+    return _ConformanceRetryContext(
+        reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+        evidence=evidence,
+        evidence_ref={
+            "source_workspace_id": workspace.id,
+            "event_type": "workspace.state_changed",
+            "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+        },
+    )
 
 
 def _workspace_runtime_health_from_events(

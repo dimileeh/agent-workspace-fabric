@@ -10,10 +10,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateV2Request
 from awf.db.base import Base
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.service.workspaces import WorkspaceRetryNotFoundError, WorkspaceService
 
 
@@ -83,6 +84,48 @@ async def _mark_failed(
         await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
         await session.commit()
         return frozen_profile
+
+
+async def _mark_conformance_failed(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> None:
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = (
+            "plan conformance was not satisfied after 0 iteration(s): add tests"
+        )
+        workspace.branch_name = "awf/ws_old"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            payload={
+                "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+                "details": {
+                    "conformance": {
+                        "summary": "Implementation is incomplete.",
+                        "gaps": ["Add regression test", "Wire retry endpoint"],
+                        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+                        "iterations_used": 0,
+                        "max_iterations": 0,
+                        "plan_path": "docs/awf-plans/ws_old.md",
+                        "report_path": "docs/awf-plans/ws_old.conformance.json",
+                    }
+                },
+                "salvage": {
+                    "hint": "Workspace worktree and branch were preserved for salvage.",
+                    "worktree_path": "/worktrees/ws_old",
+                    "branch_name": "awf/ws_old",
+                    "remote_push_branch": "awf/ws_old",
+                },
+            },
+        )
+        await session.commit()
 
 
 @pytest.mark.unit
@@ -175,6 +218,56 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
         (first.id, "workspace.retry_requested", first.id),
         (retried.id, "workspace.retry_created", first.id),
     }
+
+
+@pytest.mark.unit
+async def test_retry_conformance_unsatisfied_enriches_prompt_with_final_gaps(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request())
+    await _mark_conformance_failed(factory, first.id)
+
+    retry = await service.retry_workspace(first.id)
+
+    async with factory() as session:
+        retried = await WorkspaceRepository(session).get(retry.new_workspace_id)
+        operations = list(
+            (
+                await session.execute(
+                    select(Operation).where(Operation.workspace_id == retry.new_workspace_id)
+                )
+            ).scalars()
+        )
+        retry_created = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == retry.new_workspace_id,
+                        WorkspaceEvent.event_type == "workspace.retry_created",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert retried is not None
+    assert "Fix the intermittent validation failure." in retried.task_prompt
+    assert "finish the remaining plan-conformance gaps" in retried.task_prompt
+    assert "Do not restart from scratch" in retried.task_prompt
+    assert "- Add regression test" in retried.task_prompt
+    assert "- Wire retry endpoint" in retried.task_prompt
+
+    assert len(operations) == 1
+    evidence_ref = operations[0].payload["conformance_evidence_ref"]
+    assert evidence_ref == {
+        "source_workspace_id": first.id,
+        "event_type": "workspace.state_changed",
+        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+    }
+    assert "Add regression test" not in str(operations[0].payload)
+    assert operations[0].result["source_reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
+    assert retry_created[0].payload["source_reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
+    assert "conformance_evidence_ref" in retry_created[0].payload
 
 
 @pytest.mark.unit
