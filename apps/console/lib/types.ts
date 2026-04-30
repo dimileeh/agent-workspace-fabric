@@ -354,6 +354,43 @@ export interface MergeQueueItem {
   policy_findings: PolicyFinding[];
 }
 
+export interface WorkspaceSecretLease {
+  lease_id: string;
+  secret_name: string;
+  kind: "mount" | "env";
+  target: string;
+  status: "issued" | "mounted" | "expired" | "revoked";
+  provider: string | null;
+  ref_digest: string | null;
+  issued_at: string;
+  mounted_at: string | null;
+  expires_at: string | null;
+  revoked_at: string | null;
+}
+
+export interface ProfileSecret {
+  name: string;
+  target: string;
+  kind: "mount" | "env";
+  mode: "ro" | "rw";
+  required: boolean;
+  provider: string | null;
+}
+
+export interface ProfileEgress {
+  mode: "open" | "allowlist" | "offline" | "mirrored" | "unavailable";
+  allowlist: string[];
+}
+
+export interface HostHomeAuthMountPolicy {
+  mode: "block" | "warn" | "unavailable";
+}
+
+export interface ProfileSecurity {
+  egress: ProfileEgress;
+  host_home_auth_mounts: HostHomeAuthMountPolicy;
+}
+
 export interface Workspace {
   id: string;
   status: WorkspaceStatus;
@@ -393,6 +430,8 @@ export interface Workspace {
   pr_url: string | null;
   failure_reason: string | null;
   failure_message: string | null;
+  secret_leases: WorkspaceSecretLease[];
+  policy_findings: PolicyFinding[];
   created_at: string;
   updated_at: string;
 }
