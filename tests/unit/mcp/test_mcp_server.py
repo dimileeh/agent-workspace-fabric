@@ -961,6 +961,7 @@ class TestWorkspaceRuntime:
                     "started_at": "2026-04-25T10:00:00Z",
                 }
             ],
+            "app_endpoints": [],
             "logs_available": True,
             "control_available": True,
             "reason": None,

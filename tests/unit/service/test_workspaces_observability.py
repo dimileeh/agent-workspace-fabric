@@ -171,6 +171,22 @@ async def test_get_runtime_returns_snapshot_and_none_for_missing_workspace(
             )
 
     service = WorkspaceService(factory, runtime_inspector=FakeRuntimeInspector())
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "runtime-endpoints",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {
+                    "name": "app",
+                    "service": "app",
+                    "port": 3000,
+                    "path": "/",
+                    "health": {"path": "/healthz"},
+                    "visibility": "agent",
+                }
+            ],
+        }
+    )
     async with factory() as session:
         workspace = await WorkspaceRepository(session).create(
             repo_url="git@github.com:example/app.git",
@@ -179,6 +195,7 @@ async def test_get_runtime_returns_snapshot_and_none_for_missing_workspace(
             task_prompt="Inspect runtime.",
             agent="codex",
             test_commands=[],
+            resolved_profile=profile.model_dump(mode="json", by_alias=True),
         )
         workspace.compose_project_name = "awf_ws_service_runtime"
         await session.commit()
@@ -196,6 +213,23 @@ async def test_get_runtime_returns_snapshot_and_none_for_missing_workspace(
     assert len(snapshot.services) == 1
     assert snapshot.services[0].name == "agent"
     assert snapshot.services[0].health == "healthy"
+    assert [endpoint.model_dump(mode="json") for endpoint in snapshot.app_endpoints] == [
+        {
+            "name": "app",
+            "service": "app",
+            "scheme": "http",
+            "port": 3000,
+            "path": "/",
+            "internal_url": "http://app:3000/",
+            "visibility": "agent",
+            "health": {
+                "path": "/healthz",
+                "method": "GET",
+                "expected_status": 200,
+                "internal_url": "http://app:3000/healthz",
+            },
+        }
+    ]
     assert missing is None
 
 

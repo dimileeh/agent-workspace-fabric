@@ -64,8 +64,10 @@ def test_callback_insert_helpers_cover_postgres_and_unsupported_dialects() -> No
     delivery_sql = str(delivery_stmt.compile(dialect=postgresql.dialect()))
     assert "ON CONFLICT" in subscription_sql
     assert "ON CONFLICT" in delivery_sql
-    assert repository_module._callback_subscription_insert_if_absent_stmt("mysql") is None
     assert repository_module._callback_delivery_insert_if_absent_stmt("mysql") is None
+    assert repository_module._callback_subscription_insert_if_absent_stmt("mysql") is None
+    assert repository_module._secret_lease_insert_if_absent_stmt("mysql") is None
+    assert repository_module._callback_subscription_event_type_candidates("internal.event") == ()
 
     event_filter = repository_module._callback_subscription_event_type_filter(
         ("workspace.state_changed",),

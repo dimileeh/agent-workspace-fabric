@@ -610,6 +610,29 @@ def test_operation_response_preserves_colliding_log_stream_refs() -> None:
 
 
 @pytest.mark.unit
+def test_operation_response_deduplicates_colliding_log_stream_ref_lists() -> None:
+    now = datetime(2026, 4, 28, tzinfo=UTC)
+
+    response = OperationResponse(
+        id="op_duplicate_logs",
+        workspace_id="ws_duplicate_logs",
+        type=OperationType.validate.value,
+        status=OperationStatus.succeeded.value,
+        error_code=None,
+        error_message=None,
+        payload={"log_stream_refs": {"monitor": "monitor.log"}},
+        result={"log_stream_refs": {"monitor": ["monitor.log", "monitor.retry.log"]}},
+        idempotency_key=None,
+        created_at=now,
+        started_at=now,
+        finished_at=now,
+    )
+
+    assert response.log_stream_refs == {"monitor": ["monitor.log", "monitor.retry.log"]}
+    assert response.log_stream_ids == ["monitor.log", "monitor.retry.log"]
+
+
+@pytest.mark.unit
 async def test_list_operations_limit_validation(client: AsyncClient):
     response = await client.get("/v1/operations?limit=0")
     assert response.status_code == 422

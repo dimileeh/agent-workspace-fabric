@@ -27,6 +27,7 @@ from awf.profiles.registry import (
 from awf.profiles.resolver import (
     ProfileResolutionError,
     ProfileResolver,
+    _validation_error_message,
     resolve_workspace_profile,
 )
 
@@ -46,6 +47,19 @@ def test_profile_schema_accepts_minimal_valid_profile() -> None:
     assert profile.monitor.non_check_reviewer_logins == ["greptile-apps"]
     assert profile.phases.setup[0].command == "go mod download"
     assert profile.phases.validate_commands[0].command == "go test ./..."
+
+
+@pytest.mark.unit
+def test_validation_error_message_falls_back_when_pydantic_has_no_errors() -> None:
+    class EmptyValidationError:
+        def errors(self, *, include_input: bool = True) -> list[dict[str, object]]:
+            assert include_input is False
+            return []
+
+    assert (
+        _validation_error_message(EmptyValidationError())  # type: ignore[arg-type]
+        == "schema validation failed"
+    )
 
 
 @pytest.mark.unit
@@ -138,6 +152,45 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
         profile.validation.coverage.command.command == "uv run pytest --cov=awf --cov-report=term"
     )
     assert profile.validation.coverage.command.timeout_seconds == 900
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_declared_provider_github_and_local_auth_leases() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "declared-local-leases",
+            "secrets": [
+                {
+                    "name": "github-token",
+                    "kind": "env",
+                    "target": "GITHUB_TOKEN",
+                    "provider": "github",
+                    "ref": "token",
+                },
+                {
+                    "name": "openai-token",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "env",
+                    "ref": "OPENAI_API_KEY",
+                },
+                {
+                    "name": "github-cli-config",
+                    "kind": "mount",
+                    "target": "/home/agent/.config/gh",
+                    "provider": "local-auth",
+                    "ref": ".config/gh",
+                },
+            ],
+        }
+    )
+
+    assert [secret.provider for secret in profile.secrets] == [
+        "github",
+        "env",
+        "local-auth",
+    ]
+    assert profile.secrets[2].mode == "ro"
 
 
 @pytest.mark.unit
@@ -333,6 +386,74 @@ def test_profile_schema_accepts_http_healthcheck_without_shell_command() -> None
 
 
 @pytest.mark.unit
+def test_profile_schema_rejects_mismatched_healthcheck_kind() -> None:
+    with pytest.raises(ValidationError, match="healthcheck kind must match"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-health-kind",
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "kind": "http",
+                            "command": "curl -fsS http://api:8000/healthz",
+                        }
+                    ]
+                },
+            }
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "name": "bad-health-method",
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "api",
+                        "url": "http://api.example.test/healthz",
+                        "method": 123,
+                    }
+                ]
+            },
+        },
+        {
+            "name": "bad-endpoint-health-method",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {
+                    "name": "app",
+                    "service": "app",
+                    "port": 3000,
+                    "health": {"path": "/healthz", "method": 123},
+                }
+            ],
+        },
+        {
+            "name": "bad-endpoint-scheme",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {"name": "app", "service": "app", "scheme": 123, "port": 3000}
+            ],
+        },
+        {
+            "name": "bad-endpoint-visibility",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {"name": "app", "service": "app", "port": 3000, "visibility": 123}
+            ],
+        },
+    ],
+)
+def test_profile_schema_rejects_non_string_normalized_fields(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(payload)
+
+
+@pytest.mark.unit
 def test_http_healthcheck_public_targets_redact_url_userinfo() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -366,8 +487,9 @@ def test_http_healthcheck_public_targets_redact_url_userinfo() -> None:
     [
         {"name": "missing-target"},
         {"name": "both", "command": "curl localhost", "url": "http://localhost/health"},
-        {"name": "ftp", "url": "ftp://localhost/health"},
         {"name": "kind-mismatch", "kind": "http", "command": "curl localhost"},
+        {"name": "ftp", "url": "ftp://localhost/health"},
+        {"name": "method-type", "url": "http://localhost/health", "method": 123},
         {"name": "status", "url": "http://localhost/health", "expected_status": 99},
         {"name": "interval", "url": "http://localhost/health", "interval_seconds": 0},
     ],

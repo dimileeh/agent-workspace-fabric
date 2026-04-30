@@ -2,13 +2,22 @@
 
 from __future__ import annotations
 
+import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
+from typing import Any
+from urllib.parse import urlunsplit
 
 from awf.node.compose_manager import ComposeService
 from awf.profiles.lint import profile_service_volume_lint_errors
-from awf.profiles.models import ProfileLintFinding, WorkspaceProfile
+from awf.profiles.models import (
+    EndpointVisibility,
+    ProfileAppEndpoint,
+    ProfileLintFinding,
+    WorkspaceProfile,
+    _normalized_endpoint_env_name,
+)
 
 AGENT_AUTH_ENV_VARS = (
     # Codex/OpenAI static-token fallback auth. Prefer isolated ~/.codex copies
@@ -119,7 +128,126 @@ def _resolve_workspace_path(value: str, *, base_path: Path | None) -> str:
 
 
 def profile_agent_environment(profile: WorkspaceProfile) -> tuple[tuple[str, str], ...]:
-    return tuple(profile.runtime.environment.items())
+    return (
+        *profile.runtime.environment.items(),
+        *profile_app_endpoint_environment(profile),
+    )
+
+
+def resolve_app_endpoints(
+    profile: WorkspaceProfile,
+    *,
+    include_internal: bool = True,
+) -> tuple[dict[str, Any], ...]:
+    """Resolve profile endpoints into deterministic internal service URLs."""
+
+    return resolve_profile_app_endpoints(
+        profile.app_endpoints,
+        include_internal=include_internal,
+    )
+
+
+def resolve_profile_app_endpoints(
+    app_endpoints: Iterable[ProfileAppEndpoint],
+    *,
+    include_internal: bool = True,
+) -> tuple[dict[str, Any], ...]:
+    """Resolve profile endpoint definitions into deterministic internal service URLs."""
+
+    endpoints: list[dict[str, Any]] = []
+    for endpoint in app_endpoints:
+        if not include_internal and endpoint.visibility is EndpointVisibility.internal:
+            continue
+        endpoints.append(_resolved_app_endpoint(endpoint))
+    return tuple(endpoints)
+
+
+def profile_app_endpoint_environment(
+    profile: WorkspaceProfile,
+    *,
+    resolved_endpoints: Iterable[dict[str, Any]] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    if resolved_endpoints is None:
+        resolved_endpoints = resolve_app_endpoints(profile)
+
+    endpoints = [
+        endpoint
+        for endpoint in resolved_endpoints
+        if endpoint["visibility"] in {"agent", "validation"}
+    ]
+    if not endpoints:
+        return ()
+
+    env: list[tuple[str, str]] = [
+        (
+            "AWF_APP_ENDPOINTS_JSON",
+            json.dumps(
+                endpoints,
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ),
+        )
+    ]
+    for endpoint in endpoints:
+        env.append(
+            (
+                f"AWF_APP_ENDPOINT_{_normalized_endpoint_env_name(str(endpoint['name']))}_URL",
+                str(endpoint["internal_url"]),
+            )
+        )
+    return tuple(env)
+
+
+def _resolved_app_endpoint(endpoint: ProfileAppEndpoint) -> dict[str, Any]:
+    internal_url = _endpoint_url(endpoint, endpoint.path)
+    return {
+        "name": endpoint.name,
+        "service": endpoint.service,
+        "scheme": endpoint.scheme,
+        "port": endpoint.port,
+        "path": endpoint.path,
+        "internal_url": internal_url,
+        "visibility": endpoint.visibility.value,
+        "health": (
+            {
+                "path": endpoint.health.path,
+                "method": endpoint.health.method,
+                "expected_status": endpoint.health.expected_status,
+                "internal_url": _endpoint_url(endpoint, endpoint.health.path),
+            }
+            if endpoint.health is not None
+            else None
+        ),
+    }
+
+
+def _endpoint_url(endpoint: ProfileAppEndpoint, path: str) -> str:
+    return urlunsplit((endpoint.scheme, f"{endpoint.service}:{endpoint.port}", path, "", ""))
+
+
+def merge_agent_environment(
+    base_environment: tuple[tuple[str, str], ...],
+    additions: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    """Merge agent environment pairs without overwriting existing keys."""
+
+    merged: list[tuple[str, str]] = list(base_environment)
+    existing = {key for key, _ in merged}
+    for key, value in additions:
+        if key not in existing:
+            merged.append((key, value))
+            existing.add(key)
+    return tuple(merged)
+
+
+def agent_environment_with_declared_secret_leases(
+    base_environment: tuple[tuple[str, str], ...],
+    lease_environment: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    """Add profile-declared secret lease placeholders before legacy fallbacks."""
+
+    return merge_agent_environment(base_environment, lease_environment)
 
 
 def agent_environment_with_github_token(
@@ -150,6 +278,14 @@ def _github_token_placeholder(source_env: Mapping[str, str]) -> str | None:
 
 
 def agent_environment_with_host_auth(
+    base_environment: tuple[tuple[str, str], ...],
+    *,
+    host_env: Mapping[str, str] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    return agent_environment_with_legacy_host_auth(base_environment, host_env=host_env)
+
+
+def agent_environment_with_legacy_host_auth(
     base_environment: tuple[tuple[str, str], ...],
     *,
     host_env: Mapping[str, str] | None = None,

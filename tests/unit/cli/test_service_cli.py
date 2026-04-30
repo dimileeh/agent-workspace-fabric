@@ -1445,10 +1445,12 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             compose: object,
             agent_runtime_image: str,
             auth_mount_resolver: object | None = None,
+            secret_lease_resolver: object | None = None,
         ) -> None:
             created["stack_compose"] = compose
             created["stack_agent_runtime_image"] = agent_runtime_image
             created["stack_auth_mount_resolver"] = auth_mount_resolver
+            created["stack_secret_lease_resolver"] = secret_lease_resolver
 
     class _Provisioner:
         def __init__(
@@ -1540,6 +1542,12 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["stack_auth_mount_resolver"] is not None
     assert created["stack_auth_mount_resolver"].host_home == (tmp_path / "host-home").resolve()
     assert created["stack_auth_mount_resolver"].work_dir == host_work_dir
+    assert created["stack_secret_lease_resolver"] is not None
+    assert created["stack_secret_lease_resolver"].host_home == (
+        tmp_path / "host-home"
+    ).resolve()
+    assert created["stack_secret_lease_resolver"].work_dir == host_work_dir
+    assert created["stack_secret_lease_resolver"].host_env is worker_mod.os.environ
     assert created["provisioner_session_factory"] is session_factory
     assert created["worker_session_factory"] is session_factory
     assert created["provisioner_stack_launcher"].__class__ is _ComposeStackLauncher

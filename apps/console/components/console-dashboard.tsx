@@ -83,6 +83,7 @@ import type {
   ResourceSaturationSummary,
   RuntimeService,
   Workspace,
+  WorkspaceAppEndpoint,
   WorkspaceEvent,
   WorkspaceLifecycleStage,
   WorkspaceLogRead,
@@ -2659,6 +2660,9 @@ function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
               {runtime.reason}
             </div>
           ) : null}
+          {runtime.app_endpoints.length > 0 ? (
+            <EndpointTable endpoints={runtime.app_endpoints} />
+          ) : null}
           <div className="overflow-auto rounded-md border border-slate-200">
             <table className="w-full min-w-[720px] text-left text-xs">
               <thead className="bg-slate-50 text-slate-600">
@@ -2687,6 +2691,51 @@ function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
         </div>
       )}
     </Panel>
+  );
+}
+
+function EndpointTable({ endpoints }: { endpoints: WorkspaceAppEndpoint[] }) {
+  return (
+    <div className="overflow-auto rounded-md border border-slate-200">
+      <table className="w-full min-w-[680px] text-left text-xs">
+        <thead className="bg-slate-50 text-slate-600">
+          <tr>
+            <Th>Name</Th>
+            <Th>Service</Th>
+            <Th>Visibility</Th>
+            <Th>Internal URL</Th>
+            <Th>Health</Th>
+          </tr>
+        </thead>
+        <tbody>
+          {endpoints.map((endpoint) => (
+            <tr key={endpoint.name} className="border-t border-slate-100">
+              <Td>
+                <div className="font-medium">{endpoint.name}</div>
+              </Td>
+              <Td>
+                <span className="mono">{endpoint.service}</span>
+                <span className="text-slate-500">:{endpoint.port}</span>
+              </Td>
+              <Td>
+                <Badge value={endpoint.visibility} />
+              </Td>
+              <Td className="mono max-w-[280px] truncate">{endpoint.internal_url}</Td>
+              <Td>
+                {endpoint.health ? (
+                  <span className="mono">
+                    {endpoint.health.method} {endpoint.health.path}{" "}
+                    {endpoint.health.expected_status}
+                  </span>
+                ) : (
+                  "—"
+                )}
+              </Td>
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
   );
 }
 

@@ -25,6 +25,28 @@ services:
       - app
     healthcheck_cmd: node /app/scripts/container-healthcheck.mjs http://127.0.0.1:9323/healthz ok
     command: node /app/browser/validator-server.mjs
+app_endpoints:
+  - name: app
+    service: app
+    port: 3000
+    path: /
+    health:
+      path: /healthz
+      expected_status: 200
+    visibility: agent
+  - name: browser_validation
+    service: browser
+    port: 9323
+    path: /validate
+    health:
+      path: /healthz
+      expected_status: 200
+    visibility: validation
+  - name: operator_notes
+    service: app
+    port: 3000
+    path: /operator
+    visibility: console
 phases:
   setup:
     - command: node scripts/setup.mjs

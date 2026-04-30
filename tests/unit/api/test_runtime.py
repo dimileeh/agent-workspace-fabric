@@ -33,7 +33,28 @@ async def runtime_app_and_client(engine: AsyncEngine) -> AsyncIterator[tuple[obj
         yield app, client
 
 
-async def _running_workspace(engine: AsyncEngine) -> str:
+def _runtime_endpoint_profile() -> dict[str, object]:
+    return {
+        "name": "runtime-endpoints",
+        "services": [{"name": "app", "image": "example/app:latest"}],
+        "app_endpoints": [
+            {
+                "name": "app",
+                "service": "app",
+                "port": 3000,
+                "path": "/",
+                "health": {"path": "/healthz"},
+                "visibility": "agent",
+            }
+        ],
+    }
+
+
+async def _running_workspace(
+    engine: AsyncEngine,
+    *,
+    resolved_profile: dict[str, object] | None = None,
+) -> str:
     factory = make_session_factory(engine)
     async with factory() as session:
         workspace = await WorkspaceRepository(session).create(
@@ -43,6 +64,7 @@ async def _running_workspace(engine: AsyncEngine) -> str:
             task_prompt="inspect runtime api",
             agent="codex",
             test_commands=[],
+            resolved_profile=resolved_profile,
         )
         workspace.status = WorkspaceStatus.running.value
         workspace.compose_project_name = "awf_ws_runtime_api"
@@ -75,6 +97,42 @@ async def test_runtime_endpoint_serializes_structured_runtime_health(
         "services": [],
     }
     assert inspector.calls == ["awf_ws_runtime_api"]
+
+
+@pytest.mark.unit
+async def test_runtime_endpoint_serializes_app_endpoint_metadata(
+    runtime_app_and_client: tuple[object, AsyncClient],
+    engine: AsyncEngine,
+) -> None:
+    app, client = runtime_app_and_client
+    workspace_id = await _running_workspace(
+        engine,
+        resolved_profile=_runtime_endpoint_profile(),
+    )
+    app.state.workspace_runtime_inspector = _RuntimeInspector(
+        RuntimeSnapshot(stack_state="running")
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/runtime")
+
+    assert response.status_code == 200
+    assert response.json()["app_endpoints"] == [
+        {
+            "name": "app",
+            "service": "app",
+            "scheme": "http",
+            "port": 3000,
+            "path": "/",
+            "internal_url": "http://app:3000/",
+            "visibility": "agent",
+            "health": {
+                "path": "/healthz",
+                "method": "GET",
+                "expected_status": 200,
+                "internal_url": "http://app:3000/healthz",
+            },
+        }
+    ]
 
 
 @pytest.mark.unit

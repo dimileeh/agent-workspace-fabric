@@ -227,7 +227,7 @@ Status values:
 
 ## P1: Security, Secrets, And Egress Policy
 
-- [ ] Replace broad static auth mounts with declared secret leases where possible.
+- [x] Replace broad static auth mounts with declared secret leases where possible.
 - [x] Track secret lease issue, mount, expiry, revoke, and audit events.
 - [x] Revoke workspace secrets when workspace reaches terminal cleanup.
 - [x] Redact known token patterns from persisted logs and artifacts.
