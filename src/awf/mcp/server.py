@@ -30,6 +30,8 @@ from awf.api.schemas import (
     OwnedPath,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
+    WorkspaceLockListResponse,
+    WorkspaceLockResponse,
     WorkspaceOverlapGraphResponse,
 )
 from awf.common.config import Settings, get_settings
@@ -38,6 +40,7 @@ from awf.profiles.resolver import ProfileResolutionError
 from awf.service.artifacts import list_workspace_artifacts_metadata
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
+from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
 from awf.service.merge_queue import InvalidMergeQueueCursorError, list_merge_queue_response
 from awf.service.metrics import (
     DEFAULT_FAILURE_EXAMPLE_LIMIT,
@@ -53,6 +56,7 @@ from awf.service.metrics import (
 )
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
+from awf.service.tasks import build_task_attempt_list_response, build_task_list_response
 from awf.service.validation_provenance import list_validation_provenance_response
 from awf.service.workspace_observability import (
     InvalidWorkspaceOverviewCursorError,
@@ -72,6 +76,14 @@ RuntimeHealthSummaryProvider = Callable[
     [Settings, AsyncSession, OrphanResourceSummary],
     WorkspaceRuntimeHealthSummary | Awaitable[WorkspaceRuntimeHealthSummary],
 ]
+ReadinessProvider = Callable[
+    [Settings],
+    dict[str, Any] | Awaitable[dict[str, Any]],
+]
+HealthProvider = Callable[
+    [],
+    dict[str, Any] | Awaitable[dict[str, Any]],
+]
 
 
 def _resolve_settings(settings: Settings | None) -> Settings:
@@ -90,6 +102,8 @@ def build_mcp_server(
     disk_check_provider: DiskCheckProvider | None = None,
     orphan_resource_summary_provider: OrphanResourceSummaryProvider | None = None,
     runtime_health_summary_provider: RuntimeHealthSummaryProvider | None = None,
+    readiness_provider: ReadinessProvider | None = None,
+    health_provider: HealthProvider | None = None,
 ) -> FastMCP:
     """Construct a FastMCP instance with AWF's tools bound to ``service``.
 
@@ -649,6 +663,156 @@ def build_mcp_server(
             limit_bytes=limit_bytes,
         )
 
+    @mcp.tool(name="awf_list_tasks")
+    async def awf_list_tasks(
+        status: WorkspaceStatus | None = Field(
+            default=None,
+            description="Optional workspace status filter.",
+        ),
+        agent: AgentRuntime | None = Field(
+            default=None,
+            description="Optional agent runtime filter.",
+        ),
+        repo_url: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="Optional repository URL filter.",
+        ),
+        limit: int = Field(default=50, ge=1, le=500, description="Maximum items to return."),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list tasks with their canonical attempt status."""
+        async with service.session_factory() as session:
+            response = await build_task_list_response(
+                session,
+                workspace_status=status,
+                agent=agent,
+                repo_url=repo_url,
+                limit=limit,
+            )
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_list_task_attempts")
+    async def awf_list_task_attempts(
+        task_ref: str = Field(..., min_length=1, max_length=256, description="Task ID or external reference."),
+        limit: int = Field(default=100, ge=1, le=500, description="Maximum attempts to return."),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list attempts for a given task."""
+        async with service.session_factory() as session:
+            response = await build_task_attempt_list_response(
+                session,
+                task_ref,
+                limit=limit,
+            )
+            if response is None:
+                return _error_result("NOT_FOUND", f"No task with ref {task_ref}")
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_list_locks")
+    async def awf_list_locks(
+        repo_url: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="Optional repository URL filter.",
+        ),
+        task_class: TaskClass | None = Field(
+            default=None,
+            description="Optional task class filter.",
+        ),
+        workspace_status: WorkspaceStatus | None = Field(
+            default=None,
+            description="Optional workspace status filter.",
+        ),
+        limit: int = Field(default=50, ge=1, le=500, description="Maximum items to return."),
+        cursor: str | None = Field(
+            default=None,
+            max_length=256,
+            description="Pagination cursor from a previous response.",
+        ),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: list workspace owned-path locks with overlap risks."""
+        async with service.session_factory() as session:
+            try:
+                page = await list_workspace_lock_page_for_session(
+                    session,
+                    repo_url=repo_url,
+                    task_class=task_class,
+                    status=workspace_status,
+                    limit=limit,
+                    cursor=cursor,
+                )
+            except InvalidWorkspaceLockCursorError:
+                return _error_result("INVALID_CURSOR", "Invalid workspace lock cursor.")
+        response = WorkspaceLockListResponse(
+            items=[WorkspaceLockResponse.model_validate(row) for row in page.items],
+            next_cursor=page.next_cursor,
+            has_more=page.has_more,
+            limit=limit,
+            cursor=cursor,
+        )
+        return _tool_result(response.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_get_service_readiness")
+    async def awf_get_service_readiness() -> StructuredToolResult:
+        """Read-only operator observability: report AWF service readiness checks."""
+        payload = await _provided_readiness(
+            readiness_provider=readiness_provider,
+            settings=settings_value,
+        )
+        return _tool_result(payload)
+
+    @mcp.tool(name="awf_get_service_health")
+    async def awf_get_service_health() -> StructuredToolResult:
+        """Read-only operator observability: report AWF service liveness."""
+        payload = await _provided_health(
+            health_provider=health_provider,
+        )
+        return _tool_result(payload)
+
+    @mcp.tool(name="awf_remonitor_workspace")
+    async def awf_remonitor_workspace(
+        workspace_id: str = Field(..., description="Workspace ID to remonitor."),
+        reason: str | None = Field(
+            default=None,
+            description="Optional operator reason to record with the remonitor request.",
+        ),
+    ) -> StructuredToolResult:
+        """Operator control: re-trigger PR monitor for a workspace; this is not shell access."""
+        try:
+            result = await service.remonitor_workspace(
+                workspace_id,
+                reason=reason,
+            )
+        except WorkspaceControlError as exc:
+            return _tool_error(exc)
+        return _tool_result(result.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_request_workspace_validation")
+    async def awf_request_workspace_validation(
+        workspace_id: str = Field(..., description="Workspace ID to validate."),
+        reason: str | None = Field(
+            default=None,
+            description="Optional operator reason for re-validation.",
+        ),
+        requested_tier: int | None = Field(
+            default=None,
+            ge=1,
+            le=3,
+            description="Optional validation tier hint.",
+        ),
+    ) -> StructuredToolResult:
+        """Operator control: request workspace re-validation; this is not shell access."""
+        try:
+            result = await service.request_validate_workspace(
+                workspace_id,
+                reason=reason,
+                requested_tier=requested_tier,
+            )
+        except WorkspaceControlError as exc:
+            return _tool_error(exc)
+        return _tool_result(OperationResponse.model_validate(result).model_dump(mode="json"))
+
     return mcp
 
 
@@ -723,6 +887,64 @@ async def _provided_runtime_health(
     if inspect.isawaitable(result):
         return await result
     return result
+
+
+async def _provided_readiness(
+    *,
+    readiness_provider: ReadinessProvider | None,
+    settings: Settings,
+) -> dict[str, Any]:
+    if readiness_provider is not None:
+        result = readiness_provider(settings)
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    from awf import __version__
+    from awf.api.routes.health import CheckResult, ReadyResponse
+
+    db_check = CheckResult(
+        ok=True,
+        status="ok",
+        reason="DB_OK",
+    )
+    degraded_check = CheckResult(
+        ok=False,
+        status="degraded",
+        reason="PROVIDER_NOT_CONFIGURED",
+        detail="Readiness provider not configured; Docker-dependent checks unavailable via MCP.",
+    )
+    checks = {
+        "db": db_check.model_dump(mode="json"),
+        "docker_cli": degraded_check.model_dump(mode="json"),
+        "docker_daemon": degraded_check.model_dump(mode="json"),
+        "docker_compose": degraded_check.model_dump(mode="json"),
+        "agent_runtime_image": degraded_check.model_dump(mode="json"),
+        "orphan_resources": degraded_check.model_dump(mode="json"),
+    }
+    readiness = ReadyResponse(
+        service="awf",
+        version=__version__,
+        status="degraded",
+        checks=checks,
+        agent_readiness={"status": "degraded", "providers": {}},
+    )
+    return readiness.model_dump(mode="json")
+
+
+async def _provided_health(
+    *,
+    health_provider: HealthProvider | None,
+) -> dict[str, Any]:
+    if health_provider is not None:
+        result = health_provider()
+        if inspect.isawaitable(result):
+            return await result
+        return result
+    from awf import __version__
+    from awf.api.routes.health import HealthResponse
+
+    response = HealthResponse(status="ok", service="awf", version=__version__)
+    return response.model_dump(mode="json")
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:

@@ -168,6 +168,11 @@ class TestToolRegistration:
             "awf_list_operations",
             "awf_get_operation",
             "awf_get_overlap_graph",
+            "awf_list_tasks",
+            "awf_list_task_attempts",
+            "awf_list_locks",
+            "awf_get_service_readiness",
+            "awf_get_service_health",
         } <= names
 
     @pytest.mark.unit
@@ -181,6 +186,8 @@ class TestToolRegistration:
             "awf_cancel_workspace",
             "awf_stop_workspace",
             "awf_destroy_workspace",
+            "awf_remonitor_workspace",
+            "awf_request_workspace_validation",
         ):
             description = (tools[name].description or "").lower()
             assert "operator control" in description
@@ -242,6 +249,47 @@ class TestToolRegistration:
         overlap_props = tools["awf_get_overlap_graph"].inputSchema["properties"]
         assert overlap_props["limit"]["default"] == 100
         assert overlap_props["limit"]["maximum"] == 500
+
+        tasks_props = tools["awf_list_tasks"].inputSchema["properties"]
+        assert tasks_props["limit"]["default"] == 50
+        assert tasks_props["limit"]["minimum"] == 1
+        assert tasks_props["limit"]["maximum"] == 500
+        assert "status" in tasks_props
+        assert tasks_props["status"]["default"] is None
+        repo_url_schema = _optional_string_schema(tasks_props["repo_url"])
+        assert repo_url_schema["maxLength"] == 512
+        assert repo_url_schema["minLength"] == 1
+
+        task_attempts_props = tools["awf_list_task_attempts"].inputSchema["properties"]
+        assert "task_ref" in task_attempts_props
+        required_fields = tools["awf_list_task_attempts"].inputSchema.get("required", [])
+        assert "task_ref" in required_fields
+        assert task_attempts_props["limit"]["default"] == 100
+        assert task_attempts_props["limit"]["minimum"] == 1
+        assert task_attempts_props["limit"]["maximum"] == 500
+
+        locks_props = tools["awf_list_locks"].inputSchema["properties"]
+        assert locks_props["limit"]["default"] == 50
+        assert locks_props["limit"]["minimum"] == 1
+        assert locks_props["limit"]["maximum"] == 500
+        cursor_schema = _optional_string_schema(locks_props["cursor"])
+        assert cursor_schema["maxLength"] == 256
+
+        assert "limit" not in tools["awf_get_service_readiness"].inputSchema.get("properties", {})
+        assert "limit" not in tools["awf_get_service_health"].inputSchema.get("properties", {})
+
+        remonitor_props = tools["awf_remonitor_workspace"].inputSchema["properties"]
+        assert "workspace_id" in remonitor_props
+        remonitor_required = tools["awf_remonitor_workspace"].inputSchema.get("required", [])
+        assert "workspace_id" in remonitor_required
+        assert remonitor_props["reason"]["default"] is None
+
+        validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
+        assert "workspace_id" in validate_props
+        validate_required = tools["awf_request_workspace_validation"].inputSchema.get("required", [])
+        assert "workspace_id" in validate_required
+        assert validate_props["reason"]["default"] is None
+        assert validate_props["requested_tier"]["default"] is None
 
 
 class TestOperationTools:

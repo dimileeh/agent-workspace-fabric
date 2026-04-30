@@ -376,6 +376,36 @@ class WorkspaceService:
             await s.commit()
             return result
 
+    async def remonitor_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+    ) -> WorkspaceControlResponse:
+        async with self._factory() as s:
+            result = await self._controls(s).remonitor_workspace(
+                workspace_id,
+                reason=reason,
+            )
+            await s.commit()
+            return result
+
+    async def request_validate_workspace(
+        self,
+        workspace_id: str,
+        *,
+        reason: str | None = None,
+        requested_tier: int | None = None,
+    ) -> Any:
+        async with self._factory() as s:
+            result = await self._controls(s).request_validate_workspace(
+                workspace_id,
+                reason=reason,
+                requested_tier=requested_tier,
+            )
+            await s.commit()
+            return result
+
     async def get_runtime(self, workspace_id: str) -> WorkspaceRuntimeResponse | None:
         async with self._factory() as s:
             workspace = await WorkspaceRepository(s).get(workspace_id)

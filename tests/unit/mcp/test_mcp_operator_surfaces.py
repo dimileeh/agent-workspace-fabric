@@ -68,6 +68,11 @@ NEW_OPERATOR_TOOLS = {
     "awf_list_operations",
     "awf_get_operation",
     "awf_get_overlap_graph",
+    "awf_list_tasks",
+    "awf_list_task_attempts",
+    "awf_list_locks",
+    "awf_get_service_readiness",
+    "awf_get_service_health",
 }
 
 
@@ -623,6 +628,72 @@ class TestMcpOperatorSurfaceParity:
             assert runtime_health.stranded_count == 0
 
     @pytest.mark.unit
+    async def test_readiness_and_health_provider_helpers_support_sync_async_and_absent(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        expected_readiness = {
+            "service": "awf",
+            "version": "test",
+            "status": "ok",
+            "checks": {},
+            "agent_readiness": {"status": "ok"},
+        }
+        expected_health = {
+            "status": "ok",
+            "service": "awf",
+            "version": "test",
+        }
+
+        def sync_readiness(settings: Settings) -> dict[str, Any]:
+            return expected_readiness
+
+        async def async_readiness(settings: Settings) -> dict[str, Any]:
+            return expected_readiness
+
+        def sync_health() -> dict[str, Any]:
+            return expected_health
+
+        async def async_health() -> dict[str, Any]:
+            return expected_health
+
+        sync_result = await mcp_server._provided_readiness(
+            readiness_provider=sync_readiness,
+            settings=resource_stack.settings,
+        )
+        assert sync_result == expected_readiness
+
+        async_result = await mcp_server._provided_readiness(
+            readiness_provider=async_readiness,
+            settings=resource_stack.settings,
+        )
+        assert async_result == expected_readiness
+
+        fallback_result = await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=resource_stack.settings,
+        )
+        assert fallback_result["service"] == "awf"
+        assert fallback_result["status"] == "degraded"
+        assert "checks" in fallback_result
+
+        sync_health_result = await mcp_server._provided_health(
+            health_provider=sync_health,
+        )
+        assert sync_health_result == expected_health
+
+        async_health_result = await mcp_server._provided_health(
+            health_provider=async_health,
+        )
+        assert async_health_result == expected_health
+
+        fallback_health = await mcp_server._provided_health(
+            health_provider=None,
+        )
+        assert fallback_health["status"] == "ok"
+        assert fallback_health["service"] == "awf"
+
+    @pytest.mark.unit
     async def test_read_only_operator_tools_use_shared_services_not_route_handlers(
         self,
         resource_stack: OperatorStack,
@@ -1121,3 +1192,385 @@ class TestMcpOperatorSurfaceParity:
             "message": "Invalid workspace overview cursor.",
             "detail": None,
         }
+
+    @pytest.mark.unit
+    async def test_task_listing_tool_matches_rest_payload(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        workspace_id = await _seed_merge_queue(operator_stack.factory)
+        await _workspace(
+            operator_stack.factory,
+            title="Legacy workspace",
+            repo_url="git@github.com:example/legacy.git",
+            status=WorkspaceStatus.requested,
+            task_class=None,
+        )
+
+        response = await operator_stack.client.get(
+            "/v1/tasks",
+            params={"limit": 20},
+            headers=operator_stack.auth_headers,
+        )
+        assert response.status_code == 200
+        rest = response.json()
+        mcp = await _call(
+            operator_stack.mcp,
+            "awf_list_tasks",
+            {"limit": 20},
+        )
+
+        assert mcp == rest
+        item = next(item for item in rest["items"] if item["workspace_id"] == workspace_id)
+        assert item["attempt_id"] is not None
+        assert item["is_canonical_for_merge"] is True
+        assert item["canonical_attempt_id"] is not None
+        assert item["agent_model"] is not None
+        legacy_item = next(
+            item for item in rest["items"]
+            if item.get("attempt_id") is None
+        )
+        assert legacy_item["task_id"] is not None
+
+    @pytest.mark.unit
+    async def test_task_listing_includes_attempt_without_merge_candidate(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+        async with operator_stack.factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.create(
+                repo_url="git@github.com:example/no-candidate.git",
+                branch_base="main",
+                task_title="No candidate task",
+                task_prompt="Test task without merge candidate.",
+                task_external_id="NC-1",
+                task_class="test_task",
+                owned_paths=["src/**"],
+                agent=AgentRuntime.codex.value,
+                test_commands=["pytest -q"],
+            )
+            workspace.status = WorkspaceStatus.running.value
+            workspace.created_at = now
+            workspace.updated_at = now
+            task = await TaskRepository(session).create_or_get(
+                repo_url=workspace.repo_url,
+                base_branch=workspace.branch_base,
+                title=workspace.task_title,
+                prompt=workspace.task_prompt,
+                external_id=workspace.task_external_id,
+                idempotency_key=None,
+                task_class=workspace.task_class,
+                owned_paths=list(workspace.owned_paths),
+            )
+            await TaskAttemptRepository(session).create_for_workspace(
+                task=task,
+                workspace=workspace,
+            )
+            await session.commit()
+
+        mcp_payload = await _call(
+            operator_stack.mcp,
+            "awf_list_tasks",
+            {"limit": 20},
+        )
+        assert isinstance(mcp_payload, dict)
+        items = mcp_payload["items"]
+        no_candidate_item = next(
+            item for item in items
+            if item.get("candidate_id") is None and item.get("attempt_id") is not None
+        )
+        assert no_candidate_item["readiness"] is None
+
+    @pytest.mark.unit
+    async def test_task_attempts_tool_matches_rest_payload(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        workspace_id = await _seed_merge_queue(operator_stack.factory)
+        async with operator_stack.factory() as session:
+            attempt_repo = TaskAttemptRepository(session)
+            attempt = await attempt_repo.get_by_workspace_id(workspace_id)
+            assert attempt is not None
+            task_id = attempt.task_id
+            task = await TaskRepository(session).get(task_id)
+            assert task is not None
+            task_ref = task.external_id or task.id
+            await session.commit()
+
+        response = await operator_stack.client.get(
+            f"/v1/tasks/{task_ref}/attempts",
+            headers=operator_stack.auth_headers,
+        )
+        assert response.status_code == 200
+        rest = response.json()
+        mcp = await _call(
+            operator_stack.mcp,
+            "awf_list_task_attempts",
+            {"task_ref": task_ref},
+        )
+
+        assert mcp == rest
+        assert rest["task_id"] is not None
+        assert rest["task_ref"] == task_ref
+        assert len(rest["items"]) >= 1
+        attempt = rest["items"][0]
+        assert attempt["attempt_number"] == 1
+        assert attempt["is_canonical_for_merge"] is True
+
+    @pytest.mark.unit
+    async def test_missing_task_attempts_return_structured_error(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        result = await _call_result(
+            operator_stack.mcp,
+            "awf_list_task_attempts",
+            {"task_ref": "nonexistent"},
+        )
+
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "NOT_FOUND",
+            "message": "No task with ref nonexistent",
+            "detail": None,
+        }
+
+    @pytest.mark.unit
+    async def test_locks_tool_matches_rest_payload(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        await _workspace(
+            operator_stack.factory,
+            title="Lock parity",
+            status=WorkspaceStatus.monitoring_pr,
+            repo_url="git@github.com:example/locks.git",
+            task_class="refactor_task",
+            owned_paths=["src/awf/mcp/**"],
+        )
+
+        response = await operator_stack.client.get(
+            "/v1/locks",
+            params={"repo_url": "git@github.com:example/locks.git", "limit": 10},
+            headers=operator_stack.auth_headers,
+        )
+        assert response.status_code == 200
+        rest = response.json()
+        mcp = await _call(
+            operator_stack.mcp,
+            "awf_list_locks",
+            {"repo_url": "git@github.com:example/locks.git", "limit": 10},
+        )
+
+        assert mcp == rest
+        assert len(rest["items"]) >= 1
+        lock_item = rest["items"][0]
+        assert lock_item["owned_paths"] == ["src/awf/mcp/**"]
+        assert lock_item["overlap_risks"] is not None
+
+    @pytest.mark.unit
+    async def test_locks_invalid_cursor_returns_structured_mcp_error(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        result = await _call_result(
+            operator_stack.mcp,
+            "awf_list_locks",
+            {"cursor": "not-a-cursor"},
+        )
+
+        assert result.isError is True
+        assert result.structuredContent == {
+            "error_code": "INVALID_CURSOR",
+            "message": "Invalid workspace lock cursor.",
+            "detail": None,
+        }
+
+    @pytest.mark.unit
+    async def test_service_health_tool_returns_healthz_payload(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        response = await operator_stack.client.get("/healthz")
+        assert response.status_code == 200
+        rest = response.json()
+        mcp = await _call(
+            operator_stack.mcp,
+            "awf_get_service_health",
+            {},
+        )
+
+        assert mcp == rest
+        assert rest["status"] == "ok"
+        assert rest["service"] == "awf"
+        assert "version" in rest
+
+    @pytest.mark.unit
+    async def test_service_readiness_tool_matches_rest_payload(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        mcp_payload = await _call(
+            resource_stack.mcp,
+            "awf_get_service_readiness",
+            {},
+        )
+
+        assert isinstance(mcp_payload, dict)
+        assert mcp_payload["service"] == "awf"
+        assert "version" in mcp_payload
+        assert mcp_payload["status"] in {"ok", "degraded", "fail"}
+        assert "checks" in mcp_payload
+        assert "agent_readiness" in mcp_payload
+        for check_name in ("db", "docker_cli", "docker_daemon", "docker_compose",
+                           "agent_runtime_image", "orphan_resources"):
+            assert check_name in mcp_payload["checks"]
+            check = mcp_payload["checks"][check_name]
+            assert "ok" in check
+            assert "status" in check
+            assert "reason" in check
+
+    @pytest.mark.unit
+    async def test_remonitor_workspace_tool_returns_control_response(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        workspace_id = await _workspace(
+            operator_stack.factory,
+            title="Remonitor parity",
+            status=WorkspaceStatus.monitoring_pr,
+        )
+
+        result = await _call(
+            operator_stack.mcp,
+            "awf_remonitor_workspace",
+            {"workspace_id": workspace_id, "reason": "PR monitor stuck"},
+        )
+
+        assert isinstance(result, dict)
+        assert result["workspace_id"] == workspace_id
+        assert result["operation_id"] is not None
+        assert result["status"] == "monitoring_pr"
+
+    @pytest.mark.unit
+    async def test_remonitor_workspace_wrong_state_returns_structured_error(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        workspace_id = await _workspace(
+            operator_stack.factory,
+            title="Remonitor wrong state",
+            status=WorkspaceStatus.requested,
+        )
+
+        result = await _call_result(
+            operator_stack.mcp,
+            "awf_remonitor_workspace",
+            {"workspace_id": workspace_id},
+        )
+
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "WORKSPACE_STATE_NOT_REMONITORABLE"
+
+    @pytest.mark.unit
+    async def test_request_workspace_validation_tool_returns_operation_response(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        workspace_id = await _workspace(
+            operator_stack.factory,
+            title="Validate parity",
+            status=WorkspaceStatus.monitoring_pr,
+        )
+
+        result = await _call(
+            operator_stack.mcp,
+            "awf_request_workspace_validation",
+            {"workspace_id": workspace_id, "reason": "recheck validation", "requested_tier": 2},
+        )
+
+        assert isinstance(result, dict)
+        assert result["workspace_id"] == workspace_id
+        assert result["type"] == "validate"
+        assert result["status"] == "pending"
+
+    @pytest.mark.unit
+    async def test_request_workspace_validation_wrong_state_returns_structured_error(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        workspace_id = await _workspace(
+            operator_stack.factory,
+            title="Validate wrong state",
+            status=WorkspaceStatus.requested,
+        )
+
+        result = await _call_result(
+            operator_stack.mcp,
+            "awf_request_workspace_validation",
+            {"workspace_id": workspace_id},
+        )
+
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "WORKSPACE_STATE_NOT_VALIDATABLE"
+
+    @pytest.mark.unit
+    async def test_new_operator_tools_use_shared_services_not_route_handlers(
+        self,
+        resource_stack: OperatorStack,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.api.routes import health as health_routes
+        from awf.api.routes import locks as lock_routes
+        from awf.api.routes import tasks as task_routes
+
+        await _seed_merge_queue(resource_stack.factory)
+
+        async def fail_route_handler(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("MCP tools must use shared services, not route handlers")
+
+        monkeypatch.setattr(
+            task_routes,
+            "list_tasks",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            task_routes,
+            "list_task_attempts",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            lock_routes,
+            "list_locks",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            health_routes,
+            "healthz",
+            fail_route_handler,
+        )
+        monkeypatch.setattr(
+            health_routes,
+            "readyz",
+            fail_route_handler,
+        )
+
+        task_payload = await _call(
+            resource_stack.mcp,
+            "awf_list_tasks",
+            {"limit": 10},
+        )
+        assert isinstance(task_payload, dict)
+        assert "items" in task_payload
+
+        health_payload = await _call(
+            resource_stack.mcp,
+            "awf_get_service_health",
+            {},
+        )
+        assert isinstance(health_payload, dict)
+        assert health_payload["status"] == "ok"
