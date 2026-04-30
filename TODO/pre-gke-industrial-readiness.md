@@ -49,16 +49,16 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Security, Secrets, And Egress Policy | Replace broad auth mounts with secret leases | `ws_22fc3239a5bd4d93b82ff003` | _pending_ | validating | Codex/gpt-5.5; declared secret leases and safer local auth mounts while preserving compatibility. |
-| P1 Workspace Services And Realistic Project Profiles | Profile-defined app endpoints | `ws_0a911b1614e54418a2ce6877` | [#152](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/152) | monitoring_pr | Codex/gpt-5.5; profile app endpoint metadata for agents, validation, API, and console-safe detail. |
-| P1 Workspace Services And Realistic Project Profiles | Database refresh hooks | `ws_0fdabcdbbf884682ae033426` | [#151](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/151) | validating | Codex/gpt-5.5; DB-backed profile refresh/generation hooks with durable logs and structured failures. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Agent overlap warning prompts | `ws_9d924227c4744603aeed80cf` | [#153](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/153) | monitoring_pr | Codex/gpt-5.5; include advisory overlap graph warnings in agent prompts without blocking launch. |
-| P1 MCP And Project Onboarding Client Parity | AWF doctor diagnostics | `ws_7d33a6f9a0b24eea91058a9e` | _pending_ | running | Codex/gpt-5.5; plain-language local diagnostics for Docker, API, worker, auth, provider readiness, ports, disk, stale containers, and env/config issues. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | AWF doctor diagnostics | `ws_7d33a6f9a0b24eea91058a9e` | [#155](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/155) | merged | Adds plain-language local diagnostics for Docker, API, worker, auth, provider readiness, ports, disk, stale containers, and env/config issues. |
+| P1 Security, Secrets, And Egress Policy | Replace broad auth mounts with secret leases | `ws_22fc3239a5bd4d93b82ff003` | [#154](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/154) | merged | Adds declared secret lease mounts and safer local auth handling while preserving compatibility. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Agent overlap warning prompts | `ws_9d924227c4744603aeed80cf` | [#153](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/153) | merged | Includes advisory overlap graph warnings in agent prompts without blocking launch. |
+| P1 Workspace Services And Realistic Project Profiles | Profile-defined app endpoints | `ws_0a911b1614e54418a2ce6877` | [#152](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/152) | merged | Adds profile app endpoint metadata for agents, validation, API, and console-safe detail. |
+| P1 Workspace Services And Realistic Project Profiles | Database refresh hooks | `ws_0fdabcdbbf884682ae033426` | [#151](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/151) | merged | Adds DB-backed profile refresh/generation hooks with durable logs and structured failures. |
 | P1 Workspace Services And Realistic Project Profiles | Migration-chain validation policy | `ws_f1f1f57ee64e470a9ee44821` | [#150](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/150) | merged | Adds Alembic chain validation policy for Python DB-backed profiles. |
 | P1 Security, Secrets, And Egress Policy | Local secret lease lifecycle records | `ws_60b4cd270bf34577bba32d28` | [#147](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/147) | merged | Records declared secret lease issue/mount/expiry/revoke metadata and audit events. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Local resource reservation accounting | `ws_a65f1a826823480a8c7cb197` | [#146](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/146) | merged | Finishes CPU, memory, disk, and DinD reservation accounting in local scheduling/status surfaces. |
@@ -243,15 +243,15 @@ Status values:
 - [x] Add integration fixtures for Node/Next.js plus browser/Playwright validation.
 - [x] Add Redis/app/worker/service sidecar examples.
 - [x] Add health-check wait semantics before validation.
-- [ ] Add profile-defined app endpoints exposed to agents and validation commands.
-- [ ] Add database refresh/generation hooks for DB-backed profiles.
+- [x] Add profile-defined app endpoints exposed to agents and validation commands.
+- [x] Add database refresh/generation hooks for DB-backed profiles.
 - [x] Add migration-chain validation for Python/Alembic workloads.
 
 ## P1: Scheduler, Reservations, And Advisory Overlap Graph
 
-- [ ] Keep workspace/task submission non-blocking when owned paths overlap.
+- [x] Keep workspace/task submission non-blocking when owned paths overlap.
 - [x] Add an operator-visible overlap graph for running and queued workspaces.
-- [ ] Use overlap graph to warn agents in prompts and stale policy, not to prevent parallel work.
+- [x] Use overlap graph to warn agents in prompts and stale policy, not to prevent parallel work.
 - [x] Finish resource reservation accounting for CPU, memory, disk, and DinD pressure.
 - [ ] Add fairness and starvation prevention for long-lived queues.
 - [ ] Add task class bias and priority scoring as described in the PRD.
@@ -281,7 +281,7 @@ coding agent in any project to use AWF for a feature.
 
 - [ ] Define the primary install path: package-manager install such as `uv tool install aira-awf`/`uv pip install aira-awf`, with git clone as the contributor path.
 - [ ] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
-- [ ] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
+- [x] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
 - [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
 - [ ] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
 - [ ] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
