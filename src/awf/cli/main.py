@@ -153,8 +153,9 @@ def init(
 ) -> None:
     """Run local onboarding checks and print clear next steps for first setup."""
     from awf.profiles.onboarding import preview_project_onboarding
-    from awf.service.config import resolve_service_settings
-    from awf.service.doctor import DoctorReport, collect_doctor_report, render_doctor_pretty
+    from awf.service.config import ServiceSettings, resolve_service_settings
+    from awf.service.doctor import collect_doctor_report, render_doctor_pretty
+    from awf.service.doctor.models import DoctorReport
     from awf.service.status import collect_service_status
 
     repository = path.expanduser().resolve()
@@ -172,12 +173,12 @@ def init(
             )
 
             async def _collect_cached_service_status(
-                _settings: object,
+                _settings: ServiceSettings,
                 *,
                 strict_providers: Iterable[str] | None = None,
                 provider_environ: Mapping[str, str] | None = None,
             ) -> dict[str, object]:
-                _ = strict_providers, provider_environ
+                _ = _settings, strict_providers, provider_environ
                 return await service_status_task
 
             return await asyncio.gather(
