@@ -141,24 +141,61 @@ async def test_issue_profile_secret_leases_persists_sanitized_metadata(
 
 
 @pytest.mark.unit
-async def test_issue_declared_leases_empty_input_is_noop(session: AsyncSession) -> None:
+async def test_issue_declared_leases_handles_empty_declarations(
+    session: AsyncSession,
+) -> None:
     workspace = await _workspace(session)
 
-    assert await SecretLeaseRepository(session).issue_declared_leases(
+    leases = await SecretLeaseRepository(session).issue_declared_leases(
         workspace,
         leases=[],
         now=datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
-    ) == []
+    )
+
+    assert leases == []
+    assert "SECRET_LEASE_ISSUED" not in [
+        event.reason_code for event in await _events(session, workspace.id)
+    ]
 
 
 @pytest.mark.unit
-async def test_issue_declared_leases_falls_back_without_insert_guard(
+async def test_issue_declared_leases_falls_back_without_conflict_helper(
     session: AsyncSession,
 ) -> None:
     now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
     workspace = await _workspace(session)
-    repo = SecretLeaseRepository(session)
-    repo._dialect_name = "mysql"
+    repo = SecretLeaseRepository(session, dialect_name="unsupported")
+
+    leases = await repo.issue_declared_leases(
+        workspace,
+        leases=[
+            SecretLeaseIssue(
+                secret_name="api-token",
+                kind="env",
+                target="API_TOKEN",
+                mode="ro",
+                required=True,
+                provider="env",
+                ref_digest="sha256:" + "a" * 64,
+                expires_at=now + timedelta(hours=1),
+                issue_metadata={"profile": "secure-local", "declaration_index": 0},
+            )
+        ],
+        now=now,
+    )
+
+    assert len(leases) == 1
+    assert leases[0].secret_name == "api-token"
+    assert leases[0].issued_at == now
+
+
+@pytest.mark.unit
+async def test_issue_declared_leases_fallback_accepts_optional_metadata(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    workspace = await _workspace(session)
+    repo = SecretLeaseRepository(session, dialect_name="unsupported")
 
     leases = await repo.issue_declared_leases(
         workspace,
@@ -181,6 +218,8 @@ async def test_issue_declared_leases_falls_back_without_insert_guard(
     assert len(leases) == 1
     assert leases[0].secret_name == "fallback-token"
     assert leases[0].issued_at == now
+    assert leases[0].ref_digest is None
+    assert leases[0].expires_at is None
 
 
 @pytest.mark.unit

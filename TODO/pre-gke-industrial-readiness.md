@@ -49,8 +49,11 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 API Contract Completion | Callback event allowlist recovery | `ws_0f8c4dba48874f59ba3729f3` | [#149](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/149) | merged | Recovered failed `ws_0e2fc82ece7541659287e063`, reused the salvage branch, and finished exact public callback event allowlist validation. |
-| P0 Operation And Recovery Truth | Plan conformance failure recovery | `ws_ebdc016deac8454688bce7a2` | [#148](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/148) | merged | Adds `PLAN_CONFORMANCE_UNSATISFIED` evidence, retry gap carry-forward, salvage hints, and env-configurable planning iterations defaulting to 3. |
+| P1 Security, Secrets, And Egress Policy | Replace broad auth mounts with secret leases | `ws_22fc3239a5bd4d93b82ff003` | _pending_ | running | Codex/gpt-5.5; declared secret leases and safer local auth mounts while preserving compatibility. |
+| P1 Workspace Services And Realistic Project Profiles | Profile-defined app endpoints | `ws_0a911b1614e54418a2ce6877` | _pending_ | running | Codex/gpt-5.5; profile app endpoint metadata for agents, validation, API, and console-safe detail. |
+| P1 Workspace Services And Realistic Project Profiles | Database refresh hooks | `ws_0fdabcdbbf884682ae033426` | _pending_ | running | Codex/gpt-5.5; DB-backed profile refresh/generation hooks with durable logs and structured failures. |
+| P1 Workspace Services And Realistic Project Profiles | Migration-chain validation policy | `ws_f1f1f57ee64e470a9ee44821` | _pending_ | running | Codex/gpt-5.5; Alembic chain validation policy for Python DB-backed profiles. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Agent overlap warning prompts | `ws_9d924227c4744603aeed80cf` | _pending_ | running | Codex/gpt-5.5; include advisory overlap graph warnings in agent prompts without blocking launch. |
 
 ### Completed Slices
 

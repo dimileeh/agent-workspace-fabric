@@ -7,10 +7,11 @@ service tests while still asserting durable behavior, not just execution.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.dialects import postgresql, sqlite
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from awf.db.base import Base
@@ -31,11 +32,14 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
+    _callback_delivery_insert_if_absent_stmt,
+    _callback_subscription_insert_if_absent_stmt,
     _candidate_terminal_close_reason,
     _claims_non_docs_path,
     _operation_idempotency_advisory_lock_key,
     _owned_path_conflict_advisory_lock_key,
     _resolve_session_dialect_name,
+    _secret_lease_insert_if_absent_stmt,
     _wildcard_prefixes_overlap,
     owned_path_overlap_match,
     owned_paths_overlap,
@@ -83,6 +87,42 @@ async def _workspace(
     workspace.status = status.value
     await session.flush()
     return workspace
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("helper", "conflict_columns"),
+    [
+        (
+            _secret_lease_insert_if_absent_stmt,
+            "workspace_id, secret_name, kind, target",
+        ),
+        (
+            _callback_subscription_insert_if_absent_stmt,
+            "idempotency_key",
+        ),
+        (
+            _callback_delivery_insert_if_absent_stmt,
+            "subscription_id, dedupe_key",
+        ),
+    ],
+)
+def test_idempotent_insert_helpers_support_postgres_sqlite_and_fallback(
+    helper: Callable[[str | None], object | None],
+    conflict_columns: str,
+) -> None:
+    for dialect_name, dialect in (
+        ("postgresql", postgresql.dialect()),
+        ("sqlite", sqlite.dialect()),
+    ):
+        stmt = helper(dialect_name)
+
+        assert stmt is not None
+        sql = str(stmt.compile(dialect=dialect))
+        assert f"ON CONFLICT ({conflict_columns}) DO NOTHING" in sql
+        assert "RETURNING" in sql
+
+    assert helper(None) is None
 
 
 async def _task(
