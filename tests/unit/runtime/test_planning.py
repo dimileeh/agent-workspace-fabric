@@ -10,6 +10,7 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
     PlanConformanceStatus,
     _gaps_from_payload,
+    build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
     build_conformance_retry_prompt,
@@ -82,11 +83,14 @@ def test_satisfied_report_with_gaps_is_downgraded() -> None:
 
 @pytest.mark.unit
 def test_parse_conformance_report_defaults_and_aliases() -> None:
-    satisfied = parse_conformance_report('{"status":"ok","summary":"","gaps":[]}')
+    satisfied = parse_conformance_report(
+        '{"status":"ok","summary":"","gaps":[],"reason_code":"   "}'
+    )
     needs_iteration = parse_conformance_report('{"status":"unknown","summary":"","gaps":"rerun mypy"}')
 
     assert satisfied.status == PlanConformanceStatus.satisfied
     assert satisfied.summary == "Plan satisfied."
+    assert satisfied.reason_code == "PLAN_CONFORMANCE_REPORTED"
     assert needs_iteration.status == PlanConformanceStatus.needs_iteration
     assert needs_iteration.summary == "Plan gaps remain."
     assert needs_iteration.gaps == ("rerun mypy",)
@@ -195,6 +199,7 @@ def test_coordination_warning_renders_in_planning_and_execution_prompts() -> Non
 def test_empty_coordination_warnings_do_not_change_prompt_shape() -> None:
     plan = Path("docs/awf-plans/ws_empty.md")
 
+    assert build_agent_task_prompt(task_prompt="Add metrics") == "Add metrics"
     assert build_planning_prompt(
         task_prompt="Add metrics",
         plan_path=plan,
@@ -216,6 +221,62 @@ def test_empty_coordination_warnings_do_not_change_prompt_shape() -> None:
         coordination_warnings=(),
     )
     assert render_coordination_warning_section(()) == ""
+
+
+@pytest.mark.unit
+def test_coordination_warning_renderer_sanitizes_legacy_warning_shapes() -> None:
+    rendered = render_coordination_warning_section(
+        (
+            {
+                "warning_code": 42,
+                "message": "",
+                "severity": "",
+                "blocks_launch": True,
+                "workspace_ids": "ws_bad",
+                "overlaps": "bad",
+                "stale_policy_context": "bad",
+            },
+            {
+                "warning_code": "OWNED_PATH_OVERLAP_RISK",
+                "message": "Coordinate around active work.",
+                "severity": "advisory",
+                "blocks_launch": False,
+                "workspace_ids": [],
+                "overlaps": [
+                    "bad",
+                    {"workspace_id": "ws_missing", "existing_path": "src/**"},
+                    {
+                        "workspace_id": "ws_valid",
+                        "existing_path": "src/**",
+                        "requested_path": "src/app.py",
+                    },
+                ],
+                "stale_policy_context": {},
+            },
+        )
+    )
+
+    assert "COORDINATION_WARNING (advisory; blocks_launch=true): COORDINATION_WARNING" in rendered
+    assert "OWNED_PATH_OVERLAP_RISK (advisory; blocks_launch=false)" in rendered
+    assert "Workspaces:" not in rendered
+    assert "ws_valid: src/** -> src/app.py" in rendered
+    assert "Stale policy:" not in rendered
+
+
+@pytest.mark.unit
+def test_conformance_retry_prompt_bounds_text_and_handles_missing_artifacts() -> None:
+    prompt = build_conformance_retry_prompt(
+        task_prompt="finish the slice",
+        evidence={
+            "summary": "x" * 1200,
+            "gaps": "legacy string gaps are ignored",
+        },
+    )
+
+    assert "xxx..." in prompt
+    assert "- Re-check the saved plan." in prompt
+    assert "- Plan artifacts were not recorded." in prompt
+    assert "finish the slice" in prompt
 
 
 @pytest.mark.unit

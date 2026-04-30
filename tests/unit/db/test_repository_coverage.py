@@ -37,6 +37,7 @@ from awf.db.repositories import (
     _owned_path_conflict_advisory_lock_key,
     _resolve_session_dialect_name,
     _wildcard_prefixes_overlap,
+    owned_path_overlap_match,
     owned_paths_overlap,
     sync_candidate_readiness,
 )
@@ -591,7 +592,11 @@ async def test_validation_run_finish_updates_metadata_and_handles_missing(
         coverage={"total": 99.1},
         command_retries=[1, 0, 9],
     )
-    updated = await repo.update_target_head_sha(run.id, target_head_sha="d" * 40)
+    updated = await repo.update_target_head_sha(
+        run.id,
+        target_head_sha="d" * 40,
+        workspace_head_sha="e" * 40,
+    )
     plain_run = await repo.start(
         workspace_id=workspace.id,
         attempt_id=None,
@@ -627,6 +632,7 @@ async def test_validation_run_finish_updates_metadata_and_handles_missing(
     ]
     assert updated is not None
     assert updated.target_head_sha == "d" * 40
+    assert updated.workspace_head_sha == "e" * 40
     assert plain_finished is not None
     assert plain_finished.log_stream_refs == {}
     assert plain_finished.commands == [{"command": "mypy"}]
@@ -1392,6 +1398,15 @@ def test_wildcard_prefix_helpers_cover_root_and_nested_prefixes() -> None:
     assert _wildcard_prefixes_overlap("", "src/") is True
     assert _wildcard_prefixes_overlap("src/", "src/awf/") is True
     assert _wildcard_prefixes_overlap("src/awf/", "tests/") is False
+
+
+@pytest.mark.unit
+def test_owned_path_overlap_match_reports_overlapping_wildcard_prefixes() -> None:
+    match = owned_path_overlap_match("src/awf/**", "src/awf/service/**")
+
+    assert match is not None
+    assert match.match_reason_code == "OWNED_PATH_WILDCARD_MATCH"
+    assert "Wildcard owned-path prefixes overlap" in match.explanation
 
 
 @pytest.mark.unit

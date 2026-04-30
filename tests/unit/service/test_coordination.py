@@ -7,6 +7,7 @@ import pytest
 from awf.db.repositories import OwnedPathOverlap
 from awf.service.coordination import (
     MAX_COORDINATION_WARNING_OVERLAPS,
+    MAX_COORDINATION_WARNING_WORKSPACES,
     MAX_COORDINATION_WARNINGS,
     coordination_warnings_from_payload,
     coordination_warnings_from_task_policy,
@@ -23,7 +24,7 @@ def test_owned_path_overlap_coordination_warnings_are_bounded_and_enriched() -> 
             existing_path="src/awf/service/**",
             requested_path=f"src/awf/service/module_{index}.py",
         )
-        for index in range(MAX_COORDINATION_WARNING_OVERLAPS + 2)
+        for index in range(MAX_COORDINATION_WARNING_WORKSPACES + 2)
     ]
 
     warnings = owned_path_overlap_coordination_warnings(overlaps)
@@ -34,6 +35,7 @@ def test_owned_path_overlap_coordination_warnings_are_bounded_and_enriched() -> 
     assert warning["blocks_launch"] is False
     assert warning["overlap_count"] == len(overlaps)
     assert warning["overlaps_truncated"] is True
+    assert len(warning["workspace_ids"]) == MAX_COORDINATION_WARNING_WORKSPACES
     assert len(warning["overlaps"]) == MAX_COORDINATION_WARNING_OVERLAPS
     assert warning["overlaps"][0]["match_reason_code"] == "OWNED_PATH_WILDCARD_MATCH"
     assert warning["stale_policy_context"] == {
@@ -111,6 +113,14 @@ def test_coordination_warning_payload_sanitizer_bounds_and_defaults() -> None:
                     "match_reason_code": "OWNED_PATH_WILDCARD_MATCH",
                     "explanation": "Wildcard match.",
                 },
+                *(
+                    {
+                        "workspace_id": f"ws_extra_{index}",
+                        "existing_path": "src/**",
+                        "requested_path": f"src/extra_{index}.py",
+                    }
+                    for index in range(MAX_COORDINATION_WARNING_OVERLAPS + 2)
+                ),
             ],
             "overlap_count": -4,
             "overlaps_truncated": True,
@@ -131,15 +141,14 @@ def test_coordination_warning_payload_sanitizer_bounds_and_defaults() -> None:
     assert first["severity"] == "advisory"
     assert first["blocks_launch"] is False
     assert first["workspace_ids"] == ["ws_a"]
-    assert first["overlap_count"] == 1
+    assert first["overlap_count"] == MAX_COORDINATION_WARNING_OVERLAPS
     assert first["overlaps_truncated"] is True
     assert first["stale_policy_context"] == {"trigger_type": "path_overlap"}
-    assert first["overlaps"] == [
-        {
-            "workspace_id": "ws_a",
-            "existing_path": "src/**",
-            "requested_path": "src/app.py",
-            "match_reason_code": "OWNED_PATH_WILDCARD_MATCH",
-            "explanation": "Wildcard match.",
-        }
-    ]
+    assert len(first["overlaps"]) == MAX_COORDINATION_WARNING_OVERLAPS
+    assert first["overlaps"][0] == {
+        "workspace_id": "ws_a",
+        "existing_path": "src/**",
+        "requested_path": "src/app.py",
+        "match_reason_code": "OWNED_PATH_WILDCARD_MATCH",
+        "explanation": "Wildcard match.",
+    }

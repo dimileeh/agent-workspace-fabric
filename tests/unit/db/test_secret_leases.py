@@ -98,6 +98,11 @@ def test_secret_lease_issue_insert_has_conflict_guard(
     assert "RETURNING" in sql
 
 
+@pytest.mark.unit
+def test_secret_lease_issue_insert_unsupported_dialect_has_no_conflict_guard() -> None:
+    assert _secret_lease_insert_if_absent_stmt("mysql") is None
+
+
 async def _events(session: AsyncSession, workspace_id: str) -> list[WorkspaceEvent]:
     rows = await session.execute(
         select(WorkspaceEvent)
@@ -133,6 +138,49 @@ async def test_issue_profile_secret_leases_persists_sanitized_metadata(
     assert leases[0].ref_digest == "sha256:" + "a" * 64
     assert leases[0].issue_metadata["profile"] == "secure-local"
     assert "secret-value" not in json.dumps([lease.__dict__ for lease in leases], default=str)
+
+
+@pytest.mark.unit
+async def test_issue_declared_leases_empty_input_is_noop(session: AsyncSession) -> None:
+    workspace = await _workspace(session)
+
+    assert await SecretLeaseRepository(session).issue_declared_leases(
+        workspace,
+        leases=[],
+        now=datetime(2026, 4, 29, 10, 0, tzinfo=UTC),
+    ) == []
+
+
+@pytest.mark.unit
+async def test_issue_declared_leases_falls_back_without_insert_guard(
+    session: AsyncSession,
+) -> None:
+    now = datetime(2026, 4, 29, 10, 0, tzinfo=UTC)
+    workspace = await _workspace(session)
+    repo = SecretLeaseRepository(session)
+    repo._dialect_name = "mysql"
+
+    leases = await repo.issue_declared_leases(
+        workspace,
+        leases=[
+            SecretLeaseIssue(
+                secret_name="fallback-token",
+                kind="env",
+                target="FALLBACK_TOKEN",
+                mode="ro",
+                required=True,
+                provider="env",
+                ref_digest=None,
+                expires_at=None,
+                issue_metadata={},
+            )
+        ],
+        now=now,
+    )
+
+    assert len(leases) == 1
+    assert leases[0].secret_name == "fallback-token"
+    assert leases[0].issued_at == now
 
 
 @pytest.mark.unit
