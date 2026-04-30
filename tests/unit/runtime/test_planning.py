@@ -7,9 +7,12 @@ from pathlib import Path
 import pytest
 
 from awf.runtime.planning import (
+    PLAN_CONFORMANCE_UNSATISFIED,
     PlanConformanceStatus,
     _gaps_from_payload,
+    build_conformance_failure_evidence,
     build_conformance_prompt,
+    build_conformance_retry_prompt,
     build_execution_prompt,
     build_planning_prompt,
     changed_paths_from_porcelain,
@@ -37,12 +40,14 @@ def test_render_workspace_path_substitutes_workspace_id_and_rejects_escape() -> 
 @pytest.mark.unit
 def test_parse_conformance_report_accepts_json_object() -> None:
     report = parse_conformance_report(
-        '{"status":"needs_iteration","summary":"not done","gaps":["wire API"]}'
+        '{"status":"needs_iteration","summary":"not done","gaps":["wire API"],'
+        '"reason_code":"PLAN_CONFORMANCE_API_GAP"}'
     )
 
     assert report.status == PlanConformanceStatus.needs_iteration
     assert report.summary == "not done"
     assert report.gaps == ("wire API",)
+    assert report.reason_code == "PLAN_CONFORMANCE_API_GAP"
 
 
 @pytest.mark.unit
@@ -139,3 +144,49 @@ def test_prompts_reference_plan_and_report_paths() -> None:
     assert str(plan) in execution_prompt
     assert str(report) in conformance_prompt
     assert '"status"' in conformance_prompt
+
+
+@pytest.mark.unit
+def test_conformance_failure_evidence_is_structured_and_bounded() -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration","summary":"still missing","gaps":["finish API","run mypy"]}'
+    )
+
+    evidence = build_conformance_failure_evidence(
+        report=report,
+        iterations_used=2,
+        max_iterations=2,
+        plan_path=Path("docs/awf-plans/ws_123.md"),
+        report_path=Path("docs/awf-plans/ws_123.conformance.json"),
+    )
+
+    assert evidence == {
+        "summary": "still missing",
+        "gaps": ["finish API", "run mypy"],
+        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+        "report_reason_code": "PLAN_CONFORMANCE_REPORTED",
+        "iterations_used": 2,
+        "max_iterations": 2,
+        "plan_path": "docs/awf-plans/ws_123.md",
+        "report_path": "docs/awf-plans/ws_123.conformance.json",
+    }
+
+
+@pytest.mark.unit
+def test_conformance_retry_prompt_steers_agent_to_finish_remaining_gaps() -> None:
+    prompt = build_conformance_retry_prompt(
+        task_prompt="Implement the billing retry flow.",
+        evidence={
+            "summary": "Implementation is close but incomplete.",
+            "gaps": ["Add regression test", "Wire retry endpoint"],
+            "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+            "plan_path": "docs/awf-plans/ws_old.md",
+            "report_path": "docs/awf-plans/ws_old.conformance.json",
+        },
+    )
+
+    assert "Implement the billing retry flow." in prompt
+    assert "finish the remaining plan-conformance gaps" in prompt
+    assert "- Add regression test" in prompt
+    assert "- Wire retry endpoint" in prompt
+    assert "Do not restart from scratch" in prompt

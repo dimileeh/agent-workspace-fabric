@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 
 import pytest
+import yaml
 from pydantic import ValidationError
 
 from awf.profiles.lint import profile_lint_errors
@@ -296,6 +297,23 @@ def test_profile_schema_accepts_planning_policy() -> None:
     assert profile.planning.required is True
     assert profile.planning.max_iterations == 2
     assert profile.planning.plan_path == "docs/awf-plans/{workspace_id}.md"
+
+
+@pytest.mark.unit
+def test_profile_planning_default_max_iterations_is_three() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {"name": "awf-self", "planning": {"required": True}}
+    )
+
+    assert profile.planning.max_iterations == 3
+
+
+@pytest.mark.unit
+def test_awf_self_profile_declares_three_planning_iterations() -> None:
+    profile_path = Path(__file__).resolve().parents[3] / ".awf" / "workspace.yml"
+    profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))["awf"]
+
+    assert profile["planning"]["max_iterations"] == 3
 
 
 @pytest.mark.unit

@@ -10,10 +10,16 @@ needed from that report.
 from __future__ import annotations
 
 import json
+from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+
+PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
+PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
+MAX_CONFORMANCE_GAPS = 20
+MAX_CONFORMANCE_TEXT_CHARS = 1000
 
 
 class PlanConformanceStatus(StrEnum):
@@ -30,7 +36,7 @@ class PlanConformanceReport:
     status: PlanConformanceStatus
     summary: str
     gaps: tuple[str, ...]
-    reason_code: str = "PLAN_CONFORMANCE_REPORTED"
+    reason_code: str = PLAN_CONFORMANCE_REPORTED
 
     @property
     def satisfied(self) -> bool:
@@ -116,6 +122,59 @@ def build_conformance_prompt(
     )
 
 
+def build_conformance_failure_evidence(
+    *,
+    report: PlanConformanceReport,
+    iterations_used: int,
+    max_iterations: int,
+    plan_path: Path,
+    report_path: Path,
+) -> dict[str, Any]:
+    """Return bounded structured evidence for exhausted conformance."""
+
+    return {
+        "summary": _safe_conformance_text(report.summary),
+        "gaps": [_safe_conformance_text(gap) for gap in report.gaps[:MAX_CONFORMANCE_GAPS]],
+        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+        "report_reason_code": report.reason_code,
+        "iterations_used": iterations_used,
+        "max_iterations": max_iterations,
+        "plan_path": plan_path.as_posix(),
+        "report_path": report_path.as_posix(),
+    }
+
+
+def build_conformance_retry_prompt(
+    *,
+    task_prompt: str,
+    evidence: Mapping[str, Any],
+) -> str:
+    """Build a retry prompt that resumes from final conformance gaps."""
+
+    summary = _safe_conformance_text(evidence.get("summary"))
+    gaps = _evidence_gaps(evidence)
+    gap_lines = "\n".join(f"- {gap}" for gap in gaps) or "- Re-check the saved plan."
+    plan_path = _safe_conformance_text(evidence.get("plan_path"))
+    report_path = _safe_conformance_text(evidence.get("report_path"))
+    artifact_lines = []
+    if plan_path:
+        artifact_lines.append(f"- Plan: `{plan_path}`")
+    if report_path:
+        artifact_lines.append(f"- Final conformance report: `{report_path}`")
+    artifacts = "\n".join(artifact_lines) or "- Plan artifacts were not recorded."
+
+    return (
+        "## Retry after plan conformance failure\n\n"
+        "The prior workspace exhausted plan-conformance iterations. Continue from the "
+        "original task and finish the remaining plan-conformance gaps below. Do not "
+        "restart from scratch unless the existing work is unusable.\n\n"
+        f"### Final summary\n{summary or 'Plan conformance was not satisfied.'}\n\n"
+        f"### Remaining gaps\n{gap_lines}\n\n"
+        f"### Evidence\n{artifacts}\n\n"
+        f"### Original task\n{task_prompt}\n"
+    )
+
+
 def parse_conformance_report(text: str) -> PlanConformanceReport:
     """Parse the agent's conformance JSON, degrading invalid output safely."""
 
@@ -141,10 +200,16 @@ def parse_conformance_report(text: str) -> PlanConformanceReport:
     summary = str(payload.get("summary") or "").strip() or (
         "Plan satisfied." if status == PlanConformanceStatus.satisfied else "Plan gaps remain."
     )
+    reason_code = _reason_code_from_payload(payload.get("reason_code"))
     if status == PlanConformanceStatus.satisfied and gaps:
         status = PlanConformanceStatus.needs_iteration
         summary = f"{summary} Report included gaps, so AWF requires another iteration."
-    return PlanConformanceReport(status=status, summary=summary, gaps=gaps)
+    return PlanConformanceReport(
+        status=status,
+        summary=summary,
+        gaps=gaps,
+        reason_code=reason_code,
+    )
 
 
 def changed_paths_from_porcelain(output: str) -> set[Path]:
@@ -176,3 +241,31 @@ def _gaps_from_payload(value: Any) -> tuple[str, ...]:
     if isinstance(value, str) and value.strip():
         return (value.strip(),)
     return ()
+
+
+def _reason_code_from_payload(value: Any) -> str:
+    if not isinstance(value, str):
+        return PLAN_CONFORMANCE_REPORTED
+    normalized = value.strip().upper().replace("-", "_")
+    if not normalized:
+        return PLAN_CONFORMANCE_REPORTED
+    return normalized[:128]
+
+
+def _safe_conformance_text(value: object) -> str:
+    text = str(value or "").strip()
+    if len(text) <= MAX_CONFORMANCE_TEXT_CHARS:
+        return text
+    return text[: MAX_CONFORMANCE_TEXT_CHARS - 3].rstrip() + "..."
+
+
+def _evidence_gaps(evidence: Mapping[str, Any]) -> tuple[str, ...]:
+    value = evidence.get("gaps")
+    if not isinstance(value, list):
+        return ()
+    gaps = [
+        _safe_conformance_text(item)
+        for item in value[:MAX_CONFORMANCE_GAPS]
+        if _safe_conformance_text(item)
+    ]
+    return tuple(gaps)

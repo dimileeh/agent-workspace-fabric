@@ -23,6 +23,7 @@ from awf.control.executor import (
     _failure_reason_for_phase,
     _get_active_recovery_payload,
     _MonitorRebaseRecoveryError,
+    _profile_with_planning_iteration_default,
     _read_text_if_present,
     _validation_failure_message,
     _validation_run_command_records,
@@ -33,6 +34,7 @@ from awf.control.executor import (
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -495,7 +497,7 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
         }
     )
 
-    message = await executor._run_agent_task_with_optional_planning(
+    failure = await executor._run_agent_task_with_optional_planning(
         adapter=adapter,  # type: ignore[arg-type]
         workspace=SimpleNamespace(id="ws_unsat", task_prompt="do it"),  # type: ignore[arg-type]
         profile=profile,
@@ -505,7 +507,42 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
         model=None,
     )
 
-    assert message == "plan conformance was not satisfied after 0 iteration(s): gap one"
+    assert failure is not None
+    assert not isinstance(failure, str)
+    assert failure.message == "plan conformance was not satisfied after 0 iteration(s): gap one"
+    assert failure.reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert failure.details["conformance"] == {
+        "summary": "more tests needed",
+        "gaps": ["gap one"],
+        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+        "report_reason_code": "PLAN_CONFORMANCE_REPORTED",
+        "iterations_used": 1,
+        "max_iterations": 0,
+        "plan_path": "docs/awf-plans/ws_unsat.md",
+        "report_path": "docs/awf-plans/ws_unsat.json",
+    }
+
+
+@pytest.mark.unit
+def test_planning_iteration_settings_default_applies_only_when_profile_omits_value() -> None:
+    omitted = WorkspaceProfile.model_validate(
+        {"name": "planning-default", "planning": {"required": True}}
+    )
+    explicit = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-explicit",
+            "planning": {"required": True, "max_iterations": 1},
+        }
+    )
+
+    assert (
+        _profile_with_planning_iteration_default(omitted, 4).planning.max_iterations
+        == 4
+    )
+    assert (
+        _profile_with_planning_iteration_default(explicit, 4).planning.max_iterations
+        == 1
+    )
 
 
 @pytest.mark.unit

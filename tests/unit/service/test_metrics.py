@@ -19,6 +19,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
 from awf.service.disk import DiskCheck
 from awf.service.orphan_resources import (
     WorkspaceIdView,
@@ -161,6 +162,68 @@ async def test_empty_db_returns_zero_workspace_reliability_summary(
     assert summary.cancelled_count == 0
     assert summary.destroyed_count == 0
     assert summary.cleanup_failure_count == 0
+
+
+@pytest.mark.unit
+async def test_failure_analysis_exposes_specific_conformance_reason_and_details(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_failure_analysis
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/project.git",
+            branch_base="main",
+            task_title="Finish planned work",
+            task_prompt="Implement the saved plan.",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "plan conformance was not satisfied"
+        workspace.updated_at = now
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            payload={
+                "details": {
+                    "conformance": {
+                        "summary": "Missing planned checks.",
+                        "gaps": ["Run mypy", "Add API test"],
+                        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+                        "iterations_used": 0,
+                        "max_iterations": 0,
+                        "plan_path": "docs/awf-plans/ws.md",
+                        "report_path": "docs/awf-plans/ws.conformance.json",
+                    }
+                },
+                "salvage": {"branch_name": "awf/ws_failed"},
+            },
+        )
+        workspace.updated_at = now
+        await session.commit()
+        workspace_id = workspace.id
+
+    summary = await summarize_failure_analysis(session_factory, now=now)
+
+    assert summary.failure_groups[0].failure_reason == FailureReason.agent_failure.value
+    assert summary.latest_examples[0].workspace_id == workspace_id
+    assert summary.latest_examples[0].reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert summary.latest_examples[0].details["conformance"]["gaps"] == [
+        "Run mypy",
+        "Add API test",
+    ]
+    assert summary.latest_examples[0].salvage == {"branch_name": "awf/ws_failed"}
+    assert summary.root_cause_clusters[0].reason_code == PLAN_CONFORMANCE_UNSATISFIED
+    assert summary.root_cause_clusters[0].likely_cause == "Plan Conformance Unsatisfied"
+    assert (
+        summary.root_cause_clusters[0].actionable_next_action
+        == "Retry with the final conformance gaps and finish the remaining planned work."
+    )
 
 
 @pytest.mark.unit
@@ -442,7 +505,6 @@ async def test_failure_analysis_latest_examples_do_not_load_workspace_relationsh
 
     relationship_tables = (
         "from operations",
-        "from workspace_events",
         "from workspace_log_streams",
         "from task_attempts",
     )
@@ -451,6 +513,21 @@ async def test_failure_analysis_latest_examples_do_not_load_workspace_relationsh
         for statement in statements
         if any(table in statement for table in relationship_tables)
     ]
+    workspace_event_queries = [
+        statement
+        for statement in statements
+        if "from workspace_events" in statement
+    ]
+    assert len(workspace_event_queries) == 1
+    workspace_event_query = workspace_event_queries[0]
+    # Failure details intentionally read workspace_events, but must keep using the
+    # explicit filtered batch query instead of an ORM relationship load.
+    assert "workspace_events.event_type = " in workspace_event_query
+    assert "workspace_events.new_state = " in workspace_event_query
+    assert (
+        "order by workspace_events.workspace_id, workspace_events.occurred_at desc"
+        in workspace_event_query
+    )
 
 
 @pytest.mark.unit

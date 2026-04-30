@@ -111,6 +111,9 @@ class FailedWorkspaceExampleResponse(BaseModel):
     pr_url: str | None
     created_at: datetime
     updated_at: datetime
+    reason_code: str | None = None
+    details: dict[str, Any] = Field(default_factory=dict)
+    salvage: dict[str, Any] | None = None
 
 
 class RootCauseClusterResponse(BaseModel):
@@ -119,10 +122,13 @@ class RootCauseClusterResponse(BaseModel):
     agent: str
     agent_model: str | None
     failure_reason: str
+    reason_code: str | None = None
     likely_cause: str
     actionable_next_action: str
     count: int
     sample_workspace_ids: list[str]
+    details: dict[str, Any] = Field(default_factory=dict)
+    salvage: dict[str, Any] | None = None
 
 
 class FailureAnalysisSummaryResponse(BaseModel):

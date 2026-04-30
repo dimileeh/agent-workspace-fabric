@@ -38,6 +38,7 @@ class ServiceSettings:
     worker_max_concurrent_executions: int = 3
     agent_wall_timeout_seconds: float = 7200
     agent_idle_timeout_seconds: float = 900
+    planning_max_iterations_default: int = 3
     host_home: str = "~"
     node_id: str | None = None
     branch_prefix: str = "awf"
@@ -95,6 +96,7 @@ def resolve_service_settings(
         worker_max_concurrent_executions=settings.worker_max_concurrent_executions,
         agent_wall_timeout_seconds=settings.agent_wall_timeout_seconds,
         agent_idle_timeout_seconds=settings.agent_idle_timeout_seconds,
+        planning_max_iterations_default=settings.planning_max_iterations_default,
         node_id=_empty_to_none(settings.worker_node_id) or DEFAULT_LOCAL_SERVICE_WORKER_NODE_ID,
         branch_prefix=settings.worker_branch_prefix,
         completed_workspace_retention_hours=settings.completed_workspace_retention_hours,
