@@ -1381,7 +1381,6 @@ function TaskDetailsModal({
   workspace: WorkspaceOverview;
   onClose: () => void;
 }) {
-  const coordinationSummary = summarizeCoordinationWarnings(workspace.coordination_warnings);
   return (
     <div className="fixed inset-0 z-50 grid bg-slate-950/45 p-3 sm:p-6" role="dialog" aria-modal="true">
       <div className="m-auto grid max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-md border border-slate-300 bg-white shadow-xl">
@@ -1416,9 +1415,7 @@ function TaskDetailsModal({
             <Fact label="Repository" value={workspace.repo_url} />
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
-          {coordinationSummary.count > 0 ? (
-            <CoordinationWarningBlock warnings={workspace.coordination_warnings} />
-          ) : null}
+          <CoordinationWarningBlock warnings={workspace.coordination_warnings} />
           <section className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 p-3">
             <div className="text-xs font-semibold text-slate-500">Prompt sent to AWF</div>
             <TaskPromptBody prompt={workspace.task_prompt} />
