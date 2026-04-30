@@ -275,7 +275,12 @@ class TestToolRegistration:
         cursor_schema = _optional_string_schema(locks_props["cursor"])
         assert cursor_schema["maxLength"] == 256
 
-        assert "limit" not in tools["awf_get_service_readiness"].inputSchema.get("properties", {})
+        readiness_props = tools["awf_get_service_readiness"].inputSchema["properties"]
+        assert "limit" not in readiness_props
+        assert "providers" in readiness_props
+        assert readiness_props["providers"]["default"] is None
+        readiness_required = tools["awf_get_service_readiness"].inputSchema.get("required", [])
+        assert "providers" not in readiness_required
         assert "limit" not in tools["awf_get_service_health"].inputSchema.get("properties", {})
 
         remonitor_props = tools["awf_remonitor_workspace"].inputSchema["properties"]

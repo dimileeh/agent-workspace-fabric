@@ -56,6 +56,7 @@ from awf.service.metrics import (
 )
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
+from awf.service.provider_readiness import ProviderName
 from awf.service.tasks import build_task_attempt_list_response, build_task_list_response
 from awf.service.validation_provenance import list_validation_provenance_response
 from awf.service.workspace_observability import (
@@ -754,12 +755,26 @@ def build_mcp_server(
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_service_readiness")
-    async def awf_get_service_readiness() -> StructuredToolResult:
+    async def awf_get_service_readiness(
+        providers: list[str] | None = Field(
+            default=None,
+            description="Optional list of provider names to restrict readiness checks to (e.g. 'github', 'codex', 'claude_code', 'gemini', 'opencode', 'docker'). When set, only these providers affect the overall readiness outcome.",
+        ),
+    ) -> StructuredToolResult:
         """Read-only operator observability: report AWF service readiness checks."""
+        from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+
+        validated_strict_providers = None
+        if providers is not None and len(providers) > 0:
+            try:
+                validated_strict_providers = validate_provider_names(providers)
+            except ProviderReadinessError as exc:
+                return _error_result("INVALID_PROVIDERS", str(exc))
         payload = await _provided_readiness(
             readiness_provider=readiness_provider,
             settings=settings_value,
             session_factory=service.session_factory,
+            validated_strict_providers=validated_strict_providers,
         )
         return _tool_result(payload)
 
@@ -897,6 +912,7 @@ async def _provided_readiness(
     readiness_provider: ReadinessProvider | None,
     settings: Settings,
     session_factory: Any | None = None,
+    validated_strict_providers: set[ProviderName] | None = None,
 ) -> dict[str, Any]:
     if readiness_provider is not None:
         result = readiness_provider(settings)
@@ -920,11 +936,18 @@ async def _provided_readiness(
     from awf.service.config import resolve_service_settings
     from awf.service.provider_readiness import collect_agent_readiness
 
+    readiness_kwargs: dict[str, Any] = {}
+    if validated_strict_providers is not None:
+        readiness_kwargs["validated_strict_providers"] = validated_strict_providers
     runner = AsyncioSubprocessRunner()
     db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(session_factory))
     cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
-    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_daemon(runner))
-    compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_compose(runner))
+    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_docker_daemon(runner)
+    )
+    compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_docker_compose(runner)
+    )
     image_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_agent_runtime_image(runner, settings.agent_runtime_image)
     )
@@ -932,6 +955,7 @@ async def _provided_readiness(
         asyncio.to_thread(
             collect_agent_readiness,
             resolve_service_settings(settings),
+            **readiness_kwargs,
         )
     )
     await asyncio.gather(

@@ -737,6 +737,36 @@ class TestMcpOperatorSurfaceParity:
         assert fallback_result["status"] == "fail"
 
     @pytest.mark.unit
+    async def test_readiness_fallback_with_strict_providers(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        from awf.service.provider_readiness import validate_provider_names
+
+        strict = validate_provider_names(["github"])
+        fallback_result = await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=resource_stack.settings,
+            session_factory=resource_stack.factory,
+            validated_strict_providers=strict,
+        )
+        assert fallback_result["service"] == "awf"
+        assert "agent_readiness" in fallback_result
+        assert "github" in fallback_result["agent_readiness"]["strict_providers"]
+
+    @pytest.mark.unit
+    async def test_readiness_fallback_omits_strict_providers_when_none(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        fallback_result = await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=resource_stack.settings,
+            session_factory=resource_stack.factory,
+        )
+        assert fallback_result["agent_readiness"]["strict_providers"] == []
+
+    @pytest.mark.unit
     async def test_read_only_operator_tools_use_shared_services_not_route_handlers(
         self,
         resource_stack: OperatorStack,
@@ -1474,6 +1504,38 @@ class TestMcpOperatorSurfaceParity:
             assert "ok" in check
             assert "status" in check
             assert "reason" in check
+
+    @pytest.mark.unit
+    async def test_service_readiness_tool_with_providers_filter(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        mcp_payload = await _call(
+            resource_stack.mcp,
+            "awf_get_service_readiness",
+            {"providers": ["github"]},
+        )
+
+        assert isinstance(mcp_payload, dict)
+        assert mcp_payload["service"] == "awf"
+        agent_readiness = mcp_payload["agent_readiness"]
+        assert "strict_providers" in agent_readiness
+        assert "github" in agent_readiness["strict_providers"]
+
+    @pytest.mark.unit
+    async def test_service_readiness_tool_with_invalid_providers_returns_error(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        result = await _call_result(
+            resource_stack.mcp,
+            "awf_get_service_readiness",
+            {"providers": ["nonexistent_provider"]},
+        )
+
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert result.structuredContent["error_code"] == "INVALID_PROVIDERS"
 
     @pytest.mark.unit
     async def test_remonitor_workspace_tool_returns_control_response(
