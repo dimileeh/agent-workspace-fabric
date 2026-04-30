@@ -9,7 +9,7 @@ import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import ProfileHealthCheck, WorkspaceProfile
 from awf.runtime.logs import CommandLogSinks, LogStore
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -18,6 +18,8 @@ from awf.runtime.validation import (
     ValidationRunner,
     _coverage_reason_code,
     _coverage_status,
+    _healthcheck_cli_args,
+    _healthcheck_failure_reason,
     _parse_python_coverage_percent_from_files,
 )
 from awf.runtime.validation_identity import (
@@ -825,8 +827,90 @@ class TestHappyPath:
             ("healthcheck", "curl -fsS http://api:8000/healthz"),
         ]
 
+    @pytest.mark.unit
+    async def test_db_refresh_without_validate_commands_returns_pending_healthcheck_failure(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="refresh ok")
+        fake.queue_result(returncode=7, stderr="connection refused")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-refresh-no-validate-health-failure",
+                "database": {"pre_validation_refresh": ["python scripts/db_refresh.py"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 0.001,
+                            "interval_seconds": 0.001,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_refresh_no_validate_health_fail",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert not result.all_passed
+        assert [(command.phase, command.reason_code) for command in result.commands] == [
+            ("db_refresh", "COMMAND_FAILED"),
+            ("healthcheck", "HEALTHCHECK_COMMAND_FAILED"),
+        ]
+
 
 class TestProfileHealthChecks:
+    @pytest.mark.unit
+    async def test_healthcheck_timeout_attempt_retries_before_deadline(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=124,
+            stderr="attempt timed out",
+            reason_code="PHASE_TIMEOUT",
+        )
+        fake.queue_result(returncode=0, stdout="ready")
+        fake.queue_result(returncode=0, stdout="tests ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "health-timeout-retry",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 1,
+                            "interval_seconds": 0.001,
+                            "attempt_timeout_seconds": 0.001,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_health_timeout_retry",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert result.all_passed
+        assert result.commands[0].phase == "healthcheck"
+        assert result.commands[0].retry_count == 1
+
     @pytest.mark.unit
     async def test_validation_waits_until_healthcheck_succeeds(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
@@ -1081,6 +1165,77 @@ class TestProfileHealthChecks:
         ]
         assert result.commands[0].stdout_path.name == "01_validate.stdout"
         assert len(fake.calls) == 1
+
+    @pytest.mark.unit
+    async def test_append_healthcheck_diagnostic_ignores_non_stderr_stream_id(
+        self, tmp_path: Path
+    ) -> None:
+        stderr = tmp_path / "health.stderr"
+        stderr.write_text("connection refused\n", encoding="utf-8")
+        log_store = LogStore(root=tmp_path / "logs")
+        val = ValidationRunner(
+            runner=FakeCommandRunner(),
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=log_store,
+        )
+        result = ValidationCommandResult(
+            command="curl -fsS http://api:8000/healthz",
+            returncode=7,
+            duration_seconds=0.01,
+            stdout_path=tmp_path / "health.stdout",
+            stderr_path=stderr,
+            phase="healthcheck",
+            stream_ids={"stderr": "validation.01_healthcheck.stdout"},
+        )
+
+        await val._append_healthcheck_stderr(
+            workspace_id="ws_bad_stream_id",
+            result=result,
+            diagnostic="diagnostic\n",
+        )
+
+        assert stderr.read_text(encoding="utf-8").endswith("diagnostic\n")
+        assert not (tmp_path / "logs" / "ws_bad_stream_id").exists()
+
+    @pytest.mark.unit
+    def test_invalid_healthcheck_configuration_helpers_fail_closed(
+        self, tmp_path: Path
+    ) -> None:
+        invalid = ProfileHealthCheck.model_construct(
+            name="invalid",
+            kind=None,
+            command=None,
+            url=None,
+            method="GET",
+            expected_status=200,
+            timeout_seconds=1.0,
+            interval_seconds=1.0,
+            attempt_timeout_seconds=None,
+        )
+        http = ProfileHealthCheck.model_validate(
+            {
+                "name": "api",
+                "url": "http://api:8080/healthz",
+                "expected_status": 200,
+            }
+        )
+        latest = ValidationCommandResult(
+            command="health",
+            returncode=1,
+            duration_seconds=0.01,
+            stdout_path=tmp_path / "health.stdout",
+            stderr_path=tmp_path / "health.stderr",
+        )
+
+        assert _healthcheck_cli_args(invalid) == [
+            "python",
+            "-c",
+            "import sys; print('invalid healthcheck configuration', file=sys.stderr); sys.exit(2)",
+        ]
+        assert _healthcheck_failure_reason(http, latest) == "HEALTHCHECK_HTTP_STATUS_MISMATCH"
+        assert _healthcheck_failure_reason(invalid, latest) == (
+            "HEALTHCHECK_INVALID_CONFIGURATION"
+        )
 
 
 class TestFailureStopsEarly:

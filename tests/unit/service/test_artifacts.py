@@ -10,6 +10,10 @@ import pytest
 from awf.service.artifacts import (
     ArtifactNotFoundError,
     ArtifactPathError,
+    _artifact_id,
+    _artifact_kind,
+    _is_symlink,
+    _resolve_artifact_root,
     get_downloadable_artifact,
     list_artifacts,
     workspace_artifact_dir,
@@ -143,6 +147,19 @@ class TestArtifactService:
             )
 
     @pytest.mark.unit
+    def test_directory_download_request_fails_closed(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        report_dir = artifact_dir / "reports"
+        report_dir.mkdir(parents=True)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_downloadable_artifact(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="reports",
+            )
+
+    @pytest.mark.unit
     def test_listing_reports_metadata_and_skips_deleted_files(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -184,3 +201,50 @@ class TestArtifactService:
         assert items[0].workspace_id == "ws_artifacts"
         assert items[0].kind == "txt"
         assert items[0].content_type == "text/plain"
+
+    @pytest.mark.unit
+    def test_listing_returns_empty_when_directory_walk_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+
+        def fail_walk(self: Path, *, follow_symlinks: bool = False) -> object:
+            assert self == artifact_dir
+            assert follow_symlinks is False
+            raise OSError("walk failed")
+
+        monkeypatch.setattr(Path, "walk", fail_walk)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
+    def test_small_artifact_private_aliases_and_oserror_paths(self, tmp_path: Path) -> None:
+        class RootPath:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+
+            def is_dir(self) -> bool:
+                return True
+
+            def is_symlink(self) -> bool:
+                return False
+
+            def resolve(self, *, strict: bool) -> object:
+                assert strict is True
+                return self.root / "regular-file"
+
+            def __str__(self) -> str:
+                return str(self.root)
+
+        class BrokenSymlinkProbe:
+            def is_symlink(self) -> bool:
+                raise OSError("stat failed")
+
+        assert _artifact_id("ws_artifacts", "report.txt").startswith("art_")
+        assert _artifact_kind(tmp_path / "report.txt") == "txt"
+        assert _is_symlink(BrokenSymlinkProbe()) is True  # type: ignore[arg-type]
+        with pytest.raises(ArtifactNotFoundError):
+            _resolve_artifact_root(RootPath(tmp_path))  # type: ignore[arg-type]

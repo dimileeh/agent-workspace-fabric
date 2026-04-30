@@ -442,6 +442,41 @@ async def test_baseline_coverage_preflight_returns_logged_policy_result(
 
 
 @pytest.mark.unit
+async def test_baseline_coverage_preflight_returns_successful_result(tmp_path: Path) -> None:
+    baseline = _coverage(
+        tmp_path,
+        percent=99,
+        minimum=99,
+        status="passed",
+        reason_code="COVERAGE_OK",
+    )
+    validation = _CoverageValidation(baseline)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path, validation=validation)
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "coverage-preflight-success",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99,
+                    "enforce": True,
+                    "command": "pytest --cov=awf",
+                }
+            },
+        }
+    )
+
+    result = await executor._run_baseline_coverage_preflight(
+        workspace_id="ws_preflight_success",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+    )
+
+    assert result is baseline
+    assert validation.calls == ["baseline_coverage"]
+
+
+@pytest.mark.unit
 async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: Path) -> None:
     runner = FakeCommandRunner()
     runner.queue_result(returncode=0, stdout="")
@@ -592,6 +627,65 @@ async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Pa
 
 
 @pytest.mark.unit
+async def test_planning_required_allows_extra_changes_when_profile_disables_guards(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="")  # before_plan
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_permissive.md\n?? src/allowed.py\n",
+    )  # dirty after plan
+    runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+    runner.queue_result(
+        returncode=0,
+        stdout="?? docs/awf-plans/ws_permissive.md\n?? src/allowed.py\n",
+    )  # before_compare
+    runner.queue_result(
+        returncode=0,
+        stdout=(
+            "?? docs/awf-plans/ws_permissive.md\n"
+            "?? docs/awf-plans/ws_permissive.json\n"
+            "?? src/allowed.py\n"
+            "?? src/compare_extra.py\n"
+        ),
+    )  # after_compare
+    executor = _executor_with_runner(runner, tmp_path)
+    adapter = _PlanningAdapter(
+        "plan",
+        "implementation",
+        '{"status":"satisfied","summary":"ok","gaps":[]}',
+    )
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "planning-permissive",
+            "planning": {
+                "required": True,
+                "plan_path": "docs/awf-plans/{workspace_id}.md",
+                "conformance_report_path": "docs/awf-plans/{workspace_id}.json",
+                "max_iterations": 0,
+                "enforce_plan_only_changes": False,
+                "fail_on_unexplained_deviation": False,
+            },
+        }
+    )
+
+    message = await executor._run_agent_task_with_optional_planning(
+        adapter=adapter,  # type: ignore[arg-type]
+        workspace=SimpleNamespace(id="ws_permissive", task_prompt="do it"),  # type: ignore[arg-type]
+        profile=profile,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        worktree_path=tmp_path / "worktree",
+        model=None,
+    )
+
+    assert message is None
+    assert len(adapter.prompts) == 3
+
+
+@pytest.mark.unit
 async def test_planning_required_reports_unsatisfied_conformance_after_iterations(
     tmp_path: Path,
 ) -> None:
@@ -670,6 +764,36 @@ def test_planning_iteration_settings_default_applies_only_when_profile_omits_val
         _profile_with_planning_iteration_default(explicit, 4).planning.max_iterations
         == 1
     )
+
+
+@pytest.mark.unit
+def test_raw_profile_and_salvage_helpers_handle_missing_optional_values(tmp_path: Path) -> None:
+    assert executor_mod._raw_profile_has_explicit_planning_max_iterations(None) is False
+    assert (
+        executor_mod._raw_profile_has_explicit_planning_max_iterations(
+            {"planning": {"required": True}}
+        )
+        is False
+    )
+    assert (
+        executor_mod._raw_profile_has_explicit_planning_max_iterations(
+            {"planning": {"max_iterations": 0}}
+        )
+        is True
+    )
+
+    minimal = executor_mod._failure_salvage_payload(
+        SimpleNamespace(branch_name=None, remote_push_branch=None),
+        worktree_path=tmp_path / "worktree",
+    )
+    with_branch = executor_mod._failure_salvage_payload(
+        SimpleNamespace(branch_name="awf/ws_123", remote_push_branch=None),
+        worktree_path=tmp_path / "worktree",
+    )
+
+    assert set(minimal) == {"hint", "worktree_path"}
+    assert with_branch["branch_name"] == "awf/ws_123"
+    assert with_branch["remote_push_branch"] == "awf/ws_123"
 
 
 @pytest.mark.unit
@@ -896,6 +1020,34 @@ def test_validation_failure_message_carries_healthcheck_context(tmp_path: Path) 
     assert "http://api:8080/healthz" in message
     assert "HEALTHCHECK_HTTP_STATUS_MISMATCH" in message
     assert "validation.01_healthcheck.stderr" in message
+
+
+@pytest.mark.unit
+def test_validation_failure_message_handles_minimal_healthcheck_metadata(tmp_path: Path) -> None:
+    failure = ValidationCommandResult(
+        command="curl -fsS http://api:8000/healthz",
+        returncode=7,
+        duration_seconds=0.1,
+        stdout_path=tmp_path / "health.stdout",
+        stderr_path=tmp_path / "health.stderr",
+        phase="healthcheck",
+        reason_code="HEALTHCHECK_COMMAND_FAILED",
+        stream_ids={"stdout": None, "stderr": None},
+        metadata={
+            "healthcheck_kind": 123,
+            "target": None,
+            "attempts": "one",
+            "timeout_seconds": "30",
+        },
+    )
+
+    message = _validation_failure_message(ValidationResult(commands=[failure]))
+
+    assert message == (
+        "validation failed: health check curl -fsS http://api:8000/healthz "
+        "(unknown target=curl -fsS http://api:8000/healthz) "
+        "failed with HEALTHCHECK_COMMAND_FAILED"
+    )
 
 
 @pytest.mark.unit
@@ -1498,6 +1650,147 @@ class _FakeSession:
 
     async def commit(self) -> None:
         self.commits += 1
+
+
+@pytest.mark.unit
+async def test_healthcheck_failure_event_noops_when_workspace_is_not_validating(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    workspace = SimpleNamespace(id="ws_health_stale", status=WorkspaceStatus.completed.value)
+
+    class FakeWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> object:
+            assert workspace_id == workspace.id
+            return workspace
+
+        async def add_event(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("stale healthcheck failures should not add events")
+
+    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+
+    await executor._record_health_check_failed_event(
+        workspace_id=workspace.id,
+        failure=_command_result(tmp_path),
+    )
+
+    assert session.commits == 0
+
+
+@pytest.mark.unit
+async def test_stale_terminal_workspace_paths_record_ignored_callbacks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session = _FakeSession()
+    workspace = SimpleNamespace(id="ws_terminal", status=WorkspaceStatus.completed.value)
+    stale_events: list[str] = []
+    ignored_callbacks: list[dict[str, object]] = []
+    finished_callbacks: list[dict[str, object]] = []
+
+    class FakeWorkspaceRepository:
+        def __init__(self, _session: object) -> None:
+            pass
+
+        async def get(self, workspace_id: str) -> object:
+            assert workspace_id == workspace.id
+            return workspace
+
+        async def get_with_operations(self, workspace_id: str) -> object:
+            assert workspace_id == workspace.id
+            workspace.operations = []
+            return workspace
+
+        async def record_ignored_stale_callback(
+            self,
+            _workspace: object,
+            *,
+            callback_source: str,
+            callback_action: str,
+            expected_status: WorkspaceStatus,
+            reason_code: str,
+        ) -> None:
+            ignored_callbacks.append(
+                {
+                    "source": callback_source,
+                    "action": callback_action,
+                    "expected": expected_status.value,
+                    "reason_code": reason_code,
+                }
+            )
+
+        async def add_event(
+            self,
+            _workspace: object,
+            *,
+            event_type: str,
+            **_kwargs: object,
+        ) -> None:
+            stale_events.append(event_type)
+
+        async def transition(self, *_args: object, **_kwargs: object) -> None:
+            raise AssertionError("stale terminal workspace should not transition")
+
+    async def finish_ignored(
+        _session: object,
+        **kwargs: object,
+    ) -> None:
+        finished_callbacks.append(kwargs)
+
+    monkeypatch.setattr(executor_mod, "WorkspaceRepository", FakeWorkspaceRepository)
+    executor = _executor_with_runner(FakeCommandRunner(), tmp_path)
+    executor._session_factory = lambda: session  # type: ignore[method-assign]
+    monkeypatch.setattr(
+        executor,
+        "_finish_ignored_stale_callback_operations_in_session",
+        finish_ignored,
+    )
+
+    transitioned = await executor._transition_if_current(
+        workspace.id,
+        from_status=WorkspaceStatus.running,
+        to=WorkspaceStatus.validating,
+        reason="RUN_OK",
+        action="start_validation",
+    )
+    worktree_available = await executor._ensure_worktree_available(
+        workspace_id=workspace.id,
+        worktree_path=tmp_path / "missing-worktree",
+        expected=WorkspaceStatus.running,
+        action="post_agent_commit",
+        validation_run_id="vr_stale",
+        requested_tier=2,
+    )
+    await executor._mark_failed(
+        workspace_id=workspace.id,
+        from_status=WorkspaceStatus.running,
+        failure_reason=FailureReason.infrastructure_failure,
+        message="late failure",
+    )
+    blocked = await executor._block_open_pr_reexecution_without_recovery(
+        workspace_id=workspace.id,
+    )
+
+    assert transitioned is False
+    assert worktree_available is False
+    assert blocked.blocked is True
+    assert [item["action"] for item in ignored_callbacks] == [
+        "start_validation",
+        "post_agent_commit",
+        "mark_failed",
+        "pr_reexecution_guard",
+    ]
+    assert len(finished_callbacks) == 3
+    assert finished_callbacks[1]["validation_run_id"] == "vr_stale"
+    assert finished_callbacks[1]["requested_tier"] == 2
+    assert stale_events == ["workspace.stale_action_skipped"] * 4
+    assert session.commits == 4
 
 
 @pytest.mark.unit

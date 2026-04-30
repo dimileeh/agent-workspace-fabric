@@ -83,12 +83,16 @@ def test_satisfied_report_with_gaps_is_downgraded() -> None:
 def test_parse_conformance_report_defaults_and_aliases() -> None:
     satisfied = parse_conformance_report('{"status":"ok","summary":"","gaps":[]}')
     needs_iteration = parse_conformance_report('{"status":"unknown","summary":"","gaps":"rerun mypy"}')
+    blank_reason = parse_conformance_report(
+        '{"status":"needs_iteration","summary":"x","gaps":[],"reason_code":"  "}'
+    )
 
     assert satisfied.status == PlanConformanceStatus.satisfied
     assert satisfied.summary == "Plan satisfied."
     assert needs_iteration.status == PlanConformanceStatus.needs_iteration
     assert needs_iteration.summary == "Plan gaps remain."
     assert needs_iteration.gaps == ("rerun mypy",)
+    assert blank_reason.reason_code == "PLAN_CONFORMANCE_REPORTED"
 
 
 @pytest.mark.unit
@@ -190,3 +194,21 @@ def test_conformance_retry_prompt_steers_agent_to_finish_remaining_gaps() -> Non
     assert "- Add regression test" in prompt
     assert "- Wire retry endpoint" in prompt
     assert "Do not restart from scratch" in prompt
+
+
+@pytest.mark.unit
+def test_conformance_retry_prompt_handles_missing_and_oversized_evidence() -> None:
+    prompt = build_conformance_retry_prompt(
+        task_prompt="Finish the DB hook profile work.",
+        evidence={
+            "summary": "x" * 2000,
+            "gaps": "not-a-list",
+            "plan_path": "",
+            "report_path": None,
+        },
+    )
+
+    assert "- Re-check the saved plan." in prompt
+    assert "- Plan artifacts were not recorded." in prompt
+    assert ("x" * 1000) not in prompt
+    assert "..." in prompt

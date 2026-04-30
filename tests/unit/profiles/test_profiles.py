@@ -221,6 +221,23 @@ def test_profile_schema_accepts_legacy_command_healthcheck_shape() -> None:
 
 
 @pytest.mark.unit
+def test_profile_healthcheck_method_validator_leaves_non_string_values_to_pydantic() -> None:
+    assert ProfileHealthCheck._normalize_method(123) == 123
+
+
+@pytest.mark.unit
+def test_profile_healthcheck_rejects_kind_that_conflicts_with_target_shape() -> None:
+    with pytest.raises(ValidationError, match="kind must match"):
+        ProfileHealthCheck.model_validate(
+            {
+                "name": "api",
+                "kind": "http",
+                "command": "curl -fsS http://api:8000/healthz",
+            }
+        )
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_http_healthcheck_without_shell_command() -> None:
     profile = WorkspaceProfile.model_validate(
         {
