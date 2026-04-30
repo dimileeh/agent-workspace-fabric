@@ -149,7 +149,17 @@ def _command_from(
         return command
     config = inspect_data.get("Config")
     if isinstance(config, dict):
-        command = _text_or_none(config.get("Cmd"))
+        config_cmd = config.get("Cmd")
+        if isinstance(config_cmd, list):
+            parts: list[str] = []
+            for value in config_cmd:
+                part = _text_or_none(value)
+                if part is not None:
+                    parts.append(part)
+            if parts:
+                return " ".join(parts)
+        else:
+            command = _text_or_none(config_cmd)
         if command is not None:
             return command
     return None
