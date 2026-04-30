@@ -122,6 +122,30 @@ def profile_agent_environment(profile: WorkspaceProfile) -> tuple[tuple[str, str
     return tuple(profile.runtime.environment.items())
 
 
+def merge_agent_environment(
+    base_environment: tuple[tuple[str, str], ...],
+    additions: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    """Merge agent environment pairs without overwriting existing keys."""
+
+    merged: list[tuple[str, str]] = list(base_environment)
+    existing = {key for key, _ in merged}
+    for key, value in additions:
+        if key not in existing:
+            merged.append((key, value))
+            existing.add(key)
+    return tuple(merged)
+
+
+def agent_environment_with_declared_secret_leases(
+    base_environment: tuple[tuple[str, str], ...],
+    lease_environment: tuple[tuple[str, str], ...],
+) -> tuple[tuple[str, str], ...]:
+    """Add profile-declared secret lease placeholders before legacy fallbacks."""
+
+    return merge_agent_environment(base_environment, lease_environment)
+
+
 def agent_environment_with_github_token(
     base_environment: tuple[tuple[str, str], ...],
     *,
@@ -150,6 +174,14 @@ def _github_token_placeholder(source_env: Mapping[str, str]) -> str | None:
 
 
 def agent_environment_with_host_auth(
+    base_environment: tuple[tuple[str, str], ...],
+    *,
+    host_env: Mapping[str, str] | None = None,
+) -> tuple[tuple[str, str], ...]:
+    return agent_environment_with_legacy_host_auth(base_environment, host_env=host_env)
+
+
+def agent_environment_with_legacy_host_auth(
     base_environment: tuple[tuple[str, str], ...],
     *,
     host_env: Mapping[str, str] | None = None,

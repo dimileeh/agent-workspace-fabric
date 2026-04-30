@@ -311,6 +311,37 @@ class TestRender:
         assert env["GIT_COMMITTER_EMAIL"] == "awf@example.com"
 
     @pytest.mark.unit
+    def test_declared_secret_lease_mounts_render_read_only_without_secret_values(
+        self, manager: ComposeManager, tmp_path: Path
+    ) -> None:
+        from awf.node.compose_manager import AuthMount
+
+        raw_secret = "sk-live-do-not-render"
+        secret_file = tmp_path / "openai-token"
+        secret_file.write_text(raw_secret, encoding="utf-8")
+        spec = _spec(
+            tmp_path,
+            auth_mounts=(
+                AuthMount(
+                    source=str(secret_file),
+                    target="/run/awf/secrets/openai-token",
+                    mode="ro",
+                ),
+            ),
+            agent_environment=(("OPENAI_API_KEY", "${OPENAI_API_KEY}"),),
+        )
+
+        rendered = manager.render(spec).compose_file.read_text()
+        parsed = yaml.safe_load(rendered)
+
+        volumes = parsed["services"]["agent"]["volumes"]
+        assert f"{secret_file}:/run/awf/secrets/openai-token:ro" in volumes
+        assert parsed["services"]["agent"]["environment"]["OPENAI_API_KEY"] == (
+            "${OPENAI_API_KEY}"
+        )
+        assert raw_secret not in rendered
+
+    @pytest.mark.unit
     def test_companion_service_renders_as_build_from_source(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:

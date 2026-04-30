@@ -49,6 +49,134 @@ def test_safe_secret_declarations_produce_no_lint_findings() -> None:
 
 
 @pytest.mark.unit
+def test_declared_local_secret_leases_are_safe_default_profile_shape() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "local-declared-leases",
+            "secrets": [
+                {
+                    "name": "github-token",
+                    "kind": "env",
+                    "target": "GH_TOKEN",
+                    "provider": "github",
+                    "ref": "token",
+                },
+                {
+                    "name": "openai-token",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "env",
+                    "ref": "env/OPENAI_API_KEY",
+                },
+                {
+                    "name": "github-cli-config",
+                    "kind": "mount",
+                    "target": "/home/agent/.config/gh",
+                    "provider": "local-auth",
+                    "ref": ".config/gh",
+                },
+                {
+                    "name": "service-account",
+                    "kind": "mount",
+                    "target": "/run/awf/secrets/gcp/credentials.json",
+                    "provider": "host-file",
+                    "ref": "/var/lib/awf/secrets/gcp/credentials.json",
+                },
+            ],
+        }
+    )
+
+    assert lint_workspace_profile(profile) == ()
+    assert profile_lint_errors(profile) == ()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "ref",
+    [
+        "~",
+        "${HOME}",
+        "${AWF_HOST_HOME}",
+        "/home/alice",
+        "/Users/alice",
+    ],
+)
+def test_broad_declared_local_file_refs_are_rejected_without_echoing_ref(ref: str) -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "host-home",
+            "kind": "mount",
+            "target": "/run/awf/secrets/host-home",
+            "provider": "local-file",
+            "ref": ref,
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert [finding.reason_code for finding in errors] == ["SECRET_LEASE_SOURCE_TOO_BROAD"]
+    assert ref not in json.dumps([finding.model_dump(mode="json") for finding in errors])
+
+
+@pytest.mark.unit
+def test_writable_declared_local_auth_lease_is_rejected_with_explicit_reason() -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "github-cli-config",
+            "kind": "mount",
+            "target": "/home/agent/.config/gh",
+            "provider": "local-auth",
+            "ref": ".config/gh",
+            "mode": "rw",
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert [finding.reason_code for finding in errors] == [
+        "SECRET_LEASE_WRITABLE_UNSUPPORTED"
+    ]
+    assert ".config/gh" not in json.dumps([finding.model_dump(mode="json") for finding in errors])
+
+
+@pytest.mark.unit
+def test_relative_declared_local_auth_target_is_rejected_as_broad() -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "github-cli-config",
+            "kind": "mount",
+            "target": "home/agent/.config/gh",
+            "provider": "local-auth",
+            "ref": ".config/gh",
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert [finding.reason_code for finding in errors] == ["SECRET_TARGET_TOO_BROAD"]
+
+
+@pytest.mark.unit
+def test_declared_local_file_ref_under_home_placeholder_is_rejected() -> None:
+    profile = _profile_with_secret(
+        {
+            "name": "host-home-file",
+            "kind": "mount",
+            "target": "/run/awf/secrets/host-home-file",
+            "provider": "host-file",
+            "ref": "${HOME}/.ssh/id_rsa",
+        }
+    )
+
+    errors = profile_lint_errors(profile)
+
+    assert [finding.reason_code for finding in errors] == ["SECRET_LEASE_SOURCE_TOO_BROAD"]
+    assert "${HOME}/.ssh/id_rsa" not in json.dumps(
+        [finding.model_dump(mode="json") for finding in errors]
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "target",
     [
@@ -247,6 +375,10 @@ def test_long_provider_ref_with_common_cloud_identifier_chars_is_not_raw_secret(
 
 @pytest.mark.unit
 def test_profile_lint_private_path_and_raw_secret_edges() -> None:
+    providerless_secret = _profile_with_secret(
+        {"name": "providerless", "target": "/run/awf/secrets/providerless"}
+    ).secrets[0]
+    assert profile_lint._normalized_secret_provider(providerless_secret) is None
     assert profile_lint._secret_mount_target_is_too_broad("relative/path") is True
     assert profile_lint._looks_like_raw_secret(None) is False
     assert profile_lint._looks_like_raw_secret("   ") is False

@@ -87,6 +87,18 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             created["compose_work_dir"] = work_dir
             created["compose_template_path"] = template_path
 
+    class _LocalSecretLeaseMountResolver:
+        def __init__(
+            self,
+            *,
+            host_home: Path,
+            work_dir: Path,
+            host_env: object,
+        ) -> None:
+            created["secret_resolver_host_home"] = host_home
+            created["secret_resolver_work_dir"] = work_dir
+            created["secret_resolver_host_env"] = host_env
+
     class _ComposeStackLauncher:
         def __init__(
             self,
@@ -94,10 +106,12 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
             compose: object,
             agent_runtime_image: str,
             auth_mount_resolver: object,
+            secret_lease_resolver: object,
         ) -> None:
             created["stack_compose"] = compose
             created["stack_agent_runtime_image"] = agent_runtime_image
             created["stack_auth_mount_resolver"] = auth_mount_resolver
+            created["stack_secret_lease_resolver"] = secret_lease_resolver
 
     class _Provisioner:
         def __init__(
@@ -162,6 +176,7 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     monkeypatch.setattr(worker_mod, "GitHubClient", _GitHubClient)
     monkeypatch.setattr(worker_mod, "GitManager", _GitManager)
     monkeypatch.setattr(worker_mod, "ComposeManager", _ComposeManager)
+    monkeypatch.setattr(worker_mod, "LocalSecretLeaseMountResolver", _LocalSecretLeaseMountResolver)
     monkeypatch.setattr(worker_mod, "ComposeStackLauncher", _ComposeStackLauncher)
     monkeypatch.setattr(worker_mod, "Provisioner", _Provisioner)
     monkeypatch.setattr(worker_mod, "WorkspaceExecutor", _WorkspaceExecutor)
@@ -197,6 +212,10 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["git_env"] == {"HOME": str(Path(settings.host_home).resolve())}
     assert created["applied_git_env"] == created["git_env"]
     assert created["executor_compose"] is created["stack_compose"]
+    assert created["secret_resolver_host_home"] == Path(settings.host_home).resolve()
+    assert created["secret_resolver_work_dir"] == work_dir
+    assert created["secret_resolver_host_env"] is worker_mod.os.environ
+    assert created["stack_secret_lease_resolver"].__class__ is _LocalSecretLeaseMountResolver
     assert created["executor_log_store"] is created["validation_log_store"]
     assert created["log_root"] == work_dir / "logs"
     assert created["validation_artifacts_dir"] == work_dir / "artifacts"

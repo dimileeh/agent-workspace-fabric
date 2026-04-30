@@ -11,6 +11,7 @@ from awf.node import stack_launcher as stack_launcher_mod
 from awf.node.compose_manager import AuthMount, ComposeProjectPaths, WorkspaceComposeSpec
 from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import WorktreeLayout
+from awf.node.secret_mounts import LocalSecretLeaseResolution, SecretLeaseResolutionError
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.models import (
     DockerMode,
@@ -71,6 +72,58 @@ class _FailingAuthMountResolver:
     def resolve(self, *, workspace_id: str) -> tuple[AuthMount, ...]:
         self.workspace_ids.append(workspace_id)
         raise RuntimeError("auth mount resolution failed")
+
+
+class _DeclaredLeaseResolver:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, str]] = []
+
+    def resolve(
+        self,
+        profile: WorkspaceProfile,
+        *,
+        workspace_id: str,
+    ) -> LocalSecretLeaseResolution:
+        self.calls.append((profile.name, workspace_id))
+        return LocalSecretLeaseResolution(
+            environment=(("OPENAI_API_KEY", "${OPENAI_API_KEY}"),),
+            mounts=(
+                AuthMount(
+                    source="/host/home/.config/gh",
+                    target="/home/agent/.config/gh",
+                    mode="ro",
+                ),
+            ),
+            metadata={
+                "schema": "secret_lease_mount_metadata.v1",
+                "mount_plan": "profile_declared_secret_leases",
+                "env_count": 1,
+                "mount_count": 1,
+                "providers": ["env", "local-auth"],
+                "targets": ["OPENAI_API_KEY", "/home/agent/.config/gh"],
+            },
+            satisfied_legacy_targets=frozenset({"/home/agent/.config/gh"}),
+        )
+
+
+class _FailingDeclaredLeaseResolver:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def resolve(
+        self,
+        profile: WorkspaceProfile,
+        *,
+        workspace_id: str,
+    ) -> LocalSecretLeaseResolution:
+        del profile
+        self.calls.append(workspace_id)
+        raise SecretLeaseResolutionError(
+            reason_code="SECRET_LEASE_SOURCE_MISSING",
+            secret_name="openai",
+            provider="env",
+            target="OPENAI_API_KEY",
+        )
 
 
 def _layout() -> WorktreeLayout:
@@ -490,6 +543,97 @@ async def test_compose_stack_launcher_appends_service_auth_mounts() -> None:
             mode="rw",
         ),
     )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_uses_declared_leases_before_legacy_auth_mounts() -> None:
+    compose = _RecordingCompose()
+    declared_resolver = _DeclaredLeaseResolver()
+    auth_mount_resolver = _RecordingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=declared_resolver,
+        auth_mount_resolver=auth_mount_resolver,
+    )
+    layout = _layout()
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "declared-leases",
+            "secrets": [
+                {
+                    "name": "openai",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "env",
+                    "ref": "env/OPENAI_API_KEY",
+                },
+                {
+                    "name": "github-cli-config",
+                    "kind": "mount",
+                    "target": "/home/agent/.config/gh",
+                    "provider": "local-auth",
+                    "ref": ".config/gh",
+                },
+            ],
+        }
+    )
+
+    paths = await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=layout,
+            profile=profile,
+        )
+    )
+
+    assert declared_resolver.calls == [("declared-leases", "ws_launcher")]
+    assert auth_mount_resolver.workspace_ids == ["ws_launcher"]
+    spec = compose.specs[0]
+    assert spec.auth_mounts == (
+        AuthMount(source=str(layout.mirror_path), target=str(layout.mirror_path), mode="rw"),
+        AuthMount(
+            source="/host/home/.config/gh",
+            target="/home/agent/.config/gh",
+            mode="ro",
+        ),
+        AuthMount(
+            source="/host/work/auth/ws_launcher/codex",
+            target="/home/agent/.codex",
+            mode="rw",
+        ),
+    )
+    assert dict(spec.agent_environment)["OPENAI_API_KEY"] == "${OPENAI_API_KEY}"
+    assert "env/OPENAI_API_KEY" not in repr(spec.agent_environment)
+    assert paths.secret_lease_mount_metadata["mount_plan"] == "profile_declared_secret_leases"
+    assert paths.secret_lease_mount_metadata["mount_count"] == 1
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_fails_secret_lease_resolution_before_compose_up() -> None:
+    compose = _RecordingCompose()
+    declared_resolver = _FailingDeclaredLeaseResolver()
+    auth_mount_resolver = _RecordingAuthMountResolver()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+        secret_lease_resolver=declared_resolver,
+        auth_mount_resolver=auth_mount_resolver,
+    )
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=WorkspaceProfile(name="generic"),
+            )
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_SOURCE_MISSING"
+    assert declared_resolver.calls == ["ws_launcher"]
+    assert auth_mount_resolver.workspace_ids == []
+    assert compose.specs == []
 
 
 @pytest.mark.unit

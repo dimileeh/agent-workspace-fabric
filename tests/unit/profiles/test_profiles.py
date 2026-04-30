@@ -129,6 +129,45 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_accepts_declared_provider_github_and_local_auth_leases() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "declared-local-leases",
+            "secrets": [
+                {
+                    "name": "github-token",
+                    "kind": "env",
+                    "target": "GITHUB_TOKEN",
+                    "provider": "github",
+                    "ref": "token",
+                },
+                {
+                    "name": "openai-token",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "env",
+                    "ref": "OPENAI_API_KEY",
+                },
+                {
+                    "name": "github-cli-config",
+                    "kind": "mount",
+                    "target": "/home/agent/.config/gh",
+                    "provider": "local-auth",
+                    "ref": ".config/gh",
+                },
+            ],
+        }
+    )
+
+    assert [secret.provider for secret in profile.secrets] == [
+        "github",
+        "env",
+        "local-auth",
+    ]
+    assert profile.secrets[2].mode == "ro"
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_legacy_command_healthcheck_shape() -> None:
     profile = WorkspaceProfile.model_validate(
         {

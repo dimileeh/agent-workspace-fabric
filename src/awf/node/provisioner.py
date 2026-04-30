@@ -18,6 +18,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -231,12 +232,10 @@ class Provisioner:
                 persisted.compose_file_path = str(stack_paths.compose_file)
                 await SecretLeaseService(session).record_secret_lease_mounts(
                     persisted,
-                    mount_metadata={
-                        "schema": "secret_lease_mount_metadata.v1",
-                        "mount_plan": "profile_declared_secrets",
-                        "compose_project": f"awf_{workspace_id}",
-                        "compose_file": str(stack_paths.compose_file),
-                    },
+                    mount_metadata=_stack_secret_lease_mount_metadata(
+                        workspace_id=workspace_id,
+                        stack_paths=stack_paths,
+                    ),
                 )
             if profile_resolution is not None:
                 persisted.resolved_profile = profile_resolution.profile.model_dump(
@@ -448,3 +447,31 @@ async def _reconcile_active_reservation_for_profile(
         return
     reservation.node_id = node_id
     reservation.dind_slots = 1 if profile.docker.mode.value == "dind" else 0
+
+
+def _stack_secret_lease_mount_metadata(
+    *,
+    workspace_id: str,
+    stack_paths: ComposeProjectPaths,
+) -> dict[str, Any]:
+    plan_metadata = stack_paths.secret_lease_mount_metadata
+    metadata: dict[str, Any] = {
+        "schema": str(plan_metadata.get("schema", "secret_lease_mount_metadata.v1")),
+        "mount_plan": str(
+            plan_metadata.get("mount_plan", "profile_declared_secret_leases")
+        ),
+        "compose_project": f"awf_{workspace_id}",
+        "compose_file": str(stack_paths.compose_file),
+    }
+    for key in (
+        "env_count",
+        "mount_count",
+        "providers",
+        "targets",
+        "omitted_optional_count",
+        "omitted_optional",
+        "skipped_unresolved_count",
+    ):
+        if key in plan_metadata:
+            metadata[key] = plan_metadata[key]
+    return metadata

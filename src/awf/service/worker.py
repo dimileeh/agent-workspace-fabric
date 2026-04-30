@@ -26,6 +26,7 @@ from awf.node.auth_mounts import ServiceAuthMountResolver
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
+from awf.node.secret_mounts import LocalSecretLeaseMountResolver
 from awf.node.stack_launcher import ComposeStackLauncher
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.logs import LogStore
@@ -112,10 +113,16 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         host_home=host_home,
         work_dir=work_dir,
     )
+    secret_lease_resolver = LocalSecretLeaseMountResolver(
+        host_home=host_home,
+        work_dir=work_dir,
+        host_env=os.environ,
+    )
     stack_launcher = ComposeStackLauncher(
         compose=compose,
         agent_runtime_image=settings.agent_runtime_image,
         auth_mount_resolver=auth_mount_resolver,
+        secret_lease_resolver=secret_lease_resolver,
     )
     node_id = settings.node_id or socket.gethostname()
     provisioner = Provisioner(

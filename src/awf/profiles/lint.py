@@ -22,6 +22,8 @@ SECRET_PROVIDER_REF_MISMATCH = "SECRET_PROVIDER_REF_MISMATCH"
 HOST_HOME_AUTH_MOUNT_TOO_BROAD = "HOST_HOME_AUTH_MOUNT_TOO_BROAD"
 HOST_HOME_AUTH_MOUNT_COMPATIBILITY = "HOST_HOME_AUTH_MOUNT_COMPATIBILITY"
 HOST_HOME_AUTH_MOUNT_WRITABLE = "HOST_HOME_AUTH_MOUNT_WRITABLE"
+SECRET_LEASE_SOURCE_TOO_BROAD = "SECRET_LEASE_SOURCE_TOO_BROAD"
+SECRET_LEASE_WRITABLE_UNSUPPORTED = "SECRET_LEASE_WRITABLE_UNSUPPORTED"
 
 _ENV_TARGET_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED_ENV_TARGETS = frozenset(("HOME", "PATH", "USER"))
@@ -89,6 +91,8 @@ _KNOWN_LOCAL_AUTH_TARGETS = frozenset(
         "/home/agent/.ssh",
     )
 )
+_LOCAL_LEASE_SOURCE_PROVIDERS = frozenset(("local-file", "host-file", "local-auth", "auth"))
+_LOCAL_AUTH_LEASE_PROVIDERS = frozenset(("local-auth", "auth"))
 _AUTH_LIKE_TARGET_SUFFIXES = frozenset(
     (
         ".aws",
@@ -181,7 +185,43 @@ def _lint_secret(secret: ProfileSecret, *, index: int) -> tuple[ProfileLintFindi
     path = f"secrets[{index}]"
 
     if secret.kind == "mount":
-        if _secret_mount_target_is_too_broad(secret.target):
+        if _declared_local_lease_mount_is_writable(secret):
+            findings.append(
+                ProfileLintFinding(
+                    reason_code=SECRET_LEASE_WRITABLE_UNSUPPORTED,
+                    message=(
+                        "Profile-declared local secret lease mounts must be read-only; "
+                        "use the legacy per-workspace auth seeding path for writable "
+                        "compatibility state."
+                    ),
+                    path=f"{path}.mode",
+                    details={
+                        "secret_name": secret.name,
+                        "kind": secret.kind,
+                        "provider": _normalized_secret_provider(secret),
+                    },
+                )
+            )
+        if _declared_local_lease_source_is_too_broad(secret):
+            findings.append(
+                ProfileLintFinding(
+                    reason_code=SECRET_LEASE_SOURCE_TOO_BROAD,
+                    message=(
+                        "Profile-declared local secret lease source is too broad; "
+                        "declare exact local files or known local auth refs."
+                    ),
+                    path=f"{path}.ref",
+                    details={
+                        "secret_name": secret.name,
+                        "kind": secret.kind,
+                        "provider": _normalized_secret_provider(secret),
+                    },
+                )
+            )
+        if (
+            not _declared_local_auth_target_is_allowed(secret)
+            and _secret_mount_target_is_too_broad(secret.target)
+        ):
             findings.append(
                 ProfileLintFinding(
                     reason_code=SECRET_TARGET_TOO_BROAD,
@@ -217,6 +257,52 @@ def _lint_secret(secret: ProfileSecret, *, index: int) -> tuple[ProfileLintFindi
         )
 
     return tuple(findings)
+
+
+def _normalized_secret_provider(secret: ProfileSecret) -> str | None:
+    if secret.provider is None:
+        return None
+    provider = secret.provider.strip().lower()
+    return provider or None
+
+
+def _declared_local_lease_mount_is_writable(secret: ProfileSecret) -> bool:
+    provider = _normalized_secret_provider(secret)
+    return provider in _LOCAL_LEASE_SOURCE_PROVIDERS and secret.mode != "ro"
+
+
+def _declared_local_lease_source_is_too_broad(secret: ProfileSecret) -> bool:
+    provider = _normalized_secret_provider(secret)
+    if provider not in _LOCAL_LEASE_SOURCE_PROVIDERS or secret.ref is None:
+        return False
+    return _local_lease_source_ref_is_too_broad(secret.ref)
+
+
+def _declared_local_auth_target_is_allowed(secret: ProfileSecret) -> bool:
+    provider = _normalized_secret_provider(secret)
+    if provider not in _LOCAL_AUTH_LEASE_PROVIDERS:
+        return False
+    target = _normalize_container_path(secret.target)
+    if target is None:
+        return False
+    return target in _KNOWN_LOCAL_AUTH_TARGETS
+
+
+def _local_lease_source_ref_is_too_broad(ref: str) -> bool:
+    stripped = ref.strip().rstrip("/")
+    if stripped in {
+        "~",
+        "$HOME",
+        "${HOME}",
+        "$AWF_HOST_HOME",
+        "${AWF_HOST_HOME}",
+        "/home",
+        "/Users",
+    }:
+        return True
+    if stripped.startswith(("~/", "$HOME/", "${HOME}/", "$AWF_HOST_HOME/", "${AWF_HOST_HOME}/")):
+        return True
+    return bool(re.fullmatch(r"/(?:home|Users)/[^/]+", stripped))
 
 
 def _lint_secret_env_target(secret: ProfileSecret, *, path: str) -> tuple[ProfileLintFinding, ...]:

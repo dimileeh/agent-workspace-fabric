@@ -18,8 +18,9 @@ from __future__ import annotations
 
 import asyncio
 import secrets
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from jinja2 import Environment, FileSystemLoader, StrictUndefined
 
@@ -166,6 +167,7 @@ class WorkspaceComposeSpec:
 class ComposeProjectPaths:
     project_dir: Path
     compose_file: Path
+    secret_lease_mount_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 class ComposeManager:
