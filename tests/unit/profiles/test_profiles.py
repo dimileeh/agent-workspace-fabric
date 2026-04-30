@@ -141,6 +141,41 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_accepts_database_hooks() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "db-backed",
+            "database": {
+                "generated_setup": [
+                    "./scripts/db-generated-setup.sh",
+                    {
+                        "command": "./scripts/db-generated-fixtures.sh",
+                        "timeout_seconds": 120,
+                    },
+                ],
+                "pre_validation_refresh": [
+                    {
+                        "command": "./scripts/db-refresh.sh",
+                        "timeout_seconds": 90,
+                    }
+                ],
+            },
+        }
+    )
+
+    assert [command.command for command in profile.database.generated_setup] == [
+        "./scripts/db-generated-setup.sh",
+        "./scripts/db-generated-fixtures.sh",
+    ]
+    assert profile.database.generated_setup[0].timeout_seconds is None
+    assert profile.database.generated_setup[1].timeout_seconds == 120
+    assert [command.command for command in profile.database.pre_validation_refresh] == [
+        "./scripts/db-refresh.sh"
+    ]
+    assert profile.database.pre_validation_refresh[0].timeout_seconds == 90
+
+
+@pytest.mark.unit
 def test_profile_schema_defaults_alembic_validation_to_disabled() -> None:
     profile = WorkspaceProfile.model_validate({"name": "python-explicit"})
 
@@ -170,6 +205,37 @@ def test_profile_schema_accepts_alembic_validation_policy() -> None:
     assert profile.validation.alembic.config_path == "db/alembic.ini"
     assert profile.validation.alembic.script_location == "db/migrations"
     assert profile.validation.alembic.fail_on_unconfigured is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "database",
+    [
+        {"generated_setup": "./scripts/db-generated-setup.sh"},
+        {"pre_validation_refresh": "./scripts/db-refresh.sh"},
+    ],
+)
+def test_profile_database_hooks_reject_non_list_values(
+    database: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate({"name": "bad-db-hooks", "database": database})
+
+
+@pytest.mark.unit
+def test_profile_database_hooks_coerce_none_values_to_empty_lists() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "db-hooks-none",
+            "database": {
+                "generated_setup": None,
+                "pre_validation_refresh": None,
+            },
+        }
+    )
+
+    assert profile.database.generated_setup == []
+    assert profile.database.pre_validation_refresh == []
 
 
 @pytest.mark.unit
@@ -220,6 +286,23 @@ def test_profile_schema_accepts_legacy_command_healthcheck_shape() -> None:
     assert healthcheck.timeout_seconds == 20
     assert healthcheck.interval_seconds == 1
     assert healthcheck.attempt_timeout_seconds is None
+
+
+@pytest.mark.unit
+def test_profile_healthcheck_method_validator_leaves_non_string_values_to_pydantic() -> None:
+    assert ProfileHealthCheck._normalize_method(123) == 123
+
+
+@pytest.mark.unit
+def test_profile_healthcheck_rejects_kind_that_conflicts_with_target_shape() -> None:
+    with pytest.raises(ValidationError, match="kind must match"):
+        ProfileHealthCheck.model_validate(
+            {
+                "name": "api",
+                "kind": "http",
+                "command": "curl -fsS http://api:8000/healthz",
+            }
+        )
 
 
 @pytest.mark.unit

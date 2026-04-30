@@ -128,6 +128,29 @@ async def _mark_conformance_failed(
         await session.commit()
 
 
+async def _mark_conformance_failed_without_evidence(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> None:
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "plan conformance was not satisfied"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+            payload={
+                "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+                "details": {"conformance": "legacy-invalid"},
+            },
+        )
+        await session.commit()
+
+
 @pytest.mark.unit
 async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
     factory: async_sessionmaker[AsyncSession],
@@ -268,6 +291,44 @@ async def test_retry_conformance_unsatisfied_enriches_prompt_with_final_gaps(
     assert operations[0].result["source_reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
     assert retry_created[0].payload["source_reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
     assert "conformance_evidence_ref" in retry_created[0].payload
+
+
+@pytest.mark.unit
+async def test_retry_conformance_unsatisfied_without_evidence_uses_original_prompt(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request())
+    await _mark_conformance_failed_without_evidence(factory, first.id)
+
+    retry = await service.retry_workspace(first.id)
+
+    async with factory() as session:
+        retried = await WorkspaceRepository(session).get(retry.new_workspace_id)
+        operations = list(
+            (
+                await session.execute(
+                    select(Operation).where(Operation.workspace_id == retry.new_workspace_id)
+                )
+            ).scalars()
+        )
+        retry_created = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == retry.new_workspace_id,
+                        WorkspaceEvent.event_type == "workspace.retry_created",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert retried is not None
+    assert retried.task_prompt == "Fix the intermittent validation failure."
+    assert operations[0].payload == {"source_workspace_id": first.id}
+    assert "source_reason_code" not in operations[0].result
+    assert "source_reason_code" not in retry_created[0].payload
+    assert "conformance_evidence_ref" not in retry_created[0].payload
 
 
 @pytest.mark.unit

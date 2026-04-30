@@ -1568,6 +1568,69 @@ class TestCreateWorkspaceV2OwnedPathPolicy:
         assert edges[0]["reason_code"] == "OWNED_PATH_OVERLAP_RISK"
         assert edges[0]["affected_workspace_ids"] == sorted([existing_id, new_id])
 
+    @pytest.mark.unit
+    async def test_detail_and_overview_expose_typed_coordination_warnings_for_overlaps(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        existing_id = await _create_v2_workspace(
+            client,
+            title="existing service work",
+            task_class="refactor_task",
+            owned_paths=["src/awf/service/**"],
+        )
+        create = await client.post(
+            "/v2/workspaces",
+            json=_v2_body(
+                title="new service file work",
+                task_class="docs_task",
+                owned_paths=["src/awf/service/workspaces.py"],
+            ),
+        )
+
+        assert create.status_code == 202
+        assert create.json()["warnings"][0]["warning_code"] == "OWNED_PATH_OVERLAP_RISK"
+        new_id = create.json()["workspace_id"]
+
+        detail = await client.get(f"/v1/workspaces/{new_id}")
+        overview = await client.get("/v1/workspaces/overview")
+
+        assert detail.status_code == 200
+        assert overview.status_code == 200
+        overview_item = next(
+            item for item in overview.json()["items"] if item["workspace_id"] == new_id
+        )
+        for body in (detail.json(), overview_item):
+            warnings = body["coordination_warnings"]
+            assert len(warnings) == 1
+            warning = warnings[0]
+            assert warning["warning_code"] == "OWNED_PATH_OVERLAP_RISK"
+            assert warning["severity"] == "advisory"
+            assert warning["blocks_launch"] is False
+            assert warning["workspace_ids"] == [existing_id]
+            assert warning["overlaps"] == [
+                {
+                    "workspace_id": existing_id,
+                    "existing_path": "src/awf/service/**",
+                    "requested_path": "src/awf/service/workspaces.py",
+                    "match_reason_code": "OWNED_PATH_WILDCARD_MATCH",
+                    "explanation": (
+                        "Wildcard owned-path prefixes overlap: "
+                        "src/awf/service/** <-> src/awf/service/workspaces.py."
+                    ),
+                }
+            ]
+            assert warning["stale_policy_context"] == {
+                "trigger_type": "path_overlap",
+                "stale_reason_code": "STALE_OVERLAP",
+            }
+
+        assert detail.json()["latest_queue_decision"]["decision"] == "admitted"
+        assert detail.json()["latest_queue_decision"]["reason_code"] == "ADMITTED_LOCAL"
+        assert detail.json()["task_policy"]["coordination"]["warnings"][0]["workspace_ids"] == [
+            existing_id
+        ]
+
 
 class TestIdempotency:
     @pytest.mark.unit

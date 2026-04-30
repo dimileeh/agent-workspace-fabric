@@ -37,12 +37,14 @@ _TRAILING_NUMBER_RE = re.compile(r"(?P<index>\d+)$")
 
 _PHASE_ORDER = {
     "setup": 0,
-    "pre_agent": 1,
-    "healthcheck": 2,
-    "post_agent": 3,
-    "validate": 4,
-    "coverage": 5,
-    "cleanup": 6,
+    "db_generated_setup": 1,
+    "pre_agent": 2,
+    "healthcheck": 3,
+    "post_agent": 4,
+    "db_refresh": 5,
+    "validate": 6,
+    "coverage": 7,
+    "cleanup": 8,
     "unknown": 99,
 }
 _SUCCESS_WORKSPACE_STATUSES = {
@@ -340,9 +342,11 @@ def _command_lookup(workspace: Workspace) -> dict[tuple[str, int], str]:
     if profile is not None:
         for phase_name in (
             "setup",
+            "db_generated_setup",
             "pre_agent",
             "healthcheck",
             "post_agent",
+            "db_refresh",
             "validate",
             "coverage",
             "cleanup",
@@ -359,6 +363,17 @@ def _command_lookup(workspace: Workspace) -> dict[tuple[str, int], str]:
                     start=1,
                 ):
                     lookup.setdefault((phase_key, index), healthcheck.display_command())
+                continue
+            if phase_name == "db_generated_setup":
+                for index, command in enumerate(profile.database.generated_setup, start=1):
+                    lookup.setdefault((phase_key, index), command.command)
+                continue
+            if phase_name == "db_refresh":
+                for index, command in enumerate(
+                    profile.database.pre_validation_refresh,
+                    start=1,
+                ):
+                    lookup.setdefault((phase_key, index), command.command)
                 continue
 
             for index, (_, command) in enumerate(
