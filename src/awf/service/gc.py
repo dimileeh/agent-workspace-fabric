@@ -23,6 +23,7 @@ from sqlalchemy.sql.elements import ColumnElement
 from awf.db.enums import WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import WorkspaceRepository
+from awf.runtime.inspection import RuntimeSnapshot, RuntimeService, RuntimeInspector
 from awf.service.secret_leases import (
     TERMINAL_GC_REVOKE_REASON,
     SecretLeaseService,
@@ -35,6 +36,7 @@ COMPLETED_PR_RETENTION_EXPIRED = "COMPLETED_PR_RETENTION_EXPIRED"
 TERMINAL_WORKSPACE_RETENTION_EXPIRED = "TERMINAL_WORKSPACE_RETENTION_EXPIRED"
 WORKSPACE_WITHIN_RETENTION = "WORKSPACE_WITHIN_RETENTION"
 FAILED_WORKSPACE_TRIAGE_PRESERVED = "FAILED_WORKSPACE_TRIAGE_PRESERVED"
+FAILED_WORKSPACE_NO_WORK = "FAILED_WORKSPACE_NO_WORK"
 COMPLETED_WORKSPACE_WITHOUT_PR = "COMPLETED_WORKSPACE_WITHOUT_PR"
 WORKSPACE_CLEANUP_DISABLED = "WORKSPACE_CLEANUP_DISABLED"
 
@@ -53,10 +55,18 @@ TERMINAL_WORKSPACE_GC_STATUSES = frozenset(
     {
         WorkspaceStatus.completed.value,
         WorkspaceStatus.failed.value,
+        "superseded",
         WorkspaceStatus.cancelled.value,
         WorkspaceStatus.destroyed.value,
     }
 )
+
+_FAILED_NO_WORK_TERMINAL_STATUSES = frozenset(
+    {WorkspaceStatus.failed.value, "superseded"}
+)
+_FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS = ("sleep infinity", "tail -f /dev/null")
+
+_RUNTIME_INSPECTOR = RuntimeInspector()
 
 PROTECTED_WORKSPACE_GC_STATUSES = frozenset(
     {
@@ -395,7 +405,11 @@ async def plan_terminal_workspace_gc(
     excluded_statuses = _normalize_statuses(exclude_statuses) or set()
     default_policy = requested_statuses is None
     if requested_statuses is None:
-        eligible_statuses = {WorkspaceStatus.completed.value, WorkspaceStatus.failed.value}
+        eligible_statuses = {
+            WorkspaceStatus.completed.value,
+            WorkspaceStatus.failed.value,
+            "superseded",
+        }
     else:
         eligible_statuses = requested_statuses & set(TERMINAL_WORKSPACE_GC_STATUSES)
     eligible_statuses -= excluded_statuses
@@ -537,6 +551,8 @@ def _workspace_gc_preserved_predicate(
         clauses: list[ColumnElement[bool]] = []
         if WorkspaceStatus.failed.value in eligible_statuses:
             clauses.append(Workspace.status == WorkspaceStatus.failed.value)
+        if "superseded" in eligible_statuses:
+            clauses.append(Workspace.status == "superseded")
         if WorkspaceStatus.completed.value in eligible_statuses:
             clauses.append(
                 and_(
@@ -656,7 +672,8 @@ async def run_workspace_filesystem_gc(
     include_statuses: tuple[str, ...] = ()
     if workspace is not None:
         include_statuses = (workspace.status,)
-        classification = _classify_workspace_for_gc(
+        classification = await asyncio.to_thread(
+            _classify_workspace_for_gc,
             workspace,
             work_dir=normalized_work_dir,
             now=current_time,
@@ -947,7 +964,22 @@ def _classify_workspace_for_gc(
         )
 
     if default_policy:
-        if workspace.status == WorkspaceStatus.failed.value:
+        if workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES:
+            if _failed_terminal_workspace_has_no_work(workspace):
+                if updated_at <= cutoff_at:
+                    return _candidate_for_workspace(
+                        workspace,
+                        work_dir=work_dir,
+                        now=now,
+                        reason_code=FAILED_WORKSPACE_NO_WORK,
+                    )
+                return WorkspaceGCPreserved(
+                    workspace_id=workspace.id,
+                    status=workspace.status,
+                    updated_at=updated_at,
+                    age_hours=age_hours,
+                    reason_code=WORKSPACE_WITHIN_RETENTION,
+                )
             return WorkspaceGCPreserved(
                 workspace_id=workspace.id,
                 status=workspace.status,
@@ -988,6 +1020,26 @@ def _classify_workspace_for_gc(
             age_hours=age_hours,
             reason_code=WORKSPACE_WITHIN_RETENTION,
         )
+    if (
+        workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES
+        and not _failed_terminal_workspace_has_no_work(workspace)
+    ):
+        return WorkspaceGCPreserved(
+            workspace_id=workspace.id,
+            status=workspace.status,
+            updated_at=updated_at,
+            age_hours=age_hours,
+            reason_code=TERMINAL_WORKSPACE_RETENTION_EXPIRED,
+        )
+
+    if workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES:
+        return _candidate_for_workspace(
+            workspace,
+            work_dir=work_dir,
+            now=now,
+            reason_code=FAILED_WORKSPACE_NO_WORK,
+        )
+
     reason_code = (
         COMPLETED_PR_RETENTION_EXPIRED
         if workspace.status == WorkspaceStatus.completed.value and _has_pr_metadata(workspace)
@@ -998,6 +1050,56 @@ def _classify_workspace_for_gc(
         work_dir=work_dir,
         now=now,
         reason_code=reason_code,
+    )
+
+
+def _failed_terminal_workspace_has_no_work(workspace: Workspace) -> bool:
+    """Return True when a failed terminal workspace has no active agent work."""
+
+    compose_project_name = _compose_project_name_for_workspace(workspace)
+    if compose_project_name is None:
+        return False
+    try:
+        snapshot = asyncio.run(_RUNTIME_INSPECTOR.inspect(compose_project_name))
+    except Exception:
+        return False
+    return _snapshot_has_no_work(snapshot)
+
+
+def _compose_project_name_for_workspace(workspace: Workspace) -> str | None:
+    return workspace.compose_project_name or None
+
+
+def _snapshot_has_no_work(snapshot: RuntimeSnapshot) -> bool:
+    if snapshot.stack_state == "unavailable":
+        return False
+    if not snapshot.services:
+        return snapshot.stack_state == "stopped"
+
+    agent_services = [
+        service
+        for service in snapshot.services
+        if (service.name or "").lower() == "agent"
+    ]
+    if not agent_services:
+        return False
+    return _agent_service_has_no_work(agent_services[0])
+
+
+def _agent_service_has_no_work(service: RuntimeService) -> bool:
+    if (service.state or "").lower() != "running":
+        return True
+    if _container_command_is_idle(service.command):
+        return True
+    return False
+
+
+def _container_command_is_idle(command: str | None) -> bool:
+    if not command:
+        return False
+    command_text = command.lower()
+    return any(
+        pattern in command_text for pattern in _FAILED_NO_WORK_RUNTIME_IDLE_PATTERNS
     )
 
 

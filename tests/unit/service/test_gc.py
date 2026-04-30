@@ -22,8 +22,10 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
     COMPLETED_PR_RETENTION_EXPIRED,
+    FAILED_WORKSPACE_NO_WORK,
     FAILED_WORKSPACE_TRIAGE_PRESERVED,
     WORKSPACE_WITHIN_RETENTION,
     WorkspaceGCComposeTeardownResult,
@@ -105,6 +107,15 @@ async def _issue_gc_secret_lease(
 def _write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content, encoding="utf-8")
+
+
+class _StaticRuntimeInspector:
+    def __init__(self, snapshot: RuntimeSnapshot) -> None:
+        self.snapshot = snapshot
+
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        assert compose_project_name is not None
+        return self.snapshot
 
 
 @pytest.mark.unit
@@ -644,6 +655,108 @@ async def test_failed_workspace_preserves_triage_assets_by_default(
     assert auth.exists()
     assert log_file.exists()
     assert artifact_file.exists()
+
+
+@pytest.mark.unit
+async def test_default_plan_includes_superseded_no_work_candidate(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.status = "superseded"
+        workspace.compose_project_name = "awf_superseded_gc"
+        await session.commit()
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="stopped",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="running",
+                        command="sleep infinity",
+                    )
+                ],
+            )
+        ),
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert [candidate.workspace_id for candidate in plan.candidates] == [workspace_id]
+    assert plan.candidates[0].status == "superseded"
+    assert plan.candidates[0].reason_code == FAILED_WORKSPACE_NO_WORK
+
+
+@pytest.mark.unit
+async def test_single_workspace_filesystem_gc_keeps_superseded_no_work_on_dry_run(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.status = "superseded"
+        workspace.compose_project_name = "awf_single_superseded_gc"
+        await session.commit()
+    _write(tmp_path / "service" / "git" / "worktrees" / workspace_id / "repo.txt", "repo")
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="stopped",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="running",
+                        command="sleep infinity",
+                    )
+                ],
+            )
+        ),
+    )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        workspace_id=workspace_id,
+        now=now,
+    )
+
+    assert [candidate.workspace_id for candidate in result.plan.candidates] == [
+        workspace_id,
+    ]
+    assert result.plan.candidates[0].reason_code == FAILED_WORKSPACE_NO_WORK
 
 
 @pytest.mark.unit
