@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-04-29
+Last updated: 2026-04-30
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust industrial system that is ready for a
@@ -49,16 +49,17 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Security, Secrets, And Egress Policy | Replace broad auth mounts with secret leases | `ws_22fc3239a5bd4d93b82ff003` | _pending_ | running | Codex/gpt-5.5; declared secret leases and safer local auth mounts while preserving compatibility. |
-| P1 Workspace Services And Realistic Project Profiles | Profile-defined app endpoints | `ws_0a911b1614e54418a2ce6877` | _pending_ | running | Codex/gpt-5.5; profile app endpoint metadata for agents, validation, API, and console-safe detail. |
-| P1 Workspace Services And Realistic Project Profiles | Database refresh hooks | `ws_0fdabcdbbf884682ae033426` | _pending_ | running | Codex/gpt-5.5; DB-backed profile refresh/generation hooks with durable logs and structured failures. |
-| P1 Workspace Services And Realistic Project Profiles | Migration-chain validation policy | `ws_f1f1f57ee64e470a9ee44821` | _pending_ | running | Codex/gpt-5.5; Alembic chain validation policy for Python DB-backed profiles. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Agent overlap warning prompts | `ws_9d924227c4744603aeed80cf` | _pending_ | running | Codex/gpt-5.5; include advisory overlap graph warnings in agent prompts without blocking launch. |
+| P1 Security, Secrets, And Egress Policy | Replace broad auth mounts with secret leases | `ws_22fc3239a5bd4d93b82ff003` | _pending_ | validating | Codex/gpt-5.5; declared secret leases and safer local auth mounts while preserving compatibility. |
+| P1 Workspace Services And Realistic Project Profiles | Profile-defined app endpoints | `ws_0a911b1614e54418a2ce6877` | [#152](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/152) | monitoring_pr | Codex/gpt-5.5; profile app endpoint metadata for agents, validation, API, and console-safe detail. |
+| P1 Workspace Services And Realistic Project Profiles | Database refresh hooks | `ws_0fdabcdbbf884682ae033426` | [#151](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/151) | validating | Codex/gpt-5.5; DB-backed profile refresh/generation hooks with durable logs and structured failures. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Agent overlap warning prompts | `ws_9d924227c4744603aeed80cf` | [#153](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/153) | monitoring_pr | Codex/gpt-5.5; include advisory overlap graph warnings in agent prompts without blocking launch. |
+| P1 MCP And Project Onboarding Client Parity | AWF doctor diagnostics | `ws_7d33a6f9a0b24eea91058a9e` | _pending_ | running | Codex/gpt-5.5; plain-language local diagnostics for Docker, API, worker, auth, provider readiness, ports, disk, stale containers, and env/config issues. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Workspace Services And Realistic Project Profiles | Migration-chain validation policy | `ws_f1f1f57ee64e470a9ee44821` | [#150](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/150) | merged | Adds Alembic chain validation policy for Python DB-backed profiles. |
 | P1 Security, Secrets, And Egress Policy | Local secret lease lifecycle records | `ws_60b4cd270bf34577bba32d28` | [#147](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/147) | merged | Records declared secret lease issue/mount/expiry/revoke metadata and audit events. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Local resource reservation accounting | `ws_a65f1a826823480a8c7cb197` | [#146](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/146) | merged | Finishes CPU, memory, disk, and DinD reservation accounting in local scheduling/status surfaces. |
 | P1 Workspace Services And Realistic Project Profiles | Redis app worker sidecar fixture | `ws_3dc7afc7f7f746f2b4e1dc44` | [#145](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/145) | merged | Adds a generic Redis/app/worker/service sidecar fixture with health and validation coverage. |
@@ -244,7 +245,7 @@ Status values:
 - [x] Add health-check wait semantics before validation.
 - [ ] Add profile-defined app endpoints exposed to agents and validation commands.
 - [ ] Add database refresh/generation hooks for DB-backed profiles.
-- [ ] Add migration-chain validation for Python/Alembic workloads.
+- [x] Add migration-chain validation for Python/Alembic workloads.
 
 ## P1: Scheduler, Reservations, And Advisory Overlap Graph
 
