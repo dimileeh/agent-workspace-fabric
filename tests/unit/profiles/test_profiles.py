@@ -129,6 +129,72 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_accepts_database_hooks() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "db-backed",
+            "database": {
+                "generated_setup": [
+                    "./scripts/db-generated-setup.sh",
+                    {
+                        "command": "./scripts/db-generated-fixtures.sh",
+                        "timeout_seconds": 120,
+                    },
+                ],
+                "pre_validation_refresh": [
+                    {
+                        "command": "./scripts/db-refresh.sh",
+                        "timeout_seconds": 90,
+                    }
+                ],
+            },
+        }
+    )
+
+    assert [command.command for command in profile.database.generated_setup] == [
+        "./scripts/db-generated-setup.sh",
+        "./scripts/db-generated-fixtures.sh",
+    ]
+    assert profile.database.generated_setup[0].timeout_seconds is None
+    assert profile.database.generated_setup[1].timeout_seconds == 120
+    assert [command.command for command in profile.database.pre_validation_refresh] == [
+        "./scripts/db-refresh.sh"
+    ]
+    assert profile.database.pre_validation_refresh[0].timeout_seconds == 90
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "database",
+    [
+        {"generated_setup": "./scripts/db-generated-setup.sh"},
+        {"pre_validation_refresh": "./scripts/db-refresh.sh"},
+    ],
+)
+def test_profile_database_hooks_reject_non_list_values(
+    database: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate({"name": "bad-db-hooks", "database": database})
+
+
+@pytest.mark.unit
+def test_profile_database_hooks_coerce_none_values_to_empty_lists() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "db-hooks-none",
+            "database": {
+                "generated_setup": None,
+                "pre_validation_refresh": None,
+            },
+        }
+    )
+
+    assert profile.database.generated_setup == []
+    assert profile.database.pre_validation_refresh == []
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_legacy_command_healthcheck_shape() -> None:
     profile = WorkspaceProfile.model_validate(
         {

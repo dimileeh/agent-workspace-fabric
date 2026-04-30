@@ -25,6 +25,7 @@ from awf.control.executor import (
     _MonitorRebaseRecoveryError,
     _profile_with_planning_iteration_default,
     _read_text_if_present,
+    _validation_command_count,
     _validation_failure_message,
     _validation_run_command_records,
     _validation_run_coverage_metadata,
@@ -139,6 +140,40 @@ def test_failure_reason_for_phase_maps_setup_timeout_and_healthcheck() -> None:
 
 
 @pytest.mark.unit
+def test_failure_reason_for_database_hook_phase() -> None:
+    assert (
+        _failure_reason_for_phase(
+            SimpleNamespace(
+                phase="db_generated_setup",
+                reason_code="DATABASE_GENERATED_SETUP_TIMEOUT",
+            )
+        )
+        == FailureReason.phase_timeout
+    )
+    assert (
+        _failure_reason_for_phase(
+            SimpleNamespace(phase="db_refresh", reason_code="DATABASE_REFRESH_TIMEOUT")
+        )
+        == FailureReason.phase_timeout
+    )
+    assert (
+        _failure_reason_for_phase(
+            SimpleNamespace(
+                phase="db_generated_setup",
+                reason_code="DATABASE_GENERATED_SETUP_FAILED",
+            )
+        )
+        == FailureReason.service_startup_failure
+    )
+    assert (
+        _failure_reason_for_phase(
+            SimpleNamespace(phase="db_refresh", reason_code="DATABASE_REFRESH_FAILED")
+        )
+        == FailureReason.validation_failure
+    )
+
+
+@pytest.mark.unit
 def test_validation_run_log_stream_refs_preserve_only_string_stream_ids() -> None:
     refs = _validation_run_log_stream_refs(
         [
@@ -189,6 +224,98 @@ def test_validation_run_command_records_include_healthchecks_and_coverage() -> N
         "stdout": "validation.01_coverage.stdout",
         "stderr": "validation.01_coverage.stderr",
     }
+
+
+@pytest.mark.unit
+def test_validation_run_command_records_include_database_refresh_hooks() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-db-refresh",
+            "phases": {
+                "post_agent": ["ruff format --check"],
+                "validate": ["pytest -q"],
+            },
+            "database": {
+                "pre_validation_refresh": [
+                    {"command": "python scripts/db_refresh.py", "timeout_seconds": 120}
+                ]
+            },
+            "validation": {
+                "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+            },
+        }
+    )
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("post_agent", "validate"),
+        run_healthchecks=True,
+    )
+
+    assert [(record["phase"], record["command_index"]) for record in records] == [
+        ("post_agent", 1),
+        ("db_refresh", 1),
+        ("healthcheck", 1),
+        ("validate", 1),
+    ]
+    assert records[1] == {
+        "phase": "db_refresh",
+        "command": "python scripts/db_refresh.py",
+        "command_index": 1,
+        "database_hook": True,
+        "hook_kind": "pre_validation_refresh",
+        "timeout_seconds": 120,
+        "stream_ids": {
+            "stdout": "validation.01_db_refresh.stdout",
+            "stderr": "validation.01_db_refresh.stderr",
+        },
+    }
+
+
+@pytest.mark.unit
+def test_validation_run_command_records_run_pending_healthchecks_after_refresh_without_validate() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-db-refresh-no-validate",
+            "database": {"pre_validation_refresh": ["python scripts/db_refresh.py"]},
+            "validation": {
+                "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+            },
+        }
+    )
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("validate",),
+        run_healthchecks=True,
+    )
+
+    assert [(record["phase"], record["command_index"]) for record in records] == [
+        ("db_refresh", 1),
+        ("healthcheck", 1),
+    ]
+
+
+@pytest.mark.unit
+def test_validation_command_count_includes_database_refresh_hooks_and_coverage() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "count-db-refresh",
+            "phases": {
+                "post_agent": ["ruff format --check"],
+                "validate": ["pytest -q"],
+            },
+            "database": {"pre_validation_refresh": ["python scripts/db_refresh.py"]},
+            "validation": {"coverage": {"command": "pytest --cov=awf"}},
+        }
+    )
+
+    workspace = SimpleNamespace(
+        resolved_profile=profile.model_dump(mode="json", by_alias=True),
+        test_commands=[],
+    )
+
+    assert _validation_command_count(workspace) == 4
 
 
 @pytest.mark.unit

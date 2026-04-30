@@ -56,6 +56,15 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
             "startup_timeout_seconds": profile.docker.startup_timeout_seconds,
         },
         "services": [_service_identity(service) for service in _sorted_services(profile.services)],
+        "database": {
+            "generated_setup": [
+                _command_identity(command) for command in profile.database.generated_setup
+            ],
+            "pre_validation_refresh": [
+                _command_identity(command)
+                for command in profile.database.pre_validation_refresh
+            ],
+        },
         "validation": {
             "healthchecks": [
                 _healthcheck_identity(healthcheck)

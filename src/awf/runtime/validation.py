@@ -60,6 +60,12 @@ HEALTHCHECK_TIMEOUT = "HEALTHCHECK_TIMEOUT"
 HEALTHCHECK_COMMAND_FAILED = "HEALTHCHECK_COMMAND_FAILED"
 HEALTHCHECK_HTTP_STATUS_MISMATCH = "HEALTHCHECK_HTTP_STATUS_MISMATCH"
 HEALTHCHECK_INVALID_CONFIGURATION = "HEALTHCHECK_INVALID_CONFIGURATION"
+DATABASE_GENERATED_SETUP_FAILED = "DATABASE_GENERATED_SETUP_FAILED"
+DATABASE_GENERATED_SETUP_TIMEOUT = "DATABASE_GENERATED_SETUP_TIMEOUT"
+DATABASE_REFRESH_FAILED = "DATABASE_REFRESH_FAILED"
+DATABASE_REFRESH_TIMEOUT = "DATABASE_REFRESH_TIMEOUT"
+DB_GENERATED_SETUP_PHASE = "db_generated_setup"
+DB_REFRESH_PHASE = "db_refresh"
 
 _HTTP_HEALTHCHECK_SCRIPT = (
     "import sys, urllib.error, urllib.request\n"
@@ -78,6 +84,16 @@ _HTTP_HEALTHCHECK_SCRIPT = (
     "print(f'http status {status} expected {expected}')\n"
     "sys.exit(0 if status == expected else 1)\n"
 )
+
+
+@dataclass(frozen=True)
+class ProfileExecutionCommand:
+    """One profile command after synthetic DB hook insertion."""
+
+    phase: str
+    command: ProfileCommand
+    database_hook: bool = False
+    hook_kind: str | None = None
 
 
 @dataclass(frozen=True)
@@ -165,6 +181,48 @@ class ValidationResult:
         return None
 
 
+def profile_phase_command_plan(
+    profile: WorkspaceProfile,
+    phase_names: list[str] | tuple[str, ...],
+) -> list[ProfileExecutionCommand]:
+    """Return normal phase commands plus DB hooks in runtime execution order."""
+    commands: list[ProfileExecutionCommand] = []
+    for phase in phase_names:
+        if phase == "setup":
+            commands.extend(_phase_commands(profile, "setup"))
+            commands.extend(
+                ProfileExecutionCommand(
+                    phase=DB_GENERATED_SETUP_PHASE,
+                    command=command,
+                    database_hook=True,
+                    hook_kind="generated_setup",
+                )
+                for command in profile.database.generated_setup
+            )
+            continue
+        if phase == "validate":
+            commands.extend(
+                ProfileExecutionCommand(
+                    phase=DB_REFRESH_PHASE,
+                    command=command,
+                    database_hook=True,
+                    hook_kind="pre_validation_refresh",
+                )
+                for command in profile.database.pre_validation_refresh
+            )
+            commands.extend(_phase_commands(profile, "validate"))
+            continue
+        commands.extend(_phase_commands(profile, phase))
+    return commands
+
+
+def _phase_commands(profile: WorkspaceProfile, phase: str) -> list[ProfileExecutionCommand]:
+    return [
+        ProfileExecutionCommand(phase=phase_name, command=command)
+        for phase_name, command in profile.phases.commands_for((phase,))
+    ]
+
+
 class ValidationRunner:
     """Runs profile phases inside the per-workspace agent container."""
 
@@ -202,7 +260,10 @@ class ValidationRunner:
                 reason="database setup is profile-driven in the universal runner",
             )
         del workspace_worktree
-        commands = [("validate", ProfileCommand(command=c)) for c in test_commands]
+        commands = [
+            ProfileExecutionCommand(phase="validate", command=ProfileCommand(command=c))
+            for c in test_commands
+        ]
         return await self._run_commands(
             workspace_id=workspace_id,
             compose_project=compose_project,
@@ -226,15 +287,21 @@ class ValidationRunner:
         """Run the selected profile phases in order."""
         healthchecks = profile.validation.healthchecks if run_healthchecks else []
         coverage = profile.validation.coverage if "validate" in set(phase_names) else None
+        healthcheck_before_phase = (
+            "validate"
+            if profile.database.pre_validation_refresh and "validate" in set(phase_names)
+            else None
+        )
         return await self._run_commands(
             workspace_id=workspace_id,
             compose_project=compose_project,
             compose_file=compose_file,
-            commands=profile.phases.commands_for(phase_names),
+            commands=profile_phase_command_plan(profile, phase_names),
             healthchecks=list(healthchecks),
             legacy_command_labels=False,
             retry_budget=profile.validation.retry_budget,
             coverage=coverage,
+            healthcheck_before_phase=healthcheck_before_phase,
         )
 
     async def run_profile_coverage(
@@ -269,43 +336,54 @@ class ValidationRunner:
         workspace_id: str,
         compose_project: str,
         compose_file: Path,
-        commands: list[tuple[str, ProfileCommand]],
+        commands: list[ProfileExecutionCommand],
         healthchecks: list[ProfileHealthCheck],
         legacy_command_labels: bool,
         retry_budget: int = 0,
         coverage: ProfileCoverage | None,
+        healthcheck_before_phase: str | None = None,
     ) -> ValidationResult:
         workspace_artifacts = self._artifacts_dir / workspace_id
         workspace_artifacts.mkdir(parents=True, exist_ok=True)
 
         results: list[ValidationCommandResult] = []
         phase_indices: dict[str, int] = {}
-        for healthcheck in healthchecks:
-            phase = "healthcheck"
-            phase_indices[phase] = phase_indices.get(phase, 0) + 1
-            label = f"{phase_indices[phase]:02d}_{phase}"
-            result = await self._wait_for_healthcheck(
+        pending_healthchecks = list(healthchecks)
+        if healthcheck_before_phase is None:
+            failure = await self._run_healthchecks(
                 workspace_id=workspace_id,
                 compose_project=compose_project,
                 compose_file=compose_file,
-                healthcheck=healthcheck,
-                label=label,
                 artifacts_dir=workspace_artifacts,
+                healthchecks=pending_healthchecks,
+                results=results,
+                phase_indices=phase_indices,
             )
-            results.append(result)
-            if not result.ok:
-                _log.info(
-                    "validation.healthcheck_failed",
-                    workspace_id=workspace_id,
-                    healthcheck_name=healthcheck.name,
-                    healthcheck_kind=healthcheck.kind,
-                    target=healthcheck.target(),
-                    returncode=result.returncode,
-                    reason_code=result.reason_code,
-                )
+            pending_healthchecks = []
+            if failure is not None:
                 return ValidationResult(commands=results)
 
-        for index, (phase, command) in enumerate(commands, start=1):
+        for index, step in enumerate(commands, start=1):
+            phase = step.phase
+            command = step.command
+            if (
+                healthcheck_before_phase is not None
+                and pending_healthchecks
+                and phase == healthcheck_before_phase
+            ):
+                failure = await self._run_healthchecks(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    artifacts_dir=workspace_artifacts,
+                    healthchecks=pending_healthchecks,
+                    results=results,
+                    phase_indices=phase_indices,
+                )
+                pending_healthchecks = []
+                if failure is not None:
+                    return ValidationResult(commands=results)
+
             if legacy_command_labels:
                 label = f"cmd_{index:02d}"
             else:
@@ -326,19 +404,7 @@ class ValidationRunner:
                 )
 
                 if result.ok or not command.required:
-                    results.append(
-                        ValidationCommandResult(
-                            command=result.command,
-                            returncode=result.returncode,
-                            duration_seconds=result.duration_seconds,
-                            stdout_path=result.stdout_path,
-                            stderr_path=result.stderr_path,
-                            phase=result.phase,
-                            reason_code=result.reason_code,
-                            stream_ids=result.stream_ids,
-                            retry_count=attempts,
-                        )
-                    )
+                    results.append(_final_command_result(result, step=step, attempts=attempts))
                     break
 
                 # 124: command timeout. > 128: killed by signal (e.g., 137 OOM kill).
@@ -359,7 +425,12 @@ class ValidationRunner:
                     )
                     continue
 
-                if is_flaky and attempts >= retry_budget and retry_budget > 0:
+                if (
+                    is_flaky
+                    and attempts >= retry_budget
+                    and retry_budget > 0
+                    and not step.database_hook
+                ):
                     result = ValidationCommandResult(
                         command=result.command,
                         returncode=result.returncode,
@@ -372,17 +443,7 @@ class ValidationRunner:
                         retry_count=attempts,
                     )
                 else:
-                    result = ValidationCommandResult(
-                        command=result.command,
-                        returncode=result.returncode,
-                        duration_seconds=result.duration_seconds,
-                        stdout_path=result.stdout_path,
-                        stderr_path=result.stderr_path,
-                        phase=result.phase,
-                        reason_code=result.reason_code,
-                        stream_ids=result.stream_ids,
-                        retry_count=attempts,
-                    )
+                    result = _final_command_result(result, step=step, attempts=attempts)
 
                 results.append(result)
                 _log.info(
@@ -393,6 +454,19 @@ class ValidationRunner:
                     returncode=result.returncode,
                     reason_code=result.reason_code,
                 )
+                return ValidationResult(commands=results)
+
+        if healthcheck_before_phase is not None and pending_healthchecks:
+            failure = await self._run_healthchecks(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                artifacts_dir=workspace_artifacts,
+                healthchecks=pending_healthchecks,
+                results=results,
+                phase_indices=phase_indices,
+            )
+            if failure is not None:
                 return ValidationResult(commands=results)
 
         coverage_result: ValidationCoverageResult | None = None
@@ -408,6 +482,43 @@ class ValidationRunner:
             )
 
         return ValidationResult(commands=results, coverage=coverage_result)
+
+    async def _run_healthchecks(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        artifacts_dir: Path,
+        healthchecks: list[ProfileHealthCheck],
+        results: list[ValidationCommandResult],
+        phase_indices: dict[str, int],
+    ) -> ValidationCommandResult | None:
+        for healthcheck in healthchecks:
+            phase = "healthcheck"
+            phase_indices[phase] = phase_indices.get(phase, 0) + 1
+            label = f"{phase_indices[phase]:02d}_{phase}"
+            result = await self._wait_for_healthcheck(
+                workspace_id=workspace_id,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                healthcheck=healthcheck,
+                label=label,
+                artifacts_dir=artifacts_dir,
+            )
+            results.append(result)
+            if not result.ok:
+                _log.info(
+                    "validation.healthcheck_failed",
+                    workspace_id=workspace_id,
+                    healthcheck_name=healthcheck.name,
+                    healthcheck_kind=healthcheck.kind,
+                    target=healthcheck.target(),
+                    returncode=result.returncode,
+                    reason_code=result.reason_code,
+                )
+                return result
+        return None
 
     async def _wait_for_healthcheck(
         self,
@@ -742,6 +853,46 @@ def _display_command(cli_args: list[str]) -> str:
             shell_cmd = shell_cmd[len(_VENV_ACTIVATE_PREAMBLE) :]
         return shell_cmd
     return " ".join(shlex.quote(a) for a in cli_args)
+
+
+def _final_command_result(
+    result: ValidationCommandResult,
+    *,
+    step: ProfileExecutionCommand,
+    attempts: int,
+) -> ValidationCommandResult:
+    reason_code = result.reason_code
+    if step.database_hook and not result.ok:
+        reason_code = _database_hook_failure_reason(step, result.reason_code)
+    return replace(
+        result,
+        reason_code=reason_code,
+        retry_count=attempts,
+        metadata=_execution_command_metadata(step),
+    )
+
+
+def _database_hook_failure_reason(
+    step: ProfileExecutionCommand,
+    reason_code: str,
+) -> str:
+    if step.hook_kind == "generated_setup":
+        if reason_code == "PHASE_TIMEOUT":
+            return DATABASE_GENERATED_SETUP_TIMEOUT
+        return DATABASE_GENERATED_SETUP_FAILED
+    if reason_code == "PHASE_TIMEOUT":
+        return DATABASE_REFRESH_TIMEOUT
+    return DATABASE_REFRESH_FAILED
+
+
+def _execution_command_metadata(step: ProfileExecutionCommand) -> dict[str, object]:
+    if not step.database_hook:
+        return {}
+    return {
+        "database_hook": True,
+        "hook_kind": step.hook_kind,
+        "timeout_seconds": step.command.timeout_seconds,
+    }
 
 
 def _healthcheck_cli_args(healthcheck: ProfileHealthCheck) -> list[str]:
