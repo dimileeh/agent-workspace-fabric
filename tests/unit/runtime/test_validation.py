@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
+from awf.profiles import compose as profile_compose
 from awf.profiles.models import ProfileHealthCheck, WorkspaceProfile
 from awf.runtime import validation as validation_module
+from awf.runtime import validation_identity as validation_identity_module
 from awf.runtime.logs import CommandLogSinks, LogStore
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -435,6 +438,39 @@ def test_environment_identity_inputs_include_app_endpoints_and_generated_endpoin
         entry["value_sha256"].startswith("sha256:")
         for entry in inputs["generated_endpoint_environment"]
     )
+
+
+@pytest.mark.unit
+def test_environment_identity_reuses_resolved_app_endpoints_for_generated_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    original_resolve_app_endpoints = profile_compose.resolve_app_endpoints
+
+    def counted_resolve_app_endpoints(
+        profile: WorkspaceProfile,
+        *,
+        include_internal: bool = True,
+    ) -> tuple[dict[str, Any], ...]:
+        nonlocal calls
+        calls += 1
+        return original_resolve_app_endpoints(profile, include_internal=include_internal)
+
+    monkeypatch.setattr(
+        profile_compose,
+        "resolve_app_endpoints",
+        counted_resolve_app_endpoints,
+    )
+    monkeypatch.setattr(
+        validation_identity_module,
+        "resolve_app_endpoints",
+        counted_resolve_app_endpoints,
+    )
+
+    inputs = environment_identity_inputs(_identity_profile_with_endpoint())
+
+    assert calls == 1
+    assert inputs["app_endpoints"][0]["internal_url"] == "http://api:8000/"
 
 
 class TestHappyPath:

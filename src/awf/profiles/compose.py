@@ -164,10 +164,15 @@ def resolve_profile_app_endpoints(
 
 def profile_app_endpoint_environment(
     profile: WorkspaceProfile,
+    *,
+    resolved_endpoints: Iterable[dict[str, Any]] | None = None,
 ) -> tuple[tuple[str, str], ...]:
+    if resolved_endpoints is None:
+        resolved_endpoints = resolve_app_endpoints(profile)
+
     endpoints = [
         endpoint
-        for endpoint in resolve_app_endpoints(profile)
+        for endpoint in resolved_endpoints
         if endpoint["visibility"] in {"agent", "validation"}
     ]
     if not endpoints:

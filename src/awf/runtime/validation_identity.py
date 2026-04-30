@@ -43,6 +43,8 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
     hashes so the API can explain identity inputs without leaking credentials.
     """
 
+    app_endpoints = resolve_app_endpoints(profile)
+
     return {
         "schema_version": _IDENTITY_SCHEMA_VERSION,
         "runtime": {
@@ -57,9 +59,9 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
             "startup_timeout_seconds": profile.docker.startup_timeout_seconds,
         },
         "services": [_service_identity(service) for service in _sorted_services(profile.services)],
-        "app_endpoints": list(resolve_app_endpoints(profile)),
+        "app_endpoints": list(app_endpoints),
         "generated_endpoint_environment": _environment_entries(
-            dict(profile_app_endpoint_environment(profile))
+            dict(profile_app_endpoint_environment(profile, resolved_endpoints=app_endpoints))
         ),
         "validation": {
             "healthchecks": [
