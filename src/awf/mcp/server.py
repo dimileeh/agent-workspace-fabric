@@ -773,9 +773,10 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_remonitor_workspace")
     async def awf_remonitor_workspace(
-        workspace_id: str = Field(..., description="Workspace ID to remonitor."),
+        workspace_id: str = Field(..., min_length=1, max_length=256, description="Workspace ID to remonitor."),
         reason: str | None = Field(
             default=None,
+            max_length=1024,
             description="Optional operator reason to record with the remonitor request.",
         ),
     ) -> StructuredToolResult:
@@ -791,9 +792,10 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_request_workspace_validation")
     async def awf_request_workspace_validation(
-        workspace_id: str = Field(..., description="Workspace ID to validate."),
+        workspace_id: str = Field(..., min_length=1, max_length=256, description="Workspace ID to validate."),
         reason: str | None = Field(
             default=None,
+            max_length=1024,
             description="Optional operator reason for re-validation.",
         ),
         requested_tier: int | None = Field(
