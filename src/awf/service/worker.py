@@ -242,6 +242,7 @@ def _service_git_environment(host_home: Path, *, github_token: str | None = None
     """Git/SSH environment for service-worker host repository operations."""
 
     env = {"HOME": str(host_home)}
+    _add_git_config_entries(env, (("safe.directory", "*"),))
     if github_token:
         # GitHub CLI cannot read macOS Keychain tokens from inside the local
         # service container. Forward an explicit service token to gh subprocesses.
