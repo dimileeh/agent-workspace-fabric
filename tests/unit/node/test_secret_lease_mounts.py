@@ -117,6 +117,32 @@ def test_github_provider_prefers_awf_token_and_exposes_standard_placeholders(
 
 
 @pytest.mark.unit
+def test_github_provider_rejects_unrelated_env_target_without_secret_value(
+    tmp_path: Path,
+) -> None:
+    raw_secret = "ghp_do_not_render"
+    resolver = _resolver(tmp_path, host_env={"AWF_GITHUB_TOKEN": raw_secret})
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "github",
+                    "kind": "env",
+                    "target": "OPENAI_API_KEY",
+                    "provider": "github",
+                    "ref": "token",
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_TARGET_MISMATCH"
+    assert raised.value.target == "OPENAI_API_KEY"
+    assert raw_secret not in str(raised.value)
+
+
+@pytest.mark.unit
 def test_local_file_provider_produces_exact_read_only_mount(tmp_path: Path) -> None:
     secret_file = tmp_path / "credentials.json"
     secret_file.write_text('{"token": "do-not-render"}\n', encoding="utf-8")
@@ -146,6 +172,30 @@ def test_local_file_provider_produces_exact_read_only_mount(tmp_path: Path) -> N
     assert "do-not-render" not in json.dumps(resolution.metadata, default=str)
     assert resolution.metadata["mount_count"] == 1
     assert resolution.metadata["targets"] == ["/run/awf/secrets/gcp/credentials.json"]
+
+
+@pytest.mark.unit
+def test_local_file_provider_rejects_existing_directory_source(tmp_path: Path) -> None:
+    secret_directory = tmp_path / "credentials.d"
+    secret_directory.mkdir()
+    resolver = _resolver(tmp_path)
+
+    with pytest.raises(SecretLeaseResolutionError) as raised:
+        resolver.resolve(
+            _profile(
+                {
+                    "name": "gcp-credentials",
+                    "kind": "mount",
+                    "target": "/run/awf/secrets/gcp/credentials.json",
+                    "provider": "host-file",
+                    "ref": str(secret_directory),
+                }
+            ),
+            workspace_id="ws_secret",
+        )
+
+    assert raised.value.reason_code == "SECRET_LEASE_SOURCE_INVALID"
+    assert str(secret_directory) not in str(raised.value)
 
 
 @pytest.mark.unit

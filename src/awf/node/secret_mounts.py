@@ -28,6 +28,7 @@ _SUPPORTED_PROVIDERS = (
     _ENV_PROVIDERS | _GITHUB_PROVIDERS | _LOCAL_FILE_PROVIDERS | _LOCAL_AUTH_PROVIDERS
 )
 _GITHUB_TOKEN_SOURCE_NAMES = ("AWF_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN")
+_GITHUB_TOKEN_TARGET_NAMES = frozenset(("GH_TOKEN", "GITHUB_TOKEN"))
 _ENV_NAME_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _HOME_ROOT_RE = re.compile(r"^/(?:home|Users)/[^/]+/?$")
 
@@ -235,6 +236,8 @@ class LocalSecretLeaseMountResolver:
     ) -> tuple[tuple[str, str], ...]:
         if secret.kind != "env":
             self._raise(SECRET_LEASE_TARGET_KIND_MISMATCH, secret, provider=provider)
+        if secret.target not in _GITHUB_TOKEN_TARGET_NAMES:
+            self._raise(SECRET_LEASE_TARGET_MISMATCH, secret, provider=provider)
         source_name = next((name for name in _GITHUB_TOKEN_SOURCE_NAMES if source_env.get(name)), None)
         if source_name is None:
             self._missing(secret, provider=provider, omitted_optional=omitted_optional)
@@ -256,6 +259,8 @@ class LocalSecretLeaseMountResolver:
         if not source.exists():
             self._missing(secret, provider=provider, omitted_optional=omitted_optional)
             return None
+        if not source.is_file():
+            self._raise(SECRET_LEASE_SOURCE_INVALID, secret, provider=provider)
         return AuthMount(source=str(source), target=secret.target, mode="ro")
 
     def _resolve_local_auth_secret(
