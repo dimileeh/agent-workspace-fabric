@@ -1559,7 +1559,14 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
             created["disposed"] = True
 
     class _GitManager:
-        def __init__(self, work_dir: Path, *, env: dict[str, str]) -> None:
+        def __init__(
+            self,
+            work_dir: Path,
+            *,
+            env: dict[str, str],
+            worktree_owner_uid: int | None = None,
+            worktree_owner_gid: int | None = None,
+        ) -> None:
             created["git_work_dir"] = work_dir
             created["git_env"] = env
 
