@@ -15,10 +15,11 @@ import hashlib
 import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -28,7 +29,13 @@ from sqlalchemy.sql import Select
 from sqlalchemy.sql.elements import ColumnElement
 
 from awf.common.audit import build_audit_payload, redact_audit_value
+from awf.common.callback_events import (
+    CALLBACK_EVENT_WILDCARDS,
+    PUBLIC_CALLBACK_EVENT_TYPES,
+)
 from awf.common.ids import (
+    new_callback_delivery_id,
+    new_callback_subscription_id,
     new_event_id,
     new_log_stream_id,
     new_merge_candidate_id,
@@ -45,8 +52,18 @@ from awf.common.ids import (
 )
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
-from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
+from awf.db.enums import (
+    AgentRuntime,
+    CallbackDeliveryStatus,
+    CallbackEventKind,
+    OperationStatus,
+    OperationType,
+    TaskClass,
+    WorkspaceStatus,
+)
 from awf.db.models import (
+    CallbackDelivery,
+    CallbackSubscription,
     MergeCandidate,
     Operation,
     PolicyFinding,
@@ -89,6 +106,13 @@ _SECRET_LEASE_DECLARATION_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "secret_name",
     "kind",
     "target",
+)
+_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
+    "idempotency_key",
+)
+_CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
+    "subscription_id",
+    "dedupe_key",
 )
 
 
@@ -169,6 +193,80 @@ def _secret_lease_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
             .returning(WorkspaceSecretLease.id)
         )
     return None
+
+
+def _callback_subscription_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
+    if dialect_name == "postgresql":
+        return (
+            postgresql_insert(CallbackSubscription)
+            .on_conflict_do_nothing(
+                index_elements=_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS
+            )
+            .returning(CallbackSubscription.id)
+        )
+    if dialect_name == "sqlite":
+        return (
+            sqlite_insert(CallbackSubscription)
+            .on_conflict_do_nothing(
+                index_elements=_CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS
+            )
+            .returning(CallbackSubscription.id)
+        )
+    return None
+
+
+def _callback_delivery_insert_if_absent_stmt(dialect_name: str | None) -> Any | None:
+    if dialect_name == "postgresql":
+        return (
+            postgresql_insert(CallbackDelivery)
+            .on_conflict_do_nothing(index_elements=_CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS)
+            .returning(CallbackDelivery.id)
+        )
+    if dialect_name == "sqlite":
+        return (
+            sqlite_insert(CallbackDelivery)
+            .on_conflict_do_nothing(index_elements=_CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS)
+            .returning(CallbackDelivery.id)
+        )
+    return None
+
+
+def _callback_subscription_event_type_candidates(event_type: str) -> tuple[str, ...]:
+    if event_type not in PUBLIC_CALLBACK_EVENT_TYPES:
+        return ()
+
+    candidates = [event_type]
+    namespace, separator, _suffix = event_type.partition(".")
+    wildcard = f"{namespace}.*"
+    if separator and wildcard in CALLBACK_EVENT_WILDCARDS:
+        candidates.append(wildcard)
+    return tuple(candidates)
+
+
+def _callback_subscription_event_type_filter(
+    event_type_candidates: tuple[str, ...],
+    dialect_name: str | None,
+) -> ColumnElement[bool]:
+    event_type_values: Any
+    if dialect_name == "postgresql":
+        event_type_values = (
+            func.jsonb_array_elements_text(CallbackSubscription.event_types.cast(JSONB))
+            .table_valued("value")
+            .render_derived(name="callback_event_type")
+        )
+    else:
+        event_type_values = (
+            func.json_each(CallbackSubscription.event_types)
+            .table_valued("value")
+            .alias("callback_event_type")
+        )
+
+    return (
+        select(1)
+        .select_from(event_type_values)
+        .where(event_type_values.c.value.in_(event_type_candidates))
+        .exists()
+    )
 
 
 class TaskRepository:
@@ -2888,6 +2986,344 @@ class WorkspaceEventRepository:
             WorkspaceEvent.id.desc(),
         ).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+
+class CallbackIdempotencyConflictError(ValueError):
+    """Raised when an idempotency key is replayed with a different request body."""
+
+
+class CallbackSubscriptionRepository:
+    """CRUD helpers for external callback registrations."""
+
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
+        self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+
+    async def create_idempotent(
+        self,
+        *,
+        name: str,
+        target_url: str,
+        event_types: list[str],
+        enabled: bool,
+        timeout_seconds: int,
+        max_attempts: int,
+        initial_backoff_seconds: int,
+        idempotency_key: str,
+        request_hash: str,
+    ) -> tuple[CallbackSubscription, bool]:
+        existing = await self.get_by_idempotency_key(idempotency_key)
+        if existing is not None:
+            if existing.request_hash != request_hash:
+                raise CallbackIdempotencyConflictError(
+                    "Idempotency-Key previously used with a different callback request."
+                )
+            return existing, False
+
+        now = datetime.now(UTC)
+        subscription_values: dict[str, Any] = {
+            "id": new_callback_subscription_id(),
+            "name": name,
+            "target_url": target_url,
+            "event_types": list(event_types),
+            "enabled": enabled,
+            "timeout_seconds": timeout_seconds,
+            "max_attempts": max_attempts,
+            "initial_backoff_seconds": initial_backoff_seconds,
+            "idempotency_key": idempotency_key,
+            "request_hash": request_hash,
+            "created_at": now,
+            "updated_at": now,
+            "disabled_at": None if enabled else now,
+        }
+        insert_if_absent = _callback_subscription_insert_if_absent_stmt(self._dialect_name)
+        if insert_if_absent is not None:
+            result = await self._session.execute(insert_if_absent.values(**subscription_values))
+            inserted_id = result.scalar_one_or_none()
+            if inserted_id is not None:
+                inserted = await self.get(inserted_id)
+                if inserted is None:
+                    raise RuntimeError("Inserted callback subscription could not be loaded.")
+                return inserted, True
+
+            existing = await self.get_by_idempotency_key(idempotency_key)
+            if existing is None:
+                raise RuntimeError(
+                    "Callback subscription insert conflicted but no row could be loaded."
+                )
+            if existing.request_hash != request_hash:
+                raise CallbackIdempotencyConflictError(
+                    "Idempotency-Key previously used with a different callback request."
+                )
+            return existing, False
+
+        subscription = CallbackSubscription(**subscription_values)
+        self._session.add(subscription)
+        await self._session.flush()
+        return subscription, True
+
+    async def get(self, subscription_id: str) -> CallbackSubscription | None:
+        return await self._session.get(CallbackSubscription, subscription_id)
+
+    async def get_by_idempotency_key(self, key: str) -> CallbackSubscription | None:
+        stmt = select(CallbackSubscription).where(CallbackSubscription.idempotency_key == key)
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list(
+        self,
+        *,
+        enabled: bool | None = None,
+        limit: int = 50,
+    ) -> builtins.list[CallbackSubscription]:
+        stmt = select(CallbackSubscription)
+        if enabled is not None:
+            stmt = stmt.where(CallbackSubscription.enabled.is_(enabled))
+        stmt = stmt.order_by(
+            CallbackSubscription.created_at.desc(),
+            CallbackSubscription.id.desc(),
+        ).limit(limit)
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def list_enabled_for_event_type(
+        self,
+        event_type: str,
+    ) -> builtins.list[CallbackSubscription]:
+        event_type_candidates = _callback_subscription_event_type_candidates(event_type)
+        if not event_type_candidates:
+            return []
+
+        stmt = (
+            select(CallbackSubscription)
+            .where(
+                CallbackSubscription.enabled.is_(True),
+                _callback_subscription_event_type_filter(
+                    event_type_candidates,
+                    self._dialect_name,
+                ),
+            )
+            .order_by(CallbackSubscription.created_at.asc(), CallbackSubscription.id.asc())
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+
+class CallbackDeliveryRepository:
+    """CRUD helpers for durable callback delivery records."""
+
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
+        self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+
+    async def get(self, delivery_id: str) -> CallbackDelivery | None:
+        stmt = (
+            select(CallbackDelivery)
+            .where(CallbackDelivery.id == delivery_id)
+            .options(selectinload(CallbackDelivery.subscription))
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def enqueue_once(
+        self,
+        *,
+        subscription: CallbackSubscription,
+        event_kind: CallbackEventKind | str,
+        event_type: str,
+        source_id: str,
+        dedupe_key: str,
+        workspace_id: str | None,
+        operation_id: str | None,
+        merge_candidate_id: str | None,
+        envelope: dict[str, Any],
+        now: datetime | None = None,
+    ) -> tuple[CallbackDelivery, bool]:
+        existing = await self.get_by_dedupe_key(
+            subscription_id=subscription.id,
+            dedupe_key=dedupe_key,
+        )
+        if existing is not None:
+            return existing, False
+
+        created_at = now or datetime.now(UTC)
+        delivery_id = new_callback_delivery_id()
+        event_kind_value = event_kind.value if isinstance(event_kind, CallbackEventKind) else event_kind
+        idempotency_key = f"callback-delivery:{subscription.id}:{dedupe_key}"
+        delivery_envelope = dict(envelope)
+        delivery_envelope["delivery"] = {
+            "id": delivery_id,
+            "subscription_id": subscription.id,
+            "idempotency_key": idempotency_key,
+            "dedupe_key": dedupe_key,
+            "attempt_count": 0,
+            "max_attempts": subscription.max_attempts,
+        }
+        delivery_values: dict[str, Any] = {
+            "id": delivery_id,
+            "subscription_id": subscription.id,
+            "event_kind": event_kind_value,
+            "event_type": event_type,
+            "source_id": source_id,
+            "dedupe_key": dedupe_key,
+            "workspace_id": workspace_id,
+            "operation_id": operation_id,
+            "merge_candidate_id": merge_candidate_id,
+            "envelope": delivery_envelope,
+            "idempotency_key": idempotency_key,
+            "status": CallbackDeliveryStatus.pending.value,
+            "attempt_count": 0,
+            "max_attempts": subscription.max_attempts,
+            "next_attempt_at": created_at,
+        }
+        insert_if_absent = _callback_delivery_insert_if_absent_stmt(self._dialect_name)
+        if insert_if_absent is not None:
+            result = await self._session.execute(insert_if_absent.values(**delivery_values))
+            inserted_id = result.scalar_one_or_none()
+            if inserted_id is not None:
+                inserted = await self.get(inserted_id)
+                if inserted is None:
+                    raise RuntimeError("Inserted callback delivery could not be loaded.")
+                return inserted, True
+
+            existing = await self.get_by_dedupe_key(
+                subscription_id=subscription.id,
+                dedupe_key=dedupe_key,
+            )
+            if existing is None:
+                raise RuntimeError(
+                    "Callback delivery insert conflicted but no row could be loaded."
+                )
+            return existing, False
+
+        delivery = CallbackDelivery(**delivery_values)
+        self._session.add(delivery)
+        await self._session.flush()
+        return delivery, True
+
+    async def get_by_dedupe_key(
+        self,
+        *,
+        subscription_id: str,
+        dedupe_key: str,
+    ) -> CallbackDelivery | None:
+        stmt = select(CallbackDelivery).where(
+            CallbackDelivery.subscription_id == subscription_id,
+            CallbackDelivery.dedupe_key == dedupe_key,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def list_due(
+        self,
+        *,
+        now: datetime | None = None,
+        limit: int = 50,
+    ) -> list[CallbackDelivery]:
+        due_at = now or datetime.now(UTC)
+        stmt = (
+            select(CallbackDelivery)
+            .where(
+                CallbackDelivery.status == CallbackDeliveryStatus.pending.value,
+                or_(
+                    CallbackDelivery.next_attempt_at.is_(None),
+                    CallbackDelivery.next_attempt_at <= due_at,
+                ),
+            )
+            .options(selectinload(CallbackDelivery.subscription))
+            .order_by(CallbackDelivery.created_at.asc(), CallbackDelivery.id.asc())
+            .limit(limit)
+        )
+        return list((await self._session.execute(stmt)).scalars())
+
+    async def mark_attempt_started(
+        self,
+        delivery: CallbackDelivery,
+        *,
+        now: datetime | None = None,
+    ) -> CallbackDelivery:
+        delivery.status = CallbackDeliveryStatus.running.value
+        delivery.attempt_count += 1
+        delivery.last_attempt_at = now or datetime.now(UTC)
+        delivery.next_attempt_at = None
+        delivery.response_status_code = None
+        delivery.error_code = None
+        delivery.error_message = None
+        await self._session.flush()
+        return delivery
+
+    async def sync_envelope_delivery_metadata(
+        self,
+        delivery: CallbackDelivery,
+    ) -> CallbackDelivery:
+        envelope = dict(delivery.envelope)
+        delivery_metadata = dict(envelope.get("delivery", {}))
+        delivery_metadata.update(
+            {
+                "id": delivery.id,
+                "subscription_id": delivery.subscription_id,
+                "idempotency_key": delivery.idempotency_key,
+                "dedupe_key": delivery.dedupe_key,
+                "attempt_count": delivery.attempt_count,
+                "max_attempts": delivery.max_attempts,
+            }
+        )
+        envelope["delivery"] = delivery_metadata
+        delivery.envelope = envelope
+        await self._session.flush()
+        return delivery
+
+    async def mark_succeeded(
+        self,
+        delivery: CallbackDelivery,
+        *,
+        response_status_code: int,
+        now: datetime | None = None,
+    ) -> CallbackDelivery:
+        delivered_at = now or datetime.now(UTC)
+        delivery.status = CallbackDeliveryStatus.succeeded.value
+        delivery.delivered_at = delivered_at
+        delivery.next_attempt_at = None
+        delivery.response_status_code = response_status_code
+        delivery.error_code = None
+        delivery.error_message = None
+        await self._session.flush()
+        return delivery
+
+    async def mark_failed_or_retry(
+        self,
+        delivery: CallbackDelivery,
+        *,
+        error_code: str,
+        error_message: str,
+        response_status_code: int | None,
+        backoff_seconds: int,
+        now: datetime | None = None,
+    ) -> CallbackDelivery:
+        attempted_at = now or datetime.now(UTC)
+        delivery.response_status_code = response_status_code
+        delivery.error_code = error_code
+        delivery.error_message = error_message[:512]
+        if delivery.attempt_count >= delivery.max_attempts:
+            delivery.status = CallbackDeliveryStatus.failed.value
+            delivery.next_attempt_at = None
+        else:
+            delivery.status = CallbackDeliveryStatus.pending.value
+            delivery.next_attempt_at = attempted_at + timedelta(seconds=backoff_seconds)
+        await self._session.flush()
+        return delivery
+
+    async def mark_skipped(
+        self,
+        delivery: CallbackDelivery,
+        *,
+        error_code: str,
+        error_message: str,
+        now: datetime | None = None,
+    ) -> CallbackDelivery:
+        skipped_at = now or datetime.now(UTC)
+        delivery.status = CallbackDeliveryStatus.skipped.value
+        delivery.last_attempt_at = skipped_at
+        delivery.next_attempt_at = None
+        delivery.error_code = error_code
+        delivery.error_message = error_message[:512]
+        await self._session.flush()
+        return delivery
 
 
 class OperationRepository:

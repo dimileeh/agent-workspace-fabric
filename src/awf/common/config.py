@@ -57,6 +57,13 @@ class Settings(BaseSettings):
             "require Authorization: Bearer <token>."
         ),
     )
+    callbacks_enabled: bool = Field(
+        default=True,
+        description="Whether local external callback delivery registration is enabled.",
+    )
+    callback_delivery_timeout_seconds: int = Field(default=10, ge=1, le=120)
+    callback_delivery_max_attempts: int = Field(default=3, ge=1, le=20)
+    callback_delivery_initial_backoff_seconds: int = Field(default=5, ge=1, le=3600)
 
     # Database (control-plane)
     database_url: str = Field(

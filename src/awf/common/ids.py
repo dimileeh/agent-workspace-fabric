@@ -54,6 +54,14 @@ def new_secret_lease_id() -> str:
     return f"sl_{uuid4().hex[:24]}"
 
 
+def new_callback_subscription_id() -> str:
+    return f"cb_{uuid4().hex[:24]}"
+
+
+def new_callback_delivery_id() -> str:
+    return f"cbd_{uuid4().hex[:24]}"
+
+
 def new_stale_reason_id() -> str:
     return f"sr_{uuid4().hex[:24]}"
 

@@ -815,6 +815,128 @@ class WorkspaceEvent(Base):
     workspace: Mapped[Workspace] = relationship(back_populates="events")
 
 
+class CallbackSubscription(Base):
+    """External operator callback target registration.
+
+    This deliberately stores only the destination URL and event routing policy.
+    User-supplied secrets, bearer tokens, and arbitrary outbound headers are not
+    part of this local foundation.
+    """
+
+    __tablename__ = "callback_subscriptions"
+    __table_args__ = (
+        UniqueConstraint("idempotency_key", name="uq_callback_subscriptions_idempotency_key"),
+        Index("ix_callback_subscriptions_enabled_created", "enabled", "created_at"),
+        Index("ix_callback_subscriptions_created_at", "created_at"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    target_url: Mapped[str] = mapped_column(String(2048), nullable=False)
+    event_types: Mapped[list[str]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=list,
+        server_default=text("'[]'"),
+    )
+    enabled: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+    )
+    timeout_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    initial_backoff_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+    disabled_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    deliveries: Mapped[list[CallbackDelivery]] = relationship(
+        back_populates="subscription",
+        cascade="all, delete-orphan",
+        lazy="raise",
+        order_by="CallbackDelivery.created_at",
+    )
+
+
+class CallbackDelivery(Base):
+    """Durable outbound callback delivery attempt state."""
+
+    __tablename__ = "callback_deliveries"
+    __table_args__ = (
+        UniqueConstraint("subscription_id", "dedupe_key", name="uq_callback_deliveries_dedupe"),
+        Index("ix_callback_deliveries_subscription", "subscription_id"),
+        Index("ix_callback_deliveries_due", "status", "next_attempt_at", "created_at"),
+        Index("ix_callback_deliveries_source", "event_kind", "source_id"),
+        Index("ix_callback_deliveries_workspace", "workspace_id"),
+        Index("ix_callback_deliveries_operation", "operation_id"),
+        Index("ix_callback_deliveries_merge_candidate", "merge_candidate_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    subscription_id: Mapped[str] = mapped_column(
+        String(36),
+        ForeignKey("callback_subscriptions.id"),
+        nullable=False,
+    )
+    event_kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    event_type: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    dedupe_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    workspace_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("workspaces.id"),
+        nullable=True,
+    )
+    operation_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("operations.id"),
+        nullable=True,
+    )
+    merge_candidate_id: Mapped[str | None] = mapped_column(
+        String(36),
+        ForeignKey("merge_candidates.id"),
+        nullable=True,
+    )
+    envelope: Mapped[dict[str, Any]] = mapped_column(
+        JSON,
+        nullable=False,
+        default=dict,
+        server_default=text("'{}'"),
+    )
+    idempotency_key: Mapped[str] = mapped_column(String(256), nullable=False)
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False)
+    next_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    last_attempt_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+    )
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    response_status_code: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+    subscription: Mapped[CallbackSubscription] = relationship(back_populates="deliveries")
+
+
 class StaleReason(Base):
     """One structured staleness finding against a candidate / workspace.
 

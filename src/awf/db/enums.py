@@ -75,6 +75,24 @@ class OperationType(StrEnum):
     destroy = "destroy"
 
 
+class CallbackDeliveryStatus(StrEnum):
+    """Lifecycle status for an outbound external callback delivery."""
+
+    pending = "pending"
+    running = "running"
+    succeeded = "succeeded"
+    failed = "failed"
+    skipped = "skipped"
+
+
+class CallbackEventKind(StrEnum):
+    """Top-level callback event source category."""
+
+    workspace = "workspace"
+    merge = "merge"
+    operation = "operation"
+
+
 class FailureReason(StrEnum):
     """Coarse failure taxonomy for terminal failure states.
 
