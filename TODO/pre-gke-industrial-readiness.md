@@ -49,11 +49,8 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Workspace Services And Realistic Project Profiles | Strengthen DinD compose profile execution | `ws_58551268828945cfb52fe01e` | - | running | Gemini `gemini-3-pro-preview`; focused on per-workspace DinD Compose execution, health waits, cleanup, and structured failures. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_19b11c564c3343c0965eee45` | - | running | Gemini `gemini-3-pro-preview`; focused on starvation prevention and durable scheduler explanations. |
-| P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | - | running | Gemini `gemini-3-pro-preview`; focused on v1/legacy response compatibility until documented v2 cutover. |
-| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_7c8ec611a3d14b6cb4612344` | - | running | Gemini `gemini-3-pro-preview`; focused on read-only MCP parity for existing REST operator surfaces. |
-| P1 Operator Console Completion | Security and egress status panels | `ws_8a8b09feb61d4af188473bd6` | - | running | Gemini `gemini-3-pro-preview`; focused on console-safe secret, provider, and egress status visibility. |
+| P1 Workspace Services And Realistic Project Profiles | Strengthen DinD compose profile execution | `ws_58551268828945cfb52fe01e` | [#156](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/156) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on per-workspace DinD Compose execution, health waits, cleanup, and structured failures. |
+| P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | monitoring_pr | Gemini `gemini-3-pro-preview`; focused on v1/legacy response compatibility until documented v2 cutover. |
 
 ### Completed Slices
 
@@ -141,6 +138,9 @@ Status values:
 | P0 Reliability, Cleanup, And SLOs | Orphan AWF resource detection and cleanup readiness reporting | `ws_04560f5cfd914095b357cdcb` | failed | PR [#98](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/98) repeatedly hit monitor-driven stale rebase recovery; local AWF now has a rebase-recovery fix, and the slice was retried as `ws_5605c5ca71c942d999f5b78f`. |
 | P0 Operation And Recovery Truth | Persist operation audit details and log stream references | `ws_83f4e614951446cf883f5c09` | failed | PR [#101](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/101) merged, so no feature retry is needed; the workspace failure exposed the stale-rebase recovery bug fixed locally before service rebuild. |
 | P1 API Contract Completion | External operator callback subscriptions | `ws_0e2fc82ece7541659287e063` | failed | Agent produced local commits and passed validation/coverage, but exhausted the Plan -> Execute -> Compare iteration budget with one remaining conformance gap: event type validation was prefix-based and still allowed internal-looking namespaced event types such as `workspace.internal_secret`. Recover by redispatching a narrow callback hardening/completion slice or salvaging the preserved worktree branch. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via Gemini | `ws_19b11c564c3343c0965eee45` | failed | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; recover by retrying after provider backoff or dispatching a superseding workspace with an allowed fallback model. |
+| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools via Gemini | `ws_7c8ec611a3d14b6cb4612344` | failed | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; recover by retrying after provider backoff or dispatching a superseding workspace with an allowed fallback model. |
+| P1 Operator Console Completion | Security and egress status panels via Gemini | `ws_8a8b09feb61d4af188473bd6` | failed | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; recover by retrying after provider backoff or dispatching a superseding workspace with an allowed fallback model. |
 
 ## Foundations Already In Place
 
