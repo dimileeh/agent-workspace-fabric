@@ -684,6 +684,27 @@ def test_app_endpoint_defaults_and_visibility_normalization() -> None:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("visibility", ["public", "external", "browser"])
+def test_app_endpoint_rejects_unsupported_visibility_values(visibility: str) -> None:
+    with pytest.raises(ValueError, match="visibility"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-visibility",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {
+                        "name": "api",
+                        "service": "api",
+                        "port": 8000,
+                        "path": "/",
+                        "visibility": visibility,
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
 def test_app_endpoint_service_reference_must_match_profile_services() -> None:
     with pytest.raises(ValueError, match="unknown app endpoint service"):
         WorkspaceProfile.model_validate(

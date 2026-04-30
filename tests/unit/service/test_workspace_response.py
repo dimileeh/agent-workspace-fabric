@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
@@ -367,6 +368,109 @@ def test_workspace_response_includes_sanitized_app_endpoint_metadata() -> None:
     assert "internal_metrics" not in rendered
     assert "user:password" not in rendered
     assert "token=abc" not in rendered
+    assert "secret/data/api-token" not in rendered
+
+
+@pytest.mark.unit
+def test_workspace_response_sanitizes_raw_profile_snapshots() -> None:
+    now = datetime(2026, 4, 29, 12, 35, tzinfo=UTC)
+    profile_snapshot = {
+        "name": "endpoint-profile",
+        "runtime": {
+            "environment": {
+                "SECRET_URL": "http://user:password@app:3000/secret?token=abc"
+            }
+        },
+        "services": [
+            {
+                "name": "app",
+                "image": "example/app:latest",
+                "environment": {
+                    "DATABASE_URL": (
+                        "postgresql://awf:password@postgres:5432/app?sslmode=disable"
+                    )
+                },
+            }
+        ],
+        "ports": {
+            "admin": "http://operator:token@app:3000/admin?session=secret",
+        },
+        "app_endpoints": [
+            {
+                "name": "app",
+                "service": "app",
+                "port": 3000,
+                "path": "/",
+                "visibility": "agent",
+            }
+        ],
+        "secrets": [
+            {
+                "name": "api-token",
+                "target": "API_TOKEN",
+                "kind": "env",
+                "provider": "vault",
+                "ref": "secret/data/api-token",
+            }
+        ],
+    }
+    workspace = SimpleNamespace(
+        id="ws_endpoint_profile_safety",
+        status=WorkspaceStatus.ready.value,
+        version=2,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws_endpoint_profile_safety",
+        base_commit="abc123",
+        task_title="Expose app endpoints safely",
+        task_prompt="Exercise raw profile sanitization.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref="inline",
+        requested_profile=profile_snapshot,
+        resolved_profile=profile_snapshot,
+        test_commands=[],
+        requires_database=False,
+        node_id="local",
+        compose_project_name="awf_ws_endpoint_profile_safety",
+        compose_file_path="/tmp/compose.yml",
+        pr_url=None,
+        failure_reason=None,
+        failure_message=None,
+        active_policy_findings=[],
+        operations=[],
+        events=[],
+        secret_leases=[],
+        created_at=now,
+        updated_at=now,
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.requested_profile is not None
+    assert response.resolved_profile is not None
+    assert "environment" not in response.requested_profile["runtime"]
+    assert "environment" not in response.resolved_profile["services"][0]
+    assert "ref" not in response.requested_profile["secrets"][0]
+    assert response.resolved_profile["ports"]["admin"] == "http://app:3000/admin"
+
+    rendered = json.dumps(
+        {
+            "requested_profile": response.requested_profile,
+            "resolved_profile": response.resolved_profile,
+        },
+        sort_keys=True,
+    )
+    assert "user:password" not in rendered
+    assert "operator:token" not in rendered
+    assert "token=abc" not in rendered
+    assert "session=secret" not in rendered
     assert "secret/data/api-token" not in rendered
 
 

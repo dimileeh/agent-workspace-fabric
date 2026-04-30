@@ -8,6 +8,7 @@ from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol, cast
+from urllib.parse import SplitResult, urlsplit, urlunsplit
 
 from pydantic import ValidationError
 from sqlalchemy import inspect as sa_inspect
@@ -807,6 +808,12 @@ def workspace_response(
         workspace_secret_lease_response(lease) for lease in _loaded_secret_leases(workspace)
     ]
     computed_fields["app_endpoints"] = _workspace_app_endpoint_responses(workspace)
+    computed_fields["requested_profile"] = _console_safe_profile_snapshot(
+        getattr(workspace, "requested_profile", None)
+    )
+    computed_fields["resolved_profile"] = _console_safe_profile_snapshot(
+        getattr(workspace, "resolved_profile", None)
+    )
     return WorkspaceResponse.model_validate(
         _WorkspaceResponseSource(workspace, computed_fields)
     )
@@ -826,6 +833,69 @@ def _workspace_app_endpoint_responses(
         WorkspaceAppEndpointResponse.model_validate(endpoint)
         for endpoint in resolve_app_endpoints(profile, include_internal=False)
     ]
+
+
+def _console_safe_profile_snapshot(raw_profile: object) -> dict[str, Any] | None:
+    if not isinstance(raw_profile, Mapping):
+        return None
+    sanitized = _sanitize_profile_value(raw_profile, path=())
+    return cast(dict[str, Any], sanitized)
+
+
+def _sanitize_profile_value(value: object, *, path: tuple[str, ...]) -> object:
+    if isinstance(value, Mapping):
+        sanitized: dict[str, Any] = {}
+        for raw_key, raw_child in value.items():
+            key = str(raw_key)
+            if _omit_profile_response_field(path=path, key=key):
+                continue
+            sanitized[key] = _sanitize_profile_value(raw_child, path=(*path, key))
+        return sanitized
+    if isinstance(value, list):
+        return [_sanitize_profile_value(item, path=(*path, "*")) for item in value]
+    if isinstance(value, str):
+        return _sanitize_profile_string(value)
+    return value
+
+
+def _omit_profile_response_field(*, path: tuple[str, ...], key: str) -> bool:
+    if key == "environment":
+        return True
+    return key == "ref" and "secrets" in path
+
+
+def _sanitize_profile_string(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return value
+    if not parsed.scheme or not parsed.netloc:
+        return value
+    if not (parsed.username or parsed.password or parsed.query or parsed.fragment):
+        return value
+    return urlunsplit(
+        (
+            parsed.scheme,
+            _sanitized_url_netloc(parsed),
+            parsed.path,
+            "",
+            "",
+        )
+    )
+
+
+def _sanitized_url_netloc(parsed: SplitResult) -> str:
+    hostname = parsed.hostname
+    if not hostname:
+        return "<redacted>"
+    host = f"[{hostname}]" if ":" in hostname and not hostname.startswith("[") else hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if port is None:
+        return host
+    return f"{host}:{port}"
 
 
 def _loaded_secret_leases(workspace: Workspace) -> list[WorkspaceSecretLease]:

@@ -914,6 +914,19 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert "token=abc" not in rendered
         assert "secret/data/api-token" not in rendered
 
+        profile_payload = {
+            "requested_profile": body["requested_profile"],
+            "resolved_profile": body["resolved_profile"],
+        }
+        assert profile_payload["requested_profile"] is not None
+        assert profile_payload["resolved_profile"] is not None
+        assert "environment" not in profile_payload["requested_profile"]["runtime"]
+        assert "ref" not in profile_payload["resolved_profile"]["secrets"][0]
+        rendered_profiles = json.dumps(profile_payload, sort_keys=True)
+        assert "user:password" not in rendered_profiles
+        assert "token=abc" not in rendered_profiles
+        assert "secret/data/api-token" not in rendered_profiles
+
     @pytest.mark.unit
     async def test_persists_agent_model_override_in_task_policy(
         self,
