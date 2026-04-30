@@ -519,6 +519,15 @@ async def test_failure_analysis_latest_examples_do_not_load_workspace_relationsh
         if "from workspace_events" in statement
     ]
     assert len(workspace_event_queries) == 1
+    workspace_event_query = workspace_event_queries[0]
+    # Failure details intentionally read workspace_events, but must keep using the
+    # explicit filtered batch query instead of an ORM relationship load.
+    assert "workspace_events.event_type = " in workspace_event_query
+    assert "workspace_events.new_state = " in workspace_event_query
+    assert (
+        "order by workspace_events.workspace_id, workspace_events.occurred_at desc"
+        in workspace_event_query
+    )
 
 
 @pytest.mark.unit
