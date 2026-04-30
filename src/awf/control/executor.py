@@ -74,6 +74,10 @@ from awf.db.repositories import (
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
+from awf.runtime.alembic_validation import (
+    ALEMBIC_MIGRATION_POLICY_COMMAND,
+    ALEMBIC_MIGRATION_POLICY_PHASE,
+)
 from awf.runtime.logs import LogStore
 from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -501,6 +505,7 @@ class WorkspaceExecutor:
                 compose_file=compose_file,
                 profile=profile,
                 phase_names=("setup", "pre_agent"),
+                worktree_path=worktree_path,
             )
             if not setup_result.all_passed:
                 first_fail = setup_result.first_failure
@@ -1056,6 +1061,7 @@ class WorkspaceExecutor:
                     profile=profile,
                     phase_names=("post_agent", "validate"),
                     run_healthchecks=True,
+                    worktree_path=worktree_path,
                 )
             except ComposeExecCleanupError as exc:
                 message = cleanup_failure_message(exc)
@@ -3538,6 +3544,13 @@ def _validation_run_command_records(
     run_healthchecks: bool,
 ) -> list[dict[str, Any]]:
     ordered: list[dict[str, Any]] = []
+    if "validate" in phase_names and profile.validation.alembic.enabled:
+        ordered.append(
+            {
+                "phase": ALEMBIC_MIGRATION_POLICY_PHASE,
+                "command": ALEMBIC_MIGRATION_POLICY_COMMAND,
+            }
+        )
     command_plan = profile_phase_command_plan(profile, phase_names)
     healthcheck_before_phase = (
         "validate"

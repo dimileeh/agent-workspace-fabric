@@ -21,9 +21,11 @@ from awf.control.executor import (
     _call_pr_monitor_factory,
     _coverage_preserves_below_threshold_baseline,
     _failure_reason_for_phase,
+    _failure_salvage_payload,
     _get_active_recovery_payload,
     _MonitorRebaseRecoveryError,
     _profile_with_planning_iteration_default,
+    _raw_profile_has_explicit_planning_max_iterations,
     _read_text_if_present,
     _validation_command_count,
     _validation_failure_message,
@@ -353,6 +355,37 @@ def test_validation_run_command_records_include_http_healthcheck_display() -> No
             "stdout": "validation.01_healthcheck.stdout",
             "stderr": "validation.01_healthcheck.stderr",
         },
+    }
+
+
+@pytest.mark.unit
+def test_validation_run_command_records_include_alembic_policy_before_healthchecks() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-alembic-policy",
+            "phases": {"validate": ["pytest -q"]},
+            "validation": {
+                "alembic": {"enabled": True},
+                "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+            },
+        }
+    )
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("validate",),
+        run_healthchecks=True,
+    )
+
+    assert [(record["phase"], record["command_index"]) for record in records] == [
+        ("migration_policy", 1),
+        ("healthcheck", 1),
+        ("validate", 1),
+    ]
+    assert records[0]["command"] == "awf validate alembic migration chain"
+    assert records[0]["stream_ids"] == {
+        "stdout": "validation.01_migration_policy.stdout",
+        "stderr": "validation.01_migration_policy.stderr",
     }
 
 
@@ -767,33 +800,51 @@ def test_planning_iteration_settings_default_applies_only_when_profile_omits_val
 
 
 @pytest.mark.unit
-def test_raw_profile_and_salvage_helpers_handle_missing_optional_values(tmp_path: Path) -> None:
-    assert executor_mod._raw_profile_has_explicit_planning_max_iterations(None) is False
+def test_raw_profile_planning_detection_handles_missing_profile() -> None:
+    assert _raw_profile_has_explicit_planning_max_iterations(None) is False
+    assert _raw_profile_has_explicit_planning_max_iterations({"planning": {}}) is False
     assert (
-        executor_mod._raw_profile_has_explicit_planning_max_iterations(
+        _raw_profile_has_explicit_planning_max_iterations(
             {"planning": {"required": True}}
         )
         is False
     )
     assert (
-        executor_mod._raw_profile_has_explicit_planning_max_iterations(
+        _raw_profile_has_explicit_planning_max_iterations(
             {"planning": {"max_iterations": 0}}
         )
         is True
     )
-
-    minimal = executor_mod._failure_salvage_payload(
-        SimpleNamespace(branch_name=None, remote_push_branch=None),
-        worktree_path=tmp_path / "worktree",
-    )
-    with_branch = executor_mod._failure_salvage_payload(
-        SimpleNamespace(branch_name="awf/ws_123", remote_push_branch=None),
-        worktree_path=tmp_path / "worktree",
+    assert (
+        _raw_profile_has_explicit_planning_max_iterations(
+            {"planning": {"max_iterations": 2}}
+        )
+        is True
     )
 
-    assert set(minimal) == {"hint", "worktree_path"}
-    assert with_branch["branch_name"] == "awf/ws_123"
-    assert with_branch["remote_push_branch"] == "awf/ws_123"
+
+@pytest.mark.unit
+def test_failure_salvage_payload_omits_empty_branch_fields(tmp_path: Path) -> None:
+    payload = _failure_salvage_payload(
+        SimpleNamespace(branch_name=None, remote_push_branch=None),  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+    )
+
+    assert payload == {
+        "hint": "Workspace worktree and branch were preserved for salvage.",
+        "worktree_path": str(tmp_path / "worktree"),
+    }
+
+
+@pytest.mark.unit
+def test_failure_salvage_payload_defaults_remote_branch_to_branch(tmp_path: Path) -> None:
+    payload = _failure_salvage_payload(
+        SimpleNamespace(branch_name="awf/ws_123", remote_push_branch=None),  # type: ignore[arg-type]
+        worktree_path=tmp_path / "worktree",
+    )
+
+    assert payload["branch_name"] == "awf/ws_123"
+    assert payload["remote_push_branch"] == "awf/ws_123"
 
 
 @pytest.mark.unit
@@ -1051,6 +1102,32 @@ def test_validation_failure_message_handles_minimal_healthcheck_metadata(tmp_pat
 
 
 @pytest.mark.unit
+def test_validation_failure_message_handles_minimal_healthcheck_context(tmp_path: Path) -> None:
+    stdout = tmp_path / "health-min.stdout"
+    stderr = tmp_path / "health-min.stderr"
+    stdout.write_text("", encoding="utf-8")
+    stderr.write_text("", encoding="utf-8")
+    failure = ValidationCommandResult(
+        command="custom healthcheck",
+        returncode=1,
+        duration_seconds=0.1,
+        stdout_path=stdout,
+        stderr_path=stderr,
+        phase="healthcheck",
+        reason_code="HEALTHCHECK_COMMAND_FAILED",
+        stream_ids={},
+        metadata={},
+    )
+
+    message = _validation_failure_message(ValidationResult(commands=[failure]))
+
+    assert message == (
+        "validation failed: health check custom healthcheck "
+        "(unknown target=custom healthcheck) failed with HEALTHCHECK_COMMAND_FAILED"
+    )
+
+
+@pytest.mark.unit
 def test_validation_run_reason_code_defaults_when_no_failure_detail(tmp_path: Path) -> None:
     assert _validation_run_reason_code(ValidationResult()) == "VALIDATION_OK"
     assert (
@@ -1091,6 +1168,25 @@ def test_validation_run_reason_code_defaults_when_no_failure_detail(tmp_path: Pa
             )
         )
         == "COMMAND_FAILED"
+    )
+    assert (
+        _validation_run_reason_code(
+            ValidationResult(
+                commands=[
+                    ValidationCommandResult(
+                        command="awf validate alembic migration chain",
+                        returncode=1,
+                        duration_seconds=0,
+                        stdout_path=tmp_path / "policy.out",
+                        stderr_path=tmp_path / "policy.err",
+                        phase="migration_policy",
+                        reason_code="ALEMBIC_MULTIPLE_HEADS",
+                        policy_failed=True,
+                    )
+                ]
+            )
+        )
+        == "ALEMBIC_MULTIPLE_HEADS"
     )
 
 
