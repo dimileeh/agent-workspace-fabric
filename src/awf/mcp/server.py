@@ -921,7 +921,7 @@ async def _provided_readiness(
         "agent_runtime_image": degraded_check,
         "orphan_resources": degraded_check,
     }
-    all_ok = db_check.ok
+    all_ok = all(c.ok for c in checks.values())
     readiness = ReadyResponse(
         service="awf",
         version=__version__,

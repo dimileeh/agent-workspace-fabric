@@ -675,7 +675,7 @@ class TestMcpOperatorSurfaceParity:
             session_factory=resource_stack.factory,
         )
         assert fallback_result["service"] == "awf"
-        assert fallback_result["status"] == "ok"
+        assert fallback_result["status"] == "degraded"
         assert "checks" in fallback_result
         assert fallback_result["checks"]["db"]["ok"] is True
         assert fallback_result["checks"]["db"]["status"] == "ok"
