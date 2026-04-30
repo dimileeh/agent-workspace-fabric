@@ -230,6 +230,37 @@ def test_validation_run_command_records_include_http_healthcheck_display() -> No
 
 
 @pytest.mark.unit
+def test_validation_run_command_records_include_alembic_policy_before_healthchecks() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "records-alembic-policy",
+            "phases": {"validate": ["pytest -q"]},
+            "validation": {
+                "alembic": {"enabled": True},
+                "healthchecks": [{"name": "api", "command": "curl -fsS localhost/health"}],
+            },
+        }
+    )
+
+    records = _validation_run_command_records(
+        profile=profile,
+        phase_names=("validate",),
+        run_healthchecks=True,
+    )
+
+    assert [(record["phase"], record["command_index"]) for record in records] == [
+        ("migration_policy", 1),
+        ("healthcheck", 1),
+        ("validate", 1),
+    ]
+    assert records[0]["command"] == "awf validate alembic migration chain"
+    assert records[0]["stream_ids"] == {
+        "stdout": "validation.01_migration_policy.stdout",
+        "stderr": "validation.01_migration_policy.stderr",
+    }
+
+
+@pytest.mark.unit
 def test_validation_run_command_records_can_skip_healthchecks_and_coverage() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -812,6 +843,25 @@ def test_validation_run_reason_code_defaults_when_no_failure_detail(tmp_path: Pa
             )
         )
         == "COMMAND_FAILED"
+    )
+    assert (
+        _validation_run_reason_code(
+            ValidationResult(
+                commands=[
+                    ValidationCommandResult(
+                        command="awf validate alembic migration chain",
+                        returncode=1,
+                        duration_seconds=0,
+                        stdout_path=tmp_path / "policy.out",
+                        stderr_path=tmp_path / "policy.err",
+                        phase="migration_policy",
+                        reason_code="ALEMBIC_MULTIPLE_HEADS",
+                        policy_failed=True,
+                    )
+                ]
+            )
+        )
+        == "ALEMBIC_MULTIPLE_HEADS"
     )
 
 

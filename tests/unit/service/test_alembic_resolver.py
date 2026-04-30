@@ -14,6 +14,8 @@ from alembic.script.revision import RevisionError
 
 import awf.service.alembic_resolver as alembic_resolver
 from awf.service.alembic_resolver import (
+    AlembicGraphValidationResult,
+    AlembicGraphValidationStatus,
     AlembicMergeResolver,
     AlembicResolveResult,
     AlembicResolveStatus,
@@ -22,6 +24,7 @@ from awf.service.alembic_resolver import (
     _render_merge_revision,
     _safe_heads,
     _sanitize_revision_id,
+    validate_alembic_migration_graph,
 )
 
 
@@ -39,18 +42,22 @@ def _write_alembic_ini(repo: Path) -> None:
 def _write_revision(
     repo: Path,
     revision: str,
-    down_revision: str | None,
+    down_revision: str | tuple[str, ...] | None,
     *,
     name: str | None = None,
+    branch_labels: str | tuple[str, ...] | None = None,
+    depends_on: str | tuple[str, ...] | None = None,
 ) -> None:
     filename = f"{revision}_{name or revision}.py"
     down_revision_literal = "None" if down_revision is None else repr(down_revision)
+    branch_labels_literal = "None" if branch_labels is None else repr(branch_labels)
+    depends_on_literal = "None" if depends_on is None else repr(depends_on)
     (repo / "migrations" / "versions" / filename).write_text(
         f'"""Revision {revision}."""\n\n'
         f'revision = "{revision}"\n'
         f"down_revision = {down_revision_literal}\n"
-        "branch_labels = None\n"
-        "depends_on = None\n\n"
+        f"branch_labels = {branch_labels_literal}\n"
+        f"depends_on = {depends_on_literal}\n\n"
         "def upgrade() -> None:\n"
         "    pass\n\n"
         "def downgrade() -> None:\n"
@@ -63,6 +70,137 @@ def _heads(repo: Path) -> list[str]:
     config = Config(str(repo / "alembic.ini"))
     config.set_main_option("script_location", str(repo / "migrations"))
     return sorted(ScriptDirectory.from_config(config).get_heads())
+
+
+@pytest.mark.unit
+def test_alembic_graph_validation_detects_multiple_heads(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "base001", None)
+    _write_revision(tmp_path, "left001", "base001")
+    _write_revision(tmp_path, "right001", "base001")
+
+    result = validate_alembic_migration_graph(tmp_path)
+
+    assert result.status == AlembicGraphValidationStatus.failed
+    assert result.reason_code == "ALEMBIC_MULTIPLE_HEADS"
+    assert result.heads == ("left001", "right001")
+    assert result.findings[0].reason_code == "ALEMBIC_MULTIPLE_HEADS"
+    assert result.to_dict()["findings"][0]["details"]["heads"] == ["left001", "right001"]
+    assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
+
+
+@pytest.mark.unit
+def test_alembic_graph_validation_detects_missing_down_revision(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "orphan001", "missing001")
+
+    result = validate_alembic_migration_graph(tmp_path)
+
+    assert result.status == AlembicGraphValidationStatus.failed
+    assert result.reason_code == "ALEMBIC_MISSING_DOWN_REVISION"
+    assert result.heads == ("orphan001",)
+    assert result.to_dict()["details"]["missing_down_revisions"] == ["missing001"]
+    assert result.findings[0].details["missing_down_revisions"] == ["missing001"]
+
+
+@pytest.mark.unit
+def test_alembic_graph_validation_detects_duplicate_revision_ids(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "dup001", None, name="left")
+    _write_revision(tmp_path, "dup001", None, name="right")
+
+    result = validate_alembic_migration_graph(tmp_path)
+
+    assert result.status == AlembicGraphValidationStatus.failed
+    assert result.reason_code == "ALEMBIC_DUPLICATE_REVISION"
+    assert result.heads == ("dup001", "dup001")
+    assert result.to_dict()["details"]["duplicate_revisions"] == ["dup001"]
+    assert result.findings[0].details["duplicate_revisions"] == ["dup001"]
+
+
+@pytest.mark.unit
+def test_alembic_graph_validation_detects_branch_label_anomaly(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "base001", None, branch_labels="shared")
+    _write_revision(tmp_path, "other001", None, branch_labels=("shared",))
+
+    result = validate_alembic_migration_graph(tmp_path)
+
+    assert result.status == AlembicGraphValidationStatus.failed
+    assert result.reason_code == "ALEMBIC_BRANCH_LABEL_ANOMALY"
+    assert result.to_dict()["details"]["duplicate_branch_labels"] == {
+        "shared": ["base001", "other001"]
+    }
+    assert result.findings[0].reason_code == "ALEMBIC_BRANCH_LABEL_ANOMALY"
+
+
+@pytest.mark.unit
+def test_alembic_graph_validation_reports_ambiguous_branch_label_references(
+    tmp_path: Path,
+) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "base001", None, branch_labels="shared")
+    _write_revision(tmp_path, "other001", None, branch_labels="shared")
+    _write_revision(tmp_path, "head001", "shared", depends_on="shared")
+
+    result = validate_alembic_migration_graph(tmp_path)
+
+    assert result.status == AlembicGraphValidationStatus.failed
+    assert result.reason_code == "ALEMBIC_BRANCH_LABEL_ANOMALY"
+    assert result.to_dict()["details"]["ambiguous_down_revisions"] == {
+        "shared": ["base001", "other001"]
+    }
+    assert result.to_dict()["details"]["ambiguous_dependencies"] == {
+        "shared": ["base001", "other001"]
+    }
+
+
+@pytest.mark.unit
+def test_alembic_graph_validation_accepts_clean_single_head(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "base001", None)
+    _write_revision(tmp_path, "head001", "base001")
+
+    result = validate_alembic_migration_graph(tmp_path)
+
+    assert result.status == AlembicGraphValidationStatus.passed
+    assert result.reason_code == "ALEMBIC_GRAPH_OK"
+    assert result.heads == ("head001",)
+    assert result.findings == ()
+    assert result.to_dict()["details"] == {}
+    assert result.ok is True
+
+
+@pytest.mark.unit
+def test_alembic_graph_validation_accepts_absolute_config_and_script_override(
+    tmp_path: Path,
+) -> None:
+    migrations = tmp_path / "db" / "migrations"
+    (migrations / "versions").mkdir(parents=True)
+    config_path = tmp_path / "config" / "alembic.ini"
+    config_path.parent.mkdir()
+    config_path.write_text(
+        "[alembic]\n"
+        "script_location = ignored\n"
+        "version_path_separator = os\n",
+        encoding="utf-8",
+    )
+    (migrations / "versions" / "base001.py").write_text(
+        'revision = "base001"\n'
+        "down_revision = None\n"
+        "branch_labels = None\n"
+        "depends_on = None\n",
+        encoding="utf-8",
+    )
+
+    result = validate_alembic_migration_graph(
+        tmp_path,
+        config_path=str(config_path),
+        script_location="db/migrations",
+    )
+
+    assert result.status == AlembicGraphValidationStatus.passed
+    assert result.heads == ("base001",)
 
 
 @pytest.mark.unit
@@ -195,6 +333,36 @@ def test_resolver_is_unsupported_when_script_location_is_missing(tmp_path: Path)
 
 
 @pytest.mark.unit
+def test_resolver_converts_shared_inspector_unsupported_result(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    _write_alembic_ini(tmp_path)
+
+    monkeypatch.setattr(
+        alembic_resolver,
+        "_load_script_directory",
+        lambda *_args, **_kwargs: (object(), tmp_path / "migrations" / "versions"),
+    )
+    monkeypatch.setattr(
+        alembic_resolver,
+        "_validate_script_directory",
+        lambda _script: AlembicGraphValidationResult(
+            status=AlembicGraphValidationStatus.unsupported,
+            reason_code="ALEMBIC_NOT_CONFIGURED",
+            heads=(),
+            message="not configured",
+        ),
+    )
+
+    result = AlembicMergeResolver().resolve(tmp_path)
+
+    assert result.status == AlembicResolveStatus.unsupported
+    assert result.reason_code == "ALEMBIC_NOT_CONFIGURED"
+    assert result.message == "not configured"
+
+
+@pytest.mark.unit
 def test_resolver_reports_unreadable_graph_without_escaping(tmp_path: Path) -> None:
     _write_alembic_ini(tmp_path)
     (tmp_path / "migrations" / "versions" / "bad.py").write_text(
@@ -219,7 +387,7 @@ def test_resolver_refuses_missing_down_revision_without_mutating(tmp_path: Path)
     result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
 
     assert result.status == AlembicResolveStatus.refused
-    assert result.reason_code == "ALEMBIC_GRAPH_UNSAFE"
+    assert result.reason_code == "ALEMBIC_MISSING_DOWN_REVISION"
     assert result.generated_path is None
     assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
     assert result.to_dict()["details"]["missing_down_revisions"] == ["missing001"]
@@ -240,7 +408,7 @@ def test_resolver_refuses_missing_dependency_without_mutating(tmp_path: Path) ->
     result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
 
     assert result.status == AlembicResolveStatus.refused
-    assert result.reason_code == "ALEMBIC_GRAPH_UNSAFE"
+    assert result.reason_code == "ALEMBIC_MISSING_DEPENDENCY"
     assert result.generated_path is None
     assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
     assert result.to_dict()["details"]["missing_dependencies"] == ["missingdep001"]
@@ -255,7 +423,7 @@ def test_resolver_refuses_duplicate_revision_ids_without_mutating(tmp_path: Path
     result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
 
     assert result.status == AlembicResolveStatus.refused
-    assert result.reason_code == "ALEMBIC_GRAPH_UNSAFE"
+    assert result.reason_code == "ALEMBIC_DUPLICATE_REVISION"
     assert result.heads == ("dup001", "dup001")
     assert result.generated_path is None
     assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
@@ -288,7 +456,7 @@ def test_resolver_refuses_duplicate_non_head_revision_ids_without_warning_text(
     result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
 
     assert result.status == AlembicResolveStatus.refused
-    assert result.reason_code == "ALEMBIC_GRAPH_UNSAFE"
+    assert result.reason_code == "ALEMBIC_DUPLICATE_REVISION"
     assert result.heads == ("head001",)
     assert result.generated_path is None
     assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
@@ -310,13 +478,30 @@ def test_resolver_refuses_missing_tuple_dependencies_without_mutating(tmp_path: 
     result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
 
     assert result.status == AlembicResolveStatus.refused
-    assert result.reason_code == "ALEMBIC_GRAPH_UNSAFE"
+    assert result.reason_code == "ALEMBIC_MISSING_DEPENDENCY"
     assert result.generated_path is None
     assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
     assert result.to_dict()["details"]["missing_dependencies"] == [
         "missing_dep",
         "other_missing_dep",
     ]
+
+
+@pytest.mark.unit
+def test_resolver_refuses_branch_label_anomaly_without_mutating(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "base001", None, branch_labels="shared")
+    _write_revision(tmp_path, "other001", None, branch_labels="shared")
+
+    result = AlembicMergeResolver(revision_id_factory=lambda _heads: "merge001").resolve(tmp_path)
+
+    assert result.status == AlembicResolveStatus.refused
+    assert result.reason_code == "ALEMBIC_BRANCH_LABEL_ANOMALY"
+    assert result.generated_path is None
+    assert not (tmp_path / "migrations" / "versions" / "merge001_merge_alembic_heads.py").exists()
+    assert result.to_dict()["details"]["duplicate_branch_labels"] == {
+        "shared": ["base001", "other001"]
+    }
 
 
 @pytest.mark.unit
@@ -425,6 +610,18 @@ def test_safe_heads_reports_revision_and_unexpected_graph_errors() -> None:
     assert isinstance(unreadable, AlembicResolveResult)
     assert unreadable.reason_code == "ALEMBIC_GRAPH_UNREADABLE"
     assert unreadable.to_dict()["details"]["error_type"] == "RuntimeError"
+
+
+@pytest.mark.unit
+def test_safe_heads_returns_heads_for_clean_graph(tmp_path: Path) -> None:
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "base001", None)
+    _write_revision(tmp_path, "head001", "base001")
+    config = Config(str(tmp_path / "alembic.ini"))
+    config.set_main_option("script_location", str(tmp_path / "migrations"))
+    script = ScriptDirectory.from_config(config)
+
+    assert _safe_heads(script) == ("head001",)
 
 
 @pytest.mark.unit

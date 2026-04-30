@@ -129,6 +129,60 @@ def test_profile_schema_accepts_validation_coverage_policy() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_defaults_alembic_validation_to_disabled() -> None:
+    profile = WorkspaceProfile.model_validate({"name": "python-explicit"})
+
+    assert profile.validation.alembic.enabled is False
+    assert profile.validation.alembic.config_path == "alembic.ini"
+    assert profile.validation.alembic.script_location is None
+    assert profile.validation.alembic.fail_on_unconfigured is True
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_alembic_validation_policy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "python-explicit",
+            "validation": {
+                "alembic": {
+                    "enabled": True,
+                    "config_path": "db/alembic.ini",
+                    "script_location": "db/migrations",
+                    "fail_on_unconfigured": False,
+                }
+            },
+        }
+    )
+
+    assert profile.validation.alembic.enabled is True
+    assert profile.validation.alembic.config_path == "db/alembic.ini"
+    assert profile.validation.alembic.script_location == "db/migrations"
+    assert profile.validation.alembic.fail_on_unconfigured is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "alembic",
+    [
+        {"config_path": "/etc/alembic.ini"},
+        {"config_path": "../alembic.ini"},
+        {"script_location": "/srv/migrations"},
+        {"script_location": "db/../migrations"},
+    ],
+)
+def test_profile_schema_rejects_unsafe_alembic_validation_paths(
+    alembic: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "python-explicit",
+                "validation": {"alembic": {"enabled": True, **alembic}},
+            }
+        )
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_legacy_command_healthcheck_shape() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -216,6 +270,7 @@ def test_http_healthcheck_public_targets_redact_url_userinfo() -> None:
         {"name": "missing-target"},
         {"name": "both", "command": "curl localhost", "url": "http://localhost/health"},
         {"name": "ftp", "url": "ftp://localhost/health"},
+        {"name": "kind-mismatch", "kind": "http", "command": "curl localhost"},
         {"name": "status", "url": "http://localhost/health", "expected_status": 99},
         {"name": "interval", "url": "http://localhost/health", "interval_seconds": 0},
     ],
@@ -870,3 +925,4 @@ def test_aira_profile_keeps_project_specific_bits_out_of_base_stack() -> None:
     assert profile.services[0].image == "pgvector/pgvector:pg18"
     assert "AIRA_DATABASE_URL" in profile.runtime.environment
     assert "alembic upgrade head" in [c.command for c in profile.phases.setup]
+    assert profile.validation.alembic.enabled is True

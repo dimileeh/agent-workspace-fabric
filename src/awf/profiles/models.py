@@ -194,6 +194,29 @@ class ProfileCoverage(BaseModel):
         return value
 
 
+class ProfileAlembicValidation(BaseModel):
+    """Opt-in Alembic migration-chain validation policy."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = False
+    config_path: Annotated[str, Field(min_length=1, max_length=512)] = "alembic.ini"
+    script_location: Annotated[str, Field(min_length=1, max_length=512)] | None = None
+    fail_on_unconfigured: bool = True
+
+    @model_validator(mode="after")
+    def _validate_paths(self) -> ProfileAlembicValidation:
+        _validate_workspace_relative_path("config_path", self.config_path)
+        if self.script_location is not None:
+            _validate_workspace_relative_path("script_location", self.script_location)
+        return self
+
+
+def _validate_workspace_relative_path(field_name: str, value: str) -> None:
+    if value.startswith("/") or ".." in value.split("/"):
+        raise ValueError(f"{field_name} must be a workspace-relative path")
+
+
 class OutOfScopeChangeMode(StrEnum):
     warn = "warn"
     block = "block"
@@ -226,6 +249,7 @@ class ProfileValidation(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=1, le=14400)
     requested_tier: int = Field(default=1, ge=1, le=3)
     coverage: ProfileCoverage = Field(default_factory=ProfileCoverage)
+    alembic: ProfileAlembicValidation = Field(default_factory=ProfileAlembicValidation)
     retry_budget: int = Field(default=0, ge=0, le=10)
 
 

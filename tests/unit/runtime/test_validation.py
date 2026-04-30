@@ -260,6 +260,30 @@ def test_environment_identity_digest_changes_for_healthcheck_wait_policy(
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "alembic_policy",
+    [
+        {"enabled": True},
+        {"enabled": True, "config_path": "db/alembic.ini"},
+        {"enabled": True, "script_location": "db/migrations"},
+        {"enabled": True, "fail_on_unconfigured": False},
+    ],
+)
+def test_environment_identity_digest_changes_for_alembic_validation_policy(
+    alembic_policy: dict[str, object],
+) -> None:
+    profile = _identity_profile(validation={"alembic": alembic_policy})
+
+    assert environment_identity_digest(_identity_profile()) != environment_identity_digest(profile)
+    assert environment_identity_inputs(profile)["validation"]["alembic"] == {
+        "enabled": alembic_policy.get("enabled", False),
+        "config_path": alembic_policy.get("config_path", "alembic.ini"),
+        "script_location": alembic_policy.get("script_location"),
+        "fail_on_unconfigured": alembic_policy.get("fail_on_unconfigured", True),
+    }
+
+
+@pytest.mark.unit
 def test_environment_identity_digest_excludes_non_validation_profile_metadata() -> None:
     baseline = _identity_profile()
     changed_metadata = baseline.model_copy(
