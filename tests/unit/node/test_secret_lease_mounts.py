@@ -604,6 +604,16 @@ def test_duplicate_env_lease_placeholders_are_deduplicated(tmp_path: Path) -> No
         ),
         (
             {
+                "name": "auth-double-prefixed-ref",
+                "kind": "mount",
+                "target": "/home/agent/.config/gh",
+                "provider": "local-auth",
+                "ref": "local-auth/auth/.config/gh",
+            },
+            "SECRET_LEASE_SOURCE_INVALID",
+        ),
+        (
+            {
                 "name": "auth-target-mismatch",
                 "kind": "mount",
                 "target": "/home/agent/.ssh",

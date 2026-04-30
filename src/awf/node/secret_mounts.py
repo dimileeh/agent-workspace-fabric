@@ -382,6 +382,7 @@ def _local_auth_ref(ref: str | None) -> str | None:
     for prefix in ("local-auth/", "auth/"):
         if stripped.startswith(prefix):
             stripped = stripped[len(prefix) :]
+            break
     return stripped or None
 
 
