@@ -150,13 +150,10 @@ class ComposeStackLauncher:
         except ComposeOperationError as e:
             if e.reason_code == "DOCKER_UNAVAILABLE":
                 required_services = [s.name for s in profile.services if s.required]
-                if not required_services:
-                    # Graceful skip for optional services when Docker is unavailable
-                    paths = self._compose.render(spec)
-                else:
-                    raise WorkspaceServiceExecutionError(
-                        f"DOCKER_UNAVAILABLE: Cannot start required workspace services: {required_services}"
-                    ) from e
+                msg = "DOCKER_UNAVAILABLE: Cannot start workspace agent container"
+                if required_services:
+                    msg += f" and required services: {required_services}"
+                raise WorkspaceServiceExecutionError(msg) from e
             else:
                 raise
         if secret_lease_resolution is None:
