@@ -5,6 +5,17 @@ with AWF without launching a workspace. The first pass should inspect the repo,
 draft `.awf/workspace.yml`, show gaps, and stop. Humans or agents can then edit
 the draft and decide when to submit a real workspace request.
 
+## First-run operator command
+
+Run `awf init <path>` for the first onboarding pass. It runs local readiness
+checks (without calling AWF API), prints plain-language next steps, and points to
+profile-edit and smoke-workspace workflows.
+
+```bash
+awf init .
+awf init . --include-smoke-request
+```
+
 ## One-message prompt
 
 Use this with Codex, Claude Code, Gemini, OpenCode, OpenClaw, or a human

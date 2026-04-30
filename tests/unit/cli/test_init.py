@@ -1,0 +1,164 @@
+"""CLI coverage for first-run onboarding guidance."""
+
+from __future__ import annotations
+
+from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import MagicMock
+
+import pytest
+from typer.testing import CliRunner
+
+from awf.cli.main import app
+
+_runner = CliRunner()
+
+
+def _stub_local_prerequisites(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    service_status: str = "ok",
+    doctor_status: str = "ok",
+) -> None:
+    async def _collect_service_status(
+        _settings: object, **kwargs: object
+    ) -> dict[str, object]:
+        return {
+            "service": "awf",
+            "status": service_status,
+            "checks": {},
+            "agent_readiness": {"status": service_status},
+        }
+
+    async def _collect_doctor_report(_settings: object, **_kwargs: object) -> object:
+        return SimpleNamespace(status=doctor_status, diagnostics=())
+
+    monkeypatch.setattr("awf.service.config.resolve_service_settings", lambda: object())
+    monkeypatch.setattr("awf.service.status.collect_service_status", _collect_service_status)
+    monkeypatch.setattr("awf.service.doctor.collect_doctor_report", _collect_doctor_report)
+    monkeypatch.setattr(
+        "awf.service.doctor.render_doctor_pretty",
+        lambda report: f"AWF doctor: {getattr(report, 'status', 'unknown')}\n",
+    )
+
+
+@pytest.mark.unit
+def test_init_command_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "AWF init: local onboarding readiness check" in result.output
+
+
+@pytest.mark.unit
+def test_init_is_safe_by_default_and_idempotent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result_first = _runner.invoke(app, ["init", str(tmp_path)])
+    result_second = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result_first.exit_code == 0, result_first.output
+    assert result_second.exit_code == 0, result_second.output
+    assert not (tmp_path / ".awf" / "workspace.yml").exists()
+
+
+@pytest.mark.unit
+def test_init_prints_clear_next_steps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "awf profile init" in result.output
+    assert "awf profile preview" in result.output
+    assert "--include-smoke-request" in result.output
+
+
+@pytest.mark.unit
+def test_init_runs_status_and_doctor_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = {"status": 0, "doctor": 0}
+
+    async def _collect_service_status(
+        _settings: object, **_kwargs: object
+    ) -> dict[str, object]:
+        calls["status"] += 1
+        return {
+            "service": "awf",
+            "status": "ok",
+            "checks": {},
+            "agent_readiness": {"status": "ok"},
+        }
+
+    async def _collect_doctor_report(_settings: object, **_kwargs: object) -> object:
+        calls["doctor"] += 1
+        return SimpleNamespace(status="ok", diagnostics=())
+
+    monkeypatch.setattr("awf.service.config.resolve_service_settings", lambda: object())
+    monkeypatch.setattr("awf.service.status.collect_service_status", _collect_service_status)
+    monkeypatch.setattr("awf.service.doctor.collect_doctor_report", _collect_doctor_report)
+    monkeypatch.setattr(
+        "awf.service.doctor.render_doctor_pretty",
+        lambda report: f"AWF doctor: {getattr(report, 'status', 'ok')}\n",
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert calls["status"] == 1
+    assert calls["doctor"] == 1
+
+
+@pytest.mark.unit
+def test_init_reports_local_prerequisite_failures_without_api_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_local_prerequisites(
+        monkeypatch,
+        service_status="fail",
+        doctor_status="fail",
+    )
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code != 0
+    assert "Local prerequisites are not fully ready" in result.output
+    assert "AWF doctor: fail" in result.output
+
+
+@pytest.mark.unit
+def test_init_does_not_submit_workspace_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    mocked_call = MagicMock()
+    monkeypatch.setattr("awf.cli.main._call", mocked_call)
+
+    result = _runner.invoke(app, ["init", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    mocked_call.assert_not_called()
+
+
+@pytest.mark.unit
+def test_init_includes_smoke_workspace_hints(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--include-smoke-request"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Optional" in result.output
+    assert "does not submit a workspace" in result.output
+    assert "Smoke request payload (local-only, not submitted):" in result.output
