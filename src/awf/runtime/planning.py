@@ -16,6 +16,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
+
 PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
 PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
 MAX_CONFORMANCE_GAPS = 20
@@ -346,6 +348,8 @@ def _safe_warning_overlaps(value: object) -> list[dict[str, str]]:
         return []
     overlaps: list[dict[str, str]] = []
     for item in value:
+        if len(overlaps) >= MAX_COORDINATION_WARNING_OVERLAPS:
+            break
         if not isinstance(item, Mapping):
             continue
         workspace_id = _safe_warning_text(item.get("workspace_id"))

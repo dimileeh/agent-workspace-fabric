@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
+from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 from awf.db.repositories import OwnedPathOverlap, owned_path_overlap_match
 
 COORDINATION_TASK_POLICY_KEY: Final = "coordination"
@@ -22,7 +23,6 @@ COORDINATION_WARNING_SEVERITY_ADVISORY: Final = "advisory"
 OWNED_PATH_OVERLAP_BLOCKS_LAUNCH: Final = False
 OWNED_PATH_OVERLAP_TRIGGER_TYPE: Final = "path_overlap"
 OWNED_PATH_OVERLAP_STALE_REASON_CODE: Final = "STALE_OVERLAP"
-MAX_COORDINATION_WARNING_OVERLAPS: Final = 8
 MAX_COORDINATION_WARNING_WORKSPACES: Final = 20
 MAX_COORDINATION_WARNINGS: Final = 5
 

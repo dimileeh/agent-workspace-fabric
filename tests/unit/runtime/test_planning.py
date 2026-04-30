@@ -21,6 +21,7 @@ from awf.runtime.planning import (
     render_coordination_warning_section,
     render_workspace_path,
 )
+from awf.service.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 
 
 @pytest.mark.unit
@@ -263,6 +264,31 @@ def test_coordination_warning_renderer_sanitizes_legacy_warning_shapes() -> None
     assert "Workspaces:" not in rendered
     assert "ws_valid: src/** -> src/app.py" in rendered
     assert "Stale policy:" not in rendered
+
+
+@pytest.mark.unit
+def test_coordination_warning_renderer_bounds_direct_overlap_payloads() -> None:
+    rendered = render_coordination_warning_section(
+        (
+            {
+                "warning_code": "OWNED_PATH_OVERLAP_RISK",
+                "message": "Coordinate around active work.",
+                "severity": "advisory",
+                "overlaps": [
+                    {
+                        "workspace_id": f"ws_{index}",
+                        "existing_path": "src/**",
+                        "requested_path": f"src/module_{index}.py",
+                    }
+                    for index in range(MAX_COORDINATION_WARNING_OVERLAPS + 2)
+                ],
+            },
+        )
+    )
+
+    assert rendered.count("  - ws_") == MAX_COORDINATION_WARNING_OVERLAPS
+    assert f"ws_{MAX_COORDINATION_WARNING_OVERLAPS - 1}: src/**" in rendered
+    assert f"ws_{MAX_COORDINATION_WARNING_OVERLAPS}: src/**" not in rendered
 
 
 @pytest.mark.unit
