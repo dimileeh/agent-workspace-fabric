@@ -415,6 +415,10 @@ class WorkspaceFailureDetailsResponse(BaseModel):
     message: str | None = None
     conformance: WorkspaceFailureConformanceResponse | None = None
     salvage: WorkspaceFailureSalvageResponse | None = None
+    provider: str | None = None
+    model: str | None = None
+    retryable: bool | None = None
+    recommended_action: str | None = None
 
 
 class CoordinationOverlapResponse(BaseModel):
