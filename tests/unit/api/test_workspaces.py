@@ -996,7 +996,7 @@ class TestCreateWorkspaceV2PolicyMetadata:
             tasks.json()["items"][0],
         ]
         for row in rows:
-            _assert_effective_identity(row, model="gemini-3-pro-preview")
+            _assert_effective_identity(row, model="gemini-3.1-pro-preview")
             _assert_usage_unavailable(row)
 
     @pytest.mark.unit

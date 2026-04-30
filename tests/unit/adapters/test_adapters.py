@@ -568,7 +568,7 @@ class TestGeminiAdapter:
         # trailing substring so the assertion survives preamble edits.
         assert args[-1].endswith(_PROMPT)
         assert "AWF workspace contract" in args[-1]
-        assert "-m" in args and "gemini-2.5-pro" in args
+        assert "--model" in args and "gemini-2.5-pro" in args
 
     @pytest.mark.unit
     async def test_produces_cli_invocation_without_model_or_effort(self) -> None:
@@ -588,14 +588,14 @@ class TestGeminiAdapter:
             "--skip-trust",
             "--yolo",
         ]
-        assert "-m" not in args
+        assert "--model" not in args
 
     @pytest.mark.unit
     async def test_xhigh_effort_uses_system_settings_wrapper(self) -> None:
         runner = FakeCommandRunner()
         adapter = GeminiAdapter(
             runner=runner,
-            default_model="gemini-3-pro-preview",
+            default_model="gemini-3.1-pro-preview",
             default_effort="xhigh",
         )
 
@@ -612,7 +612,7 @@ class TestGeminiAdapter:
         assert '"thinkingLevel":"HIGH"' in script
         assert "GEMINI_CLI_TRUST_WORKSPACE" in script
         assert "exec gemini" in script
-        assert "-m" in args and "gemini-3-pro-preview" in args
+        assert "--model" in args and "gemini-3.1-pro-preview" in args
         assert args[-1].endswith(_PROMPT)
 
     @pytest.mark.unit
@@ -621,7 +621,7 @@ class TestGeminiAdapter:
         assert gemini_thinking_level_for_effort("xhigh") == "HIGH"
         assert gemini_thinking_level_for_effort("max") == "HIGH"
         assert gemini_thinking_level_for_effort("medium") is None
-        assert gemini_settings_for_effort(model="gemini-3-pro-preview", effort="low") == {}
+        assert gemini_settings_for_effort(model="gemini-3.1-pro-preview", effort="low") == {}
         no_model_settings = gemini_settings_for_effort(model=None, effort="xhigh")
         override = no_model_settings["modelConfigs"]["overrides"][0]  # type: ignore[index]
         assert override["match"] == {}
@@ -733,7 +733,7 @@ class TestCentralDefaults:
     def test_defaults_map_uses_requested_models_and_xhigh_effort(self) -> None:
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.claude_code].model == "claude-opus-4-7"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.codex].model == "gpt-5.5"
-        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3-pro-preview"
+        assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.gemini].model == "gemini-3.1-pro-preview"
         assert DEFAULT_AGENT_DEFAULTS[AgentRuntime.opencode].model == "ollama/kimi-k2.6:cloud"
         assert {d.effort for d in DEFAULT_AGENT_DEFAULTS.values()} == {"xhigh"}
 
