@@ -777,6 +777,7 @@ def test_service_gc_cli_execute_compose_teardown_uses_compose_file(
 ) -> None:
     compose = tmp_path / "compose" / "workspace-1"
     compose_file = compose / "compose.yml"
+    compose.mkdir(parents=True, exist_ok=True)
     compose_file.write_text("compose: {}\n", encoding="utf-8")
     candidate = SimpleNamespace(
         workspace_id="workspace-1",
