@@ -395,7 +395,11 @@ class TestUnexpectedErrorDuringAgentRun:
     ) -> None:
         """When an agent run fails with AGENT_PROVIDER_CAPACITY_EXHAUSTED and
         produces no commits, the details and reason_code should be forwarded to the
-        Workspace row's failure_details and events rather than being lost."""
+        Workspace row's failure_details and events rather than being lost.
+
+        TODO: Once fallback dispatch logic is implemented, this test should be
+        updated or replaced by a test that verifies the fallback provider is invoked
+        rather than the workspace failing immediately."""
         ws_id = await _seed_ready(factory, agent="gemini")
 
         from awf.adapters import base as adapter_base
