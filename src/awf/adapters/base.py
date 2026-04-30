@@ -65,6 +65,8 @@ _CAPACITY_EXHAUSTED_MARKERS = (
     "model_capacity_exhausted",
     "retryablequotaerror",
     "http 429",
+    "429 too many requests",
+    " 429 ",
     "rate limited",
     "quota exhausted",
 )
