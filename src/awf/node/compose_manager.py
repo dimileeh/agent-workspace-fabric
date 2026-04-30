@@ -385,7 +385,7 @@ class ComposeManager:
         if proc.returncode != 0:
             reason_code = "COMPOSE_COMMAND_FAILED"
             err_lower = stderr.lower()
-            if "daemon" in err_lower or "connect" in err_lower or "docker endpoint" in err_lower:
+            if "daemon" in err_lower or "error during connect" in err_lower or "docker endpoint" in err_lower:
                 reason_code = "DOCKER_UNAVAILABLE"
 
             raise ComposeOperationError(
