@@ -209,7 +209,8 @@ def init(
     typer.echo("  - Run `awf profile preview <path> --profile <name>` to inspect profile resolution.")
     typer.echo(
         "  - Optional: generate a smoke workspace request locally with "
-        "`awf profile init <path> --include-smoke-request`; this does not submit a workspace."
+        "`awf init <path> --include-smoke-request`; this prints the payload inline and does "
+        "not submit a workspace."
     )
 
     if not service_ok or not doctor_ok:
