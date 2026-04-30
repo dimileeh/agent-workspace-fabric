@@ -861,7 +861,7 @@ class CallbackSubscription(Base):
     deliveries: Mapped[list[CallbackDelivery]] = relationship(
         back_populates="subscription",
         cascade="all, delete-orphan",
-        lazy="selectin",
+        lazy="raise",
         order_by="CallbackDelivery.created_at",
     )
 

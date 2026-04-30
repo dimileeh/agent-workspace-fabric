@@ -6,6 +6,7 @@ from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 import awf.db.repositories as repository_module
@@ -235,6 +236,62 @@ async def test_subscription_event_matching_filters_nonmatches_in_database(
     assert [row.id for row in rows] == [matching.id]
     assert nonmatching.id not in loaded_subscription_ids
     assert disabled_match.id not in loaded_subscription_ids
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("repository_call", ["list", "list_enabled_for_event_type"])
+async def test_subscription_queries_do_not_eager_load_delivery_history(
+    session: AsyncSession,
+    repository_call: str,
+) -> None:
+    subscription = await _subscription(session)
+    subscription_id = subscription.id
+    now = datetime(2026, 4, 29, 12, 0, tzinfo=UTC)
+    await CallbackDeliveryRepository(session).enqueue_once(
+        subscription=subscription,
+        event_kind="workspace",
+        event_type="workspace.state_changed",
+        source_id="evt_history",
+        dedupe_key="workspace:evt_history",
+        workspace_id="ws_history",
+        operation_id=None,
+        merge_candidate_id=None,
+        envelope={"event": {"type": "workspace.state_changed"}},
+        now=now,
+    )
+    await session.flush()
+    session.expunge_all()
+
+    statements: list[str] = []
+    bind = session.get_bind()
+
+    def record_sql(
+        conn: object,
+        cursor: object,
+        statement: str,
+        parameters: object,
+        context: object,
+        executemany: bool,
+    ) -> None:
+        del conn, cursor, parameters, context, executemany
+        statements.append(" ".join(statement.lower().split()))
+
+    event.listen(bind, "before_cursor_execute", record_sql)
+    try:
+        repo = CallbackSubscriptionRepository(session)
+        if repository_call == "list":
+            rows = await repo.list(limit=50)
+        else:
+            rows = await repo.list_enabled_for_event_type("workspace.state_changed")
+    finally:
+        event.remove(bind, "before_cursor_execute", record_sql)
+
+    assert [row.id for row in rows] == [subscription_id]
+    assert [
+        statement
+        for statement in statements
+        if statement.startswith("select") and "from callback_deliveries" in statement
+    ] == []
 
 
 @pytest.mark.unit
