@@ -47,6 +47,8 @@ from awf.service.target_branch_monitor import (
 )
 
 _log = get_logger(__name__)
+_AGENT_RUNTIME_UID = 1000
+_AGENT_RUNTIME_GID = 1000
 
 
 @dataclass(frozen=True)
@@ -65,7 +67,12 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     template = Path(__file__).resolve().parents[3] / "docker" / "compose" / "workspace.base.yml.j2"
     git_env = _service_git_environment(host_home, github_token=settings.github_token)
     _apply_service_git_environment(git_env)
-    git = GitManager(work_dir / "git", env=git_env)
+    git = GitManager(
+        work_dir / "git",
+        env=git_env,
+        worktree_owner_uid=_AGENT_RUNTIME_UID,
+        worktree_owner_gid=_AGENT_RUNTIME_GID,
+    )
     compose = ComposeManager(work_dir=work_dir, template_path=template)
     runner = AsyncioSubprocessRunner()
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
