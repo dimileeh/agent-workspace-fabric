@@ -153,7 +153,7 @@ export function summarizeProviderCredentialReadiness(
 
   for (const secret of secrets) {
     const matchingLease = leaseByName.get(secret.name);
-    if (matchingLease) {
+    if (matchingLease && (matchingLease.status === "mounted" || matchingLease.status === "issued")) {
       leasedProviders.add(secret.name);
     } else if (secret.provider) {
       if (!missingProviders.includes(secret.provider)) {
