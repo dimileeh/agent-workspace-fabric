@@ -94,6 +94,24 @@ class ProfilePhaseSet(BaseModel):
         return commands
 
 
+class ProfileDatabase(BaseModel):
+    """Workspace-local project database lifecycle hooks."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    generated_setup: list[ProfileCommand] = Field(default_factory=list)
+    pre_validation_refresh: list[ProfileCommand] = Field(default_factory=list)
+
+    @field_validator("generated_setup", "pre_validation_refresh", mode="before")
+    @classmethod
+    def _coerce_commands(cls, value: object) -> object:
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return [ProfileCommand.from_shell(v) if isinstance(v, str) else v for v in value]
+        return value
+
+
 _HealthCheckCommand = Annotated[str, Field(min_length=1, max_length=4096)]
 _HealthCheckUrl = Annotated[str, Field(min_length=1, max_length=2048)]
 
@@ -453,6 +471,7 @@ class WorkspaceProfile(BaseModel):
     docker: ProfileDocker = Field(default_factory=ProfileDocker)
     services: list[ProfileService] = Field(default_factory=list)
     phases: ProfilePhaseSet = Field(default_factory=ProfilePhaseSet)
+    database: ProfileDatabase = Field(default_factory=ProfileDatabase)
     validation: ProfileValidation = Field(default_factory=ProfileValidation)
     quality: ProfileQuality = Field(default_factory=ProfileQuality)
     monitor: ProfileMonitor = Field(default_factory=ProfileMonitor)

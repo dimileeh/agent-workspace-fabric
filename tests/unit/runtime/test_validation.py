@@ -9,7 +9,7 @@ import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import ProfileHealthCheck, WorkspaceProfile
 from awf.runtime import validation as validation_module
 from awf.runtime.logs import CommandLogSinks, LogStore
 from awf.runtime.validation import (
@@ -19,7 +19,10 @@ from awf.runtime.validation import (
     ValidationRunner,
     _coverage_reason_code,
     _coverage_status,
+    _healthcheck_cli_args,
+    _healthcheck_failure_reason,
     _parse_python_coverage_percent_from_files,
+    profile_phase_command_plan,
 )
 from awf.runtime.validation_identity import (
     environment_identity_digest,
@@ -265,6 +268,31 @@ def test_environment_identity_digest_changes_for_healthcheck_wait_policy(
 
 
 @pytest.mark.unit
+def test_environment_identity_digest_changes_for_database_hooks() -> None:
+    refresh_hook = {
+        "database": {
+            "pre_validation_refresh": [
+                {"command": "python scripts/db_refresh.py", "timeout_seconds": 120}
+            ]
+        }
+    }
+    changed_refresh_timeout = {
+        "database": {
+            "pre_validation_refresh": [
+                {"command": "python scripts/db_refresh.py", "timeout_seconds": 121}
+            ]
+        }
+    }
+
+    assert environment_identity_digest(_identity_profile()) != environment_identity_digest(
+        _identity_profile(**refresh_hook)
+    )
+    assert environment_identity_digest(_identity_profile(**refresh_hook)) != (
+        environment_identity_digest(_identity_profile(**changed_refresh_timeout))
+    )
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     "alembic_policy",
     [
@@ -373,6 +401,38 @@ def test_environment_identity_inputs_sanitize_environment_and_secret_values() ->
 
 class TestHappyPath:
     @pytest.mark.unit
+    def test_profile_phase_command_plan_uses_runtime_phase_order(self) -> None:
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "phase-order-test",
+                "phases": {
+                    "setup": ["python scripts/setup.py"],
+                    "pre_agent": ["python scripts/pre_agent.py"],
+                    "post_agent": ["ruff format --check"],
+                    "validate": ["pytest -q"],
+                },
+                "database": {
+                    "generated_setup": ["python scripts/db_generated_setup.py"],
+                    "pre_validation_refresh": ["python scripts/db_refresh.py"],
+                },
+            }
+        )
+
+        commands = profile_phase_command_plan(
+            profile,
+            ("validate", "pre_agent", "post_agent", "setup"),
+        )
+
+        assert [(command.phase, command.command.command) for command in commands] == [
+            ("setup", "python scripts/setup.py"),
+            ("db_generated_setup", "python scripts/db_generated_setup.py"),
+            ("pre_agent", "python scripts/pre_agent.py"),
+            ("post_agent", "ruff format --check"),
+            ("db_refresh", "python scripts/db_refresh.py"),
+            ("validate", "pytest -q"),
+        ]
+
+    @pytest.mark.unit
     async def test_runs_each_test_command_in_order(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:
@@ -457,8 +517,462 @@ class TestHappyPath:
             "01_validate.stdout",
         ]
 
+    @pytest.mark.unit
+    async def test_run_profile_phases_inserts_generated_setup_between_setup_and_pre_agent(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="setup ok")
+        fake.queue_result(returncode=0, stdout="generated ok")
+        fake.queue_result(returncode=0, stdout="pre-agent ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-generated-setup-order",
+                "phases": {
+                    "setup": ["python scripts/setup.py"],
+                    "pre_agent": ["python scripts/pre_agent.py"],
+                },
+                "database": {
+                    "generated_setup": [
+                        {
+                            "command": "python scripts/db_generated_setup.py",
+                            "timeout_seconds": 120,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_generated_setup",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("setup", "pre_agent"),
+        )
+
+        assert result.all_passed
+        assert [(command.phase, command.command) for command in result.commands] == [
+            ("setup", "python scripts/setup.py"),
+            ("db_generated_setup", "python scripts/db_generated_setup.py"),
+            ("pre_agent", "python scripts/pre_agent.py"),
+        ]
+        assert [command.stdout_path.name for command in result.commands] == [
+            "01_setup.stdout",
+            "01_db_generated_setup.stdout",
+            "01_pre_agent.stdout",
+        ]
+        assert result.commands[1].stream_ids == {
+            "stdout": "validation.01_db_generated_setup.stdout",
+            "stderr": "validation.01_db_generated_setup.stderr",
+        }
+        assert result.commands[1].metadata == {
+            "database_hook": True,
+            "hook_kind": "generated_setup",
+            "timeout_seconds": 120,
+        }
+        assert [call.args[-1].removeprefix("[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; ") for call in fake.calls] == [
+            "python scripts/setup.py",
+            "python scripts/db_generated_setup.py",
+            "python scripts/pre_agent.py",
+        ]
+
+    @pytest.mark.unit
+    async def test_run_profile_phases_runs_db_refresh_before_healthchecks_and_validate(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="post-agent ok")
+        fake.queue_result(returncode=0, stdout="refresh ok")
+        fake.queue_result(returncode=0, stdout="health ok")
+        fake.queue_result(returncode=0, stdout="tests ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-refresh-order",
+                "phases": {
+                    "post_agent": ["ruff format --check"],
+                    "validate": ["pytest -q"],
+                },
+                "database": {
+                    "pre_validation_refresh": [
+                        {
+                            "command": "python scripts/db_refresh.py",
+                            "timeout_seconds": 60,
+                        }
+                    ]
+                },
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_refresh_order",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("post_agent", "validate"),
+            run_healthchecks=True,
+        )
+
+        assert result.all_passed
+        assert [(command.phase, command.command) for command in result.commands] == [
+            ("post_agent", "ruff format --check"),
+            ("db_refresh", "python scripts/db_refresh.py"),
+            ("healthcheck", "curl -fsS http://api:8000/healthz"),
+            ("validate", "pytest -q"),
+        ]
+        assert [command.stdout_path.name for command in result.commands] == [
+            "01_post_agent.stdout",
+            "01_db_refresh.stdout",
+            "01_healthcheck.stdout",
+            "01_validate.stdout",
+        ]
+        assert result.commands[1].metadata == {
+            "database_hook": True,
+            "hook_kind": "pre_validation_refresh",
+            "timeout_seconds": 60,
+        }
+
+    @pytest.mark.unit
+    async def test_db_refresh_failure_skips_healthchecks_and_validate(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="post-agent ok")
+        fake.queue_result(returncode=1, stderr="refresh failed")
+        fake.queue_result(returncode=0, stdout="health should not run")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-refresh-failure",
+                "phases": {
+                    "post_agent": ["ruff format --check"],
+                    "validate": ["pytest -q"],
+                },
+                "database": {"pre_validation_refresh": ["python scripts/db_refresh.py"]},
+                "validation": {
+                    "healthchecks": [{"name": "api", "command": "curl -fsS http://api/health"}]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_refresh_fail",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("post_agent", "validate"),
+            run_healthchecks=True,
+        )
+
+        assert not result.all_passed
+        assert [(command.phase, command.reason_code) for command in result.commands] == [
+            ("post_agent", "COMMAND_FAILED"),
+            ("db_refresh", "DATABASE_REFRESH_FAILED"),
+        ]
+        assert len(fake.calls) == 2
+        assert all("pytest -q" not in call.args[-1] for call in fake.calls)
+
+    @pytest.mark.unit
+    async def test_database_hook_command_failure_uses_hook_specific_reason_code(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="setup ok")
+        fake.queue_result(returncode=2, stdout="partial", stderr="generated setup failed")
+        fake.queue_result(returncode=0, stdout="pre-agent should not run")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-generated-setup-failure",
+                "phases": {
+                    "setup": ["python scripts/setup.py"],
+                    "pre_agent": ["python scripts/pre_agent.py"],
+                },
+                "database": {"generated_setup": ["python scripts/db_generated_setup.py"]},
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_generated_setup_fail",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("setup", "pre_agent"),
+        )
+
+        assert not result.all_passed
+        assert result.first_failure is not None
+        assert result.first_failure.phase == "db_generated_setup"
+        assert result.first_failure.reason_code == "DATABASE_GENERATED_SETUP_FAILED"
+        assert result.first_failure.stdout_path.name == "01_db_generated_setup.stdout"
+        assert result.first_failure.stderr_path.name == "01_db_generated_setup.stderr"
+        assert result.first_failure.stdout_path.read_text(encoding="utf-8") == "partial"
+        assert result.first_failure.stderr_path.read_text(encoding="utf-8") == (
+            "generated setup failed"
+        )
+        assert result.first_failure.metadata == {
+            "database_hook": True,
+            "hook_kind": "generated_setup",
+            "timeout_seconds": None,
+        }
+        assert len(fake.calls) == 2
+
+    @pytest.mark.unit
+    async def test_database_hook_timeout_uses_hook_specific_reason_and_logs(
+        self, tmp_path: Path
+    ) -> None:
+        timeout_runner = _ImmediateTimeoutStreamingRunner()
+        log_store = LogStore(root=tmp_path / "logs")
+        val = ValidationRunner(
+            runner=timeout_runner,
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=log_store,
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-refresh-timeout",
+                "phases": {"validate": ["pytest -q"]},
+                "database": {
+                    "pre_validation_refresh": [
+                        {"command": "python scripts/db_refresh.py", "timeout_seconds": 1}
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_refresh_timeout",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert not result.all_passed
+        assert result.first_failure is not None
+        assert result.first_failure.phase == "db_refresh"
+        assert result.first_failure.reason_code == "DATABASE_REFRESH_TIMEOUT"
+        assert result.first_failure.returncode == 124
+        assert result.first_failure.stderr_path.read_text(encoding="utf-8") == (
+            "command timed out after 1s"
+        )
+        assert (
+            tmp_path
+            / "logs"
+            / "ws_db_refresh_timeout"
+            / "validation.01_db_refresh.stderr.log"
+        ).read_text(encoding="utf-8") == "command timed out after 1s"
+        assert result.first_failure.metadata == {
+            "database_hook": True,
+            "hook_kind": "pre_validation_refresh",
+            "timeout_seconds": 1,
+        }
+        assert any("awf-cleanup" in call for call in timeout_runner.calls)
+        assert all("pytest -q" not in call[-1] for call in timeout_runner.calls)
+
+    @pytest.mark.unit
+    async def test_generated_setup_timeout_uses_hook_specific_reason(
+        self, tmp_path: Path
+    ) -> None:
+        timeout_runner = _ImmediateTimeoutStreamingRunner()
+        val = ValidationRunner(
+            runner=timeout_runner,
+            artifacts_dir=tmp_path / "artifacts",
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-generated-setup-timeout",
+                "database": {
+                    "generated_setup": [
+                        {"command": "python scripts/db_generated_setup.py", "timeout_seconds": 1}
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_generated_setup_timeout",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("setup",),
+        )
+
+        assert not result.all_passed
+        assert result.first_failure is not None
+        assert result.first_failure.phase == "db_generated_setup"
+        assert result.first_failure.reason_code == "DATABASE_GENERATED_SETUP_TIMEOUT"
+
+    @pytest.mark.unit
+    async def test_db_refresh_success_then_healthcheck_failure_skips_validate(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="refresh ok")
+        fake.queue_result(returncode=7, stderr="connection refused")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-refresh-healthcheck-failure",
+                "phases": {"validate": ["pytest -q"]},
+                "database": {"pre_validation_refresh": ["python scripts/db_refresh.py"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 0.001,
+                            "interval_seconds": 0.001,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_refresh_health_fail",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert not result.all_passed
+        assert [(command.phase, command.reason_code) for command in result.commands] == [
+            ("db_refresh", "COMMAND_FAILED"),
+            ("healthcheck", "HEALTHCHECK_COMMAND_FAILED"),
+        ]
+        assert len(fake.calls) == 2
+        assert all("pytest -q" not in call.args[-1] for call in fake.calls)
+
+    @pytest.mark.unit
+    async def test_db_refresh_without_validate_commands_runs_pending_healthchecks(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="refresh ok")
+        fake.queue_result(returncode=0, stdout="health ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-refresh-no-validate-command",
+                "database": {"pre_validation_refresh": ["python scripts/db_refresh.py"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_refresh_no_validate",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert result.all_passed
+        assert [(command.phase, command.command) for command in result.commands] == [
+            ("db_refresh", "python scripts/db_refresh.py"),
+            ("healthcheck", "curl -fsS http://api:8000/healthz"),
+        ]
+
+    @pytest.mark.unit
+    async def test_db_refresh_without_validate_commands_returns_pending_healthcheck_failure(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(returncode=0, stdout="refresh ok")
+        fake.queue_result(returncode=7, stderr="connection refused")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "db-refresh-no-validate-health-failure",
+                "database": {"pre_validation_refresh": ["python scripts/db_refresh.py"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 0.001,
+                            "interval_seconds": 0.001,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_db_refresh_no_validate_health_fail",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert not result.all_passed
+        assert [(command.phase, command.reason_code) for command in result.commands] == [
+            ("db_refresh", "COMMAND_FAILED"),
+            ("healthcheck", "HEALTHCHECK_COMMAND_FAILED"),
+        ]
+
 
 class TestProfileHealthChecks:
+    @pytest.mark.unit
+    async def test_healthcheck_timeout_attempt_retries_before_deadline(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=124,
+            stderr="attempt timed out",
+            reason_code="PHASE_TIMEOUT",
+        )
+        fake.queue_result(returncode=0, stdout="ready")
+        fake.queue_result(returncode=0, stdout="tests ok")
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "health-timeout-retry",
+                "phases": {"validate": ["pytest -q"]},
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "command": "curl -fsS http://api:8000/healthz",
+                            "timeout_seconds": 1,
+                            "interval_seconds": 0.001,
+                            "attempt_timeout_seconds": 0.001,
+                        }
+                    ]
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_health_timeout_retry",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+            run_healthchecks=True,
+        )
+
+        assert result.all_passed
+        assert result.commands[0].phase == "healthcheck"
+        assert result.commands[0].retry_count == 1
+
     @pytest.mark.unit
     async def test_validation_waits_until_healthcheck_succeeds(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
@@ -713,6 +1227,77 @@ class TestProfileHealthChecks:
         ]
         assert result.commands[0].stdout_path.name == "01_validate.stdout"
         assert len(fake.calls) == 1
+
+    @pytest.mark.unit
+    async def test_append_healthcheck_diagnostic_ignores_non_stderr_stream_id(
+        self, tmp_path: Path
+    ) -> None:
+        stderr = tmp_path / "health.stderr"
+        stderr.write_text("connection refused\n", encoding="utf-8")
+        log_store = LogStore(root=tmp_path / "logs")
+        val = ValidationRunner(
+            runner=FakeCommandRunner(),
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=log_store,
+        )
+        result = ValidationCommandResult(
+            command="curl -fsS http://api:8000/healthz",
+            returncode=7,
+            duration_seconds=0.01,
+            stdout_path=tmp_path / "health.stdout",
+            stderr_path=stderr,
+            phase="healthcheck",
+            stream_ids={"stderr": "validation.01_healthcheck.stdout"},
+        )
+
+        await val._append_healthcheck_stderr(
+            workspace_id="ws_bad_stream_id",
+            result=result,
+            diagnostic="diagnostic\n",
+        )
+
+        assert stderr.read_text(encoding="utf-8").endswith("diagnostic\n")
+        assert not (tmp_path / "logs" / "ws_bad_stream_id").exists()
+
+    @pytest.mark.unit
+    def test_invalid_healthcheck_configuration_helpers_fail_closed(
+        self, tmp_path: Path
+    ) -> None:
+        invalid = ProfileHealthCheck.model_construct(
+            name="invalid",
+            kind=None,
+            command=None,
+            url=None,
+            method="GET",
+            expected_status=200,
+            timeout_seconds=1.0,
+            interval_seconds=1.0,
+            attempt_timeout_seconds=None,
+        )
+        http = ProfileHealthCheck.model_validate(
+            {
+                "name": "api",
+                "url": "http://api:8080/healthz",
+                "expected_status": 200,
+            }
+        )
+        latest = ValidationCommandResult(
+            command="health",
+            returncode=1,
+            duration_seconds=0.01,
+            stdout_path=tmp_path / "health.stdout",
+            stderr_path=tmp_path / "health.stderr",
+        )
+
+        assert _healthcheck_cli_args(invalid) == [
+            "python",
+            "-c",
+            "import sys; print('invalid healthcheck configuration', file=sys.stderr); sys.exit(2)",
+        ]
+        assert _healthcheck_failure_reason(http, latest) == "HEALTHCHECK_HTTP_STATUS_MISMATCH"
+        assert _healthcheck_failure_reason(invalid, latest) == (
+            "HEALTHCHECK_INVALID_CONFIGURATION"
+        )
 
 
 class TestFailureStopsEarly:
@@ -1248,6 +1833,39 @@ class _SleepingRunner:
 
         await asyncio.sleep(60)
         return CommandResult(returncode=0, stdout="late", stderr="")
+
+
+class _ImmediateTimeoutStreamingRunner:
+    def __init__(self) -> None:
+        self.calls: list[list[str]] = []
+
+    async def run(
+        self,
+        args: list[str],
+        *,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+    ) -> CommandResult:
+        del input_bytes, cwd
+        self.calls.append(list(args))
+        if "awf-cleanup" in args:
+            return CommandResult(returncode=0, stdout="cleanup ok", stderr="")
+        return CommandResult(returncode=0, stdout="", stderr="")
+
+    async def run_streaming(
+        self,
+        args: list[str],
+        *,
+        on_stdout: object = None,
+        on_stderr: object = None,
+        input_bytes: bytes | None = None,
+        cwd: str | None = None,
+        wall_timeout_seconds: float | None = None,
+        idle_timeout_seconds: float | None = None,
+    ) -> CommandResult:
+        del on_stdout, on_stderr, input_bytes, cwd, wall_timeout_seconds, idle_timeout_seconds
+        self.calls.append(list(args))
+        raise TimeoutError
 
 
 class _CancellingRunner:

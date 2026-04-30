@@ -99,10 +99,14 @@ from awf.runtime.pr_monitor_operations import (
     monitor_operation_idempotency_key,
 )
 from awf.runtime.validation import (
+    DATABASE_GENERATED_SETUP_TIMEOUT,
+    DATABASE_REFRESH_TIMEOUT,
+    DB_GENERATED_SETUP_PHASE,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
     ValidationRunner,
+    profile_phase_command_plan,
 )
 from awf.runtime.validation_identity import (
     environment_identity_digest,
@@ -1019,8 +1023,8 @@ class WorkspaceExecutor:
             planning_max_iterations_default=self._config.planning_max_iterations_default,
         )
         validation_commands = [
-            command.command
-            for _, command in profile.phases.commands_for(("post_agent", "validate"))
+            step.command.command
+            for step in profile_phase_command_plan(profile, ("post_agent", "validate"))
         ]
         test_commands_tuple = tuple(validation_commands)
         validation_tier = _validation_tier_for_workspace(ws, profile)
@@ -3499,9 +3503,13 @@ def _failure_reason_for_phase(first_fail: object | None) -> FailureReason:
     reason_code = getattr(first_fail, "reason_code", None)
     if phase == "healthcheck":
         return FailureReason.health_check_failure
-    if reason_code == "PHASE_TIMEOUT":
+    if reason_code in {
+        "PHASE_TIMEOUT",
+        DATABASE_GENERATED_SETUP_TIMEOUT,
+        DATABASE_REFRESH_TIMEOUT,
+    }:
         return FailureReason.phase_timeout
-    if phase in {"setup", "pre_agent"}:
+    if phase in {"setup", "pre_agent", DB_GENERATED_SETUP_PHASE}:
         return FailureReason.service_startup_failure
     return FailureReason.validation_failure
 
@@ -3511,7 +3519,10 @@ def _validation_command_count(ws: Workspace) -> int:
         profile = WorkspaceProfile.model_validate(ws.resolved_profile)
         coverage_count = 1 if profile.validation.coverage.command is not None else 0
         return (
-            len(profile.phases.post_agent) + len(profile.phases.validate_commands) + coverage_count
+            len(profile.phases.post_agent)
+            + len(profile.database.pre_validation_refresh)
+            + len(profile.phases.validate_commands)
+            + coverage_count
         )
     return len(ws.test_commands)
 
@@ -3540,21 +3551,36 @@ def _validation_run_command_records(
                 "command": ALEMBIC_MIGRATION_POLICY_COMMAND,
             }
         )
-    if run_healthchecks:
-        ordered.extend(
-            {
-                "phase": "healthcheck",
-                "command": healthcheck.display_command(),
-                "healthcheck_name": healthcheck.name,
-                "healthcheck_kind": healthcheck.kind or ("http" if healthcheck.url else "command"),
-                "target": healthcheck.target(),
-            }
-            for healthcheck in profile.validation.healthchecks
-        )
-    ordered.extend(
-        {"phase": phase, "command": command.command}
-        for phase, command in profile.phases.commands_for(phase_names)
+    command_plan = profile_phase_command_plan(profile, phase_names)
+    healthcheck_before_phase = (
+        "validate"
+        if profile.database.pre_validation_refresh and "validate" in set(phase_names)
+        else None
     )
+    pending_healthchecks = list(profile.validation.healthchecks) if run_healthchecks else []
+    if healthcheck_before_phase is None:
+        ordered.extend(_healthcheck_command_records(pending_healthchecks))
+        pending_healthchecks = []
+    for step in command_plan:
+        if (
+            healthcheck_before_phase is not None
+            and pending_healthchecks
+            and step.phase == healthcheck_before_phase
+        ):
+            ordered.extend(_healthcheck_command_records(pending_healthchecks))
+            pending_healthchecks = []
+        record: dict[str, Any] = {"phase": step.phase, "command": step.command.command}
+        if step.database_hook:
+            record.update(
+                {
+                    "database_hook": True,
+                    "hook_kind": step.hook_kind,
+                    "timeout_seconds": step.command.timeout_seconds,
+                }
+            )
+        ordered.append(record)
+    if pending_healthchecks:
+        ordered.extend(_healthcheck_command_records(pending_healthchecks))
     if "validate" in phase_names and profile.validation.coverage.command is not None:
         ordered.append({"phase": "coverage", "command": profile.validation.coverage.command.command})
 
@@ -3577,6 +3603,19 @@ def _validation_run_command_records(
         )
         records.append(record)
     return records
+
+
+def _healthcheck_command_records(healthchecks: list[Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "phase": "healthcheck",
+            "command": healthcheck.display_command(),
+            "healthcheck_name": healthcheck.name,
+            "healthcheck_kind": healthcheck.kind or ("http" if healthcheck.url else "command"),
+            "target": healthcheck.target(),
+        }
+        for healthcheck in healthchecks
+    ]
 
 
 def _validation_tier_for_workspace(workspace: Workspace, profile: WorkspaceProfile) -> int:
