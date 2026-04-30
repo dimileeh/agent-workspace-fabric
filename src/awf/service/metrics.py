@@ -473,7 +473,10 @@ async def _cluster_root_causes(
         likely_cause = "Unknown Validation Failure"
         action = "Review validation logs"
 
-        if specific_reason_code == PLAN_CONFORMANCE_UNSATISFIED:
+        if specific_reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED":
+            likely_cause = "Provider Capacity Exhausted"
+            action = "Retry the workspace later or fallback to a different provider."
+        elif specific_reason_code == PLAN_CONFORMANCE_UNSATISFIED:
             likely_cause = "Plan Conformance Unsatisfied"
             action = (
                 "Retry with the final conformance gaps and finish the remaining planned work."

@@ -386,6 +386,78 @@ class TestMissingBaseCommit:
 
 class TestUnexpectedErrorDuringAgentRun:
     @pytest.mark.unit
+    async def test_agent_run_capacity_exhausted_surfaces_structured_failure(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """When an agent run fails with AGENT_PROVIDER_CAPACITY_EXHAUSTED and
+        produces no commits, the details and reason_code should be forwarded to the
+        Workspace row's failure_details and events rather than being lost.
+
+        TODO: Once fallback dispatch logic is implemented, this test should be
+        updated or replaced by a test that verifies the fallback provider is invoked
+        rather than the workspace failing immediately."""
+        ws_id = await _seed_ready(factory, agent="gemini")
+
+        from awf.adapters import base as adapter_base
+        from awf.common.commands import CommandResult
+        from awf.db.enums import AgentRuntime, FailureReason
+
+        class _ExhaustedAdapter(adapter_base.AgentAdapter):
+            runtime = AgentRuntime.gemini
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.gemini
+            def get_provider(self, model: str | None) -> str:
+                return "google"
+            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+                return []
+            async def run(self, **kwargs: Any) -> adapter_base.AgentRunResult:
+                raise adapter_base.AgentRunError(
+                    agent=self.name,
+                    result=CommandResult(returncode=1, stdout="", stderr="quota exhausted"),
+                    reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                    details={
+                        "provider": "google",
+                        "model": "gemini-1.5-pro",
+                        "retryable": True,
+                        "recommended_action": "Retry the workspace later or fallback to a different provider.",
+                    },
+                )
+
+        monkeypatch.setitem(adapter_base._REGISTRY, AgentRuntime.gemini, _ExhaustedAdapter)
+
+        # Queue results for the post-agent commit checks so it proceeds to the 0 commits failure.
+        fake.queue_result(returncode=0, stdout="awf/x\n")  # branch drift check
+        fake.queue_result(returncode=0)                           # git add
+        fake.queue_result(returncode=0, stdout="")                # git diff --cached
+        fake.queue_result(returncode=0, stdout="0\n")             # rev-list --count -> 0 commits
+
+        executor = _make_executor(fake, factory, tmp_path)
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == FailureReason.agent_failure.value
+
+            # The executor creates an event with the payload containing reason_code and details
+            terminal_event = next(e for e in ws.events if e.new_state == "failed")
+            payload = terminal_event.payload
+            assert isinstance(payload, dict)
+            assert payload["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+            assert payload.get("details") == {
+                "provider": "google",
+                "model": "gemini-1.5-pro",
+                "retryable": True,
+                "recommended_action": "Retry the workspace later or fallback to a different provider.",
+            }
+
+    @pytest.mark.unit
     async def test_generic_exception_in_agent_run_marks_infrastructure_failure(
         self,
         fake: FakeCommandRunner,
@@ -412,6 +484,9 @@ class TestUnexpectedErrorDuringAgentRun:
                 default_effort: Any = None,
             ) -> None:
                 pass
+
+            def get_provider(self, model: str | None) -> str:
+                return "fake"
 
             @property
             def name(self) -> AgentRuntime:
@@ -710,6 +785,9 @@ class TestAgentWatchdogConfig:
         captured: dict[str, Any] = {}
 
         class _Adapter:
+            def get_provider(self, model: str | None) -> str:
+                return "fake"
+
             @property
             def name(self) -> AgentRuntime:
                 return AgentRuntime.codex

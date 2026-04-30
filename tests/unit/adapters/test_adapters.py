@@ -537,6 +537,28 @@ class TestClaudeCodeAdapter:
         assert exc.value.reason_code == "AGENT_AUTH_FAILED"
 
     @pytest.mark.unit
+    async def test_capacity_exhausted_gets_structured_reason_code(self) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(returncode=1, stderr="RESOURCE_EXHAUSTED: quota exceeded")
+        adapter = ClaudeCodeAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                model="claude-3-5-sonnet",
+            )
+
+        assert exc.value.reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+        assert exc.value.details == {
+            "provider": "anthropic",
+            "model": "claude-3-5-sonnet",
+            "retryable": True,
+            "recommended_action": "Retry the workspace later or fallback to a different provider.",
+        }
+
+    @pytest.mark.unit
     def test_effort_mapper_preserves_non_top_effort_values(self) -> None:
         assert _claude_effort_for_awf_effort("low") == "low"
 
