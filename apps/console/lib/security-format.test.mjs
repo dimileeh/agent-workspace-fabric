@@ -42,10 +42,10 @@ test("extractHostHomeAuthMountPolicy returns warn when policy explicitly set to 
   );
 });
 
-test("extractHostHomeAuthMountPolicy falls back to block for unrecognized mode", () => {
+test("extractHostHomeAuthMountPolicy falls back to unavailable for unrecognized mode", () => {
   assert.deepEqual(
     extractHostHomeAuthMountPolicy({ security: { host_home_auth_mounts: { mode: "permissive" } } }),
-    { mode: "block" },
+    { mode: "unavailable" },
   );
 });
 

@@ -61,7 +61,7 @@ export function extractHostHomeAuthMountPolicy(
   const rawMode = typeof policy.mode === "string" ? policy.mode : "";
   const mode = VALID_MOUNT_POLICY_MODES.has(rawMode)
     ? (rawMode as HostHomeAuthMountPolicy["mode"])
-    : "block";
+    : "unavailable";
   return { mode };
 }
 
