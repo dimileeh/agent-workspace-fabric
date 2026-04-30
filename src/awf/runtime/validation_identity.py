@@ -74,6 +74,12 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
             "timeout_seconds": profile.validation.timeout_seconds,
             "requested_tier": profile.validation.requested_tier,
             "coverage": _coverage_identity(profile.validation.coverage),
+            "alembic": {
+                "enabled": profile.validation.alembic.enabled,
+                "config_path": profile.validation.alembic.config_path,
+                "script_location": profile.validation.alembic.script_location,
+                "fail_on_unconfigured": profile.validation.alembic.fail_on_unconfigured,
+            },
             "retry_budget": profile.validation.retry_budget,
         },
         "security": {

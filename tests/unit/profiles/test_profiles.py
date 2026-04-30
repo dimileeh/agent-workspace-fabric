@@ -60,6 +60,18 @@ def test_profile_schema_accepts_monitor_initial_review_grace() -> None:
 
 
 @pytest.mark.unit
+def test_profile_healthcheck_rejects_non_string_method() -> None:
+    with pytest.raises(ValidationError):
+        ProfileHealthCheck.model_validate(
+            {
+                "name": "api",
+                "url": "http://api:8080/healthz",
+                "method": 123,
+            }
+        )
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_non_check_reviewer_monitor_policy() -> None:
     profile = WorkspaceProfile.model_validate(
         {
@@ -165,6 +177,62 @@ def test_profile_schema_accepts_declared_provider_github_and_local_auth_leases()
         "local-auth",
     ]
     assert profile.secrets[2].mode == "ro"
+
+
+@pytest.mark.unit
+def test_profile_schema_defaults_alembic_validation_to_disabled() -> None:
+    profile = WorkspaceProfile.model_validate({"name": "python-explicit"})
+
+    assert profile.validation.alembic.enabled is False
+    assert profile.validation.alembic.config_path == "alembic.ini"
+    assert profile.validation.alembic.script_location is None
+    assert profile.validation.alembic.fail_on_unconfigured is True
+
+
+@pytest.mark.unit
+def test_profile_schema_accepts_alembic_validation_policy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "python-explicit",
+            "validation": {
+                "alembic": {
+                    "enabled": True,
+                    "config_path": "db/alembic.ini",
+                    "script_location": "db/migrations",
+                    "fail_on_unconfigured": False,
+                }
+            },
+        }
+    )
+
+    assert profile.validation.alembic.enabled is True
+    assert profile.validation.alembic.config_path == "db/alembic.ini"
+    assert profile.validation.alembic.script_location == "db/migrations"
+    assert profile.validation.alembic.fail_on_unconfigured is False
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "alembic",
+    [
+        {"config_path": "/etc/alembic.ini"},
+        {"config_path": "../alembic.ini"},
+        {"config_path": r"db\..\alembic.ini"},
+        {"script_location": "/srv/migrations"},
+        {"script_location": "db/../migrations"},
+        {"script_location": r"db\..\migrations"},
+    ],
+)
+def test_profile_schema_rejects_unsafe_alembic_validation_paths(
+    alembic: dict[str, object],
+) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "python-explicit",
+                "validation": {"alembic": {"enabled": True, **alembic}},
+            }
+        )
 
 
 @pytest.mark.unit
@@ -883,6 +951,14 @@ def test_java_builtin_uses_worktree_build_tool_detection(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
+def test_java_builtin_without_detected_build_tool_uses_default_profile(tmp_path: Path) -> None:
+    profile = get_builtin_profile("java", worktree_path=tmp_path)
+
+    assert profile is not None
+    assert profile.phases.setup[0].command == "mvn -B -DskipTests dependency:go-offline"
+
+
+@pytest.mark.unit
 def test_aira_detector_ignores_unreadable_pyproject(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -911,3 +987,4 @@ def test_aira_profile_keeps_project_specific_bits_out_of_base_stack() -> None:
     assert profile.services[0].image == "pgvector/pgvector:pg18"
     assert "AIRA_DATABASE_URL" in profile.runtime.environment
     assert "alembic upgrade head" in [c.command for c in profile.phases.setup]
+    assert profile.validation.alembic.enabled is True
