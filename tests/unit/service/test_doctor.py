@@ -191,6 +191,58 @@ def test_doctor_green_report_covers_operator_diagnostics(tmp_path: Path) -> None
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("provider_name", "expected_reason", "expected_message"),
+    [
+        ("codex", "CODEX_AUTH_OK", "Codex auth is usable for agent workspaces."),
+        (
+            "claude_code",
+            "CLAUDE_CODE_AUTH_OK",
+            "Claude Code auth is usable for agent workspaces.",
+        ),
+        ("gemini", "GEMINI_AUTH_OK", "Gemini auth is usable for agent workspaces."),
+        (
+            "opencode",
+            "OPENCODE_AUTH_OK",
+            "OpenCode/Ollama auth is usable for agent workspaces.",
+        ),
+    ],
+)
+def test_doctor_maps_provider_ok_fallback_reasons_to_operator_output(
+    tmp_path: Path,
+    provider_name: str,
+    expected_reason: str,
+    expected_message: str,
+) -> None:
+    from awf.service.doctor import collect_doctor_report
+
+    status = _green_status()
+    readiness = status["agent_readiness"]
+    assert isinstance(readiness, dict)
+    providers = readiness["providers"]
+    assert isinstance(providers, dict)
+    providers[provider_name] = {"ok": True, "status": "ok"}
+
+    async def _collector(_settings: ServiceSettings, **_kwargs: object) -> dict[str, object]:
+        return status
+
+    report = asyncio.run(
+        collect_doctor_report(
+            _settings(tmp_path),
+            status_collector=_collector,
+            run_subprocess=_worker_running,
+            socket_connector=_connect_ok,
+            environ={},
+        )
+    )
+    diagnostic = _diagnostics_by_id(report)[f"provider.{provider_name}"]
+
+    assert diagnostic["reason"] == expected_reason
+    assert diagnostic["message"] == expected_message
+    assert diagnostic["action"] == "No action required."
+
+
+@pytest.mark.unit
 def test_doctor_maps_plain_language_failures(tmp_path: Path) -> None:
     from awf.service.doctor import collect_doctor_report
 

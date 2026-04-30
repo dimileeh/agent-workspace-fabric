@@ -194,6 +194,22 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "GitHub CLI auth is usable for PR operations.",
         "No action required.",
     ),
+    "CODEX_AUTH_OK": _ReasonText(
+        "Codex auth is usable for agent workspaces.",
+        "No action required.",
+    ),
+    "CLAUDE_CODE_AUTH_OK": _ReasonText(
+        "Claude Code auth is usable for agent workspaces.",
+        "No action required.",
+    ),
+    "GEMINI_AUTH_OK": _ReasonText(
+        "Gemini auth is usable for agent workspaces.",
+        "No action required.",
+    ),
+    "OPENCODE_AUTH_OK": _ReasonText(
+        "OpenCode/Ollama auth is usable for agent workspaces.",
+        "No action required.",
+    ),
     "GITHUB_TOKEN_ENV_MISSING": _ReasonText(
         "No service-visible GitHub token was found.",
         "Set AWF_GITHUB_TOKEN from `gh auth token` before starting the service.",
