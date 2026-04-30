@@ -160,21 +160,23 @@ def init(
 
     try:
         settings = resolve_service_settings()
-        service_status = asyncio.run(
-            collect_service_status(
-                settings,
-                strict_providers=frozenset(),
-                provider_environ=os.environ,
+
+        async def _collect_reports() -> tuple[dict[str, object], object]:
+            return await asyncio.gather(
+                collect_service_status(
+                    settings,
+                    strict_providers=frozenset(),
+                    provider_environ=os.environ,
+                ),
+                collect_doctor_report(
+                    settings,
+                    strict_providers=frozenset(),
+                    provider_environ=os.environ,
+                    environ=os.environ,
+                ),
             )
-        )
-        doctor_report = asyncio.run(
-            collect_doctor_report(
-                settings,
-                strict_providers=frozenset(),
-                provider_environ=os.environ,
-                environ=os.environ,
-            )
-        )
+
+        service_status, doctor_report = asyncio.run(_collect_reports())
         preview = preview_project_onboarding(
             repository,
             include_smoke_request=include_smoke_request,
