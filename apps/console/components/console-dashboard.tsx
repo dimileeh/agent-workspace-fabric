@@ -3429,7 +3429,10 @@ function SecurityEgressPanel({
   const security = extractProfileSecurity(resolvedProfile);
   const egressStatus = summarizeEgressStatus(security.egress);
   const mountPolicy = formatHostHomeMountPolicy(security.host_home_auth_mounts);
-  const secretCount = extractProfileSecrets(resolvedProfile).length;
+  const secretsResult = extractProfileSecrets(resolvedProfile);
+  const secretsUnavailable = !secretsResult.available;
+  const secretsAvailable = secretsResult.available ? secretsResult.secrets : [];
+  const secretCount = secretsAvailable.length;
   const activeFindings = policyFindings.filter((finding) => finding.status === "active");
 
   return (
@@ -3448,8 +3451,8 @@ function SecurityEgressPanel({
         />
         <QueueChip
           label="Secrets declared"
-          value={secretCount === 0 ? "none" : String(secretCount)}
-          tone={secretCount > 0 ? "info" : "neutral"}
+          value={secretsUnavailable ? "unavailable" : secretCount === 0 ? "none" : String(secretCount)}
+          tone={secretsUnavailable ? "neutral" : secretCount > 0 ? "info" : "neutral"}
         />
         <QueueChip
           label="Policy findings"
@@ -3474,7 +3477,9 @@ function SecretsLeasesPanel({
   resolvedProfile: Record<string, unknown> | null;
   secretLeases: WorkspaceSecretLease[] | null | undefined;
 }) {
-  const secrets = extractProfileSecrets(resolvedProfile);
+  const secretsResult = extractProfileSecrets(resolvedProfile);
+  const secretsUnavailable = !secretsResult.available;
+  const secrets = secretsResult.available ? secretsResult.secrets : [];
   const leasesUnavailable = secretLeases == null;
   const leaseArray = secretLeases ?? [];
   const readiness = summarizeSecretLeaseReadiness(leaseArray);
@@ -3484,11 +3489,13 @@ function SecretsLeasesPanel({
 
   return (
     <Panel title="Secrets & Leases" icon={<KeyRound size={16} aria-hidden />}>
-      {secrets.length === 0 && leasesUnavailable ? (
+      {secretsUnavailable && leasesUnavailable ? (
         <MutedLine>No secret policy or leases reported for this workspace.</MutedLine>
       ) : (
         <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-3">
-          {secrets.length > 0 ? (
+          {secretsUnavailable ? (
+            <QueueChip label="Secrets declared" value="unavailable" tone="neutral" />
+          ) : secrets.length > 0 ? (
             <>
               <QueueChip
                 label="Mount secrets"

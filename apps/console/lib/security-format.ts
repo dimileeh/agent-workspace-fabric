@@ -11,13 +11,17 @@ type StatusTone = "neutral" | "info" | "good" | "warn" | "bad";
 const VALID_EGRESS_MODES = new Set(["open", "allowlist", "offline", "mirrored", "unavailable"]);
 const VALID_MOUNT_POLICY_MODES = new Set(["block", "warn", "unavailable"]);
 
+export type ProfileSecretsResult =
+  | { available: true; secrets: ProfileSecret[] }
+  | { available: false };
+
 export function extractProfileSecrets(
   profile: Record<string, unknown> | null | undefined,
-): ProfileSecret[] {
+): ProfileSecretsResult {
   if (!profile || !Array.isArray(profile.secrets)) {
-    return [];
+    return { available: false };
   }
-  return profile.secrets
+  const secrets = profile.secrets
     .filter((entry): entry is Record<string, unknown> => entry != null && typeof entry === "object")
     .map((entry) => ({
       name: typeof entry.name === "string" ? entry.name : "",
@@ -27,6 +31,7 @@ export function extractProfileSecrets(
       required: entry.required === true,
       provider: typeof entry.provider === "string" ? entry.provider : null,
     }));
+  return { available: true, secrets };
 }
 
 export function extractProfileEgress(
