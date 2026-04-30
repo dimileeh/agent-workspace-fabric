@@ -13,6 +13,7 @@ from awf.node.git_manager import WorktreeLayout
 from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
 from awf.profiles.compose import (
     AGENT_AUTH_ENV_VARS,
+    agent_environment_with_github_token,
     profile_agent_environment,
     resolve_app_endpoints,
 )
@@ -137,6 +138,19 @@ def test_profile_agent_environment_exposes_only_agent_and_validation_app_endpoin
     assert [endpoint["name"] for endpoint in endpoints] == ["app", "browser_validation"]
     assert endpoints[0]["internal_url"] == "http://app:3000/"
     assert endpoints[1]["health"]["internal_url"] == "http://browser:9323/healthz"
+
+
+@pytest.mark.unit
+def test_github_token_placeholder_preserves_profile_supplied_agent_env() -> None:
+    env = agent_environment_with_github_token(
+        (("GH_TOKEN", "${WORKSPACE_GH_TOKEN}"),),
+        host_env={"AWF_GITHUB_TOKEN": "ghp_host_secret"},
+    )
+
+    assert env == (
+        ("GH_TOKEN", "${WORKSPACE_GH_TOKEN}"),
+        ("GITHUB_TOKEN", "${AWF_GITHUB_TOKEN}"),
+    )
 
 
 async def _launched_spec(

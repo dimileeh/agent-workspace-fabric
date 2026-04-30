@@ -7,6 +7,8 @@ from pathlib import Path
 import pytest
 
 from awf.runtime.planning import (
+    MAX_CONFORMANCE_TEXT_CHARS,
+    PLAN_CONFORMANCE_REPORTED,
     PLAN_CONFORMANCE_UNSATISFIED,
     PlanConformanceStatus,
     _gaps_from_payload,
@@ -190,3 +192,32 @@ def test_conformance_retry_prompt_steers_agent_to_finish_remaining_gaps() -> Non
     assert "- Add regression test" in prompt
     assert "- Wire retry endpoint" in prompt
     assert "Do not restart from scratch" in prompt
+
+
+@pytest.mark.unit
+def test_conformance_retry_prompt_handles_missing_artifact_metadata() -> None:
+    long_summary = "x" * (MAX_CONFORMANCE_TEXT_CHARS + 50)
+    prompt = build_conformance_retry_prompt(
+        task_prompt="Finish endpoint metadata coverage.",
+        evidence={
+            "summary": long_summary,
+            "gaps": "not-a-list",
+            "plan_path": "",
+            "report_path": None,
+        },
+    )
+
+    assert ("x" * (MAX_CONFORMANCE_TEXT_CHARS - 3) + "...") in prompt
+    assert long_summary not in prompt
+    assert "- Re-check the saved plan." in prompt
+    assert "- Plan artifacts were not recorded." in prompt
+
+
+@pytest.mark.unit
+def test_conformance_report_defaults_blank_reason_code() -> None:
+    report = parse_conformance_report(
+        '{"status":"needs_iteration","summary":"done","gaps":[],"reason_code":"   "}'
+    )
+
+    assert report.reason_code == PLAN_CONFORMANCE_REPORTED
+    assert report.summary == "done"

@@ -12,6 +12,7 @@ from awf.api.schemas import WorkspaceResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
 from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+from awf.service import workspaces as workspaces_service
 from awf.service.validation_observability import (
     _loaded_collection,
     _profile_requested_validation_tier,
@@ -19,7 +20,7 @@ from awf.service.validation_observability import (
     latest_merge_candidate,
     validation_freshness_summary,
 )
-from awf.service.workspaces import workspace_response
+from awf.service.workspaces import workspace_failure_details_payload, workspace_response
 
 
 @pytest.mark.unit
@@ -475,6 +476,33 @@ def test_workspace_response_sanitizes_raw_profile_snapshots() -> None:
 
 
 @pytest.mark.unit
+def test_profile_snapshot_sanitizer_handles_malformed_and_portless_urls() -> None:
+    assert workspaces_service._sanitize_profile_string("http://[::1") == "http://[::1"
+    assert (
+        workspaces_service._sanitize_profile_string(
+            "http://user:password@app/admin?token=abc"
+        )
+        == "http://app/admin"
+    )
+    assert (
+        workspaces_service._sanitize_profile_string(
+            "http://user:password@app:not-a-port/admin?token=abc"
+        )
+        == "http://app/admin"
+    )
+    assert (
+        workspaces_service._sanitize_profile_string(
+            "http://user:password@:8080/admin?token=abc"
+        )
+        == "http://<redacted>/admin"
+    )
+    assert (
+        workspaces_service._sanitize_profile_string("http://app:3000/admin")
+        == "http://app:3000/admin"
+    )
+
+
+@pytest.mark.unit
 def test_workspace_response_omits_app_endpoint_metadata_from_malformed_profile() -> None:
     now = datetime(2026, 4, 29, 12, 45, tzinfo=UTC)
     workspace = SimpleNamespace(
@@ -607,6 +635,58 @@ def test_workspace_response_includes_conformance_failure_details_and_salvage() -
     assert response.failure_details.conformance.gaps == ["Add tests"]
     assert response.failure_details.salvage is not None
     assert response.failure_details.salvage.worktree_path == "/worktrees/ws_conformance_failed"
+
+
+@pytest.mark.unit
+def test_failure_details_omit_empty_payload_and_compact_malformed_conformance() -> None:
+    empty_workspace = SimpleNamespace(
+        failure_message=None,
+        events=[
+            SimpleNamespace(
+                event_type="workspace.state_changed",
+                new_state=WorkspaceStatus.failed.value,
+                reason_code=None,
+                payload={},
+            )
+        ],
+    )
+
+    assert workspace_failure_details_payload(empty_workspace) is None  # type: ignore[arg-type]
+    assert workspaces_service._compact_conformance_payload(
+        {
+            "summary": 123,
+            "gaps": [None, "Add endpoint regression coverage"],
+            "iterations_used": "2",
+            "max_iterations": 2,
+        }
+    ) == {
+        "gaps": ["Add endpoint regression coverage"],
+        "max_iterations": 2,
+    }
+    assert workspaces_service._compact_conformance_payload(
+        {"summary": "No structured gap list.", "gaps": "not-a-list"}
+    ) == {"summary": "No structured gap list."}
+
+
+@pytest.mark.unit
+def test_conformance_retry_context_ignores_non_mapping_evidence() -> None:
+    workspace = SimpleNamespace(
+        id="ws_bad_conformance_evidence",
+        failure_message=None,
+        events=[
+            SimpleNamespace(
+                event_type="workspace.state_changed",
+                new_state=WorkspaceStatus.failed.value,
+                reason_code=PLAN_CONFORMANCE_UNSATISFIED,
+                payload={
+                    "details": {"conformance": "not structured evidence"},
+                    "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+                },
+            )
+        ],
+    )
+
+    assert workspaces_service._conformance_retry_context(workspace) is None  # type: ignore[arg-type]
 
 
 @pytest.mark.unit

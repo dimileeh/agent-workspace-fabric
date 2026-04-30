@@ -182,6 +182,74 @@ def test_profile_schema_accepts_http_healthcheck_without_shell_command() -> None
 
 
 @pytest.mark.unit
+def test_profile_schema_rejects_mismatched_healthcheck_kind() -> None:
+    with pytest.raises(ValidationError, match="healthcheck kind must match"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-health-kind",
+                "validation": {
+                    "healthchecks": [
+                        {
+                            "name": "api",
+                            "kind": "http",
+                            "command": "curl -fsS http://api:8000/healthz",
+                        }
+                    ]
+                },
+            }
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "name": "bad-health-method",
+            "validation": {
+                "healthchecks": [
+                    {
+                        "name": "api",
+                        "url": "http://api.example.test/healthz",
+                        "method": 123,
+                    }
+                ]
+            },
+        },
+        {
+            "name": "bad-endpoint-health-method",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {
+                    "name": "app",
+                    "service": "app",
+                    "port": 3000,
+                    "health": {"path": "/healthz", "method": 123},
+                }
+            ],
+        },
+        {
+            "name": "bad-endpoint-scheme",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {"name": "app", "service": "app", "scheme": 123, "port": 3000}
+            ],
+        },
+        {
+            "name": "bad-endpoint-visibility",
+            "services": [{"name": "app", "image": "example/app:latest"}],
+            "app_endpoints": [
+                {"name": "app", "service": "app", "port": 3000, "visibility": 123}
+            ],
+        },
+    ],
+)
+def test_profile_schema_rejects_non_string_normalized_fields(payload: dict[str, object]) -> None:
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(payload)
+
+
+@pytest.mark.unit
 def test_http_healthcheck_public_targets_redact_url_userinfo() -> None:
     profile = WorkspaceProfile.model_validate(
         {

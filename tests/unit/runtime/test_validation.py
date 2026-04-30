@@ -9,7 +9,7 @@ import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.models import ProfileHealthCheck, WorkspaceProfile
 from awf.runtime.logs import CommandLogSinks, LogStore
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -18,6 +18,9 @@ from awf.runtime.validation import (
     ValidationRunner,
     _coverage_reason_code,
     _coverage_status,
+    _healthcheck_attempt_timeout,
+    _healthcheck_cli_args,
+    _healthcheck_failure_reason,
     _parse_python_coverage_percent_from_files,
 )
 from awf.runtime.validation_identity import (
@@ -1078,6 +1081,60 @@ class TestCoverageEnforcement:
         assert _coverage_status(reason_code="COVERAGE_OK", enforce=True) == "passed"
         assert _coverage_status(reason_code="COVERAGE_NOT_FOUND", enforce=False) == "reported"
         assert _coverage_status(reason_code="COVERAGE_NOT_FOUND", enforce=True) == "failed"
+
+    @pytest.mark.unit
+    async def test_healthcheck_stderr_append_skips_invalid_stream_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        log_store = LogStore(root=tmp_path / "logs")
+        val = ValidationRunner(
+            runner=FakeCommandRunner(),
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=log_store,
+        )
+        stderr_path = tmp_path / "healthcheck.stderr"
+        result = ValidationCommandResult(
+            command="curl -fsS http://api:8000/healthz",
+            returncode=1,
+            duration_seconds=0.1,
+            stdout_path=tmp_path / "healthcheck.stdout",
+            stderr_path=stderr_path,
+            stream_ids={"stderr": "validation.healthcheck"},
+        )
+
+        await val._append_healthcheck_stderr(
+            workspace_id="ws_healthcheck",
+            result=result,
+            diagnostic="health check failed\n",
+        )
+
+        assert stderr_path.read_text(encoding="utf-8") == "health check failed\n"
+
+    @pytest.mark.unit
+    def test_healthcheck_helper_edges_cover_invalid_configuration(self) -> None:
+        invalid = ProfileHealthCheck.model_construct(name="invalid")
+        http = ProfileHealthCheck.model_construct(
+            name="api",
+            kind="http",
+            url="http://api:8000/healthz",
+            command=None,
+        )
+        failed = ValidationCommandResult(
+            command="healthcheck",
+            returncode=1,
+            duration_seconds=0,
+            stdout_path=Path("stdout"),
+            stderr_path=Path("stderr"),
+        )
+
+        assert _healthcheck_cli_args(invalid)[0:2] == ["python", "-c"]
+        assert _healthcheck_attempt_timeout(invalid, remaining_seconds=0) == 0.001
+        assert _healthcheck_failure_reason(http, failed) == "HEALTHCHECK_HTTP_STATUS_MISMATCH"
+        assert (
+            _healthcheck_failure_reason(invalid, failed)
+            == "HEALTHCHECK_INVALID_CONFIGURATION"
+        )
 
 
 class TestMigration:

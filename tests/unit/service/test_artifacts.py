@@ -7,9 +7,12 @@ from typing import Any
 
 import pytest
 
+from awf.service import artifacts as artifacts_service
 from awf.service.artifacts import (
     ArtifactNotFoundError,
     ArtifactPathError,
+    artifact_id,
+    artifact_kind,
     get_downloadable_artifact,
     list_artifacts,
     workspace_artifact_dir,
@@ -143,6 +146,37 @@ class TestArtifactService:
             )
 
     @pytest.mark.unit
+    def test_directory_artifact_path_is_not_downloadable(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        (artifact_dir / "reports").mkdir(parents=True)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_downloadable_artifact(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="reports",
+            )
+
+    @pytest.mark.unit
+    def test_listing_returns_empty_when_directory_walk_fails(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        original_walk = Path.walk
+
+        def walk_candidate(self: Path, *args: Any, **kwargs: Any) -> Any:
+            if self == artifact_dir:
+                raise OSError("walk failed")
+            return original_walk(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "walk", walk_candidate)
+
+        assert list_artifacts("ws_artifacts", artifact_dir) == []
+
+    @pytest.mark.unit
     def test_listing_reports_metadata_and_skips_deleted_files(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -184,3 +218,52 @@ class TestArtifactService:
         assert items[0].workspace_id == "ws_artifacts"
         assert items[0].kind == "txt"
         assert items[0].content_type == "text/plain"
+
+    @pytest.mark.unit
+    def test_artifact_compatibility_helpers_delegate_to_public_helpers(self) -> None:
+        assert artifacts_service._artifact_id("ws_artifacts", "reports/summary.json") == (
+            artifact_id("ws_artifacts", "reports/summary.json")
+        )
+        assert artifacts_service._artifact_kind(Path("summary.json")) == artifact_kind(
+            Path("summary.json")
+        )
+
+    @pytest.mark.unit
+    def test_artifact_root_resolve_to_non_directory_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        artifact_dir.mkdir(parents=True)
+        resolved_file = tmp_path / "resolved-file"
+        resolved_file.write_text("not a directory\n", encoding="utf-8")
+        original_resolve = Path.resolve
+
+        def resolve_candidate(self: Path, *args: Any, **kwargs: Any) -> Path:
+            if self == artifact_dir:
+                return resolved_file
+            return original_resolve(self, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "resolve", resolve_candidate)
+
+        with pytest.raises(ArtifactNotFoundError):
+            artifacts_service._resolve_artifact_root(artifact_dir)
+
+    @pytest.mark.unit
+    def test_artifact_symlink_probe_fails_closed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        problem_path = tmp_path / "problem"
+        original_is_symlink = Path.is_symlink
+
+        def is_symlink_candidate(self: Path) -> bool:
+            if self == problem_path:
+                raise OSError("stat failed")
+            return original_is_symlink(self)
+
+        monkeypatch.setattr(Path, "is_symlink", is_symlink_candidate)
+
+        assert artifacts_service._is_symlink(problem_path) is True

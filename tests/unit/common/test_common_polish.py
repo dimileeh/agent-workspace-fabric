@@ -12,6 +12,10 @@ from __future__ import annotations
 
 import pytest
 
+from awf.common.callback_events import (
+    callback_subscription_matches_event_type,
+    is_valid_callback_subscription_event_type,
+)
 from awf.common.commands import AsyncioSubprocessRunner
 from awf.common.config import Settings, get_settings
 from awf.common.ids import new_event_id, new_operation_id, new_workspace_id
@@ -103,3 +107,25 @@ class TestRedaction:
     @pytest.mark.unit
     def test_empty_text_is_returned_unchanged(self) -> None:
         assert redact_secrets("") == ""
+
+
+class TestCallbackEvents:
+    @pytest.mark.unit
+    def test_public_callback_subscription_matching_contract(self) -> None:
+        assert is_valid_callback_subscription_event_type("workspace.*") is True
+        assert callback_subscription_matches_event_type(
+            "workspace.*",
+            "workspace.state_changed",
+        )
+        assert callback_subscription_matches_event_type(
+            "workspace.created",
+            "workspace.created",
+        )
+        assert not callback_subscription_matches_event_type(
+            "workspace.*",
+            "workspace.internal_secret",
+        )
+        assert not callback_subscription_matches_event_type(
+            "merge.*",
+            "workspace.created",
+        )
