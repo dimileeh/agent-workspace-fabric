@@ -47,6 +47,8 @@ class ServiceAuthMountResolver:
     host_home: Path
     work_dir: Path
     host_env: Mapping[str, str] | None = None
+    workspace_owner_uid: int | None = None
+    workspace_owner_gid: int | None = None
 
     def resolve(
         self,
@@ -62,6 +64,8 @@ class ServiceAuthMountResolver:
             host_env=self.host_env,
             suppressed_targets=suppressed_targets,
             suppressed_providers=suppressed_providers,
+            workspace_owner_uid=self.workspace_owner_uid,
+            workspace_owner_gid=self.workspace_owner_gid,
         )
 
 
@@ -73,6 +77,8 @@ def resolve_service_auth_mounts(
     host_env: Mapping[str, str] | None = None,
     suppressed_targets: Collection[str] = (),
     suppressed_providers: Collection[str] = (),
+    workspace_owner_uid: int | None = None,
+    workspace_owner_gid: int | None = None,
 ) -> tuple[AuthMount, ...]:
     """Return host auth mounts for one service-created workspace.
 
@@ -98,6 +104,8 @@ def resolve_service_auth_mounts(
         work_dir=work_dir.expanduser(),
         host_home=normalized_home,
         suppressed_targets=suppressed_target_set,
+        workspace_owner_uid=workspace_owner_uid,
+        workspace_owner_gid=workspace_owner_gid,
     )
 
 
@@ -143,6 +151,8 @@ def _workspace_auth_mounts(
     work_dir: Path,
     host_home: Path,
     suppressed_targets: Collection[str] = (),
+    workspace_owner_uid: int | None = None,
+    workspace_owner_gid: int | None = None,
 ) -> tuple[AuthMount, ...]:
     auth_root = work_dir / "auth" / workspace_id
     mounts = []
@@ -187,8 +197,48 @@ def _workspace_auth_mounts(
                 target_root=auth_root / "ollama",
             )
         )
+    _chown_workspace_auth_sources(
+        mounts,
+        uid=workspace_owner_uid,
+        gid=workspace_owner_gid,
+    )
     mounts.extend(base_mounts)
     return tuple(mounts)
+
+
+def _chown_workspace_auth_sources(
+    mounts: Sequence[AuthMount],
+    *,
+    uid: int | None,
+    gid: int | None,
+) -> None:
+    if uid is None and gid is None:
+        return
+    if uid is None or gid is None:
+        raise ValueError("workspace auth ownership requires both uid and gid")
+
+    for mount in mounts:
+        if mount.mode != "rw":
+            continue
+        _chown_tree(Path(mount.source), uid, gid)
+
+
+def _chown_tree(path: Path, uid: int, gid: int) -> None:
+    if path.is_symlink():
+        os.lchown(path, uid, gid)
+        return
+
+    os.chown(path, uid, gid)
+    if not path.is_dir():
+        return
+
+    for root, dirs, files in os.walk(path, followlinks=False):
+        for name in (*dirs, *files):
+            child = Path(root) / name
+            if child.is_symlink():
+                os.lchown(child, uid, gid)
+            else:
+                os.chown(child, uid, gid)
 
 
 def legacy_provider_targets(providers: Collection[str]) -> frozenset[str]:

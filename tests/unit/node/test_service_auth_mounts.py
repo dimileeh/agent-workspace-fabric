@@ -309,6 +309,71 @@ def test_service_auth_mounts_preserve_existing_workspace_opencode_and_ollama_aut
 
 
 @pytest.mark.unit
+def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_codex = host_home / ".codex"
+    host_claude = host_home / ".claude"
+    host_gemini = host_home / ".gemini"
+    host_opencode = host_home / ".config" / "opencode"
+    host_ollama = host_home / ".ollama"
+    host_codex.mkdir(parents=True)
+    host_claude.mkdir(parents=True)
+    host_gemini.mkdir(parents=True)
+    host_opencode.mkdir(parents=True)
+    host_ollama.mkdir(parents=True)
+    (host_codex / "auth.json").write_text('{"token": "codex"}\n')
+    (host_codex / "rules").mkdir()
+    (host_codex / "rules" / "default.rules").write_text("rule\n")
+    (host_claude / "settings.json").write_text('{"token": "claude"}\n')
+    (host_home / ".claude.json").write_text('{"token": "claude-file"}\n')
+    (host_gemini / "settings.json").write_text('{"token": "gemini"}\n')
+    (host_opencode / "opencode.json").write_text('{"token": "opencode"}\n')
+    (host_ollama / "config.json").write_text('{"token": "ollama"}\n')
+    (host_ollama / "id_ed25519").write_text("private-key\n")
+    (host_home / ".gitconfig").write_text("[user]\n  name = Host\n")
+    work_dir = tmp_path / "work"
+    chowned: list[tuple[Path, int, int]] = []
+
+    def _record_chown(path: str | bytes, uid: int, gid: int) -> None:
+        chowned.append((Path(path), uid, gid))
+
+    monkeypatch.setattr("awf.node.auth_mounts.os.chown", _record_chown)
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+        workspace_owner_uid=1000,
+        workspace_owner_gid=1000,
+    )
+
+    by_target = {m.target: m for m in mounts}
+    expected_paths = {
+        Path(by_target["/home/agent/.codex"].source),
+        Path(by_target["/home/agent/.codex"].source) / "auth.json",
+        Path(by_target["/home/agent/.codex"].source) / "rules" / "default.rules",
+        Path(by_target["/home/agent/.claude"].source),
+        Path(by_target["/home/agent/.claude"].source) / "settings.json",
+        Path(by_target["/home/agent/.claude.json"].source),
+        Path(by_target["/home/agent/.gemini"].source),
+        Path(by_target["/home/agent/.gemini"].source) / "settings.json",
+        Path(by_target["/home/agent/.config/opencode"].source),
+        Path(by_target["/home/agent/.config/opencode"].source) / "opencode.json",
+        Path(by_target["/home/agent/.ollama"].source),
+        Path(by_target["/home/agent/.ollama"].source) / "config.json",
+        Path(by_target["/home/agent/.ollama"].source) / "id_ed25519",
+    }
+    assert expected_paths <= {path for path, _, _ in chowned}
+    assert all(uid == 1000 and gid == 1000 for _, uid, gid in chowned)
+    assert all(path.is_relative_to(work_dir / "auth" / "ws_auth") for path, _, _ in chowned)
+    assert host_home / ".gitconfig" not in {path for path, _, _ in chowned}
+
+
+@pytest.mark.unit
 def test_service_auth_mounts_include_google_application_credentials_file(
     tmp_path: Path,
 ) -> None:

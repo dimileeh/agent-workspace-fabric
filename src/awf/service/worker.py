@@ -119,6 +119,8 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
     auth_mount_resolver = ServiceAuthMountResolver(
         host_home=host_home,
         work_dir=work_dir,
+        workspace_owner_uid=_AGENT_RUNTIME_UID,
+        workspace_owner_gid=_AGENT_RUNTIME_GID,
     )
     secret_lease_resolver = LocalSecretLeaseMountResolver(
         host_home=host_home,

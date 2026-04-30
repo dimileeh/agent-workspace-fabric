@@ -230,6 +230,8 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["secret_resolver_host_home"] == Path(settings.host_home).resolve()
     assert created["secret_resolver_work_dir"] == work_dir
     assert created["secret_resolver_host_env"] is worker_mod.os.environ
+    assert created["stack_auth_mount_resolver"].workspace_owner_uid == 1000
+    assert created["stack_auth_mount_resolver"].workspace_owner_gid == 1000
     assert created["stack_secret_lease_resolver"].__class__ is _LocalSecretLeaseMountResolver
     assert created["executor_log_store"] is created["validation_log_store"]
     assert created["log_root"] == work_dir / "logs"
