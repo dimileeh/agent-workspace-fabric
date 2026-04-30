@@ -470,7 +470,11 @@ class ValidationRunner:
             reason_code = "ALEMBIC_WORKTREE_REQUIRED"
             policy_failed = True
         else:
-            graph_result = validate_alembic_migration_chain(worktree_path, policy)
+            graph_result = await asyncio.to_thread(
+                validate_alembic_migration_chain,
+                worktree_path,
+                policy,
+            )
             metadata = alembic_policy_metadata(graph_result, policy=policy)
             reason_code = graph_result.reason_code
             policy_failed = graph_result.status == AlembicGraphValidationStatus.failed or (
@@ -483,8 +487,13 @@ class ValidationRunner:
         stderr = rendered if policy_failed else ""
         stdout_path = artifacts_dir / f"{label}.stdout"
         stderr_path = artifacts_dir / f"{label}.stderr"
-        stdout_path.write_text(stdout, encoding="utf-8")
-        stderr_path.write_text(stderr, encoding="utf-8")
+        await asyncio.to_thread(
+            _write_alembic_policy_artifacts,
+            stdout_path,
+            stderr_path,
+            stdout,
+            stderr,
+        )
 
         if self._log_store is not None:
             sinks = await self._log_store.open_command_streams(
@@ -870,6 +879,16 @@ def _alembic_policy_missing_worktree_metadata(
             "fail_on_unconfigured": policy.fail_on_unconfigured,
         },
     }
+
+
+def _write_alembic_policy_artifacts(
+    stdout_path: Path,
+    stderr_path: Path,
+    stdout: str,
+    stderr: str,
+) -> None:
+    stdout_path.write_text(stdout, encoding="utf-8")
+    stderr_path.write_text(stderr, encoding="utf-8")
 
 
 def _display_command(cli_args: list[str]) -> str:

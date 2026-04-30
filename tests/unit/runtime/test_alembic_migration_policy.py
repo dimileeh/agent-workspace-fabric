@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -183,6 +185,41 @@ async def test_clean_single_head_policy_logs_pass_then_runs_validation_command(
     ] == "ALEMBIC_GRAPH_OK"
     assert len(fake.calls) == 1
     assert "pytest -q" in fake.calls[0].args[-1]
+
+
+@pytest.mark.unit
+async def test_enabled_policy_runs_graph_scan_and_artifact_writes_off_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    runner: tuple[FakeCommandRunner, ValidationRunner],
+    tmp_path: Path,
+) -> None:
+    fake, validator = runner
+    fake.queue_result(returncode=0, stdout="tests ok")
+    _write_alembic_ini(tmp_path)
+    _write_revision(tmp_path, "base001", None)
+    _write_revision(tmp_path, "head001", "base001")
+    to_thread_calls: list[str] = []
+
+    async def fake_to_thread(func: Callable[..., object], /, *args: object) -> object:
+        to_thread_calls.append(func.__name__)
+        return func(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+
+    result = await validator.run_profile_phases(
+        workspace_id="ws_clean_chain_threaded_io",
+        compose_project=_COMPOSE_PROJECT,
+        compose_file=_COMPOSE_FILE,
+        profile=_policy_profile(),
+        phase_names=("validate",),
+        worktree_path=tmp_path,
+    )
+
+    assert result.all_passed
+    assert to_thread_calls == [
+        "validate_alembic_migration_chain",
+        "_write_alembic_policy_artifacts",
+    ]
 
 
 @pytest.mark.unit
