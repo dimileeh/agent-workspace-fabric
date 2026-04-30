@@ -4,13 +4,16 @@ from __future__ import annotations
 
 import asyncio
 from pathlib import Path
+from typing import Any
 
 import pytest
 
 from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.compose_exec import ComposeExecCleanupError
+from awf.profiles import compose as profile_compose
 from awf.profiles.models import ProfileHealthCheck, WorkspaceProfile
 from awf.runtime import validation as validation_module
+from awf.runtime import validation_identity as validation_identity_module
 from awf.runtime.logs import CommandLogSinks, LogStore
 from awf.runtime.validation import (
     HEALTHCHECK_HTTP_STATUS_MISMATCH,
@@ -151,6 +154,19 @@ def _identity_profile(**overrides: object) -> WorkspaceProfile:
     }
     body.update(overrides)
     return WorkspaceProfile.model_validate(body)
+
+
+def _identity_profile_with_endpoint(**endpoint_overrides: object) -> WorkspaceProfile:
+    endpoint: dict[str, object] = {
+        "name": "api",
+        "service": "api",
+        "port": 8000,
+        "path": "/",
+        "health": {"path": "/health", "expected_status": 200},
+        "visibility": "agent",
+    }
+    endpoint.update(endpoint_overrides)
+    return _identity_profile(app_endpoints=[endpoint])
 
 
 @pytest.mark.unit
@@ -463,6 +479,89 @@ def test_environment_identity_inputs_sanitize_environment_and_secret_values() ->
             ),
         },
     ]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "endpoint_override",
+    [
+        {"path": "/ready"},
+        {"service": "postgres", "port": 5432},
+        {"port": 8001},
+        {"health": {"path": "/ready", "expected_status": 204}},
+        {"visibility": "validation"},
+    ],
+)
+def test_environment_identity_digest_changes_for_app_endpoint_inputs(
+    endpoint_override: dict[str, object],
+) -> None:
+    assert environment_identity_digest(_identity_profile_with_endpoint()) != (
+        environment_identity_digest(_identity_profile_with_endpoint(**endpoint_override))
+    )
+
+
+@pytest.mark.unit
+def test_environment_identity_inputs_include_app_endpoints_and_generated_endpoint_env() -> None:
+    inputs = environment_identity_inputs(_identity_profile_with_endpoint())
+
+    assert inputs["app_endpoints"] == [
+        {
+            "name": "api",
+            "service": "api",
+            "scheme": "http",
+            "port": 8000,
+            "path": "/",
+            "internal_url": "http://api:8000/",
+            "visibility": "agent",
+            "health": {
+                "path": "/health",
+                "method": "GET",
+                "expected_status": 200,
+                "internal_url": "http://api:8000/health",
+            },
+        }
+    ]
+    assert [entry["name"] for entry in inputs["generated_endpoint_environment"]] == [
+        "AWF_APP_ENDPOINTS_JSON",
+        "AWF_APP_ENDPOINT_API_URL",
+    ]
+    assert all(
+        entry["value_sha256"].startswith("sha256:")
+        for entry in inputs["generated_endpoint_environment"]
+    )
+
+
+@pytest.mark.unit
+def test_environment_identity_reuses_resolved_app_endpoints_for_generated_env(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = 0
+    original_resolve_app_endpoints = profile_compose.resolve_app_endpoints
+
+    def counted_resolve_app_endpoints(
+        profile: WorkspaceProfile,
+        *,
+        include_internal: bool = True,
+    ) -> tuple[dict[str, Any], ...]:
+        nonlocal calls
+        calls += 1
+        return original_resolve_app_endpoints(profile, include_internal=include_internal)
+
+    monkeypatch.setattr(
+        profile_compose,
+        "resolve_app_endpoints",
+        counted_resolve_app_endpoints,
+    )
+    monkeypatch.setattr(
+        validation_identity_module,
+        "resolve_app_endpoints",
+        counted_resolve_app_endpoints,
+    )
+
+    inputs = environment_identity_inputs(_identity_profile_with_endpoint())
+
+    assert calls == 1
+    assert inputs["app_endpoints"][0]["internal_url"] == "http://api:8000/"
 
 
 class TestHappyPath:
@@ -1695,6 +1794,60 @@ class TestCoverageEnforcement:
         assert _coverage_status(reason_code="COVERAGE_OK", enforce=True) == "passed"
         assert _coverage_status(reason_code="COVERAGE_NOT_FOUND", enforce=False) == "reported"
         assert _coverage_status(reason_code="COVERAGE_NOT_FOUND", enforce=True) == "failed"
+
+    @pytest.mark.unit
+    async def test_healthcheck_stderr_append_skips_invalid_stream_id(
+        self,
+        tmp_path: Path,
+    ) -> None:
+        log_store = LogStore(root=tmp_path / "logs")
+        val = ValidationRunner(
+            runner=FakeCommandRunner(),
+            artifacts_dir=tmp_path / "artifacts",
+            log_store=log_store,
+        )
+        stderr_path = tmp_path / "healthcheck.stderr"
+        result = ValidationCommandResult(
+            command="curl -fsS http://api:8000/healthz",
+            returncode=1,
+            duration_seconds=0.1,
+            stdout_path=tmp_path / "healthcheck.stdout",
+            stderr_path=stderr_path,
+            stream_ids={"stderr": "validation.healthcheck"},
+        )
+
+        await val._append_healthcheck_stderr(
+            workspace_id="ws_healthcheck",
+            result=result,
+            diagnostic="health check failed\n",
+        )
+
+        assert stderr_path.read_text(encoding="utf-8") == "health check failed\n"
+
+    @pytest.mark.unit
+    def test_healthcheck_helper_edges_cover_invalid_configuration(self) -> None:
+        invalid = ProfileHealthCheck.model_construct(name="invalid")
+        http = ProfileHealthCheck.model_construct(
+            name="api",
+            kind="http",
+            url="http://api:8000/healthz",
+            command=None,
+        )
+        failed = ValidationCommandResult(
+            command="healthcheck",
+            returncode=1,
+            duration_seconds=0,
+            stdout_path=Path("stdout"),
+            stderr_path=Path("stderr"),
+        )
+
+        assert _healthcheck_cli_args(invalid)[0:2] == ["python", "-c"]
+        assert _healthcheck_attempt_timeout(invalid, remaining_seconds=0) == 0.001
+        assert _healthcheck_failure_reason(http, failed) == "HEALTHCHECK_HTTP_STATUS_MISMATCH"
+        assert (
+            _healthcheck_failure_reason(invalid, failed)
+            == "HEALTHCHECK_INVALID_CONFIGURATION"
+        )
 
 
 class TestMigration:

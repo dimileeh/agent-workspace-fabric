@@ -355,6 +355,39 @@ def test_node_next_browser_workspace_services_profile_resolves_repo_local_contra
 
 
 @pytest.mark.unit
+def test_node_next_browser_workspace_services_profile_declares_app_endpoints() -> None:
+    profile = _load_node_browser_profile()
+
+    endpoints = {endpoint.name: endpoint for endpoint in profile.app_endpoints}
+
+    assert set(endpoints) == {"app", "browser_validation", "operator_notes"}
+
+    app = endpoints["app"]
+    assert app.service == "app"
+    assert app.scheme == "http"
+    assert app.port == 3000
+    assert app.path == "/"
+    assert app.visibility == "agent"
+    assert app.health is not None
+    assert app.health.path == "/healthz"
+    assert app.health.method == "GET"
+    assert app.health.expected_status == 200
+
+    browser = endpoints["browser_validation"]
+    assert browser.service == "browser"
+    assert browser.port == 9323
+    assert browser.path == "/validate"
+    assert browser.visibility == "validation"
+
+    console = endpoints["operator_notes"]
+    assert console.service == "app"
+    assert console.port == 3000
+    assert console.path == "/operator"
+    assert console.visibility == "console"
+    assert console.health is None
+
+
+@pytest.mark.unit
 def test_node_next_browser_workspace_services_profile_preserves_service_schema() -> None:
     profile = _load_node_browser_profile()
 
@@ -669,3 +702,170 @@ def test_profile_services_rejects_broad_host_home_auth_mounts_under_warn_policy(
         profile_services(profile, base_path=tmp_path / "repo")
 
     assert exc_info.value.reason_code == "HOST_HOME_AUTH_MOUNT_TOO_BROAD"
+
+
+@pytest.mark.unit
+def test_app_endpoint_defaults_and_visibility_normalization() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "endpoint-defaults",
+            "services": [{"name": "api", "image": "example/api:latest"}],
+            "app_endpoints": [
+                {
+                    "name": "api",
+                    "service": "api",
+                    "port": 8000,
+                    "visibility": "VALIDATION",
+                }
+            ],
+        }
+    )
+
+    endpoint = profile.app_endpoints[0]
+    assert endpoint.scheme == "http"
+    assert endpoint.path == "/"
+    assert endpoint.visibility == "validation"
+    assert endpoint.health is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("visibility", ["public", "external", "browser"])
+def test_app_endpoint_rejects_unsupported_visibility_values(visibility: str) -> None:
+    with pytest.raises(ValueError, match="visibility"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-visibility",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {
+                        "name": "api",
+                        "service": "api",
+                        "port": 8000,
+                        "path": "/",
+                        "visibility": visibility,
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_app_endpoint_service_reference_must_match_profile_services() -> None:
+    with pytest.raises(ValueError, match="unknown app endpoint service"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-service",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {
+                        "name": "missing",
+                        "service": "worker",
+                        "port": 8000,
+                        "path": "/",
+                    }
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_app_endpoint_names_must_be_unique() -> None:
+    with pytest.raises(ValueError, match="duplicate app endpoint name"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "duplicate-endpoints",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {"name": "api", "service": "api", "port": 8000, "path": "/"},
+                    {"name": "API", "service": "api", "port": 8001, "path": "/alt"},
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_app_endpoint_environment_names_must_be_unique() -> None:
+    with pytest.raises(ValueError, match="duplicate app endpoint environment name"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "duplicate-endpoint-env",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {"name": "api-v1", "service": "api", "port": 8000, "path": "/"},
+                    {"name": "api_v1", "service": "api", "port": 8001, "path": "/alt"},
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_app_endpoint_environment_names_must_not_be_empty() -> None:
+    with pytest.raises(ValueError, match="app endpoint environment name cannot be empty"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "empty-endpoint-env",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {"name": "_-.", "service": "api", "port": 8000, "path": "/"},
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_app_endpoint_ports_must_be_tcp_port_numbers() -> None:
+    with pytest.raises(ValueError, match="less than or equal to 65535"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-port",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {"name": "api", "service": "api", "port": 70000, "path": "/"},
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "path",
+    [
+        "healthz",
+        " /healthz",
+        "http://api:8000/healthz",
+        "https://user:password@api:8000/healthz",
+        "/healthz?token=secret",
+        "/healthz#secret",
+    ],
+)
+def test_app_endpoint_paths_must_be_secret_free_url_paths(path: str) -> None:
+    with pytest.raises(ValueError, match="URL path"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-path",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {"name": "api", "service": "api", "port": 8000, "path": path},
+                ],
+            }
+        )
+
+
+@pytest.mark.unit
+def test_app_endpoint_health_paths_must_be_secret_free_url_paths() -> None:
+    with pytest.raises(ValueError, match="health path must be a URL path"):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "bad-health-path",
+                "services": [{"name": "api", "image": "example/api:latest"}],
+                "app_endpoints": [
+                    {
+                        "name": "api",
+                        "service": "api",
+                        "port": 8000,
+                        "path": "/",
+                        "health": {"path": "http://api:8000/healthz?token=secret"},
+                    },
+                ],
+            }
+        )

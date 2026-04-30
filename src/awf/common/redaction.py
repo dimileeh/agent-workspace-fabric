@@ -27,8 +27,8 @@ _KNOWN_TOKEN_RE = re.compile(
     # Python's regex alternation is left-to-right: keep provider-specific
     # ``sk-`` prefixes before the generic ``sk-`` catch-all.
     r"(?<![A-Za-z0-9_])("
-    r"gh[apousr]_[A-Za-z0-9_]{8,}|"
-    r"github_pat_[A-Za-z0-9_]{8,}|"
+    r"gh[apousr]_[A-Za-z0-9_]{6,}|"
+    r"github_pat_[A-Za-z0-9_]{6,}|"
     r"sk-ant-[A-Za-z0-9_-]{8,}|"
     r"sk-proj-[A-Za-z0-9_-]{8,}|"
     r"sk-[A-Za-z0-9_-]{8,}|"

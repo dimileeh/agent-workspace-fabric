@@ -374,6 +374,24 @@ class WorkspaceSecretLeaseListResponse(BaseModel):
     items: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
 
 
+class WorkspaceAppEndpointHealthResponse(BaseModel):
+    path: str
+    method: Literal["GET", "HEAD"]
+    expected_status: int
+    internal_url: str
+
+
+class WorkspaceAppEndpointResponse(BaseModel):
+    name: str
+    service: str
+    scheme: Literal["http", "https"]
+    port: int
+    path: str
+    internal_url: str
+    visibility: Literal["agent", "validation", "console"]
+    health: WorkspaceAppEndpointHealthResponse | None = None
+
+
 class WorkspaceFailureConformanceResponse(BaseModel):
     summary: str | None = None
     gaps: list[str] = Field(default_factory=list)
@@ -483,6 +501,7 @@ class WorkspaceResponse(BaseModel):
     )
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
     secret_leases: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
+    app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
 
     created_at: datetime
     updated_at: datetime
@@ -887,6 +906,7 @@ class WorkspaceRuntimeResponse(BaseModel):
     control_available: bool
     reason: str | None = None
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
+    app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
 
 
 class WorkspaceLogStreamResponse(BaseModel):

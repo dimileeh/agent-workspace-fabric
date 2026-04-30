@@ -362,6 +362,36 @@ async def test_resource_saturation_endpoint_serializes_runtime_health_provider(
 
 
 @pytest.mark.unit
+async def test_resource_saturation_runtime_health_provider_may_be_async(
+    metrics_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
+
+    app, client = metrics_app_and_client
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-metrics-work")
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.state.workspace_admission_disk_check = lambda provider_settings: _disk_check(
+        provider_settings,
+        ok=True,
+        free_bytes=16 * 1024 * 1024 * 1024,
+    )
+
+    async def _runtime_health_provider(
+        _settings: Settings,
+        _session: Any,
+        _orphan_resources: Any,
+    ) -> WorkspaceRuntimeHealthSummary:
+        return WorkspaceRuntimeHealthSummary(findings=())
+
+    app.state.runtime_health_summary_provider = _runtime_health_provider
+
+    response = await client.get("/v1/metrics/resources/saturation")
+
+    assert response.status_code == 200
+    assert response.json()["runtime_health"]["stranded_count"] == 0
+
+
+@pytest.mark.unit
 async def test_resource_saturation_orphan_provider_supports_async_and_db_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

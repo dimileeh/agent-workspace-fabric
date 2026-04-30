@@ -679,6 +679,21 @@ async def test_log_store_appends_to_existing_closed_stream_without_reopening_sin
 
 
 @pytest.mark.unit
+async def test_log_store_append_empty_data_is_noop(tmp_path: Path) -> None:
+    store = LogStore(root=tmp_path)
+
+    await store.append_to_stream(
+        workspace_id="ws_noop",
+        stream_id="validation.stdout",
+        source="validation",
+        fd="stdout",
+        data="",
+    )
+
+    assert not (tmp_path / "ws_noop").exists()
+
+
+@pytest.mark.unit
 async def test_agent_and_validation_runners_create_indexed_log_streams(
     engine: AsyncEngine,
     tmp_path,

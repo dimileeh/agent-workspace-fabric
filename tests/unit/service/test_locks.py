@@ -128,6 +128,32 @@ async def test_list_workspace_locks_for_session_returns_page_items(
 
 
 @pytest.mark.unit
+async def test_list_workspace_locks_for_session_uses_same_page_projection(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.locks import list_workspace_locks_for_session
+
+    now = datetime(2026, 4, 26, 12, 0, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        title="Session 1",
+        owned_paths=["src/awf/profiles/**"],
+        status=WorkspaceStatus.ready,
+        created_at=now,
+    )
+
+    async with session_factory() as session:
+        locks = await list_workspace_locks_for_session(
+            session,
+            status=WorkspaceStatus.ready,
+            limit=1,
+        )
+
+    assert [lock.workspace_id for lock in locks] == [workspace_id]
+    assert locks[0].owned_paths == ("src/awf/profiles/**",)
+
+
+@pytest.mark.unit
 async def test_list_workspace_locks_applies_repo_task_class_status_and_limit_filters(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:

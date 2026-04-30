@@ -184,6 +184,18 @@ class TestRender:
         assert parsed["volumes"]["postgres_data"]["name"] == "awf-ws_test123-postgres_data"
 
     @pytest.mark.unit
+    def test_password_placeholder_expansion_noops_without_postgres_password(
+        self, manager: ComposeManager
+    ) -> None:
+        assert (
+            manager._expand_placeholders(
+                "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres/awf",
+                postgres_password=None,
+            )
+            == "postgresql://awf:${AWF_POSTGRES_PASSWORD}@postgres/awf"
+        )
+
+    @pytest.mark.unit
     def test_companion_service_password_placeholders_are_resolved(
         self, manager: ComposeManager, tmp_path: Path
     ) -> None:

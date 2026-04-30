@@ -7,8 +7,11 @@ validation phases, and project-specific environment.
 
 from awf.profiles.models import (
     DockerMode,
+    EndpointVisibility,
     HostHomeAuthMountMode,
     HostHomeAuthMountPolicy,
+    ProfileAppEndpoint,
+    ProfileAppEndpointHealth,
     ProfileCommand,
     ProfileCoverage,
     ProfileDocker,
@@ -25,8 +28,11 @@ from awf.profiles.resolver import ProfileResolver, resolve_workspace_profile
 
 __all__ = [
     "DockerMode",
+    "EndpointVisibility",
     "HostHomeAuthMountMode",
     "HostHomeAuthMountPolicy",
+    "ProfileAppEndpoint",
+    "ProfileAppEndpointHealth",
     "ProfileCommand",
     "ProfileCoverage",
     "ProfileDocker",

@@ -121,7 +121,19 @@ class TestCallbackEventPolicy:
             "workspace.created",
         )
         assert callback_subscription_matches_event_type(
+            "workspace.*",
+            "workspace.state_changed",
+        )
+        assert callback_subscription_matches_event_type(
             "workspace.created",
+            "workspace.created",
+        )
+        assert not callback_subscription_matches_event_type(
+            "workspace.*",
+            "workspace.internal_secret",
+        )
+        assert not callback_subscription_matches_event_type(
+            "merge.*",
             "workspace.created",
         )
         assert not callback_subscription_matches_event_type(
