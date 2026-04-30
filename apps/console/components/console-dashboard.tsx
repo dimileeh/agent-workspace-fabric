@@ -969,7 +969,7 @@ export function ConsoleDashboard() {
                 <RuntimePanel runtime={detail.runtime} />
                 <SecurityEgressPanel
                   resolvedProfile={detail.workspace?.resolved_profile ?? null}
-                  policyFindings={detail.workspace?.policy_findings ?? []}
+                  policyFindings={detail.workspace?.policy_findings}
                 />
                 <SecretsLeasesPanel
                   resolvedProfile={detail.workspace?.resolved_profile ?? null}
@@ -3424,8 +3424,9 @@ function SecurityEgressPanel({
   policyFindings,
 }: {
   resolvedProfile: Record<string, unknown> | null;
-  policyFindings: PolicyFinding[];
+  policyFindings: PolicyFinding[] | undefined;
 }) {
+  const findingsUnavailable = policyFindings === undefined;
   const security = extractProfileSecurity(resolvedProfile);
   const egressStatus = summarizeEgressStatus(security.egress);
   const mountPolicy = formatHostHomeMountPolicy(security.host_home_auth_mounts);
@@ -3433,7 +3434,7 @@ function SecurityEgressPanel({
   const secretsUnavailable = !secretsResult.available;
   const secretsAvailable = secretsResult.available ? secretsResult.secrets : [];
   const secretCount = secretsAvailable.length;
-  const activeFindings = policyFindings.filter((finding) => finding.status === "active");
+  const activeFindings = (policyFindings ?? []).filter((finding) => finding.status === "active");
 
   return (
     <Panel title="Security & Egress" icon={<Shield size={16} aria-hidden />}>
@@ -3456,9 +3457,9 @@ function SecurityEgressPanel({
         />
         <QueueChip
           label="Policy findings"
-          value={activeFindings.length === 0 ? "none" : String(activeFindings.length)}
+          value={findingsUnavailable ? "unavailable" : activeFindings.length === 0 ? "none" : String(activeFindings.length)}
           detail={activeFindings.length > 0 ? activeFindings.map((f) => f.reason_code).join(", ") : undefined}
-          tone={activeFindings.length > 0 ? "warn" : "neutral"}
+          tone={findingsUnavailable ? "neutral" : activeFindings.length > 0 ? "warn" : "neutral"}
         />
       </div>
       {security.egress.mode === "allowlist" && security.egress.allowlist.length > 0 ? (
