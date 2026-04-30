@@ -218,7 +218,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     assert created["validation_runner"] is created["executor_runner"]
     assert created["pr_creator_runner"] is created["executor_runner"]
     assert created["github_runner"] is created["executor_runner"]
-    assert created["git_env"] == {"HOME": str(Path(settings.host_home).resolve())}
+    git_env = created["git_env"]
+    assert git_env["HOME"] == str(Path(settings.host_home).resolve())
+    assert git_env["GIT_CONFIG_COUNT"] == "1"
+    assert git_env["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert git_env["GIT_CONFIG_VALUE_0"] == "*"
     assert created["git_worktree_owner_uid"] == 1000
     assert created["git_worktree_owner_gid"] == 1000
     assert created["applied_git_env"] == created["git_env"]
@@ -646,6 +650,15 @@ def test_service_git_environment_forwards_github_token_for_gh_cli(tmp_path: Path
 
 
 @pytest.mark.unit
+def test_service_git_environment_marks_worker_managed_worktrees_safe(tmp_path: Path) -> None:
+    env = worker_mod._service_git_environment(tmp_path / "host-home")
+
+    assert env["GIT_CONFIG_COUNT"] == "1"
+    assert env["GIT_CONFIG_KEY_0"] == "safe.directory"
+    assert env["GIT_CONFIG_VALUE_0"] == "*"
+
+
+@pytest.mark.unit
 def test_service_git_environment_configures_gh_credential_helper_for_git(
     tmp_path: Path,
 ) -> None:
@@ -660,6 +673,7 @@ def test_service_git_environment_configures_gh_credential_helper_for_git(
         for index in range(count)
     }
 
+    assert entries["safe.directory"] == "*"
     assert entries["credential.https://github.com.helper"] == "!gh auth git-credential"
     assert entries["url.https://github.com/.insteadOf"] == "git@github.com:"
     assert all("ghp_service_token" not in value for value in entries.values())
