@@ -930,10 +930,18 @@ async def _provided_readiness(
         _check_docker_cli,
         _check_docker_compose,
         _check_docker_daemon,
-        _check_orphan_resources,
+        _check_orphan_resources_with_concurrent_scans,
+        _workspace_view_for_readyz,
     )
     from awf.common.commands import AsyncioSubprocessRunner
     from awf.service.config import resolve_service_settings
+    from awf.service.orphan_resources import (
+        CHECK_TIMEOUT_SECONDS,
+        ResourceScan,
+        WorkspaceIdView,
+        scan_docker_resources_async,
+        scan_managed_worktrees,
+    )
     from awf.service.provider_readiness import collect_agent_readiness
 
     readiness_kwargs: dict[str, Any] = {}
@@ -951,6 +959,27 @@ async def _provided_readiness(
     image_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_agent_runtime_image(runner, settings.agent_runtime_image)
     )
+    workspace_view_task: asyncio.Task[WorkspaceIdView] = asyncio.create_task(
+        _workspace_view_for_readyz(session_factory)
+    )
+    docker_scan_task: asyncio.Task[ResourceScan] = asyncio.create_task(
+        scan_docker_resources_async(
+            runner=runner,
+            timeout=CHECK_TIMEOUT_SECONDS,
+        )
+    )
+    worktree_scan_task: asyncio.Task[ResourceScan] = asyncio.create_task(
+        asyncio.to_thread(scan_managed_worktrees, settings.work_dir)
+    )
+    orphan_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_orphan_resources_with_concurrent_scans(
+            db_check_task=db_check_task,
+            docker_check_task=daemon_check_task,
+            workspace_view_task=workspace_view_task,
+            docker_scan_task=docker_scan_task,
+            worktree_scan_task=worktree_scan_task,
+        )
+    )
     agent_readiness_task: asyncio.Task[dict[str, Any]] = asyncio.create_task(
         asyncio.to_thread(
             collect_agent_readiness,
@@ -965,6 +994,7 @@ async def _provided_readiness(
         compose_check_task,
         image_check_task,
         agent_readiness_task,
+        orphan_check_task,
     )
     db_check = db_check_task.result()
     cli_check = cli_check_task.result()
@@ -972,13 +1002,7 @@ async def _provided_readiness(
     compose_check = compose_check_task.result()
     image_check = image_check_task.result()
     agent_readiness = agent_readiness_task.result()
-    orphan_check = await _check_orphan_resources(
-        runner=runner,
-        factory=session_factory,
-        work_dir=settings.work_dir,
-        db_check=db_check,
-        docker_check=daemon_check,
-    )
+    orphan_check = orphan_check_task.result()
     checks = {
         "db": db_check,
         "docker_cli": cli_check,
