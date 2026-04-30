@@ -74,7 +74,7 @@ def _api_token_option() -> Any:
 
 
 def _run_terminal_workspace_compose_teardown(
-    candidate: object,
+    candidate: Any,
 ) -> WorkspaceGCComposeTeardownResult:
     """Tear down the compose stack for a terminal workspace candidate.
 
@@ -82,23 +82,23 @@ def _run_terminal_workspace_compose_teardown(
     expectations when a terminal workspace is being removed.
     """
     compose_file = getattr(candidate, "compose", None)
-    if (
-        compose_file is None
-        or not hasattr(compose_file, "path")
-        or not isinstance(compose_file.path, Path)
-    ):
+    if compose_file is None:
+        compose_path = None
+    else:
+        compose_path = getattr(compose_file, "path", None)
+    workspace_id = getattr(candidate, "workspace_id", None)
+    if not isinstance(compose_path, Path) or not isinstance(workspace_id, str):
         return WorkspaceGCComposeTeardownResult(
             status="failed",
             reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-            error="candidate.compose was missing expected shape",
+            error="candidate had unexpected workspace_id/compose shape",
         )
-    compose_path = compose_file.path
     if not compose_path.exists():
         return WorkspaceGCComposeTeardownResult(
             status="skipped",
             reason_code="NO_COMPOSE_STACK",
         )
-    compose_file_path = compose_path
+    compose_file_path: Path | None = compose_path
     if compose_path.is_dir():
         candidate_compose_paths = (
             compose_path / "compose.yml",
@@ -121,7 +121,7 @@ def _run_terminal_workspace_compose_teardown(
         "docker",
         "compose",
         "--project-name",
-        f"awf_{candidate.workspace_id}",
+        f"awf_{workspace_id}",
         "--file",
         str(compose_file_path),
         "down",
