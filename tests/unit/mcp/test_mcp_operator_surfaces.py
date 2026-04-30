@@ -672,10 +672,13 @@ class TestMcpOperatorSurfaceParity:
         fallback_result = await mcp_server._provided_readiness(
             readiness_provider=None,
             settings=resource_stack.settings,
+            session_factory=resource_stack.factory,
         )
         assert fallback_result["service"] == "awf"
-        assert fallback_result["status"] == "degraded"
+        assert fallback_result["status"] == "ok"
         assert "checks" in fallback_result
+        assert fallback_result["checks"]["db"]["ok"] is True
+        assert fallback_result["checks"]["db"]["status"] == "ok"
 
         sync_health_result = await mcp_server._provided_health(
             health_provider=sync_health,
@@ -692,6 +695,35 @@ class TestMcpOperatorSurfaceParity:
         )
         assert fallback_health["status"] == "ok"
         assert fallback_health["service"] == "awf"
+
+    @pytest.mark.unit
+    async def test_readiness_fallback_runs_real_db_check(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        fallback_result = await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=resource_stack.settings,
+            session_factory=resource_stack.factory,
+        )
+        assert fallback_result["checks"]["db"]["ok"] is True
+        assert fallback_result["checks"]["db"]["status"] == "ok"
+        assert fallback_result["checks"]["db"]["reason"] is None
+
+    @pytest.mark.unit
+    async def test_readiness_fallback_reports_db_failure_when_no_session_factory(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        fallback_result = await mcp_server._provided_readiness(
+            readiness_provider=None,
+            settings=resource_stack.settings,
+            session_factory=None,
+        )
+        assert fallback_result["checks"]["db"]["ok"] is False
+        assert fallback_result["checks"]["db"]["status"] == "fail"
+        assert fallback_result["checks"]["db"]["reason"] == "DB_NOT_CONFIGURED"
+        assert fallback_result["status"] == "degraded"
 
     @pytest.mark.unit
     async def test_read_only_operator_tools_use_shared_services_not_route_handlers(

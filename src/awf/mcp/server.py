@@ -759,6 +759,7 @@ def build_mcp_server(
         payload = await _provided_readiness(
             readiness_provider=readiness_provider,
             settings=settings_value,
+            session_factory=service.session_factory,
         )
         return _tool_result(payload)
 
@@ -893,6 +894,7 @@ async def _provided_readiness(
     *,
     readiness_provider: ReadinessProvider | None,
     settings: Settings,
+    session_factory: Any | None = None,
 ) -> dict[str, Any]:
     if readiness_provider is not None:
         result = readiness_provider(settings)
@@ -900,13 +902,9 @@ async def _provided_readiness(
             return await result
         return result
     from awf import __version__
-    from awf.api.routes.health import CheckResult, ReadyResponse
+    from awf.api.routes.health import CheckResult, ReadyResponse, _check_db
 
-    db_check = CheckResult(
-        ok=True,
-        status="ok",
-        reason="DB_OK",
-    )
+    db_check = await _check_db(session_factory)
     degraded_check = CheckResult(
         ok=False,
         status="degraded",
@@ -921,10 +919,11 @@ async def _provided_readiness(
         "agent_runtime_image": degraded_check.model_dump(mode="json"),
         "orphan_resources": degraded_check.model_dump(mode="json"),
     }
+    all_ok = db_check.ok
     readiness = ReadyResponse(
         service="awf",
         version=__version__,
-        status="degraded",
+        status="ok" if all_ok else "degraded",
         checks=checks,
         agent_readiness={"status": "degraded", "providers": {}},
     )
