@@ -373,6 +373,75 @@ def test_workspace_response_includes_sanitized_app_endpoint_metadata() -> None:
 
 
 @pytest.mark.unit
+def test_workspace_response_validates_only_app_endpoint_slice() -> None:
+    now = datetime(2026, 4, 29, 12, 32, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_endpoint_slice",
+        status=WorkspaceStatus.ready.value,
+        version=2,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws_endpoint_slice",
+        base_commit="abc123",
+        task_title="Project endpoint metadata",
+        task_prompt="Exercise endpoint projection without full profile parsing.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref="inline",
+        requested_profile=None,
+        resolved_profile={
+            "name": "endpoint-slice",
+            "runtime": {"environment": ["not-a-mapping"]},
+            "services": "not-a-service-list",
+            "app_endpoints": [
+                {
+                    "name": "console",
+                    "service": "web",
+                    "port": 8080,
+                    "path": "/ui",
+                    "visibility": "console",
+                }
+            ],
+        },
+        test_commands=[],
+        requires_database=False,
+        node_id="local",
+        compose_project_name="awf_ws_endpoint_slice",
+        compose_file_path="/tmp/compose.yml",
+        pr_url=None,
+        failure_reason=None,
+        failure_message=None,
+        active_policy_findings=[],
+        operations=[],
+        events=[],
+        secret_leases=[],
+        created_at=now,
+        updated_at=now,
+    )
+
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert [endpoint.model_dump(mode="json") for endpoint in response.app_endpoints] == [
+        {
+            "name": "console",
+            "service": "web",
+            "scheme": "http",
+            "port": 8080,
+            "path": "/ui",
+            "internal_url": "http://web:8080/ui",
+            "visibility": "console",
+            "health": None,
+        }
+    ]
+
+
+@pytest.mark.unit
 def test_workspace_response_sanitizes_raw_profile_snapshots() -> None:
     now = datetime(2026, 4, 29, 12, 35, tzinfo=UTC)
     profile_snapshot = {

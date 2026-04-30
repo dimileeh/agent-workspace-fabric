@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlunsplit
@@ -141,8 +141,21 @@ def resolve_app_endpoints(
 ) -> tuple[dict[str, Any], ...]:
     """Resolve profile endpoints into deterministic internal service URLs."""
 
+    return resolve_profile_app_endpoints(
+        profile.app_endpoints,
+        include_internal=include_internal,
+    )
+
+
+def resolve_profile_app_endpoints(
+    app_endpoints: Iterable[ProfileAppEndpoint],
+    *,
+    include_internal: bool = True,
+) -> tuple[dict[str, Any], ...]:
+    """Resolve profile endpoint definitions into deterministic internal service URLs."""
+
     endpoints: list[dict[str, Any]] = []
-    for endpoint in profile.app_endpoints:
+    for endpoint in app_endpoints:
         if not include_internal and endpoint.visibility is EndpointVisibility.internal:
             continue
         endpoints.append(_resolved_app_endpoint(endpoint))

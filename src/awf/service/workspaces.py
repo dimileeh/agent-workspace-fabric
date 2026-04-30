@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Protocol, cast
 from urllib.parse import SplitResult, urlsplit, urlunsplit
 
-from pydantic import ValidationError
+from pydantic import TypeAdapter, ValidationError
 from sqlalchemy import inspect as sa_inspect
 from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -49,8 +49,8 @@ from awf.db.repositories import (
     WorkspaceLogStreamRepository,
     WorkspaceRepository,
 )
-from awf.profiles.compose import resolve_app_endpoints
-from awf.profiles.models import WorkspaceProfile
+from awf.profiles.compose import resolve_profile_app_endpoints
+from awf.profiles.models import ProfileAppEndpoint, WorkspaceProfile
 from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.runtime.logs import read_log_chunk
@@ -138,6 +138,7 @@ TASK_CLASS_BIASES = {
     "docs_task": 0,
 }
 _log = get_logger(__name__)
+_PROFILE_APP_ENDPOINTS_ADAPTER = TypeAdapter(list[ProfileAppEndpoint])
 
 
 class WorkspaceRetryError(Exception):
@@ -827,12 +828,17 @@ def _workspace_app_endpoint_responses(
     if not isinstance(raw_profile, Mapping):
         return []
     try:
-        profile = WorkspaceProfile.model_validate(raw_profile)
+        app_endpoints = _PROFILE_APP_ENDPOINTS_ADAPTER.validate_python(
+            raw_profile.get("app_endpoints", [])
+        )
     except ValidationError:
         return []
     return [
         WorkspaceAppEndpointResponse.model_validate(endpoint)
-        for endpoint in resolve_app_endpoints(profile, include_internal=False)
+        for endpoint in resolve_profile_app_endpoints(
+            app_endpoints,
+            include_internal=False,
+        )
     ]
 
 
