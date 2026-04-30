@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from types import SimpleNamespace
 
 import pytest
 from fastapi import HTTPException
@@ -55,6 +56,24 @@ _V1_BODY = {
 
 def test_validation_route_exports_only_route_endpoint() -> None:
     assert validation_route.__all__ == ["list_validation_provenance"]
+
+
+@pytest.mark.unit
+def test_validation_provenance_command_lookup_includes_database_hooks() -> None:
+    profile = {
+        "name": "api-provenance-db-hooks",
+        "database": {
+            "generated_setup": ["python scripts/db_generated_setup.py"],
+            "pre_validation_refresh": ["python scripts/db_refresh.py"],
+        },
+    }
+
+    lookup = validation_service._command_lookup(
+        SimpleNamespace(resolved_profile=profile, test_commands=[])
+    )
+
+    assert lookup[("db_generated_setup", 1)] == "python scripts/db_generated_setup.py"
+    assert lookup[("db_refresh", 1)] == "python scripts/db_refresh.py"
 
 
 async def _create_v2_profile_workspace(client: AsyncClient) -> str:

@@ -149,6 +149,19 @@ class TestArtifactService:
             )
 
     @pytest.mark.unit
+    def test_directory_download_request_fails_closed(self, tmp_path: Path) -> None:
+        artifact_dir = tmp_path / "artifacts" / "ws_artifacts"
+        report_dir = artifact_dir / "reports"
+        report_dir.mkdir(parents=True)
+
+        with pytest.raises(ArtifactNotFoundError):
+            get_downloadable_artifact(
+                workspace_id="ws_artifacts",
+                artifact_dir=artifact_dir,
+                relative_path="reports",
+            )
+
+    @pytest.mark.unit
     def test_listing_reports_metadata_and_skips_deleted_files(
         self,
         monkeypatch: pytest.MonkeyPatch,

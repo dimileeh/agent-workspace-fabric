@@ -88,7 +88,15 @@ async def test_python_postgres_profile_runs_setup_health_validate_and_cleans_up(
             phase_names=("setup",),
         )
         assert setup_result.all_passed
+        assert [command.phase for command in setup_result.commands] == [
+            "setup",
+            "db_generated_setup",
+        ]
         assert setup_result.commands[0].stdout_path.read_text(encoding="utf-8") == "setup ok\n"
+        assert (
+            setup_result.commands[1].stdout_path.read_text(encoding="utf-8")
+            == "generated setup ok\n"
+        )
 
         validation_result = await validator.run_profile_phases(
             workspace_id=workspace_id,
@@ -100,12 +108,17 @@ async def test_python_postgres_profile_runs_setup_health_validate_and_cleans_up(
         )
         assert validation_result.all_passed
         assert [command.phase for command in validation_result.commands] == [
+            "db_refresh",
             "healthcheck",
             "validate",
         ]
-        assert validation_result.commands[0].stdout_path.read_text(encoding="utf-8") == "ok\n"
         assert (
-            validation_result.commands[1].stdout_path.read_text(encoding="utf-8")
+            validation_result.commands[0].stdout_path.read_text(encoding="utf-8")
+            == "refresh ok\n"
+        )
+        assert validation_result.commands[1].stdout_path.read_text(encoding="utf-8") == "ok\n"
+        assert (
+            validation_result.commands[2].stdout_path.read_text(encoding="utf-8")
             == "validated awf-db-profile-fixture\n"
         )
 
