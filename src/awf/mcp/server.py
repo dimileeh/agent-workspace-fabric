@@ -903,29 +903,61 @@ async def _provided_readiness(
         if inspect.isawaitable(result):
             return await result
         return result
-    from awf import __version__
-    from awf.api.routes.health import CheckResult, ReadyResponse, _check_db
+    import asyncio
 
-    db_check = await _check_db(session_factory)
-    degraded_check = CheckResult(
-        ok=False,
-        status="degraded",
-        reason="PROVIDER_NOT_CONFIGURED",
-        detail="Readiness provider not configured; Docker-dependent checks unavailable via MCP.",
+    from awf import __version__
+    from awf.api.routes.health import (
+        CheckResult,
+        ReadyResponse,
+        _check_agent_runtime_image,
+        _check_db,
+        _check_docker_cli,
+        _check_docker_compose,
+        _check_docker_daemon,
+        _check_orphan_resources,
+    )
+    from awf.common.commands import AsyncioSubprocessRunner
+
+    runner = AsyncioSubprocessRunner()
+    db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(session_factory))
+    cli_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_cli(runner))
+    daemon_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_daemon(runner))
+    compose_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_docker_compose(runner))
+    image_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
+        _check_agent_runtime_image(runner, settings.agent_runtime_image)
+    )
+    await asyncio.gather(
+        db_check_task,
+        cli_check_task,
+        daemon_check_task,
+        compose_check_task,
+        image_check_task,
+    )
+    db_check = db_check_task.result()
+    cli_check = cli_check_task.result()
+    daemon_check = daemon_check_task.result()
+    compose_check = compose_check_task.result()
+    image_check = image_check_task.result()
+    orphan_check = await _check_orphan_resources(
+        runner=runner,
+        factory=session_factory,
+        work_dir=settings.work_dir,
+        db_check=db_check,
+        docker_check=daemon_check,
     )
     checks = {
         "db": db_check,
-        "docker_cli": degraded_check,
-        "docker_daemon": degraded_check,
-        "docker_compose": degraded_check,
-        "agent_runtime_image": degraded_check,
-        "orphan_resources": degraded_check,
+        "docker_cli": cli_check,
+        "docker_daemon": daemon_check,
+        "docker_compose": compose_check,
+        "agent_runtime_image": image_check,
+        "orphan_resources": orphan_check,
     }
     all_ok = all(c.ok for c in checks.values())
     readiness = ReadyResponse(
         service="awf",
         version=__version__,
-        status="ok" if all_ok else "degraded",
+        status="ok" if all_ok else "fail",
         checks=checks,
         agent_readiness={"status": "degraded", "providers": {}},
     )

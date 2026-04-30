@@ -675,10 +675,21 @@ class TestMcpOperatorSurfaceParity:
             session_factory=resource_stack.factory,
         )
         assert fallback_result["service"] == "awf"
-        assert fallback_result["status"] == "degraded"
+        assert fallback_result["status"] in {"ok", "fail"}
         assert "checks" in fallback_result
         assert fallback_result["checks"]["db"]["ok"] is True
         assert fallback_result["checks"]["db"]["status"] == "ok"
+        for key in (
+            "docker_cli",
+            "docker_daemon",
+            "docker_compose",
+            "agent_runtime_image",
+        ):
+            assert key in fallback_result["checks"]
+            reason = fallback_result["checks"][key].get("reason")
+            assert reason is not None or fallback_result["checks"][key]["ok"] is True
+            if not fallback_result["checks"][key]["ok"]:
+                assert reason != "PROVIDER_NOT_CONFIGURED"
 
         sync_health_result = await mcp_server._provided_health(
             health_provider=sync_health,
@@ -723,7 +734,7 @@ class TestMcpOperatorSurfaceParity:
         assert fallback_result["checks"]["db"]["ok"] is False
         assert fallback_result["checks"]["db"]["status"] == "fail"
         assert fallback_result["checks"]["db"]["reason"] == "DB_NOT_CONFIGURED"
-        assert fallback_result["status"] == "degraded"
+        assert fallback_result["status"] == "fail"
 
     @pytest.mark.unit
     async def test_read_only_operator_tools_use_shared_services_not_route_handlers(
