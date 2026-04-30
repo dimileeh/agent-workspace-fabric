@@ -162,17 +162,29 @@ def init(
         settings = resolve_service_settings()
 
         async def _collect_reports() -> tuple[dict[str, object], object]:
-            return await asyncio.gather(
+            service_status_task = asyncio.create_task(
                 collect_service_status(
                     settings,
                     strict_providers=frozenset(),
                     provider_environ=os.environ,
-                ),
+                )
+            )
+
+            async def _collect_cached_service_status(
+                _settings: object,
+                *_args: object,
+                **_kwargs: object,
+            ) -> dict[str, object]:
+                return await service_status_task
+
+            return await asyncio.gather(
+                service_status_task,
                 collect_doctor_report(
                     settings,
                     strict_providers=frozenset(),
                     provider_environ=os.environ,
                     environ=os.environ,
+                    status_collector=_collect_cached_service_status,
                 ),
             )
 
