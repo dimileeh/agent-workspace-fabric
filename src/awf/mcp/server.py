@@ -917,6 +917,8 @@ async def _provided_readiness(
         _check_orphan_resources,
     )
     from awf.common.commands import AsyncioSubprocessRunner
+    from awf.service.config import resolve_service_settings
+    from awf.service.provider_readiness import collect_agent_readiness
 
     runner = AsyncioSubprocessRunner()
     db_check_task: asyncio.Task[CheckResult] = asyncio.create_task(_check_db(session_factory))
@@ -926,18 +928,26 @@ async def _provided_readiness(
     image_check_task: asyncio.Task[CheckResult] = asyncio.create_task(
         _check_agent_runtime_image(runner, settings.agent_runtime_image)
     )
+    agent_readiness_task: asyncio.Task[dict[str, Any]] = asyncio.create_task(
+        asyncio.to_thread(
+            collect_agent_readiness,
+            resolve_service_settings(settings),
+        )
+    )
     await asyncio.gather(
         db_check_task,
         cli_check_task,
         daemon_check_task,
         compose_check_task,
         image_check_task,
+        agent_readiness_task,
     )
     db_check = db_check_task.result()
     cli_check = cli_check_task.result()
     daemon_check = daemon_check_task.result()
     compose_check = compose_check_task.result()
     image_check = image_check_task.result()
+    agent_readiness = agent_readiness_task.result()
     orphan_check = await _check_orphan_resources(
         runner=runner,
         factory=session_factory,
@@ -953,7 +963,6 @@ async def _provided_readiness(
         "agent_runtime_image": image_check,
         "orphan_resources": orphan_check,
     }
-    agent_readiness: dict[str, Any] = {"status": "degraded", "providers": {}}
     overall_ok = all(c.ok for c in checks.values()) and agent_readiness["status"] == "ok"
     readiness = ReadyResponse(
         service="awf",
