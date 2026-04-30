@@ -101,11 +101,20 @@ class GitManager:
         weakref.WeakKeyDictionary()
     )
 
-    def __init__(self, work_dir: Path, *, env: Mapping[str, str] | None = None) -> None:
+    def __init__(
+        self,
+        work_dir: Path,
+        *,
+        env: Mapping[str, str] | None = None,
+        worktree_owner_uid: int | None = None,
+        worktree_owner_gid: int | None = None,
+    ) -> None:
         self._work_dir = work_dir
         self._mirrors_dir = work_dir / "mirrors"
         self._worktrees_dir = work_dir / "worktrees"
         self._env = {**os.environ, **env} if env is not None else None
+        self._worktree_owner_uid = worktree_owner_uid
+        self._worktree_owner_gid = worktree_owner_gid
 
     @classmethod
     def _lock_for_mirror(cls, mirror_path: Path) -> asyncio.Lock:
@@ -311,6 +320,9 @@ class GitManager:
                 operation="worktree.add",
             )
 
+        await self._prepare_agent_writable_tree(mirror_path)
+        await self._prepare_agent_writable_tree(worktree_path)
+
         return WorktreeLayout(
             mirror_path=mirror_path,
             worktree_path=worktree_path,
@@ -405,6 +417,19 @@ class GitManager:
             )
         return GitResult(returncode=proc.returncode, stdout=stdout, stderr=stderr)
 
+    async def _prepare_agent_writable_tree(self, path: Path) -> None:
+        """Make a root-created checkout writable by the agent-runtime user."""
+        if self._worktree_owner_uid is None or self._worktree_owner_gid is None:
+            return
+        if os.geteuid() != 0:
+            return
+        await asyncio.to_thread(
+            _chown_tree,
+            path,
+            self._worktree_owner_uid,
+            self._worktree_owner_gid,
+        )
+
 
 _SLUG_RE = re.compile(r"[^A-Za-z0-9_.-]+")
 
@@ -419,3 +444,12 @@ def _slugify_repo(repo_url: str) -> str:
     if tail.endswith(".git"):
         tail = tail[:-4]
     return _SLUG_RE.sub("-", tail) or "repo"
+
+
+def _chown_tree(path: Path, uid: int, gid: int) -> None:
+    os.chown(path, uid, gid)
+    if not path.is_dir():
+        return
+    for root, dirs, files in os.walk(path):
+        for name in (*dirs, *files):
+            os.chown(Path(root) / name, uid, gid)
