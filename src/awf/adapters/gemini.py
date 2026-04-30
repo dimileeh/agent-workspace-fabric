@@ -19,6 +19,9 @@ class GeminiAdapter(AgentAdapter):
     def name(self) -> AgentRuntime:
         return AgentRuntime.gemini
 
+    def get_provider(self, model: str | None) -> str:
+        return "google"
+
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
         args = ["--skip-trust", "--yolo"]
         if model:
