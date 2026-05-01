@@ -760,6 +760,57 @@ async def test_single_workspace_filesystem_gc_keeps_superseded_no_work_on_dry_ru
 
 
 @pytest.mark.unit
+async def test_default_plan_preserves_superseded_when_agent_container_not_running(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.status = "superseded"
+        workspace.compose_project_name = "awf_superseded_gc_not_running"
+        await session.commit()
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="stopped",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="exited",
+                        command="sleep infinity",
+                    )
+                ],
+            )
+        ),
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert plan.candidates == []
+    assert plan.preserved_count == 1
+    assert plan.preserved[0].workspace_id == workspace_id
+    assert plan.preserved[0].reason_code == FAILED_WORKSPACE_TRIAGE_PRESERVED
+
+
+@pytest.mark.unit
 async def test_cleanup_disabled_preserves_completed_pr_workspace(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,

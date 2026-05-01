@@ -1092,7 +1092,7 @@ def _snapshot_has_no_work(snapshot: RuntimeSnapshot) -> bool:
 
 def _agent_service_has_no_work(service: RuntimeService) -> bool:
     if (service.state or "").lower() != "running":
-        return True
+        return False
     return bool(_container_command_is_idle(service.command))
 
 
