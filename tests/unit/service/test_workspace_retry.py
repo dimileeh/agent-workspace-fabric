@@ -20,7 +20,11 @@ from awf.runtime.planning import (
     build_planning_prompt,
     render_workspace_path,
 )
-from awf.service.workspaces import WorkspaceRetryNotFoundError, WorkspaceService
+from awf.service.workspaces import (
+    WorkspaceRetryExhaustedError,
+    WorkspaceRetryNotFoundError,
+    WorkspaceService,
+)
 
 
 @pytest.fixture
@@ -722,7 +726,6 @@ async def test_conformance_retry_loop_terminates_after_exhausted_retries(
     await _mark_conformance_failed(factory, retried3_id)
 
     async with factory() as session:
-        # After 4 failed conformance attempts, max retries should be exhausted
         repo = WorkspaceRepository(session)
         ws3 = await repo.get(retried3_id)
         assert ws3 is not None
@@ -748,6 +751,13 @@ async def test_conformance_retry_loop_terminates_after_exhausted_retries(
         assert len(operations_for_last) >= 1
         payload = operations_for_last[0].payload or {}
         assert payload.get("source_workspace_id") == retried2_id
+
+    with pytest.raises(WorkspaceRetryExhaustedError) as exc_info:
+        await service.retry_workspace(retried3_id)
+    assert exc_info.value.detail == {
+        "attempt_count": 4,
+        "max_attempts": 4,
+    }
 
 
 @pytest.mark.unit
@@ -790,4 +800,4 @@ async def test_conformance_retry_payload_includes_retry_attempt_number_and_gaps(
     event_payload = events[0].payload
     assert isinstance(event_payload, dict)
     assert event_payload.get("attempt_number") == 2
-    assert event_payload.get("reason_code") == PLAN_CONFORMANCE_UNSATISFIED
+    assert event_payload.get("source_reason_code") == PLAN_CONFORMANCE_UNSATISFIED

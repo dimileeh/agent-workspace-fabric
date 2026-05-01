@@ -115,6 +115,7 @@ RETRYABLE_WORKSPACE_STATUSES = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
 )
+MAX_CONFORMANCE_RETRY_ATTEMPTS = 4
 PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
     {"monitor_release_pr", "sync_release_pr", "sync_feature_pr"}
 )
@@ -187,6 +188,19 @@ class WorkspaceRetryNotAllowedError(WorkspaceRetryError):
                 "retryable_statuses": [
                     status.value for status in RETRYABLE_WORKSPACE_STATUSES
                 ],
+            },
+        )
+
+
+class WorkspaceRetryExhaustedError(WorkspaceRetryError):
+    error_code = "WORKSPACE_RETRY_EXHAUSTED"
+
+    def __init__(self, attempt_count: int) -> None:
+        super().__init__(
+            "Conformance retry attempts exhausted.",
+            detail={
+                "attempt_count": attempt_count,
+                "max_attempts": MAX_CONFORMANCE_RETRY_ATTEMPTS,
             },
         )
 
@@ -713,6 +727,12 @@ async def retry_workspace_row(
     conformance_context = (
         None if planning_scope_context is not None else _conformance_retry_context(source)
     )
+    if conformance_context is not None:
+        attempt_repo = TaskAttemptRepository(session)
+        source_attempt = await attempt_repo.get_by_workspace_id(source.id)
+        if source_attempt is not None and source_attempt.attempt_number >= MAX_CONFORMANCE_RETRY_ATTEMPTS:
+            raise WorkspaceRetryExhaustedError(source_attempt.attempt_number)
+
     if planning_scope_context is not None:
         retried_prompt = build_planning_scope_retry_prompt(
             task_prompt=source.task_prompt,
