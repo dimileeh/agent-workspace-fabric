@@ -1808,9 +1808,7 @@ class PullRequestMonitorRunner:
                 )
                 return False
 
-            if merge_gate_after_lock is not None and _merge_gate_blocks(
-                merge_gate_after_lock
-            ):
+            if merge_gate_after_lock is not None and _merge_gate_blocks(merge_gate_after_lock):
                 handled = await self._handle_merge_gate_blocker(
                     gate=merge_gate_after_lock,
                     workspace_id=workspace_id,
@@ -2044,9 +2042,9 @@ class PullRequestMonitorRunner:
         )
 
         async with self._deps.session_factory() as s:
-            candidate = await MergeCandidateRepository(
-                s
-            ).get_open_for_workspace_with_merge_inputs(workspace_id)
+            candidate = await MergeCandidateRepository(s).get_open_for_workspace_with_merge_inputs(
+                workspace_id
+            )
             if candidate is None:
                 ws = await WorkspaceRepository(s).get_with_validation_runs(workspace_id)
                 if ws is None:  # pragma: no cover - defensive invariant
@@ -2064,9 +2062,9 @@ class PullRequestMonitorRunner:
             active_stale_reasons = await StaleReasonRepository(s).list_active_for_candidate(
                 candidate.id
             )
-            active_policy_findings = await PolicyFindingRepository(
-                s
-            ).list_active_for_candidate(candidate.id)
+            active_policy_findings = await PolicyFindingRepository(s).list_active_for_candidate(
+                candidate.id
+            )
             validation_reason, validation_action = compute_stale_reason_for_attempt(
                 ws,
                 attempt_id=candidate.attempt_id,
@@ -2083,9 +2081,7 @@ class PullRequestMonitorRunner:
                 validation_reason = VALIDATION_INSUFFICIENT_TIER_STALE_REASON
                 validation_action = "validate"
 
-            persisted_stale_reason = (
-                candidate.stale_reason or "stale" if candidate.stale else None
-            )
+            persisted_stale_reason = candidate.stale_reason or "stale" if candidate.stale else None
             if not stale_reason_blocks_merge(persisted_stale_reason):
                 persisted_stale_reason = None
             if (
@@ -2137,9 +2133,10 @@ class PullRequestMonitorRunner:
                 )
             elif not ws.auto_merge:
                 notify_message = "AWF blocked auto-merge because auto_merge is disabled."
-            elif check_policy and (candidate.policy_blocked or any(
-                finding.severity == "blocking" for finding in active_policy_findings
-            )):
+            elif check_policy and (
+                candidate.policy_blocked
+                or any(finding.severity == "blocking" for finding in active_policy_findings)
+            ):
                 notify_message = (
                     "OUT_OF_SCOPE_CHANGE: changed files outside declared "
                     "owned_paths require an operator scope decision."
@@ -2260,8 +2257,7 @@ class PullRequestMonitorRunner:
                 )
                 and op.status == "failed"
                 and (
-                    latest_remonitor_at is None
-                    or _operation_observed_at(op) > latest_remonitor_at
+                    latest_remonitor_at is None or _operation_observed_at(op) > latest_remonitor_at
                 )
                 for op in ws.operations
             )
@@ -2422,9 +2418,7 @@ class PullRequestMonitorRunner:
                     recovery_mode=recovery_mode,
                     stale_reason=stale_reason,
                     log_stream_refs=(
-                        {"monitor": monitor_log.stream_id}
-                        if monitor_log is not None
-                        else None
+                        {"monitor": monitor_log.stream_id} if monitor_log is not None else None
                     ),
                 )
                 operation_repo = OperationRepository(s)
@@ -2979,6 +2973,7 @@ class PullRequestMonitorRunner:
         cli_failed = False
         if await self._provider_recovery_suppresses_cli(workspace_id):
             raise ProviderRecoveryRetryError()
+        agent_run_err = None
         try:
             result = await self._deps.adapter.run(
                 compose_project=compose_project,
@@ -2989,20 +2984,22 @@ class PullRequestMonitorRunner:
             )
             result_stdout = result.stdout
         except AgentRunError as exc:
-            try:
-                await self._handle_provider_agent_run_error(workspace_id, exc)
-            except ProviderRecoveryRetryError:
-                raise
             cli_failed = True
             result_stdout = exc.result.stdout
-            _log.warning(
-                "monitor.cli_nonzero_exit",
-                returncode=exc.result.returncode,
-            )
+            agent_run_err = exc
+
         committed_dirty_changes = await self._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=commit_message,
         )
+
+        if agent_run_err is not None:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
+            _log.warning(
+                "monitor.cli_nonzero_exit",
+                returncode=agent_run_err.result.returncode,
+            )
+
         if committed_dirty_changes:
             return "fix_committed"
         if cli_failed:
@@ -3056,6 +3053,7 @@ class PullRequestMonitorRunner:
                 base_branch=base_branch,
                 conflicting_files=conflicting_files,
             )
+            agent_run_err = None
             try:
                 if not await self._provider_recovery_suppresses_cli(workspace_id):
                     await self._deps.adapter.run(
@@ -3066,16 +3064,20 @@ class PullRequestMonitorRunner:
                         log_source="recovery",
                     )
             except AgentRunError as exc:
-                await self._handle_provider_agent_run_error(workspace_id, exc)
-                _log.warning(
-                    "monitor.sync_base_cli_failed",
-                    workspace_id=workspace_id,
-                    stderr=exc.result.stderr[:400],
-                )
+                agent_run_err = exc
+
             await self._commit_dirty_worktree(
                 workspace_id=workspace_id,
                 message=f"fix: resolve PR #{pr_number} base conflicts",
             )
+
+            if agent_run_err is not None:
+                await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
+                _log.warning(
+                    "monitor.sync_base_cli_failed",
+                    workspace_id=workspace_id,
+                    stderr=agent_run_err.result.stderr[:400],
+                )
 
         # Whether or not we hit conflicts, push what we have.
         return await self._git_push_result(
@@ -3097,6 +3099,7 @@ class PullRequestMonitorRunner:
         remote_branch: str,
     ) -> _GitPushResult:
         prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
+        agent_run_err = None
         try:
             if not await self._provider_recovery_suppresses_cli(workspace_id):
                 await self._deps.adapter.run(
@@ -3107,16 +3110,20 @@ class PullRequestMonitorRunner:
                     log_source="recovery",
                 )
         except AgentRunError as exc:
-            await self._handle_provider_agent_run_error(workspace_id, exc)
-            _log.warning(
-                "monitor.ci_fix_cli_failed",
-                workspace_id=workspace_id,
-                stderr=exc.result.stderr[:400],
-            )
+            agent_run_err = exc
+
         await self._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=f"fix: address PR #{pr_number} CI failure",
         )
+
+        if agent_run_err is not None:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
+            _log.warning(
+                "monitor.ci_fix_cli_failed",
+                workspace_id=workspace_id,
+                stderr=agent_run_err.result.stderr[:400],
+            )
         return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
             remote_branch=remote_branch,
@@ -4096,9 +4103,7 @@ def _non_check_reviewer_settle_decision(
     pr_number: int,
     now: float,
 ) -> _NonCheckReviewerSettleDecision:
-    configured_reviewers = _normalize_non_check_reviewer_logins(
-        config.non_check_reviewer_logins
-    )
+    configured_reviewers = _normalize_non_check_reviewer_logins(config.non_check_reviewer_logins)
     if not config.auto_merge:
         return _NonCheckReviewerSettleDecision(
             action="not_auto_merge",
@@ -4280,9 +4285,7 @@ def _has_successful_validation_for_pr_head(
     if current_head_sha is None:
         return False
     state = inspect(workspace)
-    validation_runs = (
-        workspace.validation_runs if "validation_runs" not in state.unloaded else ()
-    )
+    validation_runs = workspace.validation_runs if "validation_runs" not in state.unloaded else ()
     for run in validation_runs:
         if run.attempt_id != attempt_id:
             continue
@@ -4337,8 +4340,7 @@ def _latest_successful_remonitor_at(operations: Iterable[Operation]) -> datetime
     remonitor_times = [
         _operation_observed_at(op)
         for op in operations
-        if op.type == OperationType.remonitor.value
-        and op.status == OperationStatus.succeeded.value
+        if op.type == OperationType.remonitor.value and op.status == OperationStatus.succeeded.value
     ]
     return max(remonitor_times, default=None)
 
