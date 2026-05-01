@@ -112,11 +112,11 @@ def _run_terminal_workspace_compose_teardown(
             None,
         )
         if compose_file_path is None:
-        return WorkspaceGCComposeTeardownResult(
-            status="failed",
-            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-            error="compose stack file not found",
-        )
+            return WorkspaceGCComposeTeardownResult(
+                status="failed",
+                reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+                error="compose stack file not found",
+            )
     compose_name = compose_project_name or f"awf_{workspace_id}"
 
     command = [
