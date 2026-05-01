@@ -5,6 +5,7 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.db.base import Base
+from awf.db.enums import WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.planning import (
@@ -28,6 +29,7 @@ async def test_cached_failure_details_by_workspace_id_none_cache(session_factory
         res = await _cached_failure_details_by_workspace_id(session, {}, failure_details_cache=None)
         assert res == {}
 
+
 @pytest.mark.unit
 async def test_cluster_root_causes_causes(session_factory):
     async with session_factory() as session:
@@ -49,7 +51,7 @@ async def test_cluster_root_causes_causes(session_factory):
                 owned_paths=[]
             )
             # Add state_changed event
-            await repo.add_event(ws, event_type="workspace.state_changed", new_state="failed", reason_code=reason, payload={"details": {}})
+            await repo.transition(ws, to=WorkspaceStatus.failed, reason_code=reason, payload={"details": {}})
 
         await session.commit()
 
