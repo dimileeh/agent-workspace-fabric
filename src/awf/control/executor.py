@@ -2327,13 +2327,16 @@ class WorkspaceExecutor:
             ),
         )
         iteration_history: list[ConformanceIterationRecord] = []
-        # Worktree snapshot at the start of each iteration. Initialized to the
-        # post-planning dirty set so iteration 0 measures progress across both
-        # its execution and conformance steps. Without this, ``worktree_changed``
-        # would only reflect mutations made during the conformance call itself
-        # and ``classify_conformance_stall`` could misread real implementation
-        # progress as a repeated-output stall.
-        iteration_start_paths: set[Path] = dirty_paths
+        # Content-aware fingerprint of the worktree at the start of each
+        # iteration. Initialized to the post-planning state so iteration 0
+        # measures progress across both its execution and conformance steps.
+        # Hashing file bytes (not just path-set membership) means iterative
+        # fixes that re-edit the same file still register as progress, which
+        # keeps ``classify_conformance_stall`` from misreading real work as
+        # a repeated-output stall.
+        iteration_start_digest = self._digest_dirty_content(
+            worktree_path, dirty_paths
+        )
         for iteration in range(planning.max_iterations + 1):
             last_iteration = iteration
             await adapter.run(
@@ -2394,14 +2397,14 @@ class WorkspaceExecutor:
                 report = parse_conformance_report(report_text)
                 last_report = report
                 report_digest = _digest_text(report_text)
-                worktree_changed = iteration_start_paths != after_compare
             else:
                 stdout = compare_error.result.stdout
                 stderr = compare_error.result.stderr
                 report_digest = None
                 after_compare = before_compare
-                worktree_changed = iteration_start_paths != before_compare
-            iteration_start_paths = after_compare
+            after_digest = self._digest_dirty_content(worktree_path, after_compare)
+            worktree_changed = iteration_start_digest != after_digest
+            iteration_start_digest = after_digest
 
             iteration_history.append(
                 ConformanceIterationRecord(
@@ -2620,6 +2623,25 @@ class WorkspaceExecutor:
                 f"git status failed while checking workspace changes: {result.stderr}"
             )
         return changed_paths_from_porcelain(result.stdout)
+
+    def _digest_dirty_content(self, worktree_path: Path, paths: set[Path]) -> str:
+        """Content-aware fingerprint of the given dirty worktree paths.
+
+        Path-set equality alone treats iterative re-edits of the same file as
+        no progress; hashing per-file bytes lets repeat edits register as work.
+        Missing files contribute a deterministic marker so the digest stays
+        stable across iterations whose worktree exists only in mocked git output.
+        """
+        hasher = hashlib.sha256()
+        for path in sorted(paths, key=lambda p: p.as_posix()):
+            hasher.update(path.as_posix().encode("utf-8"))
+            hasher.update(b"\0")
+            try:
+                hasher.update((worktree_path / path).read_bytes())
+            except OSError:
+                hasher.update(b"<missing>")
+            hasher.update(b"\0")
+        return hasher.hexdigest()
 
     async def _committed_paths_since(self, worktree_path: Path, since: str) -> set[Path]:
         result = await self._runner.run(

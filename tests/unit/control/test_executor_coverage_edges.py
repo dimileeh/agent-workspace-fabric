@@ -1162,6 +1162,64 @@ async def test_committed_paths_since_raises_when_git_diff_fails(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_digest_dirty_content_distinguishes_content_changes_within_same_paths(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    executor = _executor_with_runner(runner, tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("first")
+
+    paths = {Path("src/x.py")}
+    first = executor._digest_dirty_content(worktree, paths)
+
+    target.write_text("second")
+    second = executor._digest_dirty_content(worktree, paths)
+
+    assert first != second, (
+        "digest must reflect content changes so iterative re-edits of the "
+        "same file register as progress, not a repeated-output stall"
+    )
+
+
+@pytest.mark.unit
+def test_digest_dirty_content_is_stable_when_paths_and_content_unchanged(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    executor = _executor_with_runner(runner, tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+    target = worktree / "src" / "x.py"
+    target.parent.mkdir(parents=True)
+    target.write_text("same")
+
+    paths = {Path("src/x.py")}
+    assert executor._digest_dirty_content(worktree, paths) == (
+        executor._digest_dirty_content(worktree, paths)
+    )
+
+
+@pytest.mark.unit
+def test_digest_dirty_content_handles_missing_files_deterministically(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    executor = _executor_with_runner(runner, tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    paths = {Path("src/x.py"), Path("src/y.py")}
+    first = executor._digest_dirty_content(worktree, paths)
+    second = executor._digest_dirty_content(worktree, paths)
+    assert first == second
+    assert first != executor._digest_dirty_content(worktree, {Path("src/x.py")})
+
+
+@pytest.mark.unit
 def test_baseline_coverage_ratchet_accepts_no_regression(tmp_path: Path) -> None:
     command = _command_result(tmp_path, returncode=1)
     result = ValidationResult(
