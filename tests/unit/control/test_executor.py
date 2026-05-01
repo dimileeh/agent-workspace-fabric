@@ -1025,8 +1025,11 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (planning clean)
 
-        # Three iterations of execute + before_compare + conformance + after_compare
-        for _ in range(3):
+        # Iteration 0 introduces src/x.py (worktree_changed=True), then three
+        # follow-up iterations leave the worktree untouched (worktree_changed=False).
+        # The repeated_output stall fires once the no-progress streak hits the
+        # threshold (3) at the end of iteration 3.
+        for _ in range(4):
             fake.queue_result(returncode=0, stdout="execute output")  # execute adapter
             fake.queue_result(returncode=0, stdout=identical_paths)  # before_compare
             fake.queue_result(returncode=0, stdout=identical_report)  # conformance adapter

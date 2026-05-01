@@ -2329,6 +2329,13 @@ class WorkspaceExecutor:
             ),
         )
         iteration_history: list[ConformanceIterationRecord] = []
+        # Worktree snapshot at the start of each iteration. Initialized to the
+        # post-planning dirty set so iteration 0 measures progress across both
+        # its execution and conformance steps. Without this, ``worktree_changed``
+        # would only reflect mutations made during the conformance call itself
+        # and ``classify_conformance_stall`` could misread real implementation
+        # progress as a repeated-output stall.
+        iteration_start_paths: set[Path] = dirty_paths
         for iteration in range(planning.max_iterations + 1):
             last_iteration = iteration
             await adapter.run(
@@ -2389,13 +2396,14 @@ class WorkspaceExecutor:
                 report = parse_conformance_report(report_text)
                 last_report = report
                 report_digest = _digest_text(report_text)
-                worktree_changed = before_compare != after_compare
+                worktree_changed = iteration_start_paths != after_compare
             else:
                 stdout = compare_error.result.stdout
                 stderr = compare_error.result.stderr
                 report_digest = None
                 after_compare = before_compare
-                worktree_changed = False
+                worktree_changed = iteration_start_paths != before_compare
+            iteration_start_paths = after_compare
 
             iteration_history.append(
                 ConformanceIterationRecord(
