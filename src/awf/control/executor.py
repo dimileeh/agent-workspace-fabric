@@ -2403,8 +2403,21 @@ class WorkspaceExecutor:
             else:
                 stdout = compare_error.result.stdout
                 stderr = compare_error.result.stderr
-                report_digest = None
                 after_compare = before_compare
+                # Even when the conformance call idles or times out, the agent
+                # may have already written a valid (potentially satisfied)
+                # report. Read and parse it so a satisfied run is not
+                # misclassified as AGENT_STALLED_IN_CONFORMANCE, and so the
+                # iteration record carries a real digest for the
+                # repeated_output detector.
+                report_text = _read_text_if_present(worktree_path / report_path) or stdout
+                if report_text:
+                    report = parse_conformance_report(report_text)
+                    last_report = report
+                    report_digest = _digest_text(report_text)
+                else:
+                    report = None
+                    report_digest = None
             after_head = await self._git_rev_parse_head(worktree_path)
             after_digest = self._digest_dirty_content(
                 worktree_path, after_compare, head_sha=after_head
@@ -2427,8 +2440,10 @@ class WorkspaceExecutor:
             )
 
             # Honour conformance success before stall classification so a
-            # slow-but-satisfied iteration is not misread as over_duration.
-            if compare_error is None and report.satisfied:
+            # slow-but-satisfied iteration is not misread as over_duration,
+            # and so a run that wrote a satisfied report before idling /
+            # timing out is not misread as no_output.
+            if report is not None and report.satisfied:
                 _log.info(
                     "executor.planning_conformance_satisfied",
                     workspace_id=workspace.id,
