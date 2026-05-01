@@ -585,6 +585,46 @@ class ProviderModelCircuitBreakerRepository:
             return None
         return breaker if breaker.state == "open" else None
 
+    async def open_breakers_for_pairs(
+        self,
+        *,
+        pairs: Iterable[tuple[str, str]],
+        now: datetime,
+    ) -> dict[tuple[str, str], ProviderModelCircuitBreaker]:
+        normalized_pairs = {
+            (provider.strip(), model.strip())
+            for provider, model in pairs
+            if provider.strip() and model.strip()
+        }
+        if not normalized_pairs:
+            return {}
+
+        pair_filter = or_(
+            *(
+                and_(
+                    ProviderModelCircuitBreaker.provider == provider,
+                    ProviderModelCircuitBreaker.model == model,
+                )
+                for provider, model in sorted(normalized_pairs)
+            )
+        )
+        stmt = select(ProviderModelCircuitBreaker).where(
+            ProviderModelCircuitBreaker.state == "open",
+            pair_filter,
+        )
+        breakers = list((await self._session.execute(stmt)).scalars())
+        open_breakers: dict[tuple[str, str], ProviderModelCircuitBreaker] = {}
+        for breaker in breakers:
+            if _circuit_breaker_expired(breaker, now):
+                breaker.state = "closed"
+                breaker.failure_count = 0
+                breaker.opened_at = None
+                breaker.cooldown_until = None
+                continue
+            open_breakers[(breaker.provider, breaker.model)] = breaker
+        await self._session.flush()
+        return open_breakers
+
     async def list_open(self, *, now: datetime) -> builtins.list[ProviderModelCircuitBreaker]:
         stmt = select(ProviderModelCircuitBreaker).where(
             ProviderModelCircuitBreaker.state == "open"

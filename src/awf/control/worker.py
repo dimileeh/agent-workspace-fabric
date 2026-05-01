@@ -314,9 +314,10 @@ class ControlWorker:
             return []
         now = datetime.now(UTC)
         breaker_repo = ProviderModelCircuitBreakerRepository(session)
-        allowed: list[str] = []
+        allowed: set[str] = set()
         stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
         rows = {workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()}
+        circuit_candidates: dict[str, tuple[str, str]] = {}
         for workspace_id in workspace_ids:
             workspace = rows.get(workspace_id)
             if workspace is None:
@@ -327,17 +328,18 @@ class ControlWorker:
             model = _workspace_agent_model(workspace)
             provider = provider_for_agent_model(workspace.agent, model)
             if provider is None or model is None:
-                allowed.append(workspace_id)
+                allowed.add(workspace_id)
                 continue
-            breaker = await breaker_repo.open_breaker(
-                provider=provider,
-                model=model,
-                now=now,
-            )
-            if breaker is None:
-                allowed.append(workspace_id)
-                continue
-        return allowed
+            circuit_candidates[workspace_id] = (provider, model)
+
+        open_breakers = await breaker_repo.open_breakers_for_pairs(
+            pairs=circuit_candidates.values(),
+            now=now,
+        )
+        for workspace_id, pair in circuit_candidates.items():
+            if pair not in open_breakers:
+                allowed.add(workspace_id)
+        return [workspace_id for workspace_id in workspace_ids if workspace_id in allowed]
 
     async def _filter_current_status(
         self,
