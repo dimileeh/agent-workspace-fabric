@@ -911,6 +911,11 @@ class PullRequestMonitorRunner:
                     "workspace_id": workspace_id,
                 },
             )
+            await self._terminate_failed(
+                workspace_id,
+                message="monitor: provider recovery fallback triggered",
+                reason_code="PROVIDER_FALLBACK",
+            )
             return
         finally:
             await self._write_monitor_log(
