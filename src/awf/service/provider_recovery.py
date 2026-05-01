@@ -327,7 +327,6 @@ async def create_provider_recovery_attempt_row(
         "monitor_iter_count",
         "monitor_threads_addressed",
         "monitor_last_commit_sha",
-        "monitor_started_at",
     ):
         setattr(retried, field, getattr(source, field))
 

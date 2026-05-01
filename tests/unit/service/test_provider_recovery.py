@@ -904,7 +904,7 @@ async def test_fallback_attempt_inherits_lineage_and_workspace_policy(
     assert fallback.monitor_iter_count == source.monitor_iter_count
     assert fallback.monitor_threads_addressed == source.monitor_threads_addressed
     assert fallback.monitor_last_commit_sha == source.monitor_last_commit_sha
-    assert fallback.monitor_started_at == source.monitor_started_at
+    assert fallback.monitor_started_at is None
     assert attempts[1].parent_attempt_id == attempts[0].id
     assert attempts[1].redispatch_from_attempt_id == attempts[0].id
     assert attempts[1].is_canonical_for_merge is False
