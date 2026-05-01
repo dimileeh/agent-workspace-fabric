@@ -11,16 +11,22 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
+
+if TYPE_CHECKING:
+    from awf.adapters.base import AgentRunError
 
 PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
 PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
 AGENT_PLAN_PHASE_SCOPE_VIOLATION = "AGENT_PLAN_PHASE_SCOPE_VIOLATION"
+AGENT_STALLED_IN_CONFORMANCE = "AGENT_STALLED_IN_CONFORMANCE"
+AGENT_IDLE_TIMEOUT_REASON_CODE = "AGENT_IDLE_TIMEOUT"
+AGENT_TIMEOUT_REASON_CODE = "AGENT_TIMEOUT"
 MAX_CONFORMANCE_GAPS = 20
 MAX_CONFORMANCE_TEXT_CHARS = 1000
 
@@ -44,6 +50,51 @@ class PlanConformanceReport:
     @property
     def satisfied(self) -> bool:
         return self.status == PlanConformanceStatus.satisfied
+
+
+class ConformanceStallKind(StrEnum):
+    """Why the conformance loop is judged to be stalled."""
+
+    no_output = "no_output"
+    repeated_output = "repeated_output"
+    over_duration = "over_duration"
+
+
+@dataclass(frozen=True)
+class ConformanceStallPolicy:
+    """Thresholds that decide whether conformance progress has stalled."""
+
+    no_output_seconds: int = 600
+    over_duration_seconds: int = 1800
+    repeated_output_threshold: int = 3
+
+
+@dataclass(frozen=True)
+class ConformanceIterationRecord:
+    """Per-iteration evidence consumed by ``classify_conformance_stall``."""
+
+    iteration: int
+    elapsed_seconds: float
+    report_digest: str | None
+    worktree_changed: bool
+    stdout: str = ""
+    stderr: str = ""
+    error_reason_code: str | None = None
+
+
+@dataclass(frozen=True)
+class ConformanceStallEvidence:
+    """Structured evidence for a detected conformance stall."""
+
+    kind: ConformanceStallKind
+    iteration_index: int
+    elapsed_seconds: float
+    no_output_seconds: float
+    repeated_output_count: int
+    last_report_digest: str | None
+    plan_path: str
+    report_path: str
+    last_output_excerpt: str = ""
 
 
 def render_workspace_path(template: str, *, workspace_id: str) -> Path:
@@ -269,6 +320,174 @@ def build_conformance_failure_evidence(
         "plan_path": plan_path.as_posix(),
         "report_path": report_path.as_posix(),
     }
+
+
+def classify_conformance_stall(
+    *,
+    history: Sequence[ConformanceIterationRecord],
+    policy: ConformanceStallPolicy,
+    plan_path: Path,
+    report_path: Path,
+    latest_error: AgentRunError | None,
+) -> ConformanceStallEvidence | None:
+    """Decide whether the conformance loop has stalled.
+
+    Returns ``None`` for the deterministic ``needs_iteration`` case so the
+    existing ``PLAN_CONFORMANCE_UNSATISFIED`` path keeps owning real plan
+    gaps. Returns structured evidence only when an explicit stall signal is
+    present: an idle/wall-clock timeout, repeated identical reports without
+    any worktree change, or a cumulative loop duration above the policy.
+    """
+
+    if not history:
+        return None
+
+    last = history[-1]
+    cumulative_seconds = sum(record.elapsed_seconds for record in history)
+    plan_path_text = plan_path.as_posix()
+    report_path_text = report_path.as_posix()
+
+    error_reason_code = (
+        latest_error.reason_code if latest_error is not None else last.error_reason_code
+    )
+    if error_reason_code in {AGENT_IDLE_TIMEOUT_REASON_CODE, AGENT_TIMEOUT_REASON_CODE}:
+        excerpt = _stall_output_excerpt(latest_error, last)
+        return ConformanceStallEvidence(
+            kind=ConformanceStallKind.no_output,
+            iteration_index=last.iteration,
+            elapsed_seconds=cumulative_seconds,
+            no_output_seconds=last.elapsed_seconds,
+            repeated_output_count=0,
+            last_report_digest=last.report_digest,
+            plan_path=plan_path_text,
+            report_path=report_path_text,
+            last_output_excerpt=excerpt,
+        )
+
+    threshold = max(2, policy.repeated_output_threshold)
+    if last.report_digest is not None and len(history) >= threshold:
+        recent = history[-threshold:]
+        same_digest = all(record.report_digest == last.report_digest for record in recent)
+        no_progress = all(not record.worktree_changed for record in recent)
+        if same_digest and no_progress:
+            return ConformanceStallEvidence(
+                kind=ConformanceStallKind.repeated_output,
+                iteration_index=last.iteration,
+                elapsed_seconds=cumulative_seconds,
+                no_output_seconds=0.0,
+                repeated_output_count=threshold,
+                last_report_digest=last.report_digest,
+                plan_path=plan_path_text,
+                report_path=report_path_text,
+                last_output_excerpt=_stall_output_excerpt(None, last),
+            )
+
+    if cumulative_seconds > policy.over_duration_seconds:
+        return ConformanceStallEvidence(
+            kind=ConformanceStallKind.over_duration,
+            iteration_index=last.iteration,
+            elapsed_seconds=cumulative_seconds,
+            no_output_seconds=0.0,
+            repeated_output_count=0,
+            last_report_digest=last.report_digest,
+            plan_path=plan_path_text,
+            report_path=report_path_text,
+            last_output_excerpt=_stall_output_excerpt(None, last),
+        )
+
+    return None
+
+
+def build_conformance_stall_failure_evidence(
+    *,
+    stall: ConformanceStallEvidence,
+    head_sha: str | None,
+    base_sha: str | None,
+    commit_count: int,
+    changed_paths: Sequence[str] = (),
+) -> dict[str, Any]:
+    """Return bounded structured evidence for a detected conformance stall."""
+
+    salvage_paths = [
+        _safe_conformance_text(path)
+        for path in list(changed_paths)[:MAX_CONFORMANCE_GAPS]
+        if _safe_conformance_text(path)
+    ]
+    return {
+        "reason_code": AGENT_STALLED_IN_CONFORMANCE,
+        "kind": stall.kind.value,
+        "iteration_index": stall.iteration_index,
+        "elapsed_seconds": stall.elapsed_seconds,
+        "no_output_seconds": stall.no_output_seconds,
+        "repeated_output_count": stall.repeated_output_count,
+        "last_report_digest": stall.last_report_digest,
+        "plan_path": stall.plan_path,
+        "report_path": stall.report_path,
+        "last_output_excerpt": _safe_conformance_text(stall.last_output_excerpt),
+        "salvage_hint": {
+            "plan_path": stall.plan_path,
+            "report_path": stall.report_path,
+            "implementation_commit_count": max(0, commit_count),
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "changed_paths": salvage_paths,
+        },
+    }
+
+
+def build_conformance_stall_recovery_prompt(
+    *,
+    task_prompt: str,
+    stall_evidence: Mapping[str, Any],
+    prior_gaps: Sequence[str] = (),
+) -> str:
+    """Resume an agent with conformance-only instructions after a stall."""
+
+    plan_path = _safe_conformance_text(stall_evidence.get("plan_path"))
+    report_path = _safe_conformance_text(stall_evidence.get("report_path"))
+    plan_line = (
+        f"`{plan_path}`" if plan_path else "the existing plan artifact"
+    )
+    report_line = (
+        f"`{report_path}`" if report_path else "the existing conformance report path"
+    )
+    gap_lines = (
+        "\n".join(f"- {gap}" for gap in prior_gaps if gap)
+        or "- No prior gaps were captured."
+    )
+    return (
+        "## Retry after conformance stall\n\n"
+        "The prior workspace stalled while generating the plan-conformance JSON. "
+        "Implementation commits already exist on the feature branch; only re-run the "
+        "compare phase against the saved plan and write the JSON report.\n\n"
+        f"Read the existing plan at {plan_line} and use it as the source of truth. "
+        f"Write the JSON conformance report to {report_line} and also print the same "
+        "JSON object as your final response.\n\n"
+        "Do not modify implementation files. Only re-run the compare phase against "
+        "the existing plan, and write the JSON to the existing report path.\n\n"
+        "The object must have this shape:\n\n"
+        '```json\n{"status":"satisfied|needs_iteration","summary":"...","gaps":["..."]}\n```\n\n'
+        f"### Prior gaps (advisory)\n{gap_lines}\n\n"
+        f"### Original task\n{task_prompt}\n"
+    )
+
+
+def _stall_output_excerpt(
+    error: AgentRunError | None,
+    record: ConformanceIterationRecord,
+) -> str:
+    if error is not None:
+        result = getattr(error, "result", None)
+        if result is not None:
+            stderr = (getattr(result, "stderr", "") or "").strip()
+            if stderr:
+                return _safe_conformance_text(stderr)
+            stdout = (getattr(result, "stdout", "") or "").strip()
+            if stdout:
+                return _safe_conformance_text(stdout)
+        return _safe_conformance_text(str(error))
+    text = (record.stderr or "").strip() or (record.stdout or "").strip()
+    return _safe_conformance_text(text)
 
 
 def build_conformance_retry_prompt(

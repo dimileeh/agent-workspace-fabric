@@ -15,8 +15,10 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import re
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -81,14 +83,20 @@ from awf.runtime.alembic_validation import (
 from awf.runtime.logs import LogStore
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    AGENT_STALLED_IN_CONFORMANCE,
     PLAN_CONFORMANCE_UNSATISFIED,
+    ConformanceIterationRecord,
+    ConformanceStallEvidence,
+    ConformanceStallPolicy,
     PlanConformanceReport,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
+    build_conformance_stall_failure_evidence,
     build_execution_prompt,
     build_planning_prompt,
     changed_paths_from_porcelain,
+    classify_conformance_stall,
     parse_conformance_report,
     render_workspace_path,
 )
@@ -2313,6 +2321,15 @@ class WorkspaceExecutor:
         gaps: tuple[str, ...] = ()
         last_report: PlanConformanceReport | None = None
         last_iteration = 0
+        stall_policy = ConformanceStallPolicy(
+            no_output_seconds=planning.conformance_stall.no_output_seconds,
+            over_duration_seconds=planning.conformance_stall.over_duration_seconds,
+            repeated_output_threshold=(
+                planning.conformance_stall.repeated_output_threshold
+            ),
+        )
+        iteration_history: list[ConformanceIterationRecord] = []
+        prior_paths = dirty_paths
         for iteration in range(planning.max_iterations + 1):
             last_iteration = iteration
             await adapter.run(
@@ -2329,34 +2346,98 @@ class WorkspaceExecutor:
                 workspace_id=workspace.id,
             )
             before_compare = await self._changed_paths(worktree_path)
-            compare_result = await adapter.run(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=build_conformance_prompt(
-                    task_prompt=workspace.task_prompt,
+            iteration_started_at = time.monotonic()
+            compare_error: AgentRunError | None = None
+            compare_result = None
+            try:
+                compare_result = await adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=build_conformance_prompt(
+                        task_prompt=workspace.task_prompt,
+                        plan_path=plan_path,
+                        report_path=report_path,
+                        iteration=iteration,
+                    ),
+                    model=model,
+                    workspace_id=workspace.id,
+                )
+            except AgentRunError as exc:
+                if exc.reason_code not in {"AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"}:
+                    raise
+                compare_error = exc
+
+            elapsed_seconds = time.monotonic() - iteration_started_at
+            if compare_error is None:
+                after_compare = await self._changed_paths(worktree_path)
+                if planning.fail_on_unexplained_deviation:
+                    extra = sorted(after_compare - before_compare - {report_path})
+                    if extra:
+                        return _build_planning_scope_failure(
+                            scope_phase="conformance",
+                            required_paths=(report_path,),
+                            offending_paths=extra,
+                            summary=(
+                                f"conformance phase changed files outside `{report_path}`"
+                            ),
+                        )
+                stdout = compare_result.stdout if compare_result is not None else ""
+                stderr = compare_result.stderr if compare_result is not None else ""
+                report_text = (
+                    _read_text_if_present(worktree_path / report_path)
+                    or stdout
+                )
+                report = parse_conformance_report(report_text)
+                last_report = report
+                report_digest = _digest_text(report_text)
+                worktree_changed = before_compare != prior_paths or after_compare != prior_paths
+            else:
+                stdout = compare_error.result.stdout
+                stderr = compare_error.result.stderr
+                report_digest = None
+                after_compare = before_compare
+                worktree_changed = before_compare != prior_paths
+
+            iteration_history.append(
+                ConformanceIterationRecord(
+                    iteration=iteration,
+                    elapsed_seconds=elapsed_seconds,
+                    report_digest=report_digest,
+                    worktree_changed=worktree_changed,
+                    stdout=stdout,
+                    stderr=stderr,
+                    error_reason_code=(
+                        compare_error.reason_code if compare_error is not None else None
+                    ),
+                )
+            )
+            prior_paths = after_compare
+
+            stall = classify_conformance_stall(
+                history=iteration_history,
+                policy=stall_policy,
+                plan_path=plan_path,
+                report_path=report_path,
+                latest_error=compare_error,
+            )
+            if stall is not None:
+                return await self._build_conformance_stall_failure(
+                    workspace=workspace,
+                    worktree_path=worktree_path,
+                    baseline_sha=baseline_sha,
+                    last_report=last_report,
+                    stall=stall,
+                    iterations_used=last_iteration + 1,
+                    max_iterations=planning.max_iterations,
                     plan_path=plan_path,
                     report_path=report_path,
-                    iteration=iteration,
-                ),
-                model=model,
-                workspace_id=workspace.id,
-            )
-            after_compare = await self._changed_paths(worktree_path)
-            if planning.fail_on_unexplained_deviation:
-                extra = sorted(after_compare - before_compare - {report_path})
-                if extra:
-                    return _build_planning_scope_failure(
-                        scope_phase="conformance",
-                        required_paths=(report_path,),
-                        offending_paths=extra,
-                        summary=f"conformance phase changed files outside `{report_path}`",
-                    )
+                )
 
-            report_text = (
-                _read_text_if_present(worktree_path / report_path) or compare_result.stdout
-            )
-            report = parse_conformance_report(report_text)
-            last_report = report
+            if compare_error is not None:
+                # Not classified as a stall, but the conformance call failed —
+                # bubble up so the outer agent_failure handler captures it.
+                raise compare_error
+
             if report.satisfied:
                 _log.info(
                     "executor.planning_conformance_satisfied",
@@ -2395,6 +2476,97 @@ class WorkspaceExecutor:
                 )
             },
         )
+
+    async def _build_conformance_stall_failure(
+        self,
+        *,
+        workspace: Workspace,
+        worktree_path: Path,
+        baseline_sha: str | None,
+        last_report: PlanConformanceReport | None,
+        stall: ConformanceStallEvidence,
+        iterations_used: int,
+        max_iterations: int,
+        plan_path: Path,
+        report_path: Path,
+    ) -> _PlanningRunFailure:
+        head_sha = await self._git_rev_parse_head(worktree_path)
+        commit_count = 0
+        changed_paths: list[str] = []
+        if baseline_sha:
+            commit_count = await self._git_commit_count_since(worktree_path, baseline_sha)
+            changed = await self._committed_paths_since(worktree_path, baseline_sha)
+            changed_paths = sorted(path.as_posix() for path in changed)
+        stall_evidence_payload = build_conformance_stall_failure_evidence(
+            stall=stall,
+            head_sha=head_sha,
+            base_sha=baseline_sha,
+            commit_count=commit_count,
+            changed_paths=changed_paths,
+        )
+        details: dict[str, Any] = {"conformance_stall": stall_evidence_payload}
+        if last_report is not None:
+            details["conformance"] = build_conformance_failure_evidence(
+                report=last_report,
+                iterations_used=iterations_used,
+                max_iterations=max_iterations,
+                plan_path=plan_path,
+                report_path=report_path,
+            )
+        message = (
+            f"plan conformance stalled in iteration {stall.iteration_index} "
+            f"({stall.kind.value}); preserving worktree for recovery"
+        )
+        _log.info(
+            "executor.planning_conformance_stalled",
+            workspace_id=workspace.id,
+            iteration=stall.iteration_index,
+            kind=stall.kind.value,
+            elapsed_seconds=stall.elapsed_seconds,
+            no_output_seconds=stall.no_output_seconds,
+            repeated_output_count=stall.repeated_output_count,
+            implementation_commit_count=commit_count,
+        )
+        return _PlanningRunFailure(
+            message=message,
+            reason_code=AGENT_STALLED_IN_CONFORMANCE,
+            details=details,
+        )
+
+    async def _git_rev_parse_head(self, worktree_path: Path) -> str | None:
+        result = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "HEAD",
+            ]
+        )
+        if not result.ok:
+            return None
+        head = result.stdout.strip()
+        return head or None
+
+    async def _git_commit_count_since(self, worktree_path: Path, since: str) -> int:
+        result = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-list",
+                "--count",
+                f"{since}..HEAD",
+            ]
+        )
+        if not result.ok:
+            return 0
+        try:
+            return int(result.stdout.strip() or "0")
+        except ValueError:
+            return 0
 
     async def _changed_paths(self, worktree_path: Path) -> set[Path]:
         result = await self._runner.run(

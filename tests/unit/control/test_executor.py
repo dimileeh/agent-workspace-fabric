@@ -762,6 +762,281 @@ class TestHappyPath:
         assert not any(call.args[-1] == "pytest -q" for call in fake.calls)
 
     @pytest.mark.unit
+    async def test_planning_profile_records_conformance_stall_when_compare_idle_timeout_after_implementation_commits(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from typing import Any
+
+        from awf.adapters import base as adapter_base
+        from awf.adapters.base import AgentRunResult
+        from awf.common.commands import CommandResult
+        from awf.db.enums import AgentRuntime
+        from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
+
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 1,
+                },
+            },
+        )
+
+        class _IdleConformanceAdapter(adapter_base.AgentAdapter):
+            runtime = AgentRuntime.codex
+
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.codex
+
+            def get_provider(self, model: str | None) -> str:
+                return "openai"
+
+            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+                return []
+
+            async def run(self, *, prompt: str, **kwargs: Any) -> AgentRunResult:
+                if "## Conformance phase" in prompt:
+                    raise adapter_base.AgentRunError(
+                        agent=self.name,
+                        result=CommandResult(
+                            returncode=124,
+                            stdout="",
+                            stderr="idle timeout exceeded after 600s",
+                        ),
+                        reason_code="AGENT_IDLE_TIMEOUT",
+                    )
+                return AgentRunResult(returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setitem(
+            adapter_base._REGISTRY, AgentRuntime.codex, _IdleConformanceAdapter
+        )
+
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE),
+            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts"),
+            pr_creator=PullRequestCreator(fake),
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+            ),
+        )
+
+        fake.queue_result(returncode=0, stdout="")  # before planning git status
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        # Planning adapter (custom) — no runner call
+        fake.queue_result(  # changed_paths after planning
+            returncode=0,
+            stdout=f"?? docs/awf-plans/{ws_id}.md\n",
+        )
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (none yet)
+        # Iteration 0:
+        # Execute adapter (custom) — no runner call
+        fake.queue_result(  # before_compare git status
+            returncode=0,
+            stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/foo.py\n",
+        )
+        # Conformance adapter raises AgentRunError
+        # After raise, executor introspects implementation commits for stall evidence
+        fake.queue_result(returncode=0, stdout="head_sha_after\n")  # post-stall rev-parse HEAD
+        fake.queue_result(returncode=0, stdout="2\n")  # post-stall rev-list count
+        fake.queue_result(  # post-stall git diff --name-only base..HEAD
+            returncode=0,
+            stdout="src/awf/foo.py\nsrc/awf/bar.py\n",
+        )
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            failed_event = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            )
+            assert failed_event.reason_code == AGENT_STALLED_IN_CONFORMANCE
+            assert failed_event.payload is not None
+            stall = failed_event.payload["details"]["conformance_stall"]
+            assert stall["kind"] == "no_output"
+            assert stall["reason_code"] == AGENT_STALLED_IN_CONFORMANCE
+            assert stall["plan_path"] == f"docs/awf-plans/{ws_id}.md"
+            assert stall["report_path"] == f"docs/awf-plans/{ws_id}.conformance.json"
+            assert stall["salvage_hint"]["implementation_commit_count"] == 2
+            assert failed_event.payload["salvage"]["worktree_path"]
+            stall_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.planning_conformance_stalled"
+            ]
+            assert len(stall_events) == 1
+            assert stall_events[0].reason_code == AGENT_STALLED_IN_CONFORMANCE
+            assert stall_events[0].payload is not None
+            assert stall_events[0].payload["kind"] == "no_output"
+
+    @pytest.mark.unit
+    async def test_planning_profile_does_not_record_stall_for_deterministic_needs_iteration_within_budget(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
+
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 1,
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        # Same queue as test_planning_profile_iterates_when_conformance_reports_gaps
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(  # compare says not done (different summary each time)
+            returncode=0,
+            stdout='{"status":"needs_iteration","summary":"gap-1","gaps":["add tests"]}',
+        )
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n")
+        fake.queue_result(returncode=0, stdout="fixed gap")  # iteration execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n")
+        fake.queue_result(  # compare satisfied
+            returncode=0,
+            stdout='{"status":"satisfied","summary":"done","gaps":[]}',
+        )
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n")
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="src/x.py\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            failed_events = [
+                event
+                for event in ws.events
+                if event.reason_code == AGENT_STALLED_IN_CONFORMANCE
+            ]
+            assert failed_events == []
+            stall_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.planning_conformance_stalled"
+            ]
+            assert stall_events == []
+
+    @pytest.mark.unit
+    async def test_planning_profile_records_stall_when_report_digest_repeats_without_progress(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
+
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 5,
+                    "conformance_stall": {
+                        "no_output_seconds": 600,
+                        "over_duration_seconds": 1800,
+                        "repeated_output_threshold": 3,
+                    },
+                },
+            },
+        )
+
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE),
+            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts"),
+            pr_creator=PullRequestCreator(fake),
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+            ),
+        )
+
+        identical_report = (
+            '{"status":"needs_iteration","summary":"same gap","gaps":["finish tests"]}'
+        )
+        identical_paths = f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n"
+
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (planning clean)
+
+        # Three iterations of execute + before_compare + conformance + after_compare
+        for _ in range(3):
+            fake.queue_result(returncode=0, stdout="execute output")  # execute adapter
+            fake.queue_result(returncode=0, stdout=identical_paths)  # before_compare
+            fake.queue_result(returncode=0, stdout=identical_report)  # conformance adapter
+            fake.queue_result(returncode=0, stdout=identical_paths)  # after_compare
+
+        # post-stall git introspection
+        fake.queue_result(returncode=0, stdout="head_sha_after\n")  # rev-parse HEAD
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0, stdout="src/x.py\n")  # diff --name-only
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            failed_event = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            )
+            assert failed_event.reason_code == AGENT_STALLED_IN_CONFORMANCE
+            assert failed_event.payload is not None
+            stall = failed_event.payload["details"]["conformance_stall"]
+            assert stall["kind"] == "repeated_output"
+            assert stall["repeated_output_count"] == 3
+
+    @pytest.mark.unit
     async def test_records_all_expected_transitions(
         self,
         executor: WorkspaceExecutor,

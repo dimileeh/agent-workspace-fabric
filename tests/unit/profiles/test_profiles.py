@@ -586,6 +586,71 @@ def test_profile_planning_default_max_iterations_is_three() -> None:
 
 
 @pytest.mark.unit
+def test_planning_profile_round_trips_conformance_stall_policy_defaults() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {"name": "awf-self", "planning": {"required": True}}
+    )
+
+    stall = profile.planning.conformance_stall
+    assert stall.no_output_seconds == 600
+    assert stall.over_duration_seconds == 1800
+    assert stall.repeated_output_threshold == 3
+    assert stall.recovery_action == "retry_conformance"
+
+
+@pytest.mark.unit
+def test_planning_profile_accepts_conformance_stall_policy_overrides() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "awf-self",
+            "planning": {
+                "required": True,
+                "conformance_stall": {
+                    "no_output_seconds": 300,
+                    "over_duration_seconds": 900,
+                    "repeated_output_threshold": 4,
+                    "recovery_action": "proceed_to_validation",
+                },
+            },
+        }
+    )
+
+    stall = profile.planning.conformance_stall
+    assert stall.no_output_seconds == 300
+    assert stall.over_duration_seconds == 900
+    assert stall.repeated_output_threshold == 4
+    assert stall.recovery_action == "proceed_to_validation"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "field, value, message",
+    [
+        ("no_output_seconds", 0, "greater than"),
+        ("over_duration_seconds", -1, "greater than"),
+        ("repeated_output_threshold", 1, "greater than"),
+        ("recovery_action", "ignore", "Input should be"),
+    ],
+)
+def test_planning_profile_rejects_invalid_conformance_stall_policy(
+    field: str,
+    value: object,
+    message: str,
+) -> None:
+    payload = {
+        "no_output_seconds": 600,
+        "over_duration_seconds": 1800,
+        "repeated_output_threshold": 3,
+        "recovery_action": "retry_conformance",
+        field: value,
+    }
+    with pytest.raises(ValidationError, match=message):
+        WorkspaceProfile.model_validate(
+            {"name": "awf-self", "planning": {"conformance_stall": payload}}
+        )
+
+
+@pytest.mark.unit
 def test_awf_self_profile_declares_three_planning_iterations() -> None:
     profile_path = Path(__file__).resolve().parents[3] / ".awf" / "workspace.yml"
     profile = yaml.safe_load(profile_path.read_text(encoding="utf-8"))["awf"]
