@@ -14,6 +14,7 @@ from awf.service.provider_recovery import (
     PROVIDER_FALLBACK_SELECTED_REASON,
     PROVIDER_RECOVERY_COOLDOWN_EVENT,
     PROVIDER_RECOVERY_REASON_CODES,
+    PROVIDER_RECOVERY_REQUESTED_EVENT,
     PROVIDER_RECOVERY_STATE_KEY,
     PROVIDER_RETRY_DELAYED_REASON,
     _parse_not_before,
@@ -164,6 +165,88 @@ def test_provider_recovery_state_for_workspace_extracts_from_events() -> None:
     assert view.action == "retry"
     assert view.reason_code == PROVIDER_RETRY_DELAYED_REASON
     assert view.cooldown_until is not None
+
+
+def test_provider_recovery_state_from_events_parses_lineage_fields() -> None:
+    now = datetime.now(UTC)
+    event_payload: dict[str, Any] = {
+        "source_workspace_id": "ws-source-001",
+        "source_attempt_id": "att-042",
+        "source_task_id": "task-100",
+        "source_canonical_attempt_id": "att-canonical-001",
+        "provider_recovery": {
+            "action": "fallback",
+            "decision_reason_code": PROVIDER_FALLBACK_SELECTED_REASON,
+            "target_agent": "codex",
+            "target_provider": "openai",
+            "target_model": "gpt-5.3-codex",
+            "source_provider": "google",
+            "source_model": "gemini-2.5-pro",
+            "retry_attempt_number": 0,
+            "fallback_attempt_number": 2,
+        },
+    }
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_REQUESTED_EVENT,
+        reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
+        payload=event_payload,
+        occurred_at=now,
+        old_state="running",
+        new_state="failed",
+        id="evt-002",
+    )
+    workspace = SimpleNamespace(
+        id="ws-004",
+        status="failed",
+        task_policy={},
+        failure_reason="agent_failure",
+        failure_message="Provider exhausted",
+        agent="codex",
+        events=[event],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.action == "fallback"
+    assert view.retry_attempt_number == 0
+    assert view.fallback_attempt_number == 2
+    assert view.source_attempt_id == "att-042"
+    assert view.source_workspace_id == "ws-source-001"
+
+
+def test_provider_recovery_state_from_events_lineage_defaults_to_none_when_missing() -> None:
+    now = datetime.now(UTC)
+    not_before = now + timedelta(seconds=300)
+    event_payload: dict[str, Any] = {
+        "source_workspace_id": "ws-source-001",
+        "provider_recovery": {
+            "action": "retry",
+            "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+            "not_before": not_before.isoformat(),
+        },
+    }
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        payload=event_payload,
+        occurred_at=now,
+        old_state="running",
+        new_state="failed",
+        id="evt-003",
+    )
+    workspace = SimpleNamespace(
+        id="ws-005",
+        status="failed",
+        task_policy={},
+        failure_reason="agent_failure",
+        failure_message="Provider exhausted",
+        agent="codex",
+        events=[event],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.retry_attempt_number is None
+    assert view.fallback_attempt_number is None
+    assert view.source_attempt_id is None
 
 
 def test_provider_recovery_state_for_workspace_returns_none_when_no_recovery() -> None:

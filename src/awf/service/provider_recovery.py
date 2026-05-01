@@ -965,19 +965,30 @@ def _provider_recovery_state_from_events(
             model=target_model,
         )
     source_workspace_id = _mapping_str(payload, "source_workspace_id")
+    source_attempt_id = _mapping_str(payload, "source_attempt_id")
+    retry_attempt_number = (
+        _nonnegative_int(recovery.get("retry_attempt_number"), default=0)
+        if "retry_attempt_number" in recovery
+        else None
+    )
+    fallback_attempt_number = (
+        _nonnegative_int(recovery.get("fallback_attempt_number"), default=0)
+        if "fallback_attempt_number" in recovery
+        else None
+    )
     terminal = action == "terminal" if action is not None else None
     return ProviderRecoveryStateView(
         action=action,
         reason_code=reason_code,
         source_provider=source_provider,
         source_model=source_model,
-        retry_attempt_number=None,
-        fallback_attempt_number=None,
+        retry_attempt_number=retry_attempt_number,
+        fallback_attempt_number=fallback_attempt_number,
         cooldown_until=cooldown_until,
         next_eligible_at=next_eligible_at,
         fallback_target=fallback_target,
         source_workspace_id=source_workspace_id,
-        source_attempt_id=None,
+        source_attempt_id=source_attempt_id,
         recommended_action=_recommended_action_for_action(action),
         terminal=terminal,
     )
