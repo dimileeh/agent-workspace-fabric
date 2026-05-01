@@ -139,6 +139,8 @@ def test_validation_coverage_fields_ignore_non_contract_value_types() -> None:
         "coverage_status": None,
         "coverage_reason_code": None,
         "coverage_gaps": [],
+        "failing_test_node_ids": [],
+        "failing_test_evidence": [],
     }
 
 
