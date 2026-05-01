@@ -325,6 +325,7 @@ async def create_provider_recovery_attempt_row(
             "pr_url",
             "pr_number",
             "branch_name",
+            "remote_push_branch",
             "monitor_iter_count",
             "monitor_threads_addressed",
             "monitor_last_commit_sha",
