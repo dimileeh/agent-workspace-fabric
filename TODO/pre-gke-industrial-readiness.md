@@ -53,7 +53,6 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_42b3d10157fd4afbbbba0145` | pending AWF PR | validating | Current retry closes the remaining conformance gaps: discard-and-replan planning retries no longer inherit preserved remote push branch metadata, source plan paths are prior evidence so fresh retries have one authoritative plan artifact, and the detailed checklist is complete. |
 
 ### Reschedule Required Slices
 
@@ -64,16 +63,17 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P1 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_0d9b0d2e6b1d48149c0c5291` | none | reschedule_required | No work landed. Codex Spark exited on model usage quota before producing commits; reschedule with an approved non-Spark provider/model after provider backoff/fallback support is in place. |
+| P0 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_0d9b0d2e6b1d48149c0c5291` | none | reschedule_required | No work landed. Codex Spark exited on model usage quota before producing commits; reschedule with an approved non-Spark provider/model after provider backoff/fallback support is in place. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_42b3d10157fd4afbbbba0145` | [#164](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/164) | merged | Codex `gpt-5.5`; merged 2026-05-01 after resolving planning retry, plan artifact, and monitor recovery review comments. |
 | P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | [#161](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/161) | merged | Reattached after fixing the validate-only recovery bug locally in `faf5911`; merged 2026-05-01. |
-| P1 Provider Resilience And Automated Fallback Recovery | No-work failed idle container cleanup | `ws_cfee1e44d23a41a2aae90c8c` | [#163](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/163) | merged | Revived existing PR monitor instead of rescheduling; Codex `gpt-5.3-codex-spark`; merged 2026-05-01. |
+| P0 Provider Resilience And Automated Fallback Recovery | No-work failed idle container cleanup | `ws_cfee1e44d23a41a2aae90c8c` | [#163](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/163) | merged | Revived existing PR monitor instead of rescheduling; Codex `gpt-5.3-codex-spark`; merged 2026-05-01. |
 | P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_1e79f6b47faf44d0bf8de3f0` | [#159](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/159) | merged | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_7c8ec611a3d14b6cb4612344`; merged 2026-05-01. |
-| P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | [#162](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/162) | merged | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` propagation landed structured provider-capacity classification. |
+| P0 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | [#162](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/162) | merged | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` propagation landed structured provider-capacity classification. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_05365f752ad742abb7c134af` | [#160](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/160) | merged | Adds scheduler decision-record planning/docs slice after the OpenCode GLM attempt stalled in conformance. |
 | P1 Operator Console Completion | Security and egress status panels | `ws_ac64156e08454928985982eb` | [#158](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/158) | merged | Adds console security and egress status panels via OpenCode GLM retry. |
 | P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | merged | Guards v1/legacy response compatibility until documented v2 cutover. |
@@ -160,7 +160,7 @@ reschedule its corresponding slice.
 | P0 Reliability, Cleanup, And SLOs | Orphan AWF resource detection and cleanup readiness reporting | `ws_04560f5cfd914095b357cdcb` | failed | PR [#98](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/98) repeatedly hit monitor-driven stale rebase recovery; local AWF now has a rebase-recovery fix, and the slice was retried as `ws_5605c5ca71c942d999f5b78f`. |
 | P0 Operation And Recovery Truth | Persist operation audit details and log stream references | `ws_83f4e614951446cf883f5c09` | failed | PR [#101](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/101) merged, so no feature retry is needed; the workspace failure exposed the stale-rebase recovery bug fixed locally before service rebuild. |
 | P1 API Contract Completion | External operator callback subscriptions | `ws_0e2fc82ece7541659287e063` | failed | Agent produced local commits and passed validation/coverage, but exhausted the Plan -> Execute -> Compare iteration budget with one remaining conformance gap: event type validation was prefix-based and still allowed internal-looking namespaced event types such as `workspace.internal_secret`. Recover by redispatching a narrow callback hardening/completion slice or salvaging the preserved worktree branch. |
-| P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification via Gemini 3.1 | `ws_033d1772828042c9afa6a491` | failed | No-work Gemini auth failure: container had copied `~/.gemini` files but no Gemini/Google auth env; Gemini CLI 0.39.1 selected API-key auth and exited 41 `AGENT_AUTH_FAILED` requiring `GEMINI_API_KEY`. |
+| P0 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification via Gemini 3.1 | `ws_033d1772828042c9afa6a491` | failed | No-work Gemini auth failure: container had copied `~/.gemini` files but no Gemini/Google auth env; Gemini CLI 0.39.1 selected API-key auth and exited 41 `AGENT_AUTH_FAILED` requiring `GEMINI_API_KEY`. |
 | P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_927647b0535242c58879f7b8` | failed | Same no-work Gemini auth failure as `ws_033d1772828042c9afa6a491`; retry only after Gemini container auth/readiness is fixed or with a different provider/model. |
 | P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_8210d159580747f88c691ef5` | superseded | Gemini produced a useful local commit but did so during AWF's planning-only phase, touching `src/awf/cli/main.py` and `tests/unit/cli/test_init.py` before execution was allowed. AWF correctly failed the workspace for planning scope violation; retried fresh with Codex Spark as `ws_8c9f0ae88d5c477aac382158`. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via Gemini | `ws_19b11c564c3343c0965eee45` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_5031649e68b34b108f23782b`. |
@@ -304,10 +304,10 @@ reschedule its corresponding slice.
 - [ ] Add human-escalation boost and retry-aware queue scoring.
 - [ ] Make scheduler decisions visible as durable records and console explanations.
 
-## P1: Provider Resilience And Automated Fallback Recovery
+## P0: Provider Resilience And Automated Fallback Recovery
 
 - [ ] **Implement full provider/model automatic recovery loop** as one
-  comprehensive P1 slice. Recent incidents: Gemini 429/capacity failures,
+  comprehensive P0 slice. Recent incidents: Gemini 429/capacity failures,
   Gemini auth failures, Codex Spark usage-limit failures in
   `ws_6c5890fe7d2b43b4ba94c8ad` and `ws_0d9b0d2e6b1d48149c0c5291`, and PR
   monitor recovery loops repeatedly hammering an exhausted model. Acceptance:
