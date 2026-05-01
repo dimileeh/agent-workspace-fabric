@@ -948,7 +948,7 @@ async def test_short_circuit_completed_records_completed_monitor_state_operation
 
 
 @pytest.mark.unit
-async def test_review_comment_provider_failure_records_fallback_and_suppresses_next_loop(
+async def test_review_comment_provider_failure_records_fallback_and_suppresses_next_loop_without_event(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -1019,8 +1019,9 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
     assert fallback.auto_merge is False
     assert fallback.initial_review_grace_period_seconds == 75
     assert fallback.task_policy["pr_monitor"] == {"review_grace_seconds": 75}
-    assert cooldown_events
-    assert cooldown_events[-1].payload["source"] == "pr_monitor"
+    assert len(cooldown_events) == 1
+    assert cooldown_events[0].reason_code == "PROVIDER_FALLBACK_SELECTED"
+    assert "source" not in cooldown_events[0].payload
 
 
 @pytest.mark.unit
