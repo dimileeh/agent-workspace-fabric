@@ -45,7 +45,6 @@ _AUTH_FAILURE_MARKERS = (
     "ollama cloud authentication",
     "opencode auth",
     "unauthorized",
-    "401",
 )
 
 _QUOTA_FAILURE_MARKERS = (

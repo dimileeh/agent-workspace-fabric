@@ -123,3 +123,15 @@ def test_deterministic_cli_failures_are_not_provider_failures() -> None:
     )
 
     assert classification is None
+
+
+def test_lint_rule_ids_containing_401_are_not_auth_failures() -> None:
+    classification = classify_provider_failure(
+        reason_code="AGENT_CLI_FAILED",
+        stdout="",
+        stderr="ruff failed: E401 multiple imports on one line",
+        provider=None,
+        model=None,
+    )
+
+    assert classification is None
