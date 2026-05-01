@@ -1707,6 +1707,66 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
+    async def test_coverage_wrapped_pytest_failure_preserves_term_missing_gaps(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=1,
+            stdout=(
+                "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError\n"
+                "Name                                      Stmts   Miss  Cover   Missing\n"
+                "---------------------------------------------------------------------\n"
+                "src/awf/runtime/validation.py               400      4    99%   120-122, 130\n"
+                "src/awf/control/executor.py                 800      2    99%   50, 75\n"
+                "---------------------------------------------------------------------\n"
+                "TOTAL                                      1200      6    99%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-wrapped-pytest-failure-term-missing",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term-missing",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_coverage_pytest_failure_term_missing",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+        )
+
+        assert not result.all_passed
+        assert result.coverage is not None
+        assert result.coverage.reason_code == "COVERAGE_OK"
+        assert result.coverage.failing_test_node_ids == [
+            "tests/unit/test_widget.py::test_handles_edges"
+        ]
+        assert result.coverage.gaps == [
+            {
+                "file": "src/awf/runtime/validation.py",
+                "missing_lines": ["120-122", "130"],
+            },
+            {
+                "file": "src/awf/control/executor.py",
+                "missing_lines": ["50", "75"],
+            },
+        ]
+        metadata = result.coverage.as_metadata()
+        assert metadata["gaps"] == result.coverage.gaps
+        assert metadata["failing_test_node_ids"] == [
+            "tests/unit/test_widget.py::test_handles_edges"
+        ]
+
+    @pytest.mark.unit
     async def test_coverage_below_threshold_with_tests_passing_stays_coverage_failure(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:
@@ -1715,9 +1775,11 @@ class TestCoverageEnforcement:
             returncode=0,
             stdout=(
                 "2 passed in 0.10s\n"
-                "Name        Stmts   Miss  Cover\n"
-                "-------------------------------\n"
-                "TOTAL         100      2    98%\n"
+                "Name                                      Stmts   Miss  Cover   Missing\n"
+                "---------------------------------------------------------------------\n"
+                "src/awf/runtime/validation.py               400      8    98%   200-205, 220\n"
+                "---------------------------------------------------------------------\n"
+                "TOTAL                                       400      8    98%\n"
             ),
         )
         profile = WorkspaceProfile.model_validate(
@@ -1746,6 +1808,13 @@ class TestCoverageEnforcement:
         assert result.coverage.percent == 98
         assert result.coverage.status == "failed"
         assert result.coverage.reason_code == "COVERAGE_BELOW_THRESHOLD"
+        assert result.coverage.gaps == [
+            {
+                "file": "src/awf/runtime/validation.py",
+                "missing_lines": ["200-205", "220"],
+            }
+        ]
+        assert result.coverage.as_metadata()["gaps"] == result.coverage.gaps
         assert result.coverage.failing_test_node_ids == []
         assert result.coverage.failing_test_evidence == []
         assert result.first_failure is not None

@@ -839,6 +839,7 @@ class ValidationRunner:
 
         output_paths = _coverage_output_paths(coverage_outputs)
         percent = _parse_python_coverage_percent_from_files(output_paths)
+        gaps = _parse_term_missing_gaps(output_paths)
         pytest_evidence = (
             _parse_pytest_failure_evidence_from_files(output_paths)
             if command_result is not None and command_result.returncode != 0
@@ -880,6 +881,7 @@ class ValidationRunner:
             enforce=coverage.enforce,
             reason_code=reason_code,
             status=status,
+            gap_count=len(gaps),
         )
         return ValidationCoverageResult(
             provider=coverage.provider,
@@ -889,6 +891,7 @@ class ValidationRunner:
             status=status,
             reason_code=reason_code,
             command_result=command_result,
+            gaps=gaps,
             failing_test_node_ids=pytest_evidence.node_ids,
             failing_test_evidence=pytest_evidence.evidence,
         )
