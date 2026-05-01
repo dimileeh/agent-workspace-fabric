@@ -2668,11 +2668,17 @@ class WorkspaceExecutor:
         if head_sha is not None:
             hasher.update(head_sha.encode("utf-8"))
             hasher.update(b"\0")
+        # Stream file bytes in fixed-size chunks rather than read_bytes() so a
+        # large generated artifact in the dirty set does not balloon peak
+        # memory on every conformance iteration.
+        chunk_size = 65536
         for path in sorted(paths, key=lambda p: p.as_posix()):
             hasher.update(path.as_posix().encode("utf-8"))
             hasher.update(b"\0")
             try:
-                hasher.update((worktree_path / path).read_bytes())
+                with (worktree_path / path).open("rb") as fh:
+                    while chunk := fh.read(chunk_size):
+                        hasher.update(chunk)
             except OSError:
                 hasher.update(b"<missing>")
             hasher.update(b"\0")
