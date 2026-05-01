@@ -1,12 +1,15 @@
-from sqlalchemy.ext.asyncio import AsyncSession
+from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 
 import pytest
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.db.base import Base
+from awf.db.repositories import WorkspaceRepository
+from awf.db.session import make_engine, make_session_factory
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
 )
-from awf.db.repositories import WorkspaceRepository
 from awf.service.metrics import (
     _cached_failure_details_by_workspace_id,
     _cluster_root_causes,
@@ -55,10 +58,6 @@ async def test_cluster_root_causes_causes(session_factory):
         # ensure it runs the lines
         assert len(causes) > 0
 
-from collections.abc import AsyncIterator
-from sqlalchemy.ext.asyncio import async_sessionmaker
-from awf.db.base import Base
-from awf.db.session import make_engine, make_session_factory
 
 @pytest.fixture
 async def session_factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:

@@ -1,23 +1,23 @@
-from unittest.mock import patch
-import asyncio
-import pytest
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from datetime import datetime, UTC, timedelta
+from unittest.mock import patch
+
+from awf.db.enums import WorkspaceStatus
+from awf.db.models import Workspace
+from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.gc import (
-    _classify_workspace_for_gc,
-    _failed_terminal_workspace_has_no_work,
-    _snapshot_has_no_work,
-    _container_command_is_idle,
+    COMPLETED_PR_RETENTION_EXPIRED,
+    FAILED_WORKSPACE_NO_WORK,
+    TERMINAL_WORKSPACE_RETENTION_EXPIRED,
+    WORKSPACE_WITHIN_RETENTION,
     WorkspaceGCCandidate,
     WorkspaceGCPreserved,
-    COMPLETED_PR_RETENTION_EXPIRED,
-    TERMINAL_WORKSPACE_RETENTION_EXPIRED,
-    FAILED_WORKSPACE_NO_WORK,
-    WORKSPACE_WITHIN_RETENTION
+    _classify_workspace_for_gc,
+    _container_command_is_idle,
+    _failed_terminal_workspace_has_no_work,
+    _snapshot_has_no_work,
 )
-from awf.db.models import Workspace
-from awf.db.enums import WorkspaceStatus
-from awf.runtime.inspection import RuntimeSnapshot, RuntimeService
+
 
 def test_snapshot_has_no_work_unavailable():
     snap = RuntimeSnapshot(stack_state="unavailable", services=[])
@@ -43,7 +43,7 @@ def test_classify_workspace_completed_retention_expired():
     res = _classify_workspace_for_gc(ws, work_dir=Path("/tmp"), now=datetime.now(UTC), cutoff_at=datetime.now(UTC) - timedelta(hours=24), default_policy=False, cleanup_enabled=True)
     assert isinstance(res, WorkspaceGCCandidate)
     assert res.reason_code == COMPLETED_PR_RETENTION_EXPIRED
-    
+
     ws2 = Workspace(
         id="ws_2",
         status=WorkspaceStatus.completed.value,

@@ -1,10 +1,11 @@
-import pytest
-from unittest.mock import patch
-from datetime import datetime, timedelta, UTC
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from awf.db.models import Workspace
+from unittest.mock import patch
+
 from awf.db.enums import WorkspaceStatus
-from awf.service.gc import _classify_workspace_for_gc, WorkspaceGCPreserved
+from awf.db.models import Workspace
+from awf.service.gc import WorkspaceGCPreserved, _classify_workspace_for_gc
+
 
 def test_classify_workspace_failed_has_work_but_expired_no_default_policy():
     ws = Workspace(
