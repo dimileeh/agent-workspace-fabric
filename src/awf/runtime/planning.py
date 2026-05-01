@@ -387,12 +387,18 @@ def classify_conformance_stall(
 
     empty_streak_seconds = 0.0
     empty_streak_iterations = 0
-    for record in reversed(history):
-        if (
-            record.stdout.strip()
-            or record.stderr.strip()
-            or record.report_digest is not None
-        ):
+    # The executor reads the report file from disk each iteration, so a
+    # report left behind by an earlier iteration keeps yielding the same
+    # non-None digest even when the current iteration produced no output.
+    # Treat the digest as fresh progress only when it differs from the
+    # immediately-prior iteration's digest.
+    for index in range(len(history) - 1, -1, -1):
+        record = history[index]
+        prior = history[index - 1] if index > 0 else None
+        fresh_report_digest = record.report_digest is not None and (
+            prior is None or prior.report_digest != record.report_digest
+        )
+        if record.stdout.strip() or record.stderr.strip() or fresh_report_digest:
             break
         empty_streak_seconds += record.elapsed_seconds
         empty_streak_iterations += 1
