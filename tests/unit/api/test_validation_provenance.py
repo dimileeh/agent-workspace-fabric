@@ -685,6 +685,51 @@ async def test_validation_provenance_reports_persisted_coverage_policy(
 
 
 @pytest.mark.unit
+async def test_validation_provenance_reports_failing_test_evidence(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    await _insert_validation_run(
+        engine,
+        run_id="vr_failing_tests_0000000001",
+        workspace_id=workspace_id,
+        status="failed",
+        reason_code="PYTEST_TEST_FAILURE",
+        log_stream_refs={
+            "coverage": {
+                "provider": "python",
+                "percent": 99.2,
+                "minimum_percent": 99.0,
+                "enforce": True,
+                "status": "passed",
+                "reason_code": "COVERAGE_OK",
+                "failing_test_node_ids": [
+                    "tests/unit/test_widget.py::test_handles_edges",
+                ],
+                "failing_test_evidence": [
+                    "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError",
+                ],
+            }
+        },
+    )
+
+    response = await client.get(f"/v1/workspaces/{workspace_id}/validation")
+
+    assert response.status_code == 200
+    item = response.json()["items"][0]
+    assert item["coverage_percent"] == 99.2
+    assert item["coverage_status"] == "passed"
+    assert item["coverage_reason_code"] == "COVERAGE_OK"
+    assert item["failing_test_node_ids"] == [
+        "tests/unit/test_widget.py::test_handles_edges",
+    ]
+    assert item["failing_test_evidence"] == [
+        "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError",
+    ]
+
+
+@pytest.mark.unit
 async def test_validation_provenance_malformed_persisted_command_uses_safe_defaults(
     client: AsyncClient,
     engine: AsyncEngine,

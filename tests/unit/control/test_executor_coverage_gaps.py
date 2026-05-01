@@ -10,6 +10,7 @@ from awf.control.executor import (
     _apply_baseline_coverage_ratchet,
     _validation_failure_message,
     _validation_run_coverage_metadata,
+    _validation_run_reason_code,
 )
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -44,6 +45,8 @@ def _coverage(
     status: str = "failed",
     command_result: ValidationCommandResult | None = None,
     gaps: list[dict[str, object]] | None = None,
+    failing_test_node_ids: list[str] | None = None,
+    failing_test_evidence: list[str] | None = None,
 ) -> ValidationCoverageResult:
     return ValidationCoverageResult(
         provider="python",
@@ -54,6 +57,8 @@ def _coverage(
         reason_code=reason_code,
         command_result=command_result if command_result is not None else _command_result(tmp_path),
         gaps=gaps if gaps is not None else [],
+        failing_test_node_ids=failing_test_node_ids if failing_test_node_ids is not None else [],
+        failing_test_evidence=failing_test_evidence if failing_test_evidence is not None else [],
     )
 
 
@@ -150,6 +155,151 @@ def test_validation_run_coverage_metadata_includes_gaps(tmp_path: Path) -> None:
     assert metadata is not None
     assert metadata["gaps"] == gaps
     assert metadata["percent"] == 91.0
+
+
+@pytest.mark.unit
+def test_validation_run_coverage_metadata_includes_failing_test_evidence(
+    tmp_path: Path,
+) -> None:
+    node_ids = ["tests/unit/test_widget.py::test_handles_edges"]
+    evidence = ["FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"]
+    result = ValidationResult(
+        coverage=_coverage(
+            tmp_path,
+            percent=99.2,
+            reason_code="COVERAGE_OK",
+            status="passed",
+            failing_test_node_ids=node_ids,
+            failing_test_evidence=evidence,
+        )
+    )
+
+    metadata = _validation_run_coverage_metadata(result)
+
+    assert metadata is not None
+    assert metadata["failing_test_node_ids"] == node_ids
+    assert metadata["failing_test_evidence"] == evidence
+
+
+@pytest.mark.unit
+def test_validation_run_reason_prefers_pytest_failure_when_coverage_met(
+    tmp_path: Path,
+) -> None:
+    command = _command_result(tmp_path, returncode=1)
+    command = ValidationCommandResult(
+        command=command.command,
+        returncode=command.returncode,
+        duration_seconds=command.duration_seconds,
+        stdout_path=command.stdout_path,
+        stderr_path=command.stderr_path,
+        phase=command.phase,
+        reason_code="PYTEST_TEST_FAILURE",
+        stream_ids=command.stream_ids,
+        metadata={"failing_test_node_ids": ["tests/unit/test_widget.py::test_handles_edges"]},
+    )
+    result = ValidationResult(
+        commands=[command],
+        coverage=_coverage(
+            tmp_path,
+            percent=99.2,
+            reason_code="COVERAGE_OK",
+            status="passed",
+            command_result=command,
+            failing_test_node_ids=["tests/unit/test_widget.py::test_handles_edges"],
+            failing_test_evidence=[
+                "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
+            ],
+        ),
+    )
+
+    assert _validation_run_reason_code(result) == "PYTEST_TEST_FAILURE"
+
+
+@pytest.mark.unit
+def test_coverage_wrapped_pytest_failure_and_coverage_below_threshold_surfaces_both(
+    tmp_path: Path,
+) -> None:
+    node_ids = ["tests/unit/test_widget.py::test_handles_edges"]
+    evidence = ["FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"]
+    command = _command_result(tmp_path, returncode=1)
+    command = ValidationCommandResult(
+        command=command.command,
+        returncode=command.returncode,
+        duration_seconds=command.duration_seconds,
+        stdout_path=command.stdout_path,
+        stderr_path=command.stderr_path,
+        phase=command.phase,
+        reason_code="PYTEST_TEST_FAILURE",
+        stream_ids=command.stream_ids,
+        metadata={
+            "failing_test_node_ids": node_ids,
+            "failing_test_evidence": evidence,
+        },
+    )
+    result = ValidationResult(
+        commands=[command],
+        coverage=_coverage(
+            tmp_path,
+            percent=98,
+            minimum=99,
+            reason_code="COVERAGE_BELOW_THRESHOLD",
+            status="failed",
+            command_result=command,
+            failing_test_node_ids=node_ids,
+            failing_test_evidence=evidence,
+        ),
+    )
+
+    assert _validation_run_reason_code(result) == "PYTEST_TEST_FAILURE"
+    assert result.coverage is not None
+    assert result.coverage.reason_code == "COVERAGE_BELOW_THRESHOLD"
+    message = _validation_failure_message(result)
+    assert "tests/unit/test_widget.py::test_handles_edges" in message
+    assert "coverage 98.0% is also below required 99.0%" in message
+    assert "fix the failing test first" in message
+
+
+@pytest.mark.unit
+def test_validation_failure_message_names_failing_tests_when_coverage_met(
+    tmp_path: Path,
+) -> None:
+    node_ids = ["tests/unit/test_widget.py::test_handles_edges"]
+    evidence = ["FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"]
+    command = _command_result(tmp_path, returncode=1)
+    command = ValidationCommandResult(
+        command=command.command,
+        returncode=command.returncode,
+        duration_seconds=command.duration_seconds,
+        stdout_path=command.stdout_path,
+        stderr_path=command.stderr_path,
+        phase=command.phase,
+        reason_code="PYTEST_TEST_FAILURE",
+        stream_ids=command.stream_ids,
+        metadata={
+            "failing_test_node_ids": node_ids,
+            "failing_test_evidence": evidence,
+        },
+    )
+    result = ValidationResult(
+        commands=[command],
+        coverage=_coverage(
+            tmp_path,
+            percent=99.2,
+            minimum=99,
+            reason_code="COVERAGE_OK",
+            status="passed",
+            command_result=command,
+            failing_test_node_ids=node_ids,
+            failing_test_evidence=evidence,
+        ),
+    )
+
+    message = _validation_failure_message(result)
+
+    assert "tests/unit/test_widget.py::test_handles_edges" in message
+    assert "coverage met the 99.0% requirement at 99.2%" in message
+    assert "raise coverage" not in message.lower()
+    assert "add meaningful tests" not in message.lower()
 
 
 @pytest.mark.unit

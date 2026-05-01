@@ -76,6 +76,12 @@ class ValidationFixContext:
     baseline_coverage_percent: float | None = None
     """Coverage observed before the agent changed the branch, when measured."""
 
+    failing_test_node_ids: tuple[str, ...] = ()
+    """Pytest node IDs parsed from coverage-wrapped pytest output."""
+
+    failing_test_evidence: tuple[str, ...] = ()
+    """Fallback pytest failure evidence when node IDs are unavailable."""
+
 
 def read_output_tail(path: Path, *, max_chars: int = DEFAULT_TAIL_CHARS) -> str:
     """Return up to ``max_chars`` trailing characters from a file.
@@ -126,18 +132,46 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
     stdout_block = context.stdout_tail.rstrip() or "(empty)"
     stderr_block = context.stderr_tail.rstrip() or "(empty)"
     test_cmds_block = "\n".join(f"  - {cmd}" for cmd in context.test_commands)
-    policy_block = (
-        "Quality-gate policy:\n"
-        "  - Do not lower, disable, or bypass validation or coverage thresholds.\n"
+    coverage_below_threshold = (
+        context.coverage_percent is not None
+        and context.coverage_minimum_percent is not None
+        and context.coverage_percent < context.coverage_minimum_percent
+    )
+    coverage_meets_threshold = (
+        context.coverage_percent is not None
+        and context.coverage_minimum_percent is not None
+        and context.coverage_percent >= context.coverage_minimum_percent
+    )
+    policy_lines = [
+        "Quality-gate policy:",
+        "  - Do not lower, disable, or bypass validation or coverage thresholds.",
         "  - Do not edit quality-gate configuration files such as "
         "`.awf/workspace.yml`, `pyproject.toml`, `.coveragerc`, "
         "`pytest.ini`, or CI workflow files unless the task explicitly "
-        "asked you to change those policies.\n"
-        "  - If coverage is below the configured threshold, add meaningful "
-        "tests for the relevant code paths. If the threshold is already "
-        "unreachable on the unchanged base branch, preserve the threshold "
-        "and make the smallest honest coverage improvement you can.\n"
-    )
+        "asked you to change those policies.",
+    ]
+    if coverage_below_threshold:
+        policy_lines.append(
+            "  - Coverage is below the configured threshold; add meaningful "
+            "tests for the relevant code paths after fixing any named failing "
+            "tests. If the threshold is already unreachable on the unchanged "
+            "base branch, preserve the threshold and make the smallest honest "
+            "coverage improvement you can."
+        )
+    elif coverage_meets_threshold:
+        policy_lines.append(
+            "  - Coverage already meets the configured threshold; focus this "
+            "retry on the named pytest failures."
+        )
+    policy_block = "\n".join(policy_lines) + "\n"
+    failing_values = context.failing_test_node_ids or context.failing_test_evidence
+    failing_tests_block = ""
+    if failing_values:
+        failing_tests_block = (
+            "Failing pytest tests:\n"
+            + "\n".join(f"  - {value}" for value in failing_values[:10])
+            + "\nPrimary retry action: fix the failing pytest tests first.\n"
+        )
     coverage_lines: list[str] = []
     if context.reason_code:
         coverage_lines.append(f"Reason code: {context.reason_code}")
@@ -149,6 +183,10 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
         coverage_lines.append(
             f"Pre-agent base-branch coverage: {context.baseline_coverage_percent:.2f}%"
         )
+    if coverage_meets_threshold:
+        coverage_lines.append("Coverage already meets the configured threshold")
+    elif coverage_below_threshold and failing_values:
+        coverage_lines.append("Fix the failing pytest tests first, then revisit coverage")
     coverage_block = ""
     if coverage_lines:
         coverage_block = "Coverage context:\n" + "\n".join(f"  - {line}" for line in coverage_lines)
@@ -164,6 +202,7 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
         f"{stderr_block}\n\n"
         f"All validation commands that will run on the next pass:\n"
         f"{test_cmds_block}\n\n"
+        f"{failing_tests_block}\n"
         f"{policy_block}\n"
         f"{coverage_block}\n\n"
         f"Your job: FIX the failure above. Inspect the tail output for "

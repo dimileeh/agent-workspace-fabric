@@ -1653,6 +1653,105 @@ class TestCoverageEnforcement:
         assert result.first_failure.reason_code == "COVERAGE_BELOW_THRESHOLD"
 
     @pytest.mark.unit
+    async def test_coverage_wrapped_pytest_failure_with_coverage_at_threshold_is_test_failure(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=1,
+            stdout=(
+                "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError\n"
+                "Name        Stmts   Miss  Cover\n"
+                "-------------------------------\n"
+                "TOTAL         100      1    99%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-wrapped-pytest-failure",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_coverage_wrapped_pytest_failure",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+        )
+
+        assert not result.all_passed
+        assert result.coverage is not None
+        assert result.coverage.percent == 99
+        assert result.coverage.minimum_percent == 99
+        assert result.coverage.status == "passed"
+        assert result.coverage.reason_code == "COVERAGE_OK"
+        assert result.coverage.failing_test_node_ids == [
+            "tests/unit/test_widget.py::test_handles_edges"
+        ]
+        assert result.coverage.failing_test_evidence == [
+            "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
+        ]
+        assert result.first_failure is not None
+        assert result.first_failure.phase == "coverage"
+        assert result.first_failure.reason_code == "PYTEST_TEST_FAILURE"
+        assert result.first_failure.metadata["failing_test_node_ids"] == [
+            "tests/unit/test_widget.py::test_handles_edges"
+        ]
+
+    @pytest.mark.unit
+    async def test_coverage_below_threshold_with_tests_passing_stays_coverage_failure(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=0,
+            stdout=(
+                "2 passed in 0.10s\n"
+                "Name        Stmts   Miss  Cover\n"
+                "-------------------------------\n"
+                "TOTAL         100      2    98%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-below-threshold-tests-passing",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 99,
+                        "enforce": True,
+                        "command": "pytest --cov=awf --cov-report=term",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_coverage_below_threshold_tests_passing",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+        )
+
+        assert not result.all_passed
+        assert result.coverage is not None
+        assert result.coverage.percent == 98
+        assert result.coverage.status == "failed"
+        assert result.coverage.reason_code == "COVERAGE_BELOW_THRESHOLD"
+        assert result.coverage.failing_test_node_ids == []
+        assert result.coverage.failing_test_evidence == []
+        assert result.first_failure is not None
+        assert result.first_failure.reason_code == "COVERAGE_BELOW_THRESHOLD"
+
+    @pytest.mark.unit
     async def test_coverage_without_command_streams_artifacts_instead_of_eager_reads(
         self,
         runner: tuple[FakeCommandRunner, ValidationRunner],
@@ -1757,6 +1856,26 @@ class TestCoverageEnforcement:
         assert _parse_python_coverage_percent_from_files([coverage_output]) == 98
         assert _parse_python_coverage_percent_from_files([summary_only]) == 87.5
         assert _parse_python_coverage_percent_from_files([no_coverage]) is None
+
+    @pytest.mark.unit
+    def test_pytest_failure_parser_falls_back_to_best_evidence_without_node_ids(
+        self, tmp_path: Path
+    ) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "ERROR collecting tests/unit/test_imports.py\n"
+            "ImportError while importing test module '/workspace/tests/unit/test_imports.py'.\n"
+            "E   ModuleNotFoundError: No module named 'missing_dependency'\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == []
+        assert evidence.evidence == [
+            "ERROR collecting tests/unit/test_imports.py",
+            "E   ModuleNotFoundError: No module named 'missing_dependency'",
+        ]
 
     @pytest.mark.unit
     def test_coverage_reason_and_status_matrix(self, tmp_path: Path) -> None:
