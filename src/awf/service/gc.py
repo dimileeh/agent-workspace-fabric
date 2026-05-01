@@ -500,7 +500,10 @@ async def plan_terminal_workspace_gc(
             default_policy=default_policy,
             cleanup_enabled=cleanup_enabled,
         )
-        if isinstance(classification, WorkspaceGCPreserved):
+        if isinstance(classification, WorkspaceGCCandidate):
+            candidates.append(classification)
+            candidate_ids.add(workspace.id)
+        elif isinstance(classification, WorkspaceGCPreserved):
             preserved.append(classification)
     return WorkspaceGCPlan(
         work_dir=normalized_work_dir,
