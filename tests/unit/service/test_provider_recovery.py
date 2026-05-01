@@ -15,6 +15,7 @@ from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import Operation, TaskAttempt, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
+from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.service.provider_recovery import (
     ProviderRecoveryDecision,
     create_provider_recovery_attempt_row,
@@ -307,6 +308,17 @@ async def test_fallback_attempt_inherits_lineage_and_workspace_policy(
 ) -> None:
     service = WorkspaceService(factory)
     source_response = await service.create_v2(_request())
+    requested_profile = {
+        "name": "requested-provider-recovery",
+        "source": "inline-test",
+        "validation": {"requested_tier": 2},
+    }
+    resolved_profile = WorkspaceProfile(
+        name="provider-recovery",
+        source="test",
+        validation={"requested_tier": 2},
+        monitor=ProfileMonitor(initial_review_grace_period_seconds=45),
+    ).model_dump(mode="json")
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -315,10 +327,20 @@ async def test_fallback_attempt_inherits_lineage_and_workspace_policy(
         await repo.transition(source, to=WorkspaceStatus.provisioning, reason_code="SEED")
         source.branch_name = "awf/ws_old"
         source.remote_push_branch = "awf/ws_old"
+        source.profile_ref = "python-provider-recovery"
+        source.requested_profile = requested_profile
+        source.resolved_profile = resolved_profile
         source.task_policy = {
             **source.task_policy,
+            "pr_monitor": {"review_grace_seconds": 45},
             "provider_recovery_state": {"retry_attempt_number": 1},
         }
+        source_attempt = (
+            await session.execute(
+                select(TaskAttempt).where(TaskAttempt.workspace_id == source.id)
+            )
+        ).scalar_one()
+        source_attempt.is_canonical_for_merge = True
         source.failure_reason = FailureReason.agent_failure.value
         source.failure_message = "RESOURCE_EXHAUSTED RetryableQuotaError"
         await repo.transition(
@@ -344,6 +366,8 @@ async def test_fallback_attempt_inherits_lineage_and_workspace_policy(
             now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
         )
         assert result is not None
+        assert result.action == "fallback"
+        assert result.reason_code == "PROVIDER_FALLBACK_SELECTED"
         await session.commit()
         new_workspace_id = result.new_workspace_id
 
@@ -387,18 +411,47 @@ async def test_fallback_attempt_inherits_lineage_and_workspace_policy(
     assert fallback.owned_paths == source.owned_paths
     assert fallback.test_commands == source.test_commands
     assert fallback.profile_ref == source.profile_ref
-    assert fallback.requested_profile == source.requested_profile
-    assert fallback.resolved_profile == source.resolved_profile
+    assert fallback.profile_ref == "python-provider-recovery"
+    assert fallback.requested_profile == requested_profile
+    assert fallback.resolved_profile == resolved_profile
+    assert fallback.resolved_profile["validation"]["requested_tier"] == 2
+    assert (
+        fallback.resolved_profile["monitor"]["initial_review_grace_period_seconds"]
+        == 45
+    )
     assert fallback.auto_merge is False
     assert fallback.initial_review_grace_period_seconds == 45
     assert fallback.task_kind == source.task_kind
     assert fallback.agent == "codex"
     assert fallback.task_policy["agent_model"] == "gpt-5.3-codex"
-    assert fallback.task_policy["provider_recovery_state"]["source_workspace_id"] == source.id
-    assert fallback.task_policy["provider_recovery_state"]["fallback_attempt_number"] == 1
-    assert fallback.task_policy["provider_recovery_state"]["retry_attempt_number"] == 0
+    assert fallback.task_policy["pr_monitor"] == {"review_grace_seconds": 45}
+    source_state = source.task_policy["provider_recovery_state"]
+    fallback_state = fallback.task_policy["provider_recovery_state"]
+    assert source_state["source_workspace_id"] == source.id
+    assert source_state["source_attempt_id"] == attempts[0].id
+    assert source_state["source_task_id"] == attempts[0].task_id
+    assert source_state["source_canonical_attempt_id"] == attempts[0].id
+    assert source_state["action"] == "fallback"
+    assert source_state["not_before"] == "2026-05-01T12:03:00+00:00"
+    assert fallback_state["source_workspace_id"] == source.id
+    assert fallback_state["source_attempt_id"] == attempts[0].id
+    assert fallback_state["source_task_id"] == attempts[0].task_id
+    assert fallback_state["source_canonical_attempt_id"] == attempts[0].id
+    assert fallback_state["fallback_attempt_number"] == 1
+    assert fallback_state["retry_attempt_number"] == 0
+    assert fallback_state["target_provider"] == "openai"
+    assert fallback_state["target_model"] == "gpt-5.3-codex"
     assert attempts[1].parent_attempt_id == attempts[0].id
     assert attempts[1].redispatch_from_attempt_id == attempts[0].id
+    assert attempts[1].is_canonical_for_merge is False
     assert operations[0].type == "retry"
+    assert operations[0].payload["source_workspace_id"] == source.id
+    assert operations[0].payload["source_attempt_id"] == attempts[0].id
+    assert operations[0].payload["source_task_id"] == attempts[0].task_id
+    assert operations[0].payload["source_canonical_attempt_id"] == attempts[0].id
     assert operations[0].payload["provider_recovery"]["action"] == "fallback"
+    assert operations[0].payload["provider_recovery"]["target_provider"] == "openai"
     assert events[0].payload["new_workspace_id"] == fallback.id
+    assert events[0].payload["source_attempt_id"] == attempts[0].id
+    assert events[0].payload["source_task_id"] == attempts[0].task_id
+    assert events[0].payload["source_canonical_attempt_id"] == attempts[0].id
