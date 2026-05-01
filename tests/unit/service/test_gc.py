@@ -13,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import awf.service.gc as gc
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceEvent
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
     SecretLeaseIssue,
     SecretLeaseRepository,
