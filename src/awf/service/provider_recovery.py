@@ -623,6 +623,8 @@ def _recovery_task_policy(
         "source_workspace_id": source_workspace_id,
         "source_attempt_id": source_attempt.id if source_attempt is not None else None,
         "source_reason_code": _metadata_str(metadata, "reason_code"),
+        "source_provider": _metadata_str(metadata, "provider"),
+        "source_model": _metadata_str(metadata, "model"),
         "failure_fingerprints": fingerprints,
         "fallback_attempt_number": decision.fallback_attempt_number,
         "retry_attempt_number": decision.retry_attempt_number,
@@ -828,8 +830,8 @@ def _provider_recovery_state_from_task_policy(
     else:
         action = action_raw  # type: ignore[assignment]
     reason_code = _mapping_str(recovery_state, "source_reason_code")
-    source_provider = _mapping_str(recovery_state, "target_provider")
-    source_model = _mapping_str(recovery_state, "target_model")
+    source_provider = _mapping_str(recovery_state, "source_provider") or _mapping_str(recovery_state, "target_provider")
+    source_model = _mapping_str(recovery_state, "source_model") or _mapping_str(recovery_state, "target_model")
     retry_attempt_number = _nonnegative_int(recovery_state.get("retry_attempt_number"), default=0) if "retry_attempt_number" in recovery_state else None
     fallback_attempt_number = _nonnegative_int(recovery_state.get("fallback_attempt_number"), default=0) if "fallback_attempt_number" in recovery_state else None
     not_before_str = _mapping_str(recovery_state, "not_before")

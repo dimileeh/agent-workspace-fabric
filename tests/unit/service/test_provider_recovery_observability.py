@@ -30,6 +30,8 @@ def _workspace_with_provider_recovery_state(
     target_agent: str = "codex",
     target_provider: str | None = "openai",
     target_model: str = "gpt-5",
+    source_provider: str | None = None,
+    source_model: str | None = None,
     source_workspace_id: str = "ws-source-001",
     source_attempt_id: str = "att-001",
     not_before: str | None = None,
@@ -37,6 +39,8 @@ def _workspace_with_provider_recovery_state(
     state: dict[str, Any] = {
         "action": action,
         "source_reason_code": reason_code,
+        "source_provider": source_provider or target_provider,
+        "source_model": source_model or target_model,
         "retry_attempt_number": retry_attempt_number,
         "fallback_attempt_number": fallback_attempt_number,
         "target_agent": target_agent,
@@ -121,6 +125,28 @@ def test_provider_recovery_state_for_workspace_extracts_from_task_policy() -> No
     assert view.source_attempt_id == "att-001"
 
 
+def test_provider_recovery_state_for_workspace_fallback_preserves_source_lineage() -> None:
+    not_before_iso = (datetime.now(UTC) + timedelta(seconds=300)).isoformat()
+    workspace = _workspace_with_provider_recovery_state(
+        action="fallback",
+        reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
+        target_agent="codex",
+        target_provider="openai",
+        target_model="gpt-5.3-codex",
+        source_provider="google",
+        source_model="gemini-2.5-pro",
+        not_before=not_before_iso,
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.action == "fallback"
+    assert view.source_provider == "google"
+    assert view.source_model == "gemini-2.5-pro"
+    assert view.fallback_target is not None
+    assert view.fallback_target.provider == "openai"
+    assert view.fallback_target.model == "gpt-5.3-codex"
+
+
 def test_provider_recovery_state_for_workspace_extracts_from_events() -> None:
     workspace = _workspace_with_cooldown_event()
     view = provider_recovery_state_for_workspace(workspace)
@@ -134,6 +160,33 @@ def test_provider_recovery_state_for_workspace_returns_none_when_no_recovery() -
     workspace = _workspace_without_recovery()
     view = provider_recovery_state_for_workspace(workspace)
     assert view is None
+
+
+def test_provider_recovery_state_task_policy_falls_back_to_target_when_source_missing() -> None:
+    state_data: dict[str, Any] = {
+        "action": "retry",
+        "source_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+        "retry_attempt_number": 1,
+        "fallback_attempt_number": 0,
+        "target_agent": "codex",
+        "target_provider": "openai",
+        "target_model": "gpt-5",
+        "source_workspace_id": "ws-source-001",
+        "source_attempt_id": "att-001",
+    }
+    workspace = SimpleNamespace(
+        id="ws-001",
+        status="failed",
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: state_data},
+        failure_reason="agent_failure",
+        failure_message="Provider exhausted",
+        agent="codex",
+        events=[],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.source_provider == "openai"
+    assert view.source_model == "gpt-5"
 
 
 def test_provider_recovery_decision_from_workspace_derives_cooldown() -> None:
