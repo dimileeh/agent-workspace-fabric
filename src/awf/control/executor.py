@@ -701,11 +701,6 @@ class WorkspaceExecutor:
             # fails the workspace with ``agent_failure`` below. If there
             # IS work, validation decides whether it's pushable.
             #
-            # TODO: Future Circuit Breaker / Fallback Hook
-            # If exc.reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED", we should
-            # eventually implement fallback dispatch logic to transparently switch to
-            # another provider (e.g., Claude -> Gemini) instead of letting the workspace
-            # fail. This would require skipping the commit check and re-running the agent phase.
             agent_exit_note = (
                 f"agent CLI exited {exc.result.returncode} ({exc.reason_code}); "
                 f"continuing to salvage any uncommitted work"
@@ -974,10 +969,6 @@ class WorkspaceExecutor:
                     if agent_exit_note is not None:
                         message = f"{message}; {agent_exit_note}"
 
-                    # TODO: Future Circuit Breaker / Fallback Hook
-                    # If agent_run_reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
-                    # we should trap this failure here and initiate fallback dispatch
-                    # rather than permanently marking the workspace as failed.
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -1405,10 +1396,6 @@ class WorkspaceExecutor:
                 # through to commit any salvaged work, then continue the
                 # loop (next validation will tell us if it's pushable).
                 #
-                # TODO: Future Circuit Breaker / Fallback Hook
-                # If exc.reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED" during a fix pass,
-                # we should implement fallback dispatch logic to attempt the fix with a
-                # different provider rather than proceeding with a likely incomplete salvage.
                 _log.warning(
                     "executor.fix_pass_agent_nonzero_exit",
                     workspace_id=workspace_id,
