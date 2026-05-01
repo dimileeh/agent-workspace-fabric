@@ -53,7 +53,6 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | [#161](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/161) | monitoring_pr | Reattached after fixing the validate-only recovery bug locally in `faf5911`; AWF pushed/synced the PR branch to `5184b91` and is waiting for async checks/review grace before merge. |
 
 ### Reschedule Required Slices
 
@@ -65,12 +64,13 @@ reschedule its corresponding slice.
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
 | P1 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_0d9b0d2e6b1d48149c0c5291` | none | reschedule_required | No work landed. Codex Spark exited on model usage quota before producing commits; reschedule with an approved non-Spark provider/model after provider backoff/fallback support is in place. |
-| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_90f9152eefb54c899fccbd9b`, `ws_6c5890fe7d2b43b4ba94c8ad` | branch `awf/ws_90f9152eefb54c899fccbd9b` | reschedule_required | Work has not landed. `ws_90f9152eefb54c899fccbd9b` produced useful commits but failed validation on a prompt assertion; the retry `ws_6c5890fe7d2b43b4ba94c8ad` then failed before work due Codex Spark usage quota. Recover from the preserved branch with an approved non-Spark provider/model. |
+| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_90f9152eefb54c899fccbd9b`, `ws_6c5890fe7d2b43b4ba94c8ad`, `ws_ce97e6cd47134be49c522843` | branch `awf/ws_90f9152eefb54c899fccbd9b` | reschedule_required | Work has not landed. `ws_90f9152eefb54c899fccbd9b` produced useful commits but failed validation on a prompt assertion; retry `ws_6c5890fe7d2b43b4ba94c8ad` failed before work due Codex Spark usage quota; superseding Codex `gpt-5.5` retry `ws_ce97e6cd47134be49c522843` was operator-cancelled after cleanup/state churn. Recover from the preserved branch with an approved model only when the operator restarts this slice. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | [#161](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/161) | merged | Reattached after fixing the validate-only recovery bug locally in `faf5911`; merged 2026-05-01. |
 | P1 Provider Resilience And Automated Fallback Recovery | No-work failed idle container cleanup | `ws_cfee1e44d23a41a2aae90c8c` | [#163](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/163) | merged | Revived existing PR monitor instead of rescheduling; Codex `gpt-5.3-codex-spark`; merged 2026-05-01. |
 | P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_1e79f6b47faf44d0bf8de3f0` | [#159](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/159) | merged | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_7c8ec611a3d14b6cb4612344`; merged 2026-05-01. |
 | P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | [#162](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/162) | merged | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` propagation landed structured provider-capacity classification. |
