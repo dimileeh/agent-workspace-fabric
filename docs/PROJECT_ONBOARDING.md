@@ -5,6 +5,17 @@ with AWF without launching a workspace. The first pass should inspect the repo,
 draft `.awf/workspace.yml`, show gaps, and stop. Humans or agents can then edit
 the draft and decide when to submit a real workspace request.
 
+## First-run operator command
+
+Run `awf init <path>` for the first onboarding pass. It runs local readiness
+checks (without calling AWF API), prints plain-language next steps, and points to
+profile-edit and smoke-workspace workflows.
+
+```bash
+awf init .
+awf init . --include-smoke-request
+```
+
 ## One-message prompt
 
 Use this with Codex, Claude Code, Gemini, OpenCode, OpenClaw, or a human
@@ -12,9 +23,14 @@ operator:
 
 ```text
 Inspect this repository for AWF onboarding. Do not launch a workspace, push,
-open a PR, or start project services. Run `awf profile init . --format pretty`
-to preview a draft `.awf/workspace.yml`, review the diagnostics, then run
-`awf profile init . --write` only if the draft is useful. Keep secrets as
+open a PR, or start project services. Start with:
+
+`awf init .`
+`awf profile preview .`
+`awf profile init . --write`
+
+or use `awf profile init . --include-smoke-request` for a local copy-paste smoke request
+payload (local-only, no submission). Keep secrets as
 profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
 
@@ -23,7 +39,7 @@ profile declarations or `${VAR}` placeholders; never write raw secret values.
 Preview only:
 
 ```bash
-awf profile init . --format pretty
+awf profile preview .
 ```
 
 Write a draft profile:

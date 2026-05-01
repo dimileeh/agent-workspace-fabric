@@ -306,6 +306,25 @@ def test_smoke_request_shape_is_optional_and_does_not_launch(tmp_path: Path) -> 
 
 
 @pytest.mark.unit
+def test_smoke_request_uses_generic_profile_when_default(tmp_path: Path) -> None:
+    preview = preview_project_onboarding(tmp_path, include_smoke_request=True)
+
+    assert preview.smoke_request is not None
+    assert preview.smoke_request["workspace"]["profile"]["name"] == "generic"
+    assert preview.smoke_request["workspace"]["profile"]["source"] == "onboarding:generic"
+
+
+@pytest.mark.unit
+def test_preview_smoke_request_does_not_imply_aira_profile(tmp_path: Path) -> None:
+    preview = preview_project_onboarding(tmp_path, include_smoke_request=True)
+
+    assert preview.smoke_request is not None
+    assert preview.smoke_request["workspace"]["profile_ref"] is None
+    assert preview.smoke_request["workspace"]["profile"]["source"].startswith("onboarding:")
+    assert preview.smoke_request["task"]["agent"] == "codex"
+
+
+@pytest.mark.unit
 def test_inspection_rejects_missing_or_file_paths(tmp_path: Path) -> None:
     missing = tmp_path / "missing"
     file_path = tmp_path / "README.md"

@@ -674,6 +674,7 @@ async def test_default_plan_includes_superseded_no_work_candidate(
         assert workspace is not None
         workspace.status = "superseded"
         workspace.compose_project_name = "awf_superseded_gc"
+        workspace.updated_at = now - timedelta(hours=200)
         await session.commit()
 
     monkeypatch.setattr(
@@ -708,6 +709,57 @@ async def test_default_plan_includes_superseded_no_work_candidate(
 
 
 @pytest.mark.unit
+async def test_default_plan_preserves_recent_superseded_no_work_within_retention(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=1),
+    )
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.status = "superseded"
+        workspace.compose_project_name = "awf_recent_superseded_gc"
+        await session.commit()
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="stopped",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="running",
+                        command="sleep infinity",
+                    )
+                ],
+            )
+        ),
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=tmp_path / "service",
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert plan.candidates == []
+    assert plan.preserved_count == 1
+    assert plan.preserved[0].workspace_id == workspace_id
+    assert plan.preserved[0].reason_code == WORKSPACE_WITHIN_RETENTION
+
+
+@pytest.mark.unit
 async def test_single_workspace_filesystem_gc_keeps_superseded_no_work_on_dry_run(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -724,6 +776,7 @@ async def test_single_workspace_filesystem_gc_keeps_superseded_no_work_on_dry_ru
         assert workspace is not None
         workspace.status = "superseded"
         workspace.compose_project_name = "awf_single_superseded_gc"
+        workspace.updated_at = now - timedelta(hours=200)
         await session.commit()
     _write(tmp_path / "service" / "git" / "worktrees" / workspace_id / "repo.txt", "repo")
 

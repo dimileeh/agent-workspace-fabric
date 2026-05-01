@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import urllib.parse
+from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -234,6 +235,137 @@ def _handle_response(
 
 
 # ── Commands ─────────────────────────────────────────────────────────────
+
+
+@app.command("init")
+def init(
+    path: Path = typer.Argument(..., help="Path to a checked-out repository."),
+    include_smoke_request: bool = typer.Option(
+        False,
+        "--include-smoke-request",
+        help="Include a smoke-workspace request payload (does not submit).",
+    ),
+) -> None:
+    """Run local onboarding checks and print clear next steps for first setup."""
+    from awf.profiles.onboarding import preview_project_onboarding
+    from awf.service.config import ServiceSettings, resolve_service_settings
+    from awf.service.doctor import collect_doctor_report, render_doctor_pretty
+    from awf.service.doctor.models import DoctorReport
+    from awf.service.status import collect_service_status
+
+    repository = path.expanduser().resolve()
+
+    if not repository.exists():
+        typer.echo(f"error: project path does not exist: {repository}", err=True)
+        raise typer.Exit(code=2)
+    if not repository.is_dir():
+        typer.echo(f"error: project path is not a directory: {repository}", err=True)
+        raise typer.Exit(code=2)
+
+    try:
+        settings = resolve_service_settings()
+        service_name = getattr(settings, "service_name", "unknown")
+
+        async def _collect_reports() -> tuple[dict[str, object], DoctorReport]:
+            service_status_task = asyncio.create_task(
+                collect_service_status(
+                    settings,
+                    strict_providers=frozenset(),
+                    provider_environ=os.environ,
+                )
+            )
+
+            async def _collect_cached_service_status(
+                settings: ServiceSettings,
+                *,
+                strict_providers: Iterable[str] | None = None,
+                provider_environ: Mapping[str, str] | None = None,
+            ) -> dict[str, object]:
+                _ = settings, strict_providers, provider_environ
+                try:
+                    return await service_status_task
+                except Exception as exc:
+                    return {
+                        "service": service_name,
+                        "status": "fail",
+                        "checks": {},
+                        "agent_readiness": {"status": "fail"},
+                        "detail": str(exc),
+                    }
+
+            service_status_result, doctor_report = await asyncio.gather(
+                service_status_task,
+                collect_doctor_report(
+                    settings,
+                    strict_providers=frozenset(),
+                    provider_environ=os.environ,
+                    environ=os.environ,
+                    status_collector=_collect_cached_service_status,
+                ),
+                return_exceptions=True,
+            )
+
+            service_status: dict[str, object]
+            if isinstance(service_status_result, BaseException):
+                service_status = {
+                    "service": service_name,
+                    "status": "fail",
+                    "checks": {},
+                    "agent_readiness": {"status": "fail"},
+                    "detail": str(service_status_result),
+                }
+            else:
+                service_status = service_status_result
+            if isinstance(doctor_report, BaseException):
+                raise doctor_report
+
+            return service_status, doctor_report
+
+        service_status, doctor_report = asyncio.run(_collect_reports())
+        preview = preview_project_onboarding(
+            repository,
+            include_smoke_request=include_smoke_request,
+        )
+    except ValueError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+    except Exception as exc:
+        typer.echo(f"error: could not collect local checks: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+
+    doctor_status = getattr(doctor_report, "status", "unknown")
+    service_ok = service_status.get("status") == "ok"
+    doctor_ok = doctor_status != "fail"
+
+    typer.echo("AWF init: local onboarding readiness check")
+    typer.echo(f"  repository: {repository}")
+    typer.echo(f"  detected profile template: {preview.draft.template}")
+    typer.echo(f"  service status: {service_status.get('status', 'unknown')}")
+    typer.echo(f"  doctor status: {doctor_status}")
+    typer.echo("")
+    typer.echo(render_doctor_pretty(doctor_report), nl=False)
+
+    if include_smoke_request and preview.smoke_request is not None:
+        typer.echo("")
+        typer.echo("Smoke request payload (local-only, not submitted):")
+        typer.echo(json.dumps(preview.smoke_request, indent=2, sort_keys=True, default=str))
+
+    typer.echo("")
+    typer.echo("Suggested next steps:")
+    typer.echo("  - Run `awf profile init <path> --write` to create `.awf/workspace.yml`.")
+    typer.echo("  - Run `awf profile preview <path> --profile <name>` to inspect profile resolution.")
+    typer.echo(
+        "  - Optional: generate a smoke workspace request locally with "
+        "`awf init <path> --include-smoke-request`; this prints the payload inline and does "
+        "not submit a workspace."
+    )
+
+    if not service_ok or not doctor_ok:
+        typer.echo(
+            "\nLocal prerequisites are not fully ready yet; fix the issues above before "
+            "creating or retrying workspaces."
+        )
+        raise typer.Exit(code=1)
 
 
 @app.command()
