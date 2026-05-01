@@ -845,6 +845,52 @@ def test_workspace_response_includes_planning_scope_failure_recovery_details() -
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("details", "expected_planning_scope"),
+    [
+        ({}, {}),
+        (
+            {"recommended_action": "Retry planning from a clean workspace."},
+            {"recommended_action": "Retry planning from a clean workspace."},
+        ),
+    ],
+)
+def test_planning_scope_legacy_fallback_keeps_only_present_detail_keys(
+    monkeypatch: pytest.MonkeyPatch,
+    details: dict[str, object],
+    expected_planning_scope: dict[str, object],
+) -> None:
+    captured_planning_scope: list[object] = []
+
+    def capture_planning_scope(value: object) -> None:
+        captured_planning_scope.append(value)
+
+    monkeypatch.setattr(
+        workspaces_service,
+        "_compact_planning_scope_payload",
+        capture_planning_scope,
+    )
+    workspace = SimpleNamespace(
+        failure_message=None,
+        events=[
+            SimpleNamespace(
+                event_type="workspace.state_changed",
+                new_state=WorkspaceStatus.failed.value,
+                reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                payload={
+                    "reason_code": AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                    "details": details,
+                },
+            )
+        ],
+    )
+
+    workspace_failure_details_payload(workspace)  # type: ignore[arg-type]
+
+    assert captured_planning_scope == [expected_planning_scope]
+
+
+@pytest.mark.unit
 def test_failure_details_omit_empty_payload_and_compact_malformed_conformance() -> None:
     empty_workspace = SimpleNamespace(
         failure_message=None,

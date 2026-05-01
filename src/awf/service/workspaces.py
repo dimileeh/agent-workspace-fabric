@@ -1068,7 +1068,7 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
             planning_scope = legacy_scope
         elif reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION:
             planning_scope = {
-                key: details.get(key)
+                key: details[key]
                 for key in (
                     "scope_phase",
                     "required_paths",
@@ -1080,6 +1080,7 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
                     "fallback_model",
                     "plan_artifact",
                 )
+                if key in details
             }
 
     result: dict[str, Any] = {
