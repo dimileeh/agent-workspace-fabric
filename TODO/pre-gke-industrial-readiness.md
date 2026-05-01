@@ -39,6 +39,7 @@ Priority key:
 
 Status values:
 
+- `requested` / `provisioning`: workspace has been accepted and is starting.
 - `running`: workspace is actively implementing the slice.
 - `validating`: workspace is in validation or validation-recovery and the PR
   monitor still owns the slice.
@@ -53,8 +54,11 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P0 Provider Resilience And Automated Fallback Recovery | Provider/model backoff, circuit breakers, fallback policy, and fallback attempt lineage | `ws_a012908420364984b230df51` | pending AWF PR | running | Codex `gpt-5.5`; scoped to the core retry/backoff/fallback recovery loop. |
-| P0 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_310bcd7bcf1949e9a8421915` | pending AWF PR | running | Codex `gpt-5.5`; retry of reschedule-required slice from `ws_0d9b0d2e6b1d48149c0c5291`. |
+| P0 Provider Resilience And Automated Fallback Recovery | Executor provider fallback end-to-end behavior | `ws_3434c0301e7744d6aefbd315` | pending AWF PR | running | Codex `gpt-5.5`; owns executor/service fallback attempt creation and lineage tests. |
+| P0 Provider Resilience And Automated Fallback Recovery | Conformance stall detection and recovery | `ws_52d8415a02424c4aa4730fa1` | pending AWF PR | running | Claude Code `claude-opus-4-7`; owns `AGENT_STALLED_IN_CONFORMANCE` and conformance-only recovery semantics. |
+| P0 Provider Resilience And Automated Fallback Recovery | PR monitor provider outage recovery | `ws_2a6d2ef4186d4c48960411ec` | pending AWF PR | running | Gemini `gemini-3.1-pro-preview`; owns PR-monitor fallback/cooldown behavior for comment/fix/rebase monitor agents. |
+| P0 Provider Resilience And Automated Fallback Recovery | Provider recovery API, metrics, merge queue, and console surfacing | `ws_ebad989fc19b41d39cb150b7` | pending AWF PR | running | OpenCode `ollama/glm-5.1:cloud`; owns operator-visible recovery state and schema compatibility. |
+| P0 Provider Resilience And Automated Fallback Recovery | Provider fallback contract and no-loop regression coverage | `ws_bae976c92edc4a2eacc89830` | pending AWF PR | running | OpenCode `ollama/deepseek-v4-pro:cloud`; owns cross-provider failure contract/no-loop/cleanup evidence tests. |
 
 ### Reschedule Required Slices
 
@@ -70,6 +74,8 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_310bcd7bcf1949e9a8421915` | [#165](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/165) | merged | Codex `gpt-5.5`; classifies pytest failures inside coverage commands separately from true coverage-threshold failures. |
+| P0 Provider Resilience And Automated Fallback Recovery | Provider/model backoff, circuit breakers, fallback policy, and fallback attempt lineage | `ws_a012908420364984b230df51` | [#166](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/166) | merged | Codex `gpt-5.5`; landed core retry/backoff/fallback recovery loop, with follow-up commit `75704ad` fixing fallback retry counter inheritance and final-head monitor gating. |
 | P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_42b3d10157fd4afbbbba0145` | [#164](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/164) | merged | Codex `gpt-5.5`; merged 2026-05-01 after resolving planning retry, plan artifact, and monitor recovery review comments. |
 | P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | [#161](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/161) | merged | Reattached after fixing the validate-only recovery bug locally in `faf5911`; merged 2026-05-01. |
 | P0 Provider Resilience And Automated Fallback Recovery | No-work failed idle container cleanup | `ws_cfee1e44d23a41a2aae90c8c` | [#163](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/163) | merged | Revived existing PR monitor instead of rescheduling; Codex `gpt-5.3-codex-spark`; merged 2026-05-01. |
@@ -336,28 +342,28 @@ reschedule its corresponding slice.
   conformance/report phase with an approved fallback model or proceed to
   validation when the implementation is complete and the missing artifact is
   limited to the conformance JSON.
-- [ ] Detect provider-capacity and quota markers from agent CLIs, including
+- [x] Detect provider-capacity and quota markers from agent CLIs, including
   `RESOURCE_EXHAUSTED`, `MODEL_CAPACITY_EXHAUSTED`, `RetryableQuotaError`,
   provider HTTP 429s, and equivalent OpenCode/Ollama, Codex, Claude, and
   Gemini transient capacity errors.
-- [ ] Store structured provider failure reason codes such as
+- [x] Store structured provider failure reason codes such as
   `AGENT_PROVIDER_CAPACITY_EXHAUSTED` instead of collapsing retryable provider
   outages into generic `agent_failure`.
 - [ ] Add delayed retry/backoff for no-work provider failures, preserving
   task/attempt lineage and making retry state visible in operations, events,
   API responses, merge queue context, and console surfaces.
-- [ ] Classify pytest failures inside coverage commands separately from true
+- [x] Classify pytest failures inside coverage commands separately from true
   coverage failures when coverage meets the configured threshold, including
   failing test node IDs, coverage percent/threshold, exit status, and focused
   retry guidance in API, console, and retry prompts.
-- [ ] Add provider/model circuit breakers that pause new dispatches to a
+- [x] Add provider/model circuit breakers that pause new dispatches to a
   failing provider/model after repeated transient capacity failures, with
   configurable cooldown windows and operator-visible reason codes.
-- [ ] Add per-workspace fallback policy at creation time so a task can declare
+- [x] Add per-workspace fallback policy at creation time so a task can declare
   approved fallback providers/models, for example Gemini -> OpenCode GLM or
   Gemini -> Codex `gpt-5.5`, while preserving canonical task/attempt lineage
   and recording why the fallback was selected.
-- [ ] Clean up no-work failed containers, networks, and pressure directories
+- [x] Clean up no-work failed containers, networks, and pressure directories
   after logs/artifacts are durably retained, without removing evidence needed
   for failure analysis or retries.
 - [ ] Add TDD coverage proving provider-capacity failures retry or fallback
