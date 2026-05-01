@@ -20,6 +20,7 @@ class CodexAdapter(AgentAdapter):
         return AgentRuntime.codex
 
     def get_provider(self, model: str | None) -> str:
+        del model
         return "openai"
 
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:

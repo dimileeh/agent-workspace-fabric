@@ -294,6 +294,13 @@ def _queue_push_and_pr(
     fake.queue_result(returncode=0, stdout=pr_url)  # gh pr create
 
 
+def _queue_existing_pr_push(fake: FakeCommandRunner, *, head: str = "deadbeef01") -> None:
+    fake.queue_result(returncode=0, stdout=f"{head}\n")  # rev-parse HEAD
+    fake.queue_result(returncode=0, stdout="awf/ws_test\n")  # abbrev-ref HEAD
+    fake.queue_result(returncode=0, stdout=f"{head[:7]} fix\n")  # log ahead-of-base
+    fake.queue_result(returncode=0)  # git push
+
+
 def _queue_rebase_recovery(fake: FakeCommandRunner) -> None:
     fake.queue_result(returncode=0)  # git fetch origin <base>
     fake.queue_result(returncode=0)  # git switch <branch>
@@ -414,11 +421,9 @@ async def test_executor_skips_planning_and_agent_run_when_recovery_dispatched(
     sentinel = "# pre-existing plan content — must survive monitor recovery\n"
     plan_path.write_text(sentinel, encoding="utf-8")
 
-    # Recovery skips Step 1/1b. Validation runs once and passes; push +
-    # PR update is a no-op against the existing PR URL.
-    _queue_validation_head(fake)
+    # Recovery skips Step 1/1b. Validation runs once at the same PR head and passes.
+    _queue_validation_head(fake, head="d" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation
-    _queue_push_and_pr(fake, pr_url="https://github.com/x/y/pull/1")
 
     await executor.execute(ws_id)
 
@@ -534,9 +539,8 @@ async def test_executor_recovery_marks_validate_operation_succeeded_on_clean_pas
     executor = _make_executor(fake=fake, factory=factory, tmp_path=tmp_path)
     ws_id = await _seed_ready_workspace_with_recovery(factory)
 
-    _queue_validation_head(fake)
+    _queue_validation_head(fake, head="d" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")  # validation
-    _queue_push_and_pr(fake)
 
     await executor.execute(ws_id)
 
@@ -579,7 +583,7 @@ async def test_operator_api_validate_only_recovery_skips_full_agent_path(
         source="operator_api",
     )
 
-    _queue_validation_head(fake)
+    _queue_validation_head(fake, head="d" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -843,7 +847,7 @@ async def test_open_pr_guard_uses_fresh_recovery_operation_after_claim(
         return ws
 
     executor._claim_ready = _claim_then_insert_recovery  # type: ignore[method-assign]
-    _queue_validation_head(fake)
+    _queue_validation_head(fake, head="d" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -930,7 +934,7 @@ async def test_recovery_skips_push_when_pr_already_exists(
     ws_id = await _seed_ready_workspace_with_recovery(factory, pr_url="https://github.com/x/y/pull/1")
 
     # Only validation should run; no push or PR creation commands.
-    _queue_validation_head(fake)
+    _queue_validation_head(fake, head="d" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -978,7 +982,7 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
         factory, pr_url="https://github.com/x/y/pull/1"
     )
 
-    _queue_validation_head(fake)
+    _queue_validation_head(fake, head="d" * 40)
     fake.queue_result(returncode=0, stdout="tests ok")
 
     await executor.execute(ws_id)
@@ -1000,6 +1004,72 @@ async def test_recovery_skip_push_with_factory_resumes_monitor_runner(
             and event.new_state == WorkspaceStatus.monitoring_pr.value
             for event in events
         )
+
+
+@pytest.mark.unit
+async def test_validate_only_recovery_pushes_existing_pr_after_fix_commit(
+    fake: FakeCommandRunner,
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    """If validate-only recovery needs a fix pass, the validated local
+    commit must be pushed back to the already-open PR before monitor handoff."""
+    monitor_calls: list[str] = []
+
+    class _FakeMonitor:
+        async def run(
+            self, *, workspace_id: str, compose_project: str, compose_file: Path
+        ) -> None:
+            del compose_project, compose_file
+            monitor_calls.append(workspace_id)
+
+    executor = _make_executor(
+        fake=fake,
+        factory=factory,
+        tmp_path=tmp_path,
+        max_fix_passes=1,
+        pr_monitor_factory=lambda *_args, **_kwargs: _FakeMonitor(),
+    )
+    ws_id = await _seed_ready_workspace_with_recovery(
+        factory,
+        pr_url="https://github.com/x/y/pull/161",
+        pr_number=161,
+    )
+    source_head = "d" * 40
+    fixed_head = "e" * 40
+
+    _queue_validation_head(fake, head=source_head)
+    fake.queue_result(returncode=1, stderr="pytest: failed")  # initial validation fails
+    fake.queue_result(returncode=0)  # adapter.run (fix pass)
+    fake.queue_result(returncode=0)  # git add -A
+    fake.queue_result(returncode=0, stdout="src/awf/onboarding.py\n")  # diff --cached
+    fake.queue_result(returncode=0)  # git commit
+    _queue_validation_head(fake, head=fixed_head)
+    fake.queue_result(returncode=0, stdout="tests ok")  # validation passes after fix
+    _queue_existing_pr_push(fake, head=fixed_head)
+
+    await executor.execute(ws_id)
+
+    push_and_pr_calls = _all_push_and_pr_create_calls(fake)
+    assert any(call[0] == "git" and "push" in call for call in push_and_pr_calls)
+    assert not any(call[:3] == ["gh", "pr", "create"] for call in push_and_pr_calls)
+    assert monitor_calls == [ws_id]
+
+    async with factory() as s:
+        ws = await WorkspaceRepository(s).get(ws_id)
+        runs = await ValidationRunRepository(s).list_for_workspace(ws_id)
+        events = await WorkspaceEventRepository(s).list(workspace_id=ws_id)
+
+    assert ws is not None
+    assert ws.status == WorkspaceStatus.monitoring_pr.value
+    assert ws.monitor_last_commit_sha == fixed_head
+    assert runs[-1].workspace_head_sha == fixed_head
+    assert runs[-1].target_head_sha == fixed_head
+    assert any(
+        event.event_type == "workspace.audit.git_push"
+        and event.reason_code == "PR_UPDATED"
+        for event in events
+    )
 
 
 @pytest.mark.unit

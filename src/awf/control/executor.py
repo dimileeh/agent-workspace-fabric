@@ -217,6 +217,25 @@ def _is_validate_only_recovery_payload(payload: object) -> bool:
     )
 
 
+def _validate_only_recovery_needs_existing_pr_push(
+    recovery_payload: Mapping[str, Any],
+    *,
+    validated_workspace_head_sha: str | None,
+    rebase_recovery_result: _RebaseRecoveryResult | None,
+) -> bool:
+    """Return true when recovery produced local commits that are not on the PR yet."""
+    if recovery_payload.get("recovery_mode") != "validate_only":
+        return False
+    if rebase_recovery_result is not None:
+        return False
+    if not validated_workspace_head_sha:
+        return False
+    source_head_sha = recovery_payload.get("source_head_sha")
+    if not isinstance(source_head_sha, str) or not source_head_sha.strip():
+        return False
+    return validated_workspace_head_sha != source_head_sha.strip()
+
+
 def _is_callback_terminal_status(status: str) -> bool:
     try:
         workspace_status = WorkspaceStatus(status)
@@ -1051,6 +1070,7 @@ class WorkspaceExecutor:
             validation_tier = max(validation_tier, 2)
         last_failure_message: str | None = None
         successful_validation_run_id: str | None = None
+        successful_validation_workspace_head_sha: str | None = None
         for pass_number in range(max_fix_passes + 1):
             # pass_number == 0 is the initial run (already-committed agent
             # work). 1..N are fix attempts driven by the retry prompt.
@@ -1060,14 +1080,15 @@ class WorkspaceExecutor:
                 action="validate",
             ):
                 return
+            validation_workspace_head_sha = await self._capture_workspace_head_sha(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+            )
             validation_run_id = await self._start_validation_run(
                 workspace_id=workspace_id,
                 profile=profile,
                 base_commit=base_commit,
-                workspace_head_sha=await self._capture_workspace_head_sha(
-                    workspace_id=workspace_id,
-                    worktree_path=worktree_path,
-                ),
+                workspace_head_sha=validation_workspace_head_sha,
                 target_branch=expected_branch,
                 target_head_sha=None,
                 tier=validation_tier,
@@ -1168,6 +1189,7 @@ class WorkspaceExecutor:
             )
             if val_result.all_passed:
                 successful_validation_run_id = validation_run_id
+                successful_validation_workspace_head_sha = validation_workspace_head_sha
                 await self._finish_pending_validate_operations(
                     workspace_id=workspace_id,
                     status=OperationStatus.succeeded,
@@ -1433,10 +1455,16 @@ class WorkspaceExecutor:
 
         # ── Recovery skip-push guard ───────────────────────────────────────
         # Recovery for a workspace that already has an open PR must NOT
-        # re-create the PR. Validate-only recovery does not push; rebase-only
-        # recovery already pushed the rebased branch above and now just hands
-        # back to the monitor after validation.
+        # re-create the PR. Clean validate-only recovery does not push; if a
+        # fix pass created a new validated local commit, update the existing PR
+        # branch before handing back to the monitor. Rebase-only recovery
+        # already pushed the rebased branch above.
         if recovery is not None and ws.pr_url:
+            recovery_requires_pr_update = _validate_only_recovery_needs_existing_pr_push(
+                recovery,
+                validated_workspace_head_sha=successful_validation_workspace_head_sha,
+                rebase_recovery_result=rebase_recovery_result,
+            )
             if rebase_recovery_result is not None and successful_validation_run_id is not None:
                 try:
                     await self._set_validation_run_target_head_sha(
@@ -1452,71 +1480,79 @@ class WorkspaceExecutor:
                         workspace_id=workspace_id,
                         validation_run_id=successful_validation_run_id,
                     )
-            if not await self._recheck_status(
-                workspace_id,
-                expected=WorkspaceStatus.validating,
-                action="recovery_skip_push",
-            ):
-                return
-            async with self._session_factory() as session:
-                repo = WorkspaceRepository(session)
-                persisted = await repo.get(workspace_id)
-                if persisted is None:  # pragma: no cover - destroyed mid-flight
+            if not recovery_requires_pr_update:
+                if not await self._recheck_status(
+                    workspace_id,
+                    expected=WorkspaceStatus.validating,
+                    action="recovery_skip_push",
+                ):
                     return
-                if persisted.status != WorkspaceStatus.validating.value:
-                    await self._record_stale_action_skip(
-                        repo,
+                async with self._session_factory() as session:
+                    repo = WorkspaceRepository(session)
+                    persisted = await repo.get(workspace_id)
+                    if persisted is None:  # pragma: no cover - destroyed mid-flight
+                        return
+                    if persisted.status != WorkspaceStatus.validating.value:
+                        await self._record_stale_action_skip(
+                            repo,
+                            persisted,
+                            action="recovery_skip_push",
+                            expected=WorkspaceStatus.validating,
+                            reason_code="EXECUTOR_STALE_STATUS",
+                        )
+                        await session.commit()
+                        return
+                    has_monitor = (
+                        self._pr_monitor is not None or self._pr_monitor_factory is not None
+                    )
+                    await repo.transition(
                         persisted,
-                        action="recovery_skip_push",
-                        expected=WorkspaceStatus.validating,
-                        reason_code="EXECUTOR_STALE_STATUS",
+                        to=WorkspaceStatus.monitoring_pr
+                        if has_monitor
+                        else WorkspaceStatus.completed,
+                        reason_code="RECOVERY_VALIDATION_OK",
                     )
                     await session.commit()
-                    return
-                has_monitor = (
-                    self._pr_monitor is not None or self._pr_monitor_factory is not None
+                _log.info(
+                    "executor.recovery_skip_push",
+                    workspace_id=workspace_id,
+                    pr_url=ws.pr_url,
+                    has_monitor=has_monitor,
                 )
-                await repo.transition(
-                    persisted,
-                    to=WorkspaceStatus.monitoring_pr
-                    if has_monitor
-                    else WorkspaceStatus.completed,
-                    reason_code="RECOVERY_VALIDATION_OK",
-                )
-                await session.commit()
+                if has_monitor:
+                    _monitor: _MonitorRunnerProto | None = self._pr_monitor
+                    if _monitor is None and self._pr_monitor_factory is not None:
+                        _monitor = _call_pr_monitor_factory(
+                            self._pr_monitor_factory,
+                            adapter=adapter,
+                            profile=profile,
+                            workspace=persisted,
+                        )
+                    if _monitor is not None:
+                        _log.info(
+                            "executor.recovery_handoff_to_pr_monitor",
+                            workspace_id=workspace_id,
+                            pr_url=ws.pr_url,
+                        )
+                        if not await self._recheck_status(
+                            workspace_id,
+                            expected=WorkspaceStatus.monitoring_pr,
+                            action="run_pr_monitor",
+                        ):
+                            return
+                        await _monitor.run(
+                            workspace_id=workspace_id,
+                            compose_project=compose_project,
+                            compose_file=compose_file,
+                        )
+                return
             _log.info(
-                "executor.recovery_skip_push",
+                "executor.recovery_existing_pr_update_required",
                 workspace_id=workspace_id,
                 pr_url=ws.pr_url,
-                has_monitor=has_monitor,
+                source_head_sha=recovery.get("source_head_sha"),
+                validated_workspace_head_sha=successful_validation_workspace_head_sha,
             )
-            if has_monitor:
-                _monitor: _MonitorRunnerProto | None = self._pr_monitor
-                if _monitor is None and self._pr_monitor_factory is not None:
-                    _monitor = _call_pr_monitor_factory(
-                        self._pr_monitor_factory,
-                        adapter=adapter,
-                        profile=profile,
-                        workspace=persisted,
-                    )
-                if _monitor is not None:
-                    _log.info(
-                        "executor.recovery_handoff_to_pr_monitor",
-                        workspace_id=workspace_id,
-                        pr_url=ws.pr_url,
-                    )
-                    if not await self._recheck_status(
-                        workspace_id,
-                        expected=WorkspaceStatus.monitoring_pr,
-                        action="run_pr_monitor",
-                    ):
-                        return
-                    await _monitor.run(
-                        workspace_id=workspace_id,
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                    )
-            return
 
         # ── Step 3: push + open PR ──────────────────────────────────────────
         if not await self._transition_if_current(
