@@ -307,13 +307,16 @@ async def create_provider_recovery_attempt_row(
         else None,
     )
 
-    retried.pr_url = source.pr_url
-    retried.pr_number = source.pr_number
-    retried.branch_name = source.branch_name
-    retried.monitor_iter_count = source.monitor_iter_count
-    retried.monitor_threads_addressed = source.monitor_threads_addressed
-    retried.monitor_last_commit_sha = source.monitor_last_commit_sha
-    retried.monitor_started_at = source.monitor_started_at
+    for field in (
+        "pr_url",
+        "pr_number",
+        "branch_name",
+        "monitor_iter_count",
+        "monitor_threads_addressed",
+        "monitor_last_commit_sha",
+        "monitor_started_at",
+    ):
+        setattr(retried, field, getattr(source, field))
 
     task = await _retry_task_for_source(session, source, source_attempt=source_attempt)
     attempt = await attempt_repo.create_for_workspace(
