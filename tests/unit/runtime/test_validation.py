@@ -1947,6 +1947,24 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
+    def test_pytest_failure_parser_accepts_indented_summary_lines(
+        self, tmp_path: Path
+    ) -> None:
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "  FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError\n"
+            "    E   AssertionError: expected 1 == 2\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files([output])
+
+        assert evidence.node_ids == ["tests/unit/test_widget.py::test_handles_edges"]
+        assert evidence.evidence == [
+            "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
+        ]
+
+    @pytest.mark.unit
     def test_pytest_failure_parser_ignores_indented_fallback_evidence(
         self, tmp_path: Path
     ) -> None:

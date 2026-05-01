@@ -1248,11 +1248,12 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
                 line = raw_line.rstrip()
                 if not line:
                     continue
-                summary_match = _PYTEST_FAILURE_SUMMARY_RE.match(line)
+                summary_line = line.lstrip()
+                summary_match = _PYTEST_FAILURE_SUMMARY_RE.match(summary_line)
                 if summary_match is not None:
                     _append_unique_capped(
                         evidence,
-                        _truncate_pytest_evidence_line(line),
+                        _truncate_pytest_evidence_line(summary_line),
                         limit=_PYTEST_EVIDENCE_LIMIT,
                     )
                     target = _pytest_summary_target(summary_match.group("rest"))
