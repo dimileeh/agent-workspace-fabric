@@ -202,7 +202,7 @@ async def create_provider_recovery_attempt_row(
     *,
     now: datetime | None = None,
     metadata: Mapping[str, Any] | None = None,
-) -> ProviderRecoveryAttemptResult | None:
+) -> ProviderRecoveryAttemptResult | Literal["terminal"] | None:
     """Create a requested retry/fallback workspace for a retryable provider failure."""
 
     recovery_now = now or datetime.now(UTC)
@@ -294,7 +294,7 @@ async def create_provider_recovery_attempt_row(
             },
         )
         await session.flush()
-        return None
+        return "terminal"
 
     new_policy = _recovery_task_policy(
         source.task_policy,
@@ -332,6 +332,18 @@ async def create_provider_recovery_attempt_row(
         if source.task_kind in {"monitor_release_pr", "sync_release_pr", "sync_feature_pr"}
         else None,
     )
+
+    if decision.action == "fallback":
+        for field in (
+            "pr_url",
+            "pr_number",
+            "branch_name",
+            "remote_push_branch",
+            "monitor_iter_count",
+            "monitor_threads_addressed",
+            "monitor_last_commit_sha",
+        ):
+            setattr(retried, field, getattr(source, field))
 
     task = await _retry_task_for_source(session, source, source_attempt=source_attempt)
     attempt = await attempt_repo.create_for_workspace(
