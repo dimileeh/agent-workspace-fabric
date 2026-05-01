@@ -168,6 +168,11 @@ class TestToolRegistration:
             "awf_list_operations",
             "awf_get_operation",
             "awf_get_overlap_graph",
+            "awf_list_tasks",
+            "awf_list_task_attempts",
+            "awf_list_locks",
+            "awf_get_service_readiness",
+            "awf_get_service_health",
         } <= names
 
     @pytest.mark.unit
@@ -181,6 +186,8 @@ class TestToolRegistration:
             "awf_cancel_workspace",
             "awf_stop_workspace",
             "awf_destroy_workspace",
+            "awf_remonitor_workspace",
+            "awf_request_workspace_validation",
         ):
             description = (tools[name].description or "").lower()
             assert "operator control" in description
@@ -242,6 +249,60 @@ class TestToolRegistration:
         overlap_props = tools["awf_get_overlap_graph"].inputSchema["properties"]
         assert overlap_props["limit"]["default"] == 100
         assert overlap_props["limit"]["maximum"] == 500
+
+        tasks_props = tools["awf_list_tasks"].inputSchema["properties"]
+        assert tasks_props["limit"]["default"] == 50
+        assert tasks_props["limit"]["minimum"] == 1
+        assert tasks_props["limit"]["maximum"] == 500
+        assert "status" in tasks_props
+        assert tasks_props["status"]["default"] is None
+        repo_url_schema = _optional_string_schema(tasks_props["repo_url"])
+        assert repo_url_schema["maxLength"] == 512
+        assert repo_url_schema["minLength"] == 1
+
+        task_attempts_props = tools["awf_list_task_attempts"].inputSchema["properties"]
+        assert "task_ref" in task_attempts_props
+        required_fields = tools["awf_list_task_attempts"].inputSchema.get("required", [])
+        assert "task_ref" in required_fields
+        assert task_attempts_props["limit"]["default"] == 100
+        assert task_attempts_props["limit"]["minimum"] == 1
+        assert task_attempts_props["limit"]["maximum"] == 500
+
+        locks_props = tools["awf_list_locks"].inputSchema["properties"]
+        assert locks_props["limit"]["default"] == 50
+        assert locks_props["limit"]["minimum"] == 1
+        assert locks_props["limit"]["maximum"] == 500
+        cursor_schema = _optional_string_schema(locks_props["cursor"])
+        assert cursor_schema["maxLength"] == 256
+
+        readiness_props = tools["awf_get_service_readiness"].inputSchema["properties"]
+        assert "limit" not in readiness_props
+        assert "providers" in readiness_props
+        assert readiness_props["providers"]["default"] is None
+        readiness_required = tools["awf_get_service_readiness"].inputSchema.get("required", [])
+        assert "providers" not in readiness_required
+        assert "limit" not in tools["awf_get_service_health"].inputSchema.get("properties", {})
+
+        remonitor_props = tools["awf_remonitor_workspace"].inputSchema["properties"]
+        assert "workspace_id" in remonitor_props
+        remonitor_required = tools["awf_remonitor_workspace"].inputSchema.get("required", [])
+        assert "workspace_id" in remonitor_required
+        assert remonitor_props["reason"]["default"] is None
+        assert "idempotency_key" in remonitor_props
+        assert remonitor_props["idempotency_key"]["default"] is None
+        _ik_anyof = remonitor_props["idempotency_key"]["anyOf"]
+        assert any(s.get("minLength") == 1 for s in _ik_anyof if s.get("type") == "string")
+
+        validate_props = tools["awf_request_workspace_validation"].inputSchema["properties"]
+        assert "workspace_id" in validate_props
+        validate_required = tools["awf_request_workspace_validation"].inputSchema.get("required", [])
+        assert "workspace_id" in validate_required
+        assert validate_props["reason"]["default"] is None
+        assert validate_props["requested_tier"]["default"] is None
+        assert "idempotency_key" in validate_props
+        assert validate_props["idempotency_key"]["default"] is None
+        _vk_anyof = validate_props["idempotency_key"]["anyOf"]
+        assert any(s.get("minLength") == 1 for s in _vk_anyof if s.get("type") == "string")
 
 
 class TestOperationTools:
@@ -345,6 +406,7 @@ class _RecordingControlService:
         *,
         reason: str | None,
         stop_stack: bool,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -353,6 +415,7 @@ class _RecordingControlService:
                     "workspace_id": workspace_id,
                     "reason": reason,
                     "stop_stack": stop_stack,
+                    "idempotency_key": idempotency_key,
                 },
             )
         )
@@ -369,8 +432,9 @@ class _RecordingControlService:
         workspace_id: str,
         *,
         reason: str | None,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
-        self.calls.append(("stop", {"workspace_id": workspace_id, "reason": reason}))
+        self.calls.append(("stop", {"workspace_id": workspace_id, "reason": reason, "idempotency_key": idempotency_key}))
         return WorkspaceControlResponse(
             workspace_id=workspace_id,
             operation_id="op_stop",
@@ -386,6 +450,7 @@ class _RecordingControlService:
         force: bool,
         remove_volumes: bool,
         remove_worktree: bool,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
         self.calls.append(
             (
@@ -395,6 +460,7 @@ class _RecordingControlService:
                     "force": force,
                     "remove_volumes": remove_volumes,
                     "remove_worktree": remove_worktree,
+                    "idempotency_key": idempotency_key,
                 },
             )
         )
@@ -414,8 +480,9 @@ class _FailingControlService(_RecordingControlService):
         *,
         reason: str | None,
         stop_stack: bool,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
-        del workspace_id, reason, stop_stack
+        del workspace_id, reason, stop_stack, idempotency_key
         raise WorkspaceControlError(error_code="NOPE", message="cancel refused")
 
     async def stop_workspace(
@@ -423,8 +490,9 @@ class _FailingControlService(_RecordingControlService):
         workspace_id: str,
         *,
         reason: str | None,
+        idempotency_key: str | None = None,
     ) -> WorkspaceControlResponse:
-        del workspace_id, reason
+        del workspace_id, reason, idempotency_key
         raise WorkspaceControlError(error_code="NOPE", message="stop refused")
 
 
@@ -453,6 +521,7 @@ class TestWorkspaceControls:
                     "workspace_id": "ws_control",
                     "reason": "stale task",
                     "stop_stack": False,
+                    "idempotency_key": None,
                 },
             )
         ]
@@ -481,7 +550,7 @@ class TestWorkspaceControls:
         )
 
         assert service.calls == [
-            ("stop", {"workspace_id": "ws_control", "reason": "free local resources"})
+            ("stop", {"workspace_id": "ws_control", "reason": "free local resources", "idempotency_key": None})
         ]
         assert payload == {
             "workspace_id": "ws_control",
@@ -517,6 +586,7 @@ class TestWorkspaceControls:
                     "force": True,
                     "remove_volumes": False,
                     "remove_worktree": False,
+                    "idempotency_key": None,
                 },
             )
         ]

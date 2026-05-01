@@ -89,6 +89,7 @@ class _PreparedOperation:
     workspace: Workspace
     replay: Operation | None = None
     kind: _PreparedOperationKind | None = None
+    idempotency_key: str | None = None
 
 
 class WorkspaceCleanerProtocol(Protocol):
@@ -338,7 +339,7 @@ class WorkspaceControlService:
             operation_type=OperationType.cancel,
             status=OperationStatus.running,
             payload=operation_payload,
-            idempotency_key=idempotency_key,
+            idempotency_key=prepared.idempotency_key,
         )
         if stop_stack:
             try:
@@ -438,7 +439,7 @@ class WorkspaceControlService:
             operation_type=OperationType.stop,
             status=OperationStatus.running,
             payload=operation_payload,
-            idempotency_key=idempotency_key,
+            idempotency_key=prepared.idempotency_key,
         )
         try:
             await self._project_stopper(workspace.compose_project_name)
@@ -536,7 +537,7 @@ class WorkspaceControlService:
             operation_type=OperationType.remonitor,
             status=OperationStatus.running,
             payload=operation_payload,
-            idempotency_key=idempotency_key,
+            idempotency_key=prepared.idempotency_key,
         )
         claims_reset = _claim_reset_snapshot(workspace)
         state_reset = await _reset_failed_workspace_for_remonitor(
@@ -643,7 +644,7 @@ class WorkspaceControlService:
             operation_type=OperationType.refresh,
             status=OperationStatus.pending,
             payload=operation_payload,
-            idempotency_key=idempotency_key,
+            idempotency_key=prepared.idempotency_key,
         )
         await repo.add_event(
             workspace,
@@ -710,7 +711,7 @@ class WorkspaceControlService:
             operation_type=OperationType.validate,
             status=OperationStatus.pending,
             payload=operation_payload,
-            idempotency_key=idempotency_key,
+            idempotency_key=prepared.idempotency_key,
         )
         validate_event_payload: dict[str, object | None] = {
             "source": _OPERATOR_API_SOURCE,
@@ -828,7 +829,7 @@ class WorkspaceControlService:
             operation_type=OperationType.rebase,
             status=OperationStatus.pending,
             payload=rebase_payload,
-            idempotency_key=idempotency_key,
+            idempotency_key=prepared.idempotency_key,
         )
         rebase_event_payload = _event_payload(
             {
@@ -913,7 +914,7 @@ class WorkspaceControlService:
             operation_type=OperationType.destroy,
             status=OperationStatus.running,
             payload=operation_payload,
-            idempotency_key=idempotency_key,
+            idempotency_key=prepared.idempotency_key,
         )
         secret_lease_summary = await self._revoke_destroy_secret_leases(workspace)
         if current == WorkspaceStatus.destroyed:
@@ -1207,6 +1208,8 @@ class WorkspaceControlService:
         idempotency_identity_keys: frozenset[str] | None = None,
     ) -> _PreparedOperation:
         if idempotency_key is not None:
+            idempotency_key = idempotency_key.strip() or None
+        if idempotency_key is not None:
             await operations.acquire_idempotency_key_lock(idempotency_key)
             existing = await operations.get_by_idempotency_key(idempotency_key)
             if existing is not None:
@@ -1230,6 +1233,7 @@ class WorkspaceControlService:
                     workspace=workspace,
                     replay=existing,
                     kind=_PreparedOperationKind.exact_replay,
+                    idempotency_key=idempotency_key,
                 )
 
         workspace = await self._require_workspace_for_update(repo, workspace_id)
@@ -1249,8 +1253,9 @@ class WorkspaceControlService:
                     workspace=workspace,
                     replay=active,
                     kind=_PreparedOperationKind.active_coalesce,
+                    idempotency_key=idempotency_key,
                 )
-        return _PreparedOperation(workspace=workspace)
+        return _PreparedOperation(workspace=workspace, idempotency_key=idempotency_key)
 
 
 async def stop_project_containers(compose_project_name: str | None) -> None:
