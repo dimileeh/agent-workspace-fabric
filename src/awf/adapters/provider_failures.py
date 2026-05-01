@@ -82,7 +82,7 @@ _GOOGLE_MARKERS = (
     "resource_exhausted",
     "retryablequotaerror",
 )
-_OPENAI_MARKERS = ("codex", "openai", "gpt-", "o3", "o4", "usage limit")
+_OPENAI_MARKERS = ("codex", "openai", "gpt-", "o3", "o4")
 _ANTHROPIC_MARKERS = ("claude", "anthropic", "sonnet", "opus", "haiku")
 _OLLAMA_MARKERS = ("ollama",)
 

@@ -71,6 +71,22 @@ def test_classifies_codex_spark_usage_limit_as_provider_retryable() -> None:
     assert classification.retryable is True
 
 
+def test_usage_limit_without_provider_hint_keeps_provider_unknown() -> None:
+    classification = classify_provider_failure(
+        reason_code=None,
+        stdout="",
+        stderr="You've hit your usage limit. Switch to another model.",
+        provider=None,
+        model=None,
+    )
+
+    assert classification is not None
+    assert classification.reason_code == AGENT_PROVIDER_CAPACITY_EXHAUSTED
+    assert classification.failure_type == "usage_limit"
+    assert classification.provider is None
+    assert classification.retryable is True
+
+
 def test_known_timeout_reason_codes_become_provider_recovery_metadata() -> None:
     timeout = classify_provider_failure(
         reason_code=AGENT_TIMEOUT,
