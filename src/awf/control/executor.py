@@ -2329,7 +2329,6 @@ class WorkspaceExecutor:
             ),
         )
         iteration_history: list[ConformanceIterationRecord] = []
-        prior_paths = dirty_paths
         for iteration in range(planning.max_iterations + 1):
             last_iteration = iteration
             await adapter.run(
@@ -2390,13 +2389,13 @@ class WorkspaceExecutor:
                 report = parse_conformance_report(report_text)
                 last_report = report
                 report_digest = _digest_text(report_text)
-                worktree_changed = before_compare != prior_paths or after_compare != prior_paths
+                worktree_changed = before_compare != after_compare
             else:
                 stdout = compare_error.result.stdout
                 stderr = compare_error.result.stderr
                 report_digest = None
                 after_compare = before_compare
-                worktree_changed = before_compare != prior_paths
+                worktree_changed = False
 
             iteration_history.append(
                 ConformanceIterationRecord(
@@ -2411,7 +2410,6 @@ class WorkspaceExecutor:
                     ),
                 )
             )
-            prior_paths = after_compare
 
             stall = classify_conformance_stall(
                 history=iteration_history,
@@ -2527,6 +2525,23 @@ class WorkspaceExecutor:
             repeated_output_count=stall.repeated_output_count,
             implementation_commit_count=commit_count,
         )
+        try:
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                persisted = await repo.get(workspace.id)
+                if persisted is not None:
+                    await repo.add_event(
+                        persisted,
+                        event_type="workspace.planning_conformance_stalled",
+                        reason_code=AGENT_STALLED_IN_CONFORMANCE,
+                        payload=stall_evidence_payload,
+                    )
+                    await session.commit()
+        except Exception:
+            _log.exception(
+                "executor.planning_conformance_stalled_record_failed",
+                workspace_id=workspace.id,
+            )
         return _PlanningRunFailure(
             message=message,
             reason_code=AGENT_STALLED_IN_CONFORMANCE,
@@ -3870,6 +3885,10 @@ def _read_text_if_present(path: Path) -> str | None:
     except OSError:
         return None
     return None
+
+
+def _digest_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _validation_run_command_records(

@@ -95,7 +95,7 @@ class _PlanningAdapter:
         assert isinstance(prompt, str)
         self.prompts.append(prompt)
         stdout = self.stdout_values.pop(0) if self.stdout_values else ""
-        return SimpleNamespace(stdout=stdout)
+        return SimpleNamespace(stdout=stdout, stderr="")
 
 
 class _CoverageValidation:

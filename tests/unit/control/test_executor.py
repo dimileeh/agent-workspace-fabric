@@ -918,7 +918,7 @@ class TestHappyPath:
             returncode=0,
             stdout='{"status":"needs_iteration","summary":"gap-1","gaps":["add tests"]}',
         )
-        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n")
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
         fake.queue_result(returncode=0, stdout="fixed gap")  # iteration execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n")
         fake.queue_result(  # compare satisfied
