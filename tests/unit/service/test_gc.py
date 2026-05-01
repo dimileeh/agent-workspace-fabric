@@ -674,6 +674,7 @@ async def test_default_plan_includes_superseded_no_work_candidate(
         assert workspace is not None
         workspace.status = "superseded"
         workspace.compose_project_name = "awf_superseded_gc"
+        workspace.updated_at = now - timedelta(hours=200)
         await session.commit()
 
     monkeypatch.setattr(
@@ -775,6 +776,7 @@ async def test_single_workspace_filesystem_gc_keeps_superseded_no_work_on_dry_ru
         assert workspace is not None
         workspace.status = "superseded"
         workspace.compose_project_name = "awf_single_superseded_gc"
+        workspace.updated_at = now - timedelta(hours=200)
         await session.commit()
     _write(tmp_path / "service" / "git" / "worktrees" / workspace_id / "repo.txt", "repo")
 
