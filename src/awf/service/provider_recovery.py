@@ -917,6 +917,7 @@ def _provider_recovery_state_from_task_policy(
         )
     source_workspace_id = _mapping_str(recovery_state, "source_workspace_id")
     source_attempt_id = _mapping_str(recovery_state, "source_attempt_id")
+    recommended_action = _mapping_str(recovery_state, "recommended_action") or _recommended_action_for_action(action)
     terminal = action == "terminal" if action is not None else None
     return ProviderRecoveryStateView(
         action=action,
@@ -930,7 +931,7 @@ def _provider_recovery_state_from_task_policy(
         fallback_target=fallback_target,
         source_workspace_id=source_workspace_id,
         source_attempt_id=source_attempt_id,
-        recommended_action=_recommended_action_for_action(action),
+        recommended_action=recommended_action,
         terminal=terminal,
     )
 
@@ -988,6 +989,7 @@ def _provider_recovery_state_from_events(
         if "fallback_attempt_number" in recovery
         else None
     )
+    recommended_action = _mapping_str(recovery, "recommended_action") or _recommended_action_for_action(action)
     terminal = action == "terminal" if action is not None else None
     return ProviderRecoveryStateView(
         action=action,
@@ -1001,7 +1003,7 @@ def _provider_recovery_state_from_events(
         fallback_target=fallback_target,
         source_workspace_id=source_workspace_id,
         source_attempt_id=source_attempt_id,
-        recommended_action=_recommended_action_for_action(action),
+        recommended_action=recommended_action,
         terminal=terminal,
     )
 

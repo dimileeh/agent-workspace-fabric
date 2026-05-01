@@ -459,6 +459,96 @@ def test_recommended_action_for_action_returns_none_for_none() -> None:
     assert _recommended_action_for_action(None) is None
 
 
+def test_provider_recovery_state_from_events_uses_payload_recommended_action() -> None:
+    now = datetime.now(UTC)
+    event_payload: dict[str, Any] = {
+        "provider_recovery": {
+            "action": "retry",
+            "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+            "recommended_action": "Refresh credentials and retry.",
+        },
+    }
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_REQUESTED_EVENT,
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        payload=event_payload,
+        occurred_at=now,
+        old_state="running",
+        new_state="failed",
+        id="evt-rec-001",
+    )
+    workspace = SimpleNamespace(
+        id="ws-rec-001",
+        status="failed",
+        task_policy={},
+        events=[event],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.recommended_action == "Refresh credentials and retry."
+
+
+def test_provider_recovery_state_from_events_falls_back_to_action_default() -> None:
+    now = datetime.now(UTC)
+    event_payload: dict[str, Any] = {
+        "provider_recovery": {
+            "action": "retry",
+            "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+        },
+    }
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_REQUESTED_EVENT,
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        payload=event_payload,
+        occurred_at=now,
+        old_state="running",
+        new_state="failed",
+        id="evt-rec-002",
+    )
+    workspace = SimpleNamespace(
+        id="ws-rec-002",
+        status="failed",
+        task_policy={},
+        events=[event],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.recommended_action == "Retry after provider cooldown."
+
+
+def test_provider_recovery_state_from_task_policy_uses_payload_recommended_action() -> None:
+    state_data: dict[str, Any] = {
+        "action": "fallback",
+        "decision_reason_code": PROVIDER_FALLBACK_SELECTED_REASON,
+        "recommended_action": "Switch to backup provider immediately.",
+    }
+    workspace = SimpleNamespace(
+        id="ws-rec-003",
+        status="failed",
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: state_data},
+        events=[],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.recommended_action == "Switch to backup provider immediately."
+
+
+def test_provider_recovery_state_from_task_policy_falls_back_to_action_default() -> None:
+    state_data: dict[str, Any] = {
+        "action": "fallback",
+        "decision_reason_code": PROVIDER_FALLBACK_SELECTED_REASON,
+    }
+    workspace = SimpleNamespace(
+        id="ws-rec-004",
+        status="failed",
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: state_data},
+        events=[],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.recommended_action == "Dispatch an approved fallback model."
+
+
 def test_parse_not_before_parses_iso_with_tz() -> None:
     dt = datetime(2025, 3, 15, 12, 0, 0, tzinfo=UTC)
     iso = dt.isoformat()
