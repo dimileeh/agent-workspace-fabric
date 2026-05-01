@@ -671,6 +671,82 @@ def test_classify_conformance_stall_skips_no_output_when_below_policy_threshold(
 
 
 @pytest.mark.unit
+def test_classify_conformance_stall_returns_no_output_when_stdout_empty_across_consecutive_iterations() -> (
+    None
+):
+    history = [
+        _iter_record(
+            iteration=0,
+            elapsed_seconds=120.0,
+            report_digest="abc",
+            worktree_changed=True,
+            stdout="some output",
+        ),
+        _iter_record(
+            iteration=1,
+            elapsed_seconds=300.0,
+            report_digest=None,
+            worktree_changed=False,
+            stdout="",
+        ),
+        _iter_record(
+            iteration=2,
+            elapsed_seconds=350.0,
+            report_digest=None,
+            worktree_changed=False,
+            stdout="   \n",
+        ),
+    ]
+
+    evidence = classify_conformance_stall(
+        history=history,
+        policy=_stall_policy(no_output_seconds=600),
+        plan_path=Path("docs/awf-plans/ws_no_output_streak.md"),
+        report_path=Path("docs/awf-plans/ws_no_output_streak.conformance.json"),
+        latest_error=None,
+    )
+
+    assert evidence is not None
+    assert evidence.kind == ConformanceStallKind.no_output
+    assert evidence.iteration_index == 2
+    assert evidence.no_output_seconds == pytest.approx(650.0)
+    assert evidence.elapsed_seconds == pytest.approx(770.0)
+    assert evidence.repeated_output_count == 0
+
+
+@pytest.mark.unit
+def test_classify_conformance_stall_returns_none_when_stdout_empty_streak_below_no_output_seconds() -> (
+    None
+):
+    history = [
+        _iter_record(
+            iteration=0,
+            elapsed_seconds=200.0,
+            report_digest=None,
+            worktree_changed=False,
+            stdout="",
+        ),
+        _iter_record(
+            iteration=1,
+            elapsed_seconds=200.0,
+            report_digest=None,
+            worktree_changed=False,
+            stdout="",
+        ),
+    ]
+
+    evidence = classify_conformance_stall(
+        history=history,
+        policy=_stall_policy(no_output_seconds=600),
+        plan_path=Path("docs/awf-plans/ws_no_output_short.md"),
+        report_path=Path("docs/awf-plans/ws_no_output_short.conformance.json"),
+        latest_error=None,
+    )
+
+    assert evidence is None
+
+
+@pytest.mark.unit
 def test_classify_conformance_stall_returns_repeated_output_when_report_digest_repeats() -> None:
     history = [
         _iter_record(
@@ -719,12 +795,14 @@ def test_classify_conformance_stall_returns_over_duration_when_cumulative_second
             elapsed_seconds=900.0,
             report_digest="d-1",
             worktree_changed=True,
+            stdout='{"status":"needs_iteration","gaps":["a"]}',
         ),
         _iter_record(
             iteration=1,
             elapsed_seconds=1100.0,
             report_digest="d-2",
             worktree_changed=True,
+            stdout='{"status":"needs_iteration","gaps":["b"]}',
         ),
     ]
 

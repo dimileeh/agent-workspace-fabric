@@ -367,6 +367,26 @@ def classify_conformance_stall(
             last_output_excerpt=excerpt,
         )
 
+    empty_streak_seconds = 0.0
+    empty_streak_iterations = 0
+    for record in reversed(history):
+        if record.stdout.strip():
+            break
+        empty_streak_seconds += record.elapsed_seconds
+        empty_streak_iterations += 1
+    if empty_streak_iterations > 0 and empty_streak_seconds >= policy.no_output_seconds:
+        return ConformanceStallEvidence(
+            kind=ConformanceStallKind.no_output,
+            iteration_index=last.iteration,
+            elapsed_seconds=cumulative_seconds,
+            no_output_seconds=empty_streak_seconds,
+            repeated_output_count=0,
+            last_report_digest=last.report_digest,
+            plan_path=plan_path_text,
+            report_path=report_path_text,
+            last_output_excerpt=_stall_output_excerpt(latest_error, last),
+        )
+
     threshold = max(2, policy.repeated_output_threshold)
     if last.report_digest is not None and len(history) >= threshold:
         recent = history[-threshold:]
