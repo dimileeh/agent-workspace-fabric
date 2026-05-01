@@ -20,7 +20,7 @@ def test_alembic_revision_graph_has_single_head() -> None:
     config.set_main_option("script_location", str(repo_root / "migrations"))
     script = ScriptDirectory.from_config(config)
 
-    assert script.get_heads() == ["8c9d0e1f2a3b"]
+    assert script.get_heads() == ["0f1a2b3c4d5e"]
 
 
 @pytest.mark.unit

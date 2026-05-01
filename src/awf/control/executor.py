@@ -116,6 +116,7 @@ from awf.runtime.validation_identity import (
     resolved_profile_digest,
 )
 from awf.service.coordination import coordination_warnings_from_task_policy
+from awf.service.provider_recovery import create_provider_recovery_attempt_row
 
 
 class _MonitorRunnerProto(Protocol):
@@ -984,6 +985,8 @@ class WorkspaceExecutor:
                         reason_code=agent_run_reason_code,
                         details=agent_run_details,
                     )
+                    if agent_run_reason_code is not None:
+                        await self._prepare_provider_recovery(workspace_id)
                     return
 
                 # Some agents sever git history (e.g. by accidentally running
@@ -2654,6 +2657,21 @@ class WorkspaceExecutor:
                 payload=payload,
             )
             await session.commit()
+
+    async def _prepare_provider_recovery(self, workspace_id: str) -> None:
+        async with self._session_factory() as session:
+            result = await create_provider_recovery_attempt_row(session, workspace_id)
+            if result is None:
+                await session.commit()
+                return
+            await session.commit()
+            _log.info(
+                "executor.provider_recovery_prepared",
+                workspace_id=workspace_id,
+                new_workspace_id=result.new_workspace_id,
+                action=result.action,
+                reason_code=result.reason_code,
+            )
 
     async def _start_validation_run(
         self,

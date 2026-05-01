@@ -30,6 +30,7 @@ from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
+    ProviderModelCircuitBreakerRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
@@ -102,7 +103,12 @@ async def _create_requested(
 
 
 async def _create_ready(
-    session_factory: async_sessionmaker[AsyncSession], origin: Path, title: str
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    *,
+    agent: str = "codex",
+    task_policy: dict[str, object] | None = None,
 ) -> str:
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -111,8 +117,9 @@ async def _create_ready(
             branch_base="development",
             task_title=title,
             task_prompt="p",
-            agent="codex",
+            agent=agent,
             test_commands=[],
+            task_policy=task_policy,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = f"awf/{ws.id}"
@@ -446,6 +453,62 @@ class TestRunOnceExecution:
         assert dispatched == 2
         assert provisioner.calls == [requested_id]
         assert set(executor.calls) == {ready_id, requested_id}
+
+    @pytest.mark.unit
+    async def test_ready_execution_skips_open_provider_model_circuit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "gemini-ready",
+            agent="gemini",
+            task_policy={"agent_model": "gemini-2.5-pro"},
+        )
+        async with session_factory() as session:
+            await ProviderModelCircuitBreakerRepository(session).record_failure(
+                provider="google",
+                model="gemini-2.5-pro",
+                reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                failure_fingerprint="capacity:fingerprint",
+                workspace_id="ws_previous",
+                attempt_id=None,
+                now=datetime.now(UTC),
+                failure_threshold=1,
+                cooldown_seconds=600,
+            )
+            await session.commit()
+
+        provisioner = _TransitioningProvisioner(session_factory)
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+        )
+
+        dispatched = await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        assert dispatched == 0
+        assert executor.calls == []
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(ready_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ready.value
+            cooldown_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.provider_recovery_cooldown"
+            ]
+        assert cooldown_events
+        assert cooldown_events[-1].reason_code == "PROVIDER_MODEL_CIRCUIT_OPEN"
+        assert cooldown_events[-1].payload["provider"] == "google"
+        assert cooldown_events[-1].payload["model"] == "gemini-2.5-pro"
 
     @pytest.mark.unit
     async def test_freshly_provisioned_workspace_is_not_counted_twice(

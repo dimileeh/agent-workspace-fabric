@@ -22,6 +22,10 @@ def new_task_attempt_id() -> str:
     return f"att_{uuid4().hex[:24]}"
 
 
+def new_provider_model_circuit_breaker_id() -> str:
+    return f"pcb_{uuid4().hex[:24]}"
+
+
 def new_queue_decision_id() -> str:
     return f"qd_{uuid4().hex[:24]}"
 

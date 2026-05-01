@@ -30,9 +30,19 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.logging import get_logger
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    ProviderModelCircuitBreakerRepository,
+    WorkspaceRepository,
+)
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.service.provider_recovery import (
+    PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+    PROVIDER_RECOVERY_COOLDOWN_EVENT,
+    provider_cooldown_not_before,
+    provider_for_agent_model,
+)
 from awf.service.secret_leases import SecretLeaseService
 from awf.service.workspace_runtime_health import (
     RUNTIME_STRANDED_EVENT_TYPE,
@@ -279,11 +289,81 @@ class ControlWorker:
             return []
 
         async with self._session_factory() as session:
-            return await WorkspaceRepository(session).list_schedulable_ids(
+            ids = await WorkspaceRepository(session).list_schedulable_ids(
                 status=status,
                 limit=limit,
                 exclude_ids=exclude_ids,
             )
+            if status not in {WorkspaceStatus.requested, WorkspaceStatus.ready}:
+                return ids
+            filtered = await self._filter_provider_recovery_suppressed(
+                session,
+                ids,
+                status=status,
+            )
+            await session.commit()
+            return filtered
+
+    async def _filter_provider_recovery_suppressed(
+        self,
+        session: AsyncSession,
+        workspace_ids: list[str],
+        *,
+        status: WorkspaceStatus,
+    ) -> list[str]:
+        if not workspace_ids:
+            return []
+        now = datetime.now(UTC)
+        repo = WorkspaceRepository(session)
+        breaker_repo = ProviderModelCircuitBreakerRepository(session)
+        allowed: list[str] = []
+        stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
+        rows = {workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()}
+        for workspace_id in workspace_ids:
+            workspace = rows.get(workspace_id)
+            if workspace is None:
+                continue
+            not_before = provider_cooldown_not_before(workspace.task_policy)
+            if not_before is not None and not_before > now:
+                await repo.add_event(
+                    workspace,
+                    event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
+                    reason_code="PROVIDER_RECOVERY_NOT_BEFORE",
+                    payload={
+                        "workspace_status": status.value,
+                        "not_before": not_before.isoformat(),
+                    },
+                )
+                continue
+            model = _workspace_agent_model(workspace)
+            provider = provider_for_agent_model(workspace.agent, model)
+            if provider is None or model is None:
+                allowed.append(workspace_id)
+                continue
+            breaker = await breaker_repo.open_breaker(
+                provider=provider,
+                model=model,
+                now=now,
+            )
+            if breaker is None:
+                allowed.append(workspace_id)
+                continue
+            await repo.add_event(
+                workspace,
+                event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
+                reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+                payload={
+                    "workspace_status": status.value,
+                    "provider": provider,
+                    "model": model,
+                    "cooldown_until": breaker.cooldown_until.isoformat()
+                    if breaker.cooldown_until is not None
+                    else None,
+                    "failure_count": breaker.failure_count,
+                    "last_reason_code": breaker.last_reason_code,
+                },
+            )
+        return allowed
 
     async def _filter_current_status(
         self,
@@ -1149,6 +1229,12 @@ def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:
             for service in snapshot.services
         ],
     }
+
+
+def _workspace_agent_model(workspace: Workspace) -> str | None:
+    task_policy = workspace.task_policy if isinstance(workspace.task_policy, dict) else {}
+    model = task_policy.get("agent_model")
+    return model.strip() if isinstance(model, str) and model.strip() else None
 
 
 def _runtime_stranding_event_payload(

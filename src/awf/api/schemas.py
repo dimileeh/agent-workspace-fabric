@@ -141,6 +141,36 @@ class WorkspaceV2Repo(BaseModel):
     base_branch: Annotated[str, Field(default="main", min_length=1, max_length=256)]
 
 
+class WorkspaceProviderFallbackTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    agent: AgentRuntime
+    provider: Annotated[str | None, Field(default=None, min_length=1, max_length=128)]
+    model: Annotated[str, Field(min_length=1, max_length=128)]
+
+
+class WorkspaceProviderRecoveryCircuitBreakerPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    failure_threshold: int = Field(default=2, ge=1, le=100)
+    cooldown_seconds: int = Field(default=900, ge=1, le=86400)
+
+
+class WorkspaceProviderRecoveryPolicy(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    fallbacks: list[WorkspaceProviderFallbackTarget] = Field(
+        default_factory=list,
+        max_length=16,
+    )
+    max_fallback_attempts: int | None = Field(default=None, ge=0, le=16)
+    max_same_provider_retries: int = Field(default=1, ge=0, le=16)
+    cooldown_seconds: int = Field(default=300, ge=1, le=86400)
+    backoff_seconds: int | None = Field(default=None, ge=1, le=86400)
+    retry_after_cap_seconds: int = Field(default=3600, ge=1, le=86400)
+    circuit_breaker: WorkspaceProviderRecoveryCircuitBreakerPolicy | None = None
+
+
 class WorkspaceV2Task(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -160,6 +190,7 @@ class WorkspaceV2Task(BaseModel):
         ge=0,
         le=86400,
     )
+    provider_recovery: WorkspaceProviderRecoveryPolicy | None = None
 
 
 class WorkspaceV2Workspace(BaseModel):
@@ -435,6 +466,12 @@ class WorkspaceFailureDetailsResponse(BaseModel):
     recovery_strategy: str | None = None
     salvage_policy: str | None = None
     fallback_model: dict[str, Any] | None = None
+    provider_recovery: dict[str, Any] | None = None
+    failure_type: str | None = None
+    retry_after_seconds: int | None = None
+    cooldown_seconds: int | None = None
+    failure_fingerprint: str | None = None
+    fallback_allowed: bool | None = None
 
 
 class CoordinationOverlapResponse(BaseModel):

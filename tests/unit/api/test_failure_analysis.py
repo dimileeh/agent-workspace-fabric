@@ -428,7 +428,7 @@ async def test_failure_summary_endpoint_exposes_provider_capacity_exhausted(
         c for c in body["root_cause_clusters"]
         if c["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
     )
-    assert cluster["likely_cause"] == "Provider Capacity Exhausted"
+    assert cluster["likely_cause"] == "Provider Quota Exhausted"
     assert cluster["actionable_next_action"] == "Retry the workspace later or fallback to a different provider."
 
     # Find our example in latest_examples

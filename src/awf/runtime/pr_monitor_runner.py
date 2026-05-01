@@ -50,7 +50,11 @@ from awf.common.logging import get_logger
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
-from awf.db.repositories import WorkspaceEventCreate, WorkspaceRepository
+from awf.db.repositories import (
+    ProviderModelCircuitBreakerRepository,
+    WorkspaceEventCreate,
+    WorkspaceRepository,
+)
 from awf.runtime.logs import LogStore, WorkspaceLogSink
 from awf.runtime.merge_coordinator import DEFAULT_MERGE_COORDINATOR, MergeCoordinator
 from awf.runtime.monitor_prompts import (
@@ -96,6 +100,14 @@ from awf.service.gc import run_workspace_filesystem_gc
 from awf.service.merge_queue import (
     MergeQueueBlocker,
     list_merge_queue_blockers_for_workspace,
+)
+from awf.service.provider_recovery import (
+    PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+    PROVIDER_RECOVERY_COOLDOWN_EVENT,
+    create_provider_recovery_attempt_row,
+    provider_cooldown_not_before,
+    provider_for_agent_model,
+    provider_recovery_metadata_from_failure,
 )
 
 _log = get_logger(__name__)
@@ -602,6 +614,79 @@ class PullRequestMonitorRunner:
             if ws is None:
                 return
             await repo.add_events(ws, events=events)
+            await s.commit()
+
+    async def _provider_recovery_suppresses_cli(self, workspace_id: str) -> bool:
+        now = datetime.now(UTC)
+        async with self._deps.session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                return False
+            not_before = provider_cooldown_not_before(ws.task_policy)
+            if not_before is not None and not_before > now:
+                await repo.add_event(
+                    ws,
+                    event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
+                    reason_code="PROVIDER_RECOVERY_NOT_BEFORE",
+                    payload={"not_before": not_before.isoformat(), "source": "pr_monitor"},
+                )
+                await s.commit()
+                return True
+            model = _workspace_agent_model(ws)
+            provider = provider_for_agent_model(ws.agent, model)
+            if provider is None or model is None:
+                return False
+            breaker = await ProviderModelCircuitBreakerRepository(s).open_breaker(
+                provider=provider,
+                model=model,
+                now=now,
+            )
+            if breaker is None:
+                await s.commit()
+                return False
+            await repo.add_event(
+                ws,
+                event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
+                reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+                payload={
+                    "provider": provider,
+                    "model": model,
+                    "source": "pr_monitor",
+                    "cooldown_until": breaker.cooldown_until.isoformat()
+                    if breaker.cooldown_until is not None
+                    else None,
+                    "failure_count": breaker.failure_count,
+                    "last_reason_code": breaker.last_reason_code,
+                },
+            )
+            await s.commit()
+            return True
+
+    async def _record_provider_agent_run_error(
+        self,
+        workspace_id: str,
+        exc: AgentRunError,
+    ) -> None:
+        message = exc.result.stderr.strip() or exc.result.stdout.strip()
+        async with self._deps.session_factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                return
+            metadata = provider_recovery_metadata_from_failure(
+                reason_code=exc.reason_code,
+                message=message,
+                details=exc.details,
+                task_policy=ws.task_policy,
+            )
+            if metadata is None:
+                return
+            await create_provider_recovery_attempt_row(
+                s,
+                workspace_id,
+                metadata=metadata,
+            )
             await s.commit()
 
     async def _record_pr_monitor_audit_event(
@@ -2749,6 +2834,8 @@ class PullRequestMonitorRunner:
     ) -> Verdict:
         result_stdout = ""
         cli_failed = False
+        if await self._provider_recovery_suppresses_cli(workspace_id):
+            return "agent_failed"
         try:
             result = await self._deps.adapter.run(
                 compose_project=compose_project,
@@ -2761,6 +2848,7 @@ class PullRequestMonitorRunner:
         except AgentRunError as exc:
             cli_failed = True
             result_stdout = exc.result.stdout
+            await self._record_provider_agent_run_error(workspace_id, exc)
             _log.warning(
                 "monitor.cli_nonzero_exit",
                 returncode=exc.result.returncode,
@@ -2823,14 +2911,16 @@ class PullRequestMonitorRunner:
                 conflicting_files=conflicting_files,
             )
             try:
-                await self._deps.adapter.run(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    prompt=prompt,
-                    workspace_id=workspace_id,
-                    log_source="recovery",
-                )
+                if not await self._provider_recovery_suppresses_cli(workspace_id):
+                    await self._deps.adapter.run(
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        prompt=prompt,
+                        workspace_id=workspace_id,
+                        log_source="recovery",
+                    )
             except AgentRunError as exc:
+                await self._record_provider_agent_run_error(workspace_id, exc)
                 _log.warning(
                     "monitor.sync_base_cli_failed",
                     workspace_id=workspace_id,
@@ -2862,14 +2952,16 @@ class PullRequestMonitorRunner:
     ) -> _GitPushResult:
         prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
         try:
-            await self._deps.adapter.run(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=prompt,
-                workspace_id=workspace_id,
-                log_source="recovery",
-            )
+            if not await self._provider_recovery_suppresses_cli(workspace_id):
+                await self._deps.adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=prompt,
+                    workspace_id=workspace_id,
+                    log_source="recovery",
+                )
         except AgentRunError as exc:
+            await self._record_provider_agent_run_error(workspace_id, exc)
             _log.warning(
                 "monitor.ci_fix_cli_failed",
                 workspace_id=workspace_id,
@@ -4352,6 +4444,12 @@ def _target_reconcile_payload(result: object) -> dict[str, object]:
         if isinstance(payload, dict):
             return dict(payload)
     return {"result": str(result)}
+
+
+def _workspace_agent_model(workspace: Workspace) -> str | None:
+    task_policy = workspace.task_policy if isinstance(workspace.task_policy, dict) else {}
+    model = task_policy.get("agent_model")
+    return model.strip() if isinstance(model, str) and model.strip() else None
 
 
 def _target_reconcile_log_fields(payload: Mapping[str, object]) -> dict[str, object]:

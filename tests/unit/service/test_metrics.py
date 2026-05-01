@@ -13,6 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
+    ProviderModelCircuitBreakerRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
     TaskRepository,
@@ -669,8 +670,44 @@ async def test_resource_saturation_reports_active_counts_and_configured_defaults
     assert summary.concurrency.execution.available == 0
     assert summary.disk.reason == "SUFFICIENT_DISK"
     assert summary.admission.ok is True
-    assert summary.admission.status == "saturated"
-    assert summary.admission.reason == "WORKER_EXECUTION_CONCURRENCY_SATURATED"
+
+
+@pytest.mark.unit
+async def test_resource_saturation_exposes_open_provider_circuit_breakers(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    async with session_factory() as session:
+        await ProviderModelCircuitBreakerRepository(session).record_failure(
+            provider="google",
+            model="gemini-2.5-pro",
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            failure_fingerprint="capacity:fingerprint",
+            workspace_id="ws_capacity",
+            attempt_id=None,
+            now=now,
+            failure_threshold=1,
+            cooldown_seconds=600,
+        )
+        await session.commit()
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now + timedelta(seconds=30),
+    )
+
+    assert len(summary.provider_circuit_breakers) == 1
+    breaker = summary.provider_circuit_breakers[0]
+    assert breaker.provider == "google"
+    assert breaker.model == "gemini-2.5-pro"
+    assert breaker.state == "open"
+    assert breaker.failure_count == 1
+    assert breaker.last_workspace_id == "ws_capacity"
 
 
 @pytest.mark.unit

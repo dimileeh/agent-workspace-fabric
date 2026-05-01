@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent
-from awf.db.repositories import ResourceReservationRepository
+from awf.db.repositories import ProviderModelCircuitBreakerRepository, ResourceReservationRepository
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -221,6 +221,17 @@ class AdmissionSummary:
 
 
 @dataclass(frozen=True)
+class ProviderCircuitBreakerSummary:
+    provider: str
+    model: str
+    state: str
+    failure_count: int
+    cooldown_until: datetime | None
+    last_reason_code: str | None
+    last_workspace_id: str | None
+
+
+@dataclass(frozen=True)
 class ResourceSaturationSummary:
     generated_at: datetime
     workspace_counts: WorkspaceSaturationCounts
@@ -233,6 +244,7 @@ class ResourceSaturationSummary:
     orphan_resources: OrphanResourceSummary
     runtime_health: WorkspaceRuntimeHealthSummary
     admission: AdmissionSummary
+    provider_circuit_breakers: list[ProviderCircuitBreakerSummary] = field(default_factory=list)
 
 
 _UNKNOWN_FAILURE_ACTION = FailureAction(
@@ -476,9 +488,32 @@ async def _cluster_root_causes(
         likely_cause = "Unknown Validation Failure"
         action = "Review validation logs"
 
+        provider_recovery = details_payload.get("provider_recovery")
+        provider_failure_type = (
+            provider_recovery.get("failure_type")
+            if isinstance(provider_recovery, dict)
+            else details_payload.get("failure_type")
+        )
+        provider_action = (
+            provider_recovery.get("recommended_action")
+            if isinstance(provider_recovery, dict)
+            else details_payload.get("recommended_action")
+        )
+
         if specific_reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED":
-            likely_cause = "Provider Capacity Exhausted"
-            action = "Retry the workspace later or fallback to a different provider."
+            likely_cause = _provider_likely_cause(provider_failure_type)
+            action = (
+                provider_action
+                if isinstance(provider_action, str) and provider_action
+                else "Retry after provider cooldown or dispatch an approved fallback model."
+            )
+        elif specific_reason_code == "AGENT_AUTH_FAILED":
+            likely_cause = "Provider Auth Failed"
+            action = (
+                provider_action
+                if isinstance(provider_action, str) and provider_action
+                else "Refresh provider credentials or dispatch an approved fallback provider."
+            )
         elif specific_reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION:
             likely_cause = "Planning Scope Violation"
             action = (
@@ -613,6 +648,20 @@ async def summarize_resource_saturation_for_session(
         scanner_reason="RUNTIME_HEALTH_NOT_COLLECTED",
         scanner_detail="Runtime health inventory was not collected for this summary.",
     )
+    provider_circuit_breakers = [
+        ProviderCircuitBreakerSummary(
+            provider=breaker.provider,
+            model=breaker.model,
+            state=breaker.state,
+            failure_count=breaker.failure_count,
+            cooldown_until=breaker.cooldown_until,
+            last_reason_code=breaker.last_reason_code,
+            last_workspace_id=breaker.last_workspace_id,
+        )
+        for breaker in await ProviderModelCircuitBreakerRepository(session).list_open(
+            now=generated_at
+        )
+    ]
 
     return ResourceSaturationSummary(
         generated_at=generated_at,
@@ -626,6 +675,7 @@ async def summarize_resource_saturation_for_session(
         orphan_resources=resolved_orphan_resources,
         runtime_health=resolved_runtime_health,
         admission=admission,
+        provider_circuit_breakers=provider_circuit_breakers,
     )
 
 
@@ -1335,6 +1385,19 @@ def _validate_failure_example_limit(failure_example_limit: int) -> None:
             "failure_example_limit must be between "
             f"{MIN_FAILURE_EXAMPLE_LIMIT} and {MAX_FAILURE_EXAMPLE_LIMIT}"
         )
+
+
+def _provider_likely_cause(failure_type: object) -> str:
+    if not isinstance(failure_type, str):
+        return "Provider Capacity Exhausted"
+    return {
+        "auth": "Provider Auth Failed",
+        "quota": "Provider Quota Exhausted",
+        "capacity": "Provider Capacity Exhausted",
+        "usage_limit": "Provider Usage Limit Exhausted",
+        "timeout": "Provider Timeout",
+        "idle_timeout": "Provider Idle Timeout",
+    }.get(failure_type, "Provider Capacity Exhausted")
 
 
 def _to_utc(value: datetime) -> datetime:
