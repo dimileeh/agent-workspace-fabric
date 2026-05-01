@@ -498,11 +498,12 @@ async def test_retry_planning_scope_violation_discards_premature_work_and_replan
 @pytest.mark.parametrize(
     ("task_kind", "branch_name", "remote_push_branch"),
     [
+        ("monitor_release_pr", "release-monitor/ws_scope_old", "release/2026-05"),
         ("sync_release_pr", "release-sync/ws_scope_old", "development"),
         ("sync_feature_pr", "feature-sync/ws_scope_old", "contributors/fix-123"),
     ],
 )
-async def test_retry_planning_scope_violation_preserves_sync_remote_push_branch(
+async def test_retry_planning_scope_violation_preserves_monitor_and_sync_remote_push_branch(
     factory: async_sessionmaker[AsyncSession],
     task_kind: str,
     branch_name: str,
