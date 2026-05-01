@@ -792,15 +792,23 @@ async def test_conformance_retry_payload_includes_retry_attempt_number_and_gaps(
         )
 
     assert len(operations) >= 1
+    evidence_ref = operations[0].payload.get("conformance_evidence_ref")
+    assert evidence_ref == {
+        "source_workspace_id": first.id,
+        "event_type": "workspace.state_changed",
+        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+    }
     result = operations[0].result or {}
     assert result.get("attempt_number") == 2
     assert result.get("source_reason_code") == PLAN_CONFORMANCE_UNSATISFIED
+    assert result.get("conformance_evidence_ref") == evidence_ref
 
     assert len(events) >= 1
     event_payload = events[0].payload
     assert isinstance(event_payload, dict)
     assert event_payload.get("attempt_number") == 2
     assert event_payload.get("source_reason_code") == PLAN_CONFORMANCE_UNSATISFIED
+    assert event_payload.get("conformance_evidence_ref") == evidence_ref
 
 
 @pytest.mark.unit
