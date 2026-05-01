@@ -528,6 +528,7 @@ class TestHappyPath:
             stdout=f"?? docs/awf-plans/{ws_id}.md\n",
         )
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # execution adapter
         fake.queue_result(  # changed paths before compare
             returncode=0,
@@ -545,6 +546,7 @@ class TestHappyPath:
                 " M src/awf/foo.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="base_commit_sha\n")  # rev-parse HEAD post-iter
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")  # cached diff
@@ -598,6 +600,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="plan written")  # planning
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
         fake.queue_result(  # compare says not done
@@ -605,6 +608,7 @@ class TestHappyPath:
             stdout='{"status":"needs_iteration","summary":"gap","gaps":["add tests"]}',
         )
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
         fake.queue_result(returncode=0, stdout="fixed gap")  # iteration execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
         fake.queue_result(  # compare satisfied
@@ -612,6 +616,7 @@ class TestHappyPath:
             stdout='{"status":"satisfied","summary":"done","gaps":[]}',
         )
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="src/x.py\n")
@@ -657,6 +662,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="plan written")  # planning
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
         fake.queue_result(
@@ -671,6 +677,7 @@ class TestHappyPath:
                 " M src/x.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
 
         await executor.execute(ws_id)
 
@@ -856,13 +863,17 @@ class TestHappyPath:
             stdout=f"?? docs/awf-plans/{ws_id}.md\n",
         )
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (none yet)
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         # Iteration 0:
         # Execute adapter (custom) — no runner call
         fake.queue_result(  # before_compare git status
             returncode=0,
             stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/foo.py\n",
         )
-        # Conformance adapter raises AgentRunError
+        # Conformance adapter raises AgentRunError; executor uses
+        # before_compare for after_compare on the error path, then captures
+        # HEAD for the iteration-end progress digest.
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
         # After raise, executor introspects implementation commits for stall evidence
         fake.queue_result(returncode=0, stdout="head_sha_after\n")  # post-stall rev-parse HEAD
         fake.queue_result(returncode=0, stdout="2\n")  # post-stall rev-list count
@@ -932,6 +943,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="plan written")  # planning
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # initial execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
         fake.queue_result(  # compare says not done (different summary each time)
@@ -939,6 +951,7 @@ class TestHappyPath:
             stdout='{"status":"needs_iteration","summary":"gap-1","gaps":["add tests"]}',
         )
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
         fake.queue_result(returncode=0, stdout="fixed gap")  # iteration execute
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n")
         fake.queue_result(  # compare satisfied
@@ -946,6 +959,7 @@ class TestHappyPath:
             stdout='{"status":"satisfied","summary":"done","gaps":[]}',
         )
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n M src/y.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="src/x.py\n")
@@ -1024,16 +1038,19 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (planning clean)
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
 
         # Iteration 0 introduces src/x.py (worktree_changed=True), then three
         # follow-up iterations leave the worktree untouched (worktree_changed=False).
         # The repeated_output stall fires once the no-progress streak hits the
-        # threshold (3) at the end of iteration 3.
+        # threshold (3) at the end of iteration 3. HEAD stays at sha1 across
+        # iterations so the progress digest only flips on dirty-content changes.
         for _ in range(4):
             fake.queue_result(returncode=0, stdout="execute output")  # execute adapter
             fake.queue_result(returncode=0, stdout=identical_paths)  # before_compare
             fake.queue_result(returncode=0, stdout=identical_report)  # conformance adapter
             fake.queue_result(returncode=0, stdout=identical_paths)  # after_compare
+            fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter post
 
         # post-stall git introspection
         fake.queue_result(returncode=0, stdout="head_sha_after\n")  # rev-parse HEAD
@@ -1058,6 +1075,118 @@ class TestHappyPath:
             stall = failed_event.payload["details"]["conformance_stall"]
             assert stall["kind"] == "repeated_output"
             assert stall["repeated_output_count"] == 3
+
+    @pytest.mark.unit
+    async def test_planning_profile_does_not_record_stall_when_iterations_commit_each_round(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        """Repeated identical conformance reports must not trip the stall when
+        the agent is committing implementation work each iteration.
+
+        Without folding HEAD into the progress digest, an agent that commits
+        leaves a clean working tree (empty dirty path set) and the stall
+        detector sees worktree_changed=False every iteration even though
+        real implementation progress is happening. This test pins down the
+        commit-progression path: HEAD advances per iteration, and the loop
+        eventually reaches satisfied without falsely raising a stall.
+        """
+        from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
+
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 5,
+                    "conformance_stall": {
+                        "no_output_seconds": 600,
+                        "over_duration_seconds": 1800,
+                        "repeated_output_threshold": 3,
+                    },
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE),
+            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts"),
+            pr_creator=PullRequestCreator(fake),
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+            ),
+        )
+
+        identical_report = (
+            '{"status":"needs_iteration","summary":"same gap","gaps":["finish tests"]}'
+        )
+        satisfied_report = '{"status":"satisfied","summary":"done","gaps":[]}'
+        # Working tree stays clean every iteration because the agent commits
+        # its work; only HEAD moves. This is the scenario the original digest
+        # missed.
+        clean_paths = ""
+
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha0\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(  # committed_paths_since (planning committed plan)
+            returncode=0,
+            stdout=f"docs/awf-plans/{ws_id}.md\n",
+        )
+        fake.queue_result(returncode=0, stdout="sha_plan\n")  # rev-parse HEAD pre-loop
+
+        # Three iterations with identical clean working tree and identical
+        # report digest, but each iteration the agent commits → HEAD moves.
+        # The repeated_output threshold is 3, so without HEAD in the digest
+        # this would falsely fire.
+        for sha in ("sha_iter0", "sha_iter1", "sha_iter2"):
+            fake.queue_result(returncode=0, stdout="execute output")  # execute
+            fake.queue_result(returncode=0, stdout=clean_paths)  # before_compare
+            fake.queue_result(returncode=0, stdout=identical_report)  # conformance
+            fake.queue_result(returncode=0, stdout=clean_paths)  # after_compare
+            fake.queue_result(returncode=0, stdout=f"{sha}\n")  # rev-parse HEAD iter post
+
+        # Fourth iteration: agent finally satisfies the plan (commits + report flips)
+        fake.queue_result(returncode=0, stdout="execute output")  # execute
+        fake.queue_result(returncode=0, stdout=clean_paths)  # before_compare
+        fake.queue_result(returncode=0, stdout=satisfied_report)  # conformance
+        fake.queue_result(returncode=0, stdout=clean_paths)  # after_compare
+        fake.queue_result(returncode=0, stdout="sha_iter3\n")  # rev-parse HEAD iter post
+
+        # Post-loop validation/PR queue — the workspace should reach completion.
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
+        fake.queue_result(returncode=0)  # git add
+        fake.queue_result(returncode=0, stdout="src/x.py\n")  # cached diff
+        fake.queue_result(returncode=0)  # git commit
+        fake.queue_result(returncode=0, stdout="1\n")  # rev-list count
+        fake.queue_result(returncode=0)  # merge-base --is-ancestor
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")  # validation
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)  # git push
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            stall_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.planning_conformance_stalled"
+                or event.reason_code == AGENT_STALLED_IN_CONFORMANCE
+            ]
+            assert stall_events == []
 
     @pytest.mark.unit
     async def test_planning_profile_does_not_record_stall_when_satisfied_iteration_exceeds_over_duration(
@@ -1103,6 +1232,7 @@ class TestHappyPath:
         fake.queue_result(returncode=0, stdout="plan written")  # planning adapter
         fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
         fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="base_sha\n")  # rev-parse HEAD pre-loop
         fake.queue_result(returncode=0, stdout="implemented")  # execute adapter
         fake.queue_result(  # before_compare
             returncode=0,
@@ -1120,6 +1250,7 @@ class TestHappyPath:
                 " M src/awf/foo.py\n"
             ),
         )
+        fake.queue_result(returncode=0, stdout="base_sha\n")  # rev-parse HEAD iter 0 post
         fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
         fake.queue_result(returncode=0)
         fake.queue_result(returncode=0, stdout="src/awf/foo.py\n")

@@ -2330,12 +2330,15 @@ class WorkspaceExecutor:
         # Content-aware fingerprint of the worktree at the start of each
         # iteration. Initialized to the post-planning state so iteration 0
         # measures progress across both its execution and conformance steps.
-        # Hashing file bytes (not just path-set membership) means iterative
-        # fixes that re-edit the same file still register as progress, which
-        # keeps ``classify_conformance_stall`` from misreading real work as
-        # a repeated-output stall.
+        # Combines the HEAD commit SHA with hashed file bytes so re-edits to
+        # the same dirty file *and* commits made during an iteration both
+        # register as progress; without the HEAD signal an agent that
+        # commits each iteration leaves a clean working tree and produces
+        # identical empty digests, which would falsely trip
+        # ``classify_conformance_stall``'s repeated_output detector.
+        iteration_start_head = await self._git_rev_parse_head(worktree_path)
         iteration_start_digest = self._digest_dirty_content(
-            worktree_path, dirty_paths
+            worktree_path, dirty_paths, head_sha=iteration_start_head
         )
         for iteration in range(planning.max_iterations + 1):
             last_iteration = iteration
@@ -2402,7 +2405,10 @@ class WorkspaceExecutor:
                 stderr = compare_error.result.stderr
                 report_digest = None
                 after_compare = before_compare
-            after_digest = self._digest_dirty_content(worktree_path, after_compare)
+            after_head = await self._git_rev_parse_head(worktree_path)
+            after_digest = self._digest_dirty_content(
+                worktree_path, after_compare, head_sha=after_head
+            )
             worktree_changed = iteration_start_digest != after_digest
             iteration_start_digest = after_digest
 
@@ -2624,15 +2630,29 @@ class WorkspaceExecutor:
             )
         return changed_paths_from_porcelain(result.stdout)
 
-    def _digest_dirty_content(self, worktree_path: Path, paths: set[Path]) -> str:
-        """Content-aware fingerprint of the given dirty worktree paths.
+    def _digest_dirty_content(
+        self,
+        worktree_path: Path,
+        paths: set[Path],
+        *,
+        head_sha: str | None = None,
+    ) -> str:
+        """Progress fingerprint combining HEAD SHA and dirty content bytes.
 
         Path-set equality alone treats iterative re-edits of the same file as
-        no progress; hashing per-file bytes lets repeat edits register as work.
-        Missing files contribute a deterministic marker so the digest stays
-        stable across iterations whose worktree exists only in mocked git output.
+        no progress; hashing per-file bytes lets repeat edits register as
+        work. Folding ``head_sha`` in additionally lets commits register as
+        progress — an agent that commits each iteration leaves a clean
+        working tree, so the dirty portion would otherwise digest identically
+        and falsely trip ``classify_conformance_stall``'s repeated_output
+        detector. Missing files contribute a deterministic marker so the
+        digest stays stable across iterations whose worktree exists only in
+        mocked git output.
         """
         hasher = hashlib.sha256()
+        if head_sha is not None:
+            hasher.update(head_sha.encode("utf-8"))
+            hasher.update(b"\0")
         for path in sorted(paths, key=lambda p: p.as_posix()):
             hasher.update(path.as_posix().encode("utf-8"))
             hasher.update(b"\0")

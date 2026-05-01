@@ -599,8 +599,10 @@ async def test_planning_required_prompts_include_coordination_warning(
         stdout="?? docs/awf-plans/ws_coord_plan.md\n",
     )  # dirty after planning
     runner.queue_result(returncode=0, stdout="")  # committed paths since baseline
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n")  # before compare
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_coord_plan.md\n")  # after compare
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan",
@@ -806,6 +808,7 @@ async def test_planning_required_allows_extra_plan_changes_when_policy_disabled(
         stdout="?? docs/awf-plans/ws_plan_unenforced.md\n?? src/changed.py\n",
     )
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
     runner.queue_result(
         returncode=0,
         stdout="?? docs/awf-plans/ws_plan_unenforced.md\n?? src/changed.py\n",
@@ -814,6 +817,7 @@ async def test_planning_required_allows_extra_plan_changes_when_policy_disabled(
         returncode=0,
         stdout="?? docs/awf-plans/ws_plan_unenforced.md\n?? src/changed.py\n",
     )
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan plus code",
@@ -853,7 +857,8 @@ async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Pa
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD (2)
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")  # dirty after plan (3)
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty) (4)
-    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")  # before_compare (5)
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop (5)
+    runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare.md\n")  # before_compare (6)
     runner.queue_result(
         returncode=0,
         stdout=(
@@ -861,7 +866,7 @@ async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Pa
             "?? docs/awf-plans/ws_compare.json\n"
             "?? src/side_effect.py\n"
         ),
-    )  # after_compare (6)
+    )  # after_compare (7) — but should not get this far on scope violation
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan",
@@ -912,6 +917,7 @@ async def test_conformance_phase_allows_side_effects_when_deviation_policy_disab
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare_unenforced.md\n")
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_compare_unenforced.md\n")
     runner.queue_result(
         returncode=0,
@@ -921,6 +927,7 @@ async def test_conformance_phase_allows_side_effects_when_deviation_policy_disab
             "?? src/side_effect.py\n"
         ),
     )
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan",
@@ -965,6 +972,7 @@ async def test_planning_required_allows_extra_changes_when_profile_disables_guar
         stdout="?? docs/awf-plans/ws_permissive.md\n?? src/allowed.py\n",
     )  # dirty after plan
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
     runner.queue_result(
         returncode=0,
         stdout="?? docs/awf-plans/ws_permissive.md\n?? src/allowed.py\n",
@@ -978,6 +986,7 @@ async def test_planning_required_allows_extra_changes_when_profile_disables_guar
             "?? src/compare_extra.py\n"
         ),
     )  # after_compare
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan",
@@ -1021,12 +1030,14 @@ async def test_planning_required_reports_unsatisfied_conformance_after_iteration
     runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")  # dirty after plan
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")  # before_compare
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_unsat.md\n")  # after_compare (first)
+    runner.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
     runner.queue_result(
         returncode=0,
         stdout="?? docs/awf-plans/ws_unsat.md\n?? docs/awf-plans/ws_unsat.json\n",
-    )  # after_compare (second)
+    )  # after_compare (second) — unused on max_iterations=0
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan",
@@ -1217,6 +1228,31 @@ def test_digest_dirty_content_handles_missing_files_deterministically(
     second = executor._digest_dirty_content(worktree, paths)
     assert first == second
     assert first != executor._digest_dirty_content(worktree, {Path("src/x.py")})
+
+
+@pytest.mark.unit
+def test_digest_dirty_content_flips_on_head_sha_change_with_clean_tree(
+    tmp_path: Path,
+) -> None:
+    """Commits made during an iteration must register as progress.
+
+    Without folding HEAD into the digest, an agent that commits each
+    iteration leaves a clean working tree (empty dirty path set) and the
+    digest stays identical, falsely tripping the repeated_output stall.
+    """
+    runner = FakeCommandRunner()
+    executor = _executor_with_runner(runner, tmp_path)
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    empty_paths: set[Path] = set()
+    before = executor._digest_dirty_content(worktree, empty_paths, head_sha="sha_before")
+    after = executor._digest_dirty_content(worktree, empty_paths, head_sha="sha_after")
+
+    assert before != after, (
+        "digest must reflect HEAD progression so commits register as "
+        "progress even when the working tree is clean"
+    )
 
 
 @pytest.mark.unit
@@ -1672,10 +1708,14 @@ async def test_planning_required_accepts_committed_plan_file(tmp_path: Path) -> 
     runner.queue_result(returncode=0, stdout="")
     # git diff --name-only <base>..HEAD -> plan file
     runner.queue_result(returncode=0, stdout="docs/awf-plans/ws_plan_commit.md\n")
+    # rev-parse HEAD pre-loop (post-plan progress digest)
+    runner.queue_result(returncode=0, stdout="abc1234\n")
     # before_compare
     runner.queue_result(returncode=0, stdout="")
     # after_compare
     runner.queue_result(returncode=0, stdout="")
+    # rev-parse HEAD iter 0 post (iteration progress digest)
+    runner.queue_result(returncode=0, stdout="abc1234\n")
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan committed",
@@ -1764,8 +1804,10 @@ async def test_planning_required_falls_back_to_porcelain_when_no_baseline_sha(
     runner.queue_result(returncode=0, stdout="")  # before_plan
     runner.queue_result(returncode=128, stderr="fatal: not a git repository")  # rev-parse HEAD fails
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_plan_fallback.md\n")  # dirty after planning
+    runner.queue_result(returncode=128, stderr="fatal: not a git repository")  # rev-parse HEAD pre-loop also fails
     runner.queue_result(returncode=0, stdout="")  # before_compare
     runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=128, stderr="fatal: not a git repository")  # rev-parse HEAD iter 0 post also fails
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "plan fallback",
@@ -1807,8 +1849,10 @@ async def test_planning_required_dirty_plan_still_accepted(tmp_path: Path) -> No
     runner.queue_result(returncode=0, stdout="old_sha\n")  # rev-parse HEAD
     runner.queue_result(returncode=0, stdout="?? docs/awf-plans/ws_plan_dirty.md\n")  # dirty after planning
     runner.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+    runner.queue_result(returncode=0, stdout="old_sha\n")  # rev-parse HEAD pre-loop
     runner.queue_result(returncode=0, stdout="")  # before_compare
     runner.queue_result(returncode=0, stdout="")  # after_compare
+    runner.queue_result(returncode=0, stdout="old_sha\n")  # rev-parse HEAD iter 0 post
     executor = _executor_with_runner(runner, tmp_path)
     adapter = _PlanningAdapter(
         "dirty plan",
