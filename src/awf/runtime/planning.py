@@ -350,7 +350,10 @@ def classify_conformance_stall(
     error_reason_code = (
         latest_error.reason_code if latest_error is not None else last.error_reason_code
     )
-    if error_reason_code in {AGENT_IDLE_TIMEOUT_REASON_CODE, AGENT_TIMEOUT_REASON_CODE}:
+    if (
+        error_reason_code in {AGENT_IDLE_TIMEOUT_REASON_CODE, AGENT_TIMEOUT_REASON_CODE}
+        and last.elapsed_seconds >= policy.no_output_seconds
+    ):
         excerpt = _stall_output_excerpt(latest_error, last)
         return ConformanceStallEvidence(
             kind=ConformanceStallKind.no_output,

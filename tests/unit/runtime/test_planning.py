@@ -642,6 +642,35 @@ def test_classify_conformance_stall_returns_no_output_for_idle_timeout() -> None
 
 
 @pytest.mark.unit
+def test_classify_conformance_stall_skips_no_output_when_below_policy_threshold() -> None:
+    history = [
+        _iter_record(
+            iteration=0,
+            elapsed_seconds=30.0,
+            report_digest=None,
+            worktree_changed=False,
+            stderr="idle timeout exceeded",
+            error_reason_code="AGENT_IDLE_TIMEOUT",
+        ),
+    ]
+    error = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=124, stdout="", stderr="idle timeout exceeded"),
+        reason_code="AGENT_IDLE_TIMEOUT",
+    )
+
+    evidence = classify_conformance_stall(
+        history=history,
+        policy=_stall_policy(no_output_seconds=600),
+        plan_path=Path("docs/awf-plans/ws_no_output_below.md"),
+        report_path=Path("docs/awf-plans/ws_no_output_below.conformance.json"),
+        latest_error=error,
+    )
+
+    assert evidence is None
+
+
+@pytest.mark.unit
 def test_classify_conformance_stall_returns_repeated_output_when_report_digest_repeats() -> None:
     history = [
         _iter_record(

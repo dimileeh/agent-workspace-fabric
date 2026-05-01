@@ -774,6 +774,7 @@ class TestHappyPath:
         from awf.adapters import base as adapter_base
         from awf.adapters.base import AgentRunResult
         from awf.common.commands import CommandResult
+        from awf.control import executor as executor_module
         from awf.db.enums import AgentRuntime
         from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
 
@@ -784,9 +785,25 @@ class TestHappyPath:
                 "planning": {
                     "required": True,
                     "max_iterations": 1,
+                    "conformance_stall": {
+                        "no_output_seconds": 600,
+                        "over_duration_seconds": 1800,
+                        "repeated_output_threshold": 3,
+                    },
                 },
             },
         )
+
+        # Drive iteration_started_at -> elapsed_seconds past
+        # no_output_seconds=600 so the policy threshold is met and the idle
+        # timeout is recorded as AGENT_STALLED_IN_CONFORMANCE.
+        clock = [0.0]
+
+        def _fake_monotonic() -> float:
+            clock[0] += 700.0
+            return clock[0]
+
+        monkeypatch.setattr(executor_module.time, "monotonic", _fake_monotonic)
 
         class _IdleConformanceAdapter(adapter_base.AgentAdapter):
             runtime = AgentRuntime.codex
