@@ -497,6 +497,123 @@ def test_provider_recovery_state_reason_code_prefers_decision_reason_code() -> N
     assert view.reason_code == PROVIDER_RETRY_DELAYED_REASON
 
 
+def test_merge_recovery_views_fills_missing_fields_from_event_view() -> None:
+    partial_state: dict[str, Any] = {
+        "action": "retry",
+        "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+        "retry_attempt_number": 1,
+        "fallback_attempt_number": 0,
+        "target_agent": "codex",
+        "target_provider": "openai",
+        "target_model": "gpt-5",
+        "source_workspace_id": "ws-source-001",
+        "source_attempt_id": "att-001",
+    }
+    now = datetime.now(UTC)
+    not_before = now + timedelta(seconds=300)
+    event_payload: dict[str, Any] = {
+        "source_workspace_id": "ws-source-002",
+        "source_attempt_id": "att-002",
+        "provider_recovery": {
+            "action": "retry",
+            "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+            "source_provider": "google",
+            "source_model": "gemini-2.5-pro",
+            "retry_attempt_number": 0,
+            "fallback_attempt_number": 2,
+            "not_before": not_before.isoformat(),
+        },
+    }
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        payload=event_payload,
+        occurred_at=now,
+        old_state="running",
+        new_state="failed",
+        id="evt-merge",
+    )
+    workspace = SimpleNamespace(
+        id="ws-merge",
+        status="failed",
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: partial_state},
+        failure_reason="agent_failure",
+        failure_message="Provider exhausted",
+        agent="codex",
+        events=[event],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.source_provider == "google"
+    assert view.source_model == "gemini-2.5-pro"
+    assert view.action == "retry"
+    assert view.reason_code == PROVIDER_RETRY_DELAYED_REASON
+    assert view.retry_attempt_number == 1
+    assert view.fallback_attempt_number == 0
+    assert view.cooldown_until is not None
+
+
+def test_merge_recovery_views_prefers_policy_values_when_present() -> None:
+    now = datetime.now(UTC)
+    not_before_policy = now + timedelta(seconds=500)
+    not_before_event = now + timedelta(seconds=200)
+    state: dict[str, Any] = {
+        "action": "retry",
+        "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+        "source_provider": "anthropic",
+        "source_model": "claude-4",
+        "retry_attempt_number": 2,
+        "fallback_attempt_number": 1,
+        "target_agent": "codex",
+        "target_provider": "openai",
+        "target_model": "gpt-5",
+        "source_workspace_id": "ws-src-policy",
+        "source_attempt_id": "att-policy",
+        "not_before": not_before_policy.isoformat(),
+    }
+    event_payload: dict[str, Any] = {
+        "source_workspace_id": "ws-src-event",
+        "source_attempt_id": "att-event",
+        "provider_recovery": {
+            "action": "fallback",
+            "decision_reason_code": PROVIDER_FALLBACK_SELECTED_REASON,
+            "source_provider": "google",
+            "source_model": "gemini-2.5-pro",
+            "retry_attempt_number": 0,
+            "fallback_attempt_number": 3,
+            "target_agent": "codex",
+            "target_provider": "openai",
+            "target_model": "gpt-5.3-codex",
+            "not_before": not_before_event.isoformat(),
+        },
+    }
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_REQUESTED_EVENT,
+        reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
+        payload=event_payload,
+        occurred_at=now,
+        old_state="running",
+        new_state="failed",
+        id="evt-priority",
+    )
+    workspace = SimpleNamespace(
+        id="ws-priority",
+        status="failed",
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: state},
+        failure_reason="agent_failure",
+        failure_message="Provider exhausted",
+        agent="codex",
+        events=[event],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.source_provider == "anthropic"
+    assert view.source_model == "claude-4"
+    assert view.action == "retry"
+    assert view.retry_attempt_number == 2
+    assert view.fallback_attempt_number == 1
+
+
 def test_provider_recovery_state_reason_code_falls_back_to_source_reason_code() -> None:
     state_data: dict[str, Any] = {
         "action": "retry",
