@@ -848,7 +848,7 @@ def _provider_recovery_state_from_task_policy(
     target_provider = _mapping_str(recovery_state, "target_provider")
     target_model = _mapping_str(recovery_state, "target_model")
     fallback_target: FallbackTarget | None = None
-    if target_agent is not None and target_model is not None:
+    if action == "fallback" and target_agent is not None and target_model is not None:
         fallback_target = FallbackTarget(
             agent=target_agent,
             provider=target_provider,

@@ -123,6 +123,7 @@ def test_provider_recovery_state_for_workspace_extracts_from_task_policy() -> No
     assert view.next_eligible_at is not None
     assert view.source_workspace_id == "ws-source-001"
     assert view.source_attempt_id == "att-001"
+    assert view.fallback_target is None
 
 
 def test_provider_recovery_state_for_workspace_fallback_preserves_source_lineage() -> None:
