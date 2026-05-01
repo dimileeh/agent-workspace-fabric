@@ -2399,7 +2399,7 @@ class WorkspaceExecutor:
                 )
                 report = parse_conformance_report(report_text)
                 last_report = report
-                report_digest = _digest_text(report_text)
+                report_digest = _digest_text(report_text) if report_text else None
             else:
                 stdout = compare_error.result.stdout
                 stderr = compare_error.result.stderr
