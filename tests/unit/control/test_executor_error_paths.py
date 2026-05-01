@@ -17,12 +17,14 @@ from __future__ import annotations
 
 import shutil
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
 import pytest
 import structlog
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.control.executor as executor_module
@@ -31,7 +33,13 @@ from awf.common.commands import FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor, _call_pr_monitor_factory
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.repositories import ValidationRunRepository, WorkspaceRepository
+from awf.db.models import Operation, TaskAttempt, Workspace, WorkspaceEvent
+from awf.db.repositories import (
+    TaskAttemptRepository,
+    TaskRepository,
+    ValidationRunRepository,
+    WorkspaceRepository,
+)
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager, ComposeOperationError
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
@@ -251,6 +259,16 @@ async def _seed_ready(
     base_commit: str | None = "a" * 40,
     auto_merge: bool | None = None,
     resolved_profile: dict[str, Any] | None = None,
+    requested_profile: dict[str, Any] | None = None,
+    profile_ref: str | None = None,
+    task_prompt: str = "p",
+    task_policy: dict[str, Any] | None = None,
+    owned_paths: list[str] | None = None,
+    test_commands: list[str] | None = None,
+    task_kind: str = "feature_branch_pr",
+    initial_review_grace_period_seconds: float | None = None,
+    create_task_attempt: bool = False,
+    mark_canonical_attempt: bool = False,
     create_worktree: bool = True,
 ) -> str:
     async with factory() as s:
@@ -259,12 +277,35 @@ async def _seed_ready(
             repo_url="git@github.com:x/y.git",
             branch_base="development",
             task_title="err-path",
-            task_prompt="p",
+            task_prompt=task_prompt,
             agent=agent,
-            test_commands=["pytest -q"],
+            test_commands=test_commands or ["pytest -q"],
             requires_database=False,
+            owned_paths=owned_paths,
+            task_policy=task_policy,
+            profile_ref=profile_ref,
+            requested_profile=requested_profile,
             resolved_profile=resolved_profile,
+            initial_review_grace_period_seconds=initial_review_grace_period_seconds,
+            task_kind=task_kind,
         )
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=ws.task_external_id,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            attempt = await TaskAttemptRepository(s).create_for_workspace(
+                task=task,
+                workspace=ws,
+            )
+            if mark_canonical_attempt:
+                attempt.is_canonical_for_merge = True
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = "awf/x"
         ws.remote_push_branch = "awf/x"
@@ -277,6 +318,56 @@ async def _seed_ready(
         if create_worktree:
             (_test_worktrees_root(factory) / ws.id).mkdir(parents=True, exist_ok=True)
         return ws.id
+
+
+def _provider_recovery_policy(*, max_same_provider_retries: int) -> dict[str, Any]:
+    return {
+        "agent_model": "gemini-2.5-pro",
+        "pr_monitor": {"review_grace_seconds": 55},
+        "provider_recovery": {
+            "fallbacks": [
+                {
+                    "agent": "codex",
+                    "provider": "openai",
+                    "model": "gpt-5.3-codex",
+                }
+            ],
+            "max_fallback_attempts": 1,
+            "max_same_provider_retries": max_same_provider_retries,
+            "cooldown_seconds": 30,
+            "backoff_seconds": 30,
+            "retry_after_cap_seconds": 300,
+        },
+    }
+
+
+def _provider_recovery_resolved_profile() -> dict[str, Any]:
+    return WorkspaceProfile(
+        name="executor-provider-recovery",
+        source="test",
+        validation={"requested_tier": 2},
+        monitor=ProfileMonitor(
+            initial_review_grace_period_seconds=55,
+            non_check_reviewer_settle_seconds=12,
+            non_check_reviewer_logins=["review-bot"],
+        ),
+    ).model_dump(mode="json")
+
+
+def _provider_recovery_requested_profile() -> dict[str, Any]:
+    return {
+        "name": "requested-provider-profile",
+        "source": "inline-test",
+        "validation": {"requested_tier": 2},
+    }
+
+
+def _parse_utc_datetime(value: str) -> datetime:
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
+
 
 async def _seed_monitoring_pr(
     factory: async_sessionmaker[AsyncSession],
@@ -386,77 +477,364 @@ class TestMissingBaseCommit:
 
 class TestUnexpectedErrorDuringAgentRun:
     @pytest.mark.unit
-    async def test_agent_run_capacity_exhausted_surfaces_structured_failure(
+    async def test_provider_no_work_failure_from_stderr_creates_fallback_workspace_and_lineage(
         self,
         fake: FakeCommandRunner,
         factory: async_sessionmaker[AsyncSession],
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """When an agent run fails with AGENT_PROVIDER_CAPACITY_EXHAUSTED and
-        produces no commits, the details and reason_code should be forwarded to the
-        Workspace row's failure_details and events rather than being lost.
-
-        This also proves that the executor correctly surfaces provider recovery
-        metadata (provider, model, retryable, recommended_action) through the
-        failure path so that create_provider_recovery_attempt_row() can consume it
-        later at the service layer."""
-        ws_id = await _seed_ready(factory, agent="gemini")
-
         from awf.adapters import base as adapter_base
-        from awf.common.commands import CommandResult
         from awf.db.enums import AgentRuntime, FailureReason
 
-        class _ExhaustedAdapter(adapter_base.AgentAdapter):
+        class _StderrClassifyingGeminiAdapter(adapter_base.AgentAdapter):
             runtime = AgentRuntime.gemini
+
             @property
             def name(self) -> AgentRuntime:
                 return AgentRuntime.gemini
+
             def get_provider(self, model: str | None) -> str:
                 return "google"
+
             def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
-                return []
-            async def run(self, **kwargs: Any) -> adapter_base.AgentRunResult:
-                raise adapter_base.AgentRunError(
-                    agent=self.name,
-                    result=CommandResult(returncode=1, stdout="", stderr="quota exhausted"),
-                    reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
-                    details={
-                        "provider": "google",
-                        "model": "gemini-1.5-pro",
-                        "retryable": True,
-                        "recommended_action": "Retry the workspace later or fallback to a different provider.",
-                    },
-                )
+                del prompt, model
+                return ["gemini", "run"]
 
-        monkeypatch.setitem(adapter_base._REGISTRY, AgentRuntime.gemini, _ExhaustedAdapter)
+        monkeypatch.setitem(
+            adapter_base._REGISTRY,
+            AgentRuntime.gemini,
+            _StderrClassifyingGeminiAdapter,
+        )
 
-        # Queue results for the post-agent commit checks so it proceeds to the 0 commits failure.
-        fake.queue_result(returncode=0, stdout="awf/x\n")  # branch drift check
-        fake.queue_result(returncode=0)                           # git add
-        fake.queue_result(returncode=0, stdout="")                # git diff --cached
-        fake.queue_result(returncode=0, stdout="0\n")             # rev-list --count -> 0 commits
+        resolved_profile = _provider_recovery_resolved_profile()
+        requested_profile = _provider_recovery_requested_profile()
+        test_commands = [
+            "uv run --python 3.12 --extra dev pytest tests/unit/control/test_executor_error_paths.py -q"
+        ]
+        ws_id = await _seed_ready(
+            factory,
+            agent="gemini",
+            task_prompt="Preserve this prompt for fallback execution.",
+            task_policy=_provider_recovery_policy(max_same_provider_retries=0),
+            owned_paths=["src/awf/control/**", "tests/unit/control/**"],
+            profile_ref="python-control",
+            requested_profile=requested_profile,
+            resolved_profile=resolved_profile,
+            test_commands=test_commands,
+            auto_merge=False,
+            initial_review_grace_period_seconds=55,
+            create_task_attempt=True,
+            mark_canonical_attempt=True,
+        )
 
-        executor = _make_executor(fake, factory, tmp_path)
+        fake.queue_result(
+            returncode=1,
+            stderr="RESOURCE_EXHAUSTED RetryableQuotaError Retry-After: 90",
+        )
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(returncode=0, stdout="0\n")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
         await executor.execute(ws_id)
 
         async with factory() as session:
             ws = await WorkspaceRepository(session).get(ws_id)
+            fallback = (
+                await session.execute(
+                    select(Workspace).where(Workspace.id != ws_id)
+                )
+            ).scalar_one()
+            attempts = list(
+                (
+                    await session.execute(
+                        select(TaskAttempt).order_by(TaskAttempt.attempt_number.asc())
+                    )
+                ).scalars()
+            )
+            operations = list(
+                (
+                    await session.execute(
+                        select(Operation).where(Operation.workspace_id == fallback.id)
+                    )
+                ).scalars()
+            )
+            requested_events = list(
+                (
+                    await session.execute(
+                        select(WorkspaceEvent).where(
+                            WorkspaceEvent.workspace_id == ws_id,
+                            WorkspaceEvent.event_type
+                            == "workspace.provider_recovery_requested",
+                        )
+                    )
+                ).scalars()
+            )
             assert ws is not None
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == FailureReason.agent_failure.value
 
-            # The executor creates an event with the payload containing reason_code and details
             terminal_event = next(e for e in ws.events if e.new_state == "failed")
             payload = terminal_event.payload
             assert isinstance(payload, dict)
             assert payload["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
-            assert payload.get("details") == {
-                "provider": "google",
-                "model": "gemini-1.5-pro",
-                "retryable": True,
-                "recommended_action": "Retry the workspace later or fallback to a different provider.",
-            }
+            details = payload.get("details")
+            assert isinstance(details, dict)
+            recovery = details.get("provider_recovery")
+            assert isinstance(recovery, dict)
+            assert recovery["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+            assert recovery["failure_type"] == "quota"
+            assert recovery["provider"] == "google"
+            assert recovery["model"] == "gemini-2.5-pro"
+            assert recovery["retryable"] is True
+            assert recovery["retry_after_seconds"] == 90
+            assert recovery["cooldown_seconds"] == 90
+            assert recovery["fallback_allowed"] is True
+            assert recovery["recommended_action"] == (
+                "Retry after provider cooldown or dispatch an approved fallback model."
+            )
+            assert "AGENT_PROVIDER_CAPACITY_EXHAUSTED|quota|google|gemini-2.5-pro" in (
+                recovery["failure_fingerprint"]
+            )
+
+        assert len(requested_events) == 1
+        requested_payload = requested_events[0].payload
+        assert isinstance(requested_payload, dict)
+        provider_payload = requested_payload["provider_recovery"]
+        assert provider_payload["action"] == "fallback"
+        assert provider_payload["decision_reason_code"] == "PROVIDER_FALLBACK_SELECTED"
+        assert provider_payload["target_agent"] == "codex"
+        assert provider_payload["target_provider"] == "openai"
+        assert provider_payload["target_model"] == "gpt-5.3-codex"
+        assert provider_payload["fallback_attempt_number"] == 1
+        assert provider_payload["retry_attempt_number"] == 0
+
+        assert fallback.status == WorkspaceStatus.requested.value
+        assert fallback.agent == "codex"
+        assert fallback.task_prompt == "Preserve this prompt for fallback execution."
+        assert fallback.owned_paths == ["src/awf/control/**", "tests/unit/control/**"]
+        assert fallback.test_commands == test_commands
+        assert fallback.profile_ref == "python-control"
+        assert fallback.requested_profile == requested_profile
+        assert fallback.resolved_profile == resolved_profile
+        assert fallback.resolved_profile["validation"]["requested_tier"] == 2
+        assert fallback.resolved_profile["monitor"][
+            "initial_review_grace_period_seconds"
+        ] == 55
+        assert fallback.auto_merge is False
+        assert fallback.initial_review_grace_period_seconds == 55
+        assert fallback.task_kind == "feature_branch_pr"
+        assert fallback.task_policy["pr_monitor"] == {"review_grace_seconds": 55}
+        state = fallback.task_policy["provider_recovery_state"]
+        assert state["source_workspace_id"] == ws_id
+        assert state["source_attempt_id"] == attempts[0].id
+        assert state["source_task_id"] == attempts[0].task_id
+        assert state["source_canonical_attempt_id"] == attempts[0].id
+        assert state["source_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+        assert state["action"] == "fallback"
+        assert state["target_provider"] == "openai"
+        assert state["target_model"] == "gpt-5.3-codex"
+        assert state["fallback_attempt_number"] == 1
+        assert state["retry_attempt_number"] == 0
+
+        assert [attempt.workspace_id for attempt in attempts] == [ws_id, fallback.id]
+        assert attempts[1].attempt_number == 2
+        assert attempts[1].task_id == attempts[0].task_id
+        assert attempts[1].parent_attempt_id == attempts[0].id
+        assert attempts[1].redispatch_from_attempt_id == attempts[0].id
+        assert attempts[1].is_canonical_for_merge is False
+
+        assert requested_payload["new_workspace_id"] == fallback.id
+        assert requested_payload["source_attempt_id"] == attempts[0].id
+        assert requested_payload["source_task_id"] == attempts[0].task_id
+        assert requested_payload["source_canonical_attempt_id"] == attempts[0].id
+        assert operations[0].type == "retry"
+        assert operations[0].payload["source_workspace_id"] == ws_id
+        assert operations[0].payload["source_attempt_id"] == attempts[0].id
+        assert operations[0].payload["source_task_id"] == attempts[0].task_id
+        assert operations[0].payload["source_canonical_attempt_id"] == attempts[0].id
+        assert operations[0].payload["provider_recovery"]["action"] == "fallback"
+
+    @pytest.mark.unit
+    async def test_provider_no_work_failure_schedules_same_provider_retry_first(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.adapters import base as adapter_base
+        from awf.db.enums import AgentRuntime
+
+        class _StderrClassifyingGeminiAdapter(adapter_base.AgentAdapter):
+            runtime = AgentRuntime.gemini
+
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.gemini
+
+            def get_provider(self, model: str | None) -> str:
+                return "google"
+
+            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+                del prompt, model
+                return ["gemini", "run"]
+
+        monkeypatch.setitem(
+            adapter_base._REGISTRY,
+            AgentRuntime.gemini,
+            _StderrClassifyingGeminiAdapter,
+        )
+        task_policy = _provider_recovery_policy(max_same_provider_retries=1)
+        retry_after_seconds = 45
+        expected_retry_delay = timedelta(seconds=retry_after_seconds)
+        assert task_policy["provider_recovery"]["cooldown_seconds"] < retry_after_seconds
+        assert task_policy["provider_recovery"]["backoff_seconds"] < retry_after_seconds
+
+        ws_id = await _seed_ready(
+            factory,
+            agent="gemini",
+            task_policy=task_policy,
+            create_task_attempt=True,
+        )
+        before = datetime.now(UTC)
+        fake.queue_result(
+            returncode=1,
+            stderr=(
+                "RESOURCE_EXHAUSTED RetryableQuotaError "
+                f"Retry-After: {retry_after_seconds}"
+            ),
+        )
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(returncode=0, stdout="0\n")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+        await executor.execute(ws_id)
+        after = datetime.now(UTC)
+
+        async with factory() as session:
+            retry_workspace = (
+                await session.execute(
+                    select(Workspace).where(Workspace.id != ws_id)
+                )
+            ).scalar_one()
+            event = (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == ws_id,
+                        WorkspaceEvent.event_type
+                        == "workspace.provider_recovery_requested",
+                    )
+                )
+            ).scalar_one()
+
+        state = retry_workspace.task_policy["provider_recovery_state"]
+        not_before = _parse_utc_datetime(state["not_before"])
+        assert retry_workspace.status == WorkspaceStatus.requested.value
+        assert retry_workspace.agent == "gemini"
+        assert retry_workspace.task_policy["agent_model"] == "gemini-2.5-pro"
+        assert state["action"] == "retry"
+        assert state["target_provider"] == "google"
+        assert state["target_model"] == "gemini-2.5-pro"
+        assert state["retry_attempt_number"] == 1
+        assert state["fallback_attempt_number"] == 0
+        assert before + expected_retry_delay <= not_before <= after + expected_retry_delay
+        recovery_payload = event.payload["provider_recovery"]
+        assert recovery_payload["action"] == "retry"
+        assert recovery_payload["decision_reason_code"] == "PROVIDER_RETRY_DELAYED"
+        assert recovery_payload["retry_after_seconds"] == retry_after_seconds
+        assert "not_before" in recovery_payload
+
+    @pytest.mark.unit
+    async def test_generic_no_work_agent_failure_does_not_create_provider_recovery_attempt(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.adapters import base as adapter_base
+        from awf.db.enums import AgentRuntime, FailureReason
+
+        class _GenericFailingCodexAdapter(adapter_base.AgentAdapter):
+            runtime = AgentRuntime.codex
+
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.codex
+
+            def get_provider(self, model: str | None) -> str:
+                return "openai"
+
+            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+                del prompt, model
+                return ["codex", "exec"]
+
+        monkeypatch.setitem(
+            adapter_base._REGISTRY,
+            AgentRuntime.codex,
+            _GenericFailingCodexAdapter,
+        )
+        ws_id = await _seed_ready(
+            factory,
+            agent="codex",
+            task_policy=_provider_recovery_policy(max_same_provider_retries=1),
+            create_task_attempt=True,
+        )
+        fake.queue_result(returncode=1, stderr="SyntaxError: invalid syntax")
+        fake.queue_result(returncode=0, stdout="awf/x\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="")
+        fake.queue_result(returncode=0, stdout="0\n")
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            ws = await WorkspaceRepository(session).get(ws_id)
+            workspaces = list((await session.execute(select(Workspace))).scalars())
+            operations = list((await session.execute(select(Operation))).scalars())
+            provider_events = list(
+                (
+                    await session.execute(
+                        select(WorkspaceEvent).where(
+                            WorkspaceEvent.event_type.in_(
+                                [
+                                    "workspace.provider_recovery_requested",
+                                    "workspace.provider_recovery_created",
+                                    "workspace.provider_recovery_cooldown",
+                                ]
+                            )
+                        )
+                    )
+                ).scalars()
+            )
+
+        assert ws is not None
+        assert ws.status == WorkspaceStatus.failed.value
+        assert ws.failure_reason == FailureReason.agent_failure.value
+        assert len(workspaces) == 1
+        assert operations == []
+        assert provider_events == []
 
     @pytest.mark.unit
     async def test_generic_exception_in_agent_run_marks_infrastructure_failure(

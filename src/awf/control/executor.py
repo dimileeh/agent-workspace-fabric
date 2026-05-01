@@ -700,7 +700,10 @@ class WorkspaceExecutor:
             # If there's nothing to commit, the existing no-work check
             # fails the workspace with ``agent_failure`` below. If there
             # IS work, validation decides whether it's pushable.
-            #
+            # Structured provider-failure metadata is preserved in
+            # ``agent_run_details``. If salvage finds no commits, the
+            # no-work failure path below persists that metadata before
+            # preparing the authorized provider retry/fallback workspace.
             agent_exit_note = (
                 f"agent CLI exited {exc.result.returncode} ({exc.reason_code}); "
                 f"continuing to salvage any uncommitted work"
@@ -969,6 +972,11 @@ class WorkspaceExecutor:
                     if agent_exit_note is not None:
                         message = f"{message}; {agent_exit_note}"
 
+                    # Provider recovery reads the failed state event, so
+                    # persist the structured reason/details first. The
+                    # recovery service creates an authorized delayed retry
+                    # or fallback workspace and no-ops for ordinary agent
+                    # failures.
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -1395,7 +1403,10 @@ class WorkspaceExecutor:
                 # initial-run behaviour: log, remember the note, fall
                 # through to commit any salvaged work, then continue the
                 # loop (next validation will tell us if it's pushable).
-                #
+                # Initial no-work provider failures are handled by the
+                # post-agent failure path. Fix-pass provider errors keep
+                # the validation salvage flow so review/fix recovery
+                # remains owned by the PR-monitor path.
                 _log.warning(
                     "executor.fix_pass_agent_nonzero_exit",
                     workspace_id=workspace_id,
