@@ -642,6 +642,55 @@ def test_classify_conformance_stall_returns_no_output_for_idle_timeout() -> None
 
 
 @pytest.mark.unit
+def test_classify_conformance_stall_returns_over_duration_for_wall_timeout_with_active_output() -> (
+    None
+):
+    history = [
+        _iter_record(
+            iteration=0,
+            elapsed_seconds=120.0,
+            report_digest="abc",
+            worktree_changed=True,
+            stdout="some output",
+        ),
+        _iter_record(
+            iteration=1,
+            elapsed_seconds=900.0,
+            report_digest="def",
+            worktree_changed=True,
+            stdout="streaming progress chunk",
+            stderr="more progress",
+            error_reason_code="AGENT_TIMEOUT",
+        ),
+    ]
+    error = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(
+            returncode=124, stdout="streaming progress chunk", stderr="more progress"
+        ),
+        reason_code="AGENT_TIMEOUT",
+    )
+
+    evidence = classify_conformance_stall(
+        history=history,
+        policy=_stall_policy(),
+        plan_path=Path("docs/awf-plans/ws_wall_timeout.md"),
+        report_path=Path("docs/awf-plans/ws_wall_timeout.conformance.json"),
+        latest_error=error,
+    )
+
+    assert evidence is not None
+    assert evidence.kind == ConformanceStallKind.over_duration
+    assert evidence.iteration_index == 1
+    assert evidence.elapsed_seconds == pytest.approx(900.0 + 120.0)
+    assert evidence.no_output_seconds == 0.0
+    assert evidence.repeated_output_count == 0
+    assert evidence.last_report_digest == "def"
+    assert evidence.plan_path == "docs/awf-plans/ws_wall_timeout.md"
+    assert evidence.report_path == "docs/awf-plans/ws_wall_timeout.conformance.json"
+
+
+@pytest.mark.unit
 def test_classify_conformance_stall_skips_no_output_when_below_policy_threshold() -> None:
     history = [
         _iter_record(

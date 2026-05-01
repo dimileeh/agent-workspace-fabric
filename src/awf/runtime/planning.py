@@ -335,8 +335,9 @@ def classify_conformance_stall(
     Returns ``None`` for the deterministic ``needs_iteration`` case so the
     existing ``PLAN_CONFORMANCE_UNSATISFIED`` path keeps owning real plan
     gaps. Returns structured evidence only when an explicit stall signal is
-    present: an idle/wall-clock timeout, repeated identical reports without
-    any worktree change, or a cumulative loop duration above the policy.
+    present: an idle timeout (no_output), a wall-clock timeout (over_duration),
+    repeated identical reports without any worktree change, or a cumulative
+    loop duration above the policy.
     """
 
     if not history:
@@ -351,7 +352,7 @@ def classify_conformance_stall(
         latest_error.reason_code if latest_error is not None else last.error_reason_code
     )
     if (
-        error_reason_code in {AGENT_IDLE_TIMEOUT_REASON_CODE, AGENT_TIMEOUT_REASON_CODE}
+        error_reason_code == AGENT_IDLE_TIMEOUT_REASON_CODE
         and last.elapsed_seconds >= policy.no_output_seconds
     ):
         excerpt = _stall_output_excerpt(latest_error, last)
@@ -360,6 +361,20 @@ def classify_conformance_stall(
             iteration_index=last.iteration,
             elapsed_seconds=cumulative_seconds,
             no_output_seconds=last.elapsed_seconds,
+            repeated_output_count=0,
+            last_report_digest=last.report_digest,
+            plan_path=plan_path_text,
+            report_path=report_path_text,
+            last_output_excerpt=excerpt,
+        )
+
+    if error_reason_code == AGENT_TIMEOUT_REASON_CODE:
+        excerpt = _stall_output_excerpt(latest_error, last)
+        return ConformanceStallEvidence(
+            kind=ConformanceStallKind.over_duration,
+            iteration_index=last.iteration,
+            elapsed_seconds=cumulative_seconds,
+            no_output_seconds=0.0,
             repeated_output_count=0,
             last_report_digest=last.report_digest,
             plan_path=plan_path_text,
