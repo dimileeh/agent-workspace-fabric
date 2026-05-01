@@ -2327,18 +2327,24 @@ class WorkspaceExecutor:
             ),
         )
         iteration_history: list[ConformanceIterationRecord] = []
-        # Content-aware fingerprint of the worktree at the start of each
-        # iteration. Initialized to the post-planning state so iteration 0
-        # measures progress across both its execution and conformance steps.
-        # Combines the HEAD commit SHA with hashed file bytes so re-edits to
-        # the same dirty file *and* commits made during an iteration both
-        # register as progress; without the HEAD signal an agent that
-        # commits each iteration leaves a clean working tree and produces
-        # identical empty digests, which would falsely trip
-        # ``classify_conformance_stall``'s repeated_output detector.
-        iteration_start_head = await self._git_rev_parse_head(worktree_path)
+        # Post-planning HEAD. Serves two purposes:
+        #
+        # 1. Implementation baseline for stall commit metrics. Pre-planning
+        #    HEAD (``baseline_sha``) would inflate ``implementation_commit_count``
+        #    if the agent committed the plan artifact during planning — the
+        #    scope check accepts ``committed_paths`` and the agent is not
+        #    blocked from committing the one allowed file.
+        #
+        # 2. Seeds the iteration progress digest. Combining the HEAD commit
+        #    SHA with hashed file bytes lets re-edits to the same dirty file
+        #    *and* commits made during an iteration both register as
+        #    progress; without the HEAD signal an agent that commits each
+        #    iteration leaves a clean working tree and produces identical
+        #    empty digests, which would falsely trip
+        #    ``classify_conformance_stall``'s repeated_output detector.
+        implementation_baseline_sha = await self._git_rev_parse_head(worktree_path)
         iteration_start_digest = self._digest_dirty_content(
-            worktree_path, dirty_paths, head_sha=iteration_start_head
+            worktree_path, dirty_paths, head_sha=implementation_baseline_sha
         )
         for iteration in range(planning.max_iterations + 1):
             last_iteration = iteration
@@ -2463,7 +2469,7 @@ class WorkspaceExecutor:
                 return await self._build_conformance_stall_failure(
                     workspace=workspace,
                     worktree_path=worktree_path,
-                    baseline_sha=baseline_sha,
+                    baseline_sha=implementation_baseline_sha,
                     last_report=last_report,
                     stall=stall,
                     iterations_used=last_iteration + 1,

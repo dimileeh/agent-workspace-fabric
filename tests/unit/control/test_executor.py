@@ -855,25 +855,29 @@ class TestHappyPath:
             ),
         )
 
+        # The agent commits the plan artifact during planning (allowed by the
+        # scope check) so pre- and post-planning HEADs differ. The stall
+        # commit metrics must use the post-planning HEAD so the planning
+        # commit is excluded from ``implementation_commit_count``.
         fake.queue_result(returncode=0, stdout="")  # before planning git status
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="sha_pre\n")  # rev-parse HEAD baseline
         # Planning adapter (custom) — no runner call
-        fake.queue_result(  # changed_paths after planning
+        fake.queue_result(returncode=0, stdout="")  # changed_paths after planning (plan committed, not dirty)
+        fake.queue_result(  # committed_paths_since (planning committed the plan)
             returncode=0,
-            stdout=f"?? docs/awf-plans/{ws_id}.md\n",
+            stdout=f"docs/awf-plans/{ws_id}.md\n",
         )
-        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (none yet)
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="sha_post\n")  # rev-parse HEAD pre-loop
         # Iteration 0:
         # Execute adapter (custom) — no runner call
         fake.queue_result(  # before_compare git status
             returncode=0,
-            stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/awf/foo.py\n",
+            stdout=" M src/awf/foo.py\n",
         )
         # Conformance adapter raises AgentRunError; executor uses
         # before_compare for after_compare on the error path, then captures
         # HEAD for the iteration-end progress digest.
-        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
+        fake.queue_result(returncode=0, stdout="sha_post\n")  # rev-parse HEAD iter 0 post
         # After raise, executor introspects implementation commits for stall evidence
         fake.queue_result(returncode=0, stdout="head_sha_after\n")  # post-stall rev-parse HEAD
         fake.queue_result(returncode=0, stdout="2\n")  # post-stall rev-list count
@@ -903,6 +907,7 @@ class TestHappyPath:
             assert stall["plan_path"] == f"docs/awf-plans/{ws_id}.md"
             assert stall["report_path"] == f"docs/awf-plans/{ws_id}.conformance.json"
             assert stall["salvage_hint"]["implementation_commit_count"] == 2
+            assert stall["salvage_hint"]["base_sha"] == "sha_post"
             assert stall["recovery_action"] == "proceed_to_validation"
             assert failed_event.payload["salvage"]["worktree_path"]
             stall_events = [
@@ -915,6 +920,24 @@ class TestHappyPath:
             assert stall_events[0].payload is not None
             assert stall_events[0].payload["kind"] == "no_output"
             assert stall_events[0].payload["recovery_action"] == "proceed_to_validation"
+
+        # The stall-failure rev-list/diff calls must scope from the
+        # post-planning HEAD, not the pre-planning baseline; otherwise the
+        # plan-artifact commit made during planning would inflate
+        # ``implementation_commit_count``.
+        revlist_calls = [
+            call for call in fake.calls
+            if "rev-list" in call.args and "--count" in call.args
+        ]
+        assert len(revlist_calls) == 1
+        assert "sha_post..HEAD" in revlist_calls[0].args
+        post_stall_diff = [
+            call for call in fake.calls
+            if "diff" in call.args
+            and "--name-only" in call.args
+            and "sha_post..HEAD" in call.args
+        ]
+        assert len(post_stall_diff) == 1
 
     @pytest.mark.unit
     async def test_planning_profile_does_not_record_stall_for_deterministic_needs_iteration_within_budget(
