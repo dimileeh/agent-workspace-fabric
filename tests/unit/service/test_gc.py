@@ -837,7 +837,7 @@ async def test_explicit_status_filter_can_select_old_terminal_non_pr_workspace(
     )
 
     assert [candidate.workspace_id for candidate in plan.candidates] == [old_failed]
-    assert plan.candidates[0].reason_code == "TERMINAL_WORKSPACE_RETENTION_EXPIRED"
+    assert plan.candidates[0].reason_code == FAILED_WORKSPACE_NO_WORK
     assert plan.preserved[0].workspace_id == recent_failed
     assert plan.preserved[0].reason_code == WORKSPACE_WITHIN_RETENTION
     assert plan.to_dict()["policy"] == {

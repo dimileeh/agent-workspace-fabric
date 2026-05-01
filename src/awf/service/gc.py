@@ -1025,6 +1025,7 @@ def _classify_workspace_for_gc(
         )
     if (
         workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES
+        and workspace.compose_project_name is not None
         and not _failed_terminal_workspace_has_no_work(workspace)
     ):
         return WorkspaceGCPreserved(
