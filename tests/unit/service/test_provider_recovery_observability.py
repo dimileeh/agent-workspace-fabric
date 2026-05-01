@@ -16,6 +16,9 @@ from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_REASON_CODES,
     PROVIDER_RECOVERY_STATE_KEY,
     PROVIDER_RETRY_DELAYED_REASON,
+    _parse_not_before,
+    _recommended_action_for_action,
+    _validate_recovery_action,
     provider_recovery_decision_from_workspace,
     provider_recovery_state_for_workspace,
 )
@@ -339,3 +342,55 @@ def test_recovery_payload_includes_provider_recovery_state() -> None:
     assert summary.provider_recovery is not None
     assert summary.provider_recovery.action == "retry"
     assert summary.provider_recovery.reason_code == PROVIDER_RETRY_DELAYED_REASON
+
+
+def test_validate_recovery_action_accepts_known_actions() -> None:
+    assert _validate_recovery_action("retry") == "retry"
+    assert _validate_recovery_action("fallback") == "fallback"
+    assert _validate_recovery_action("terminal") == "terminal"
+
+
+def test_validate_recovery_action_rejects_unknown() -> None:
+    assert _validate_recovery_action("unknown") is None
+    assert _validate_recovery_action(None) is None
+    assert _validate_recovery_action("") is None
+
+
+def test_recommended_action_for_action_maps_known_actions() -> None:
+    assert _recommended_action_for_action("retry") == "Retry after provider cooldown."
+    assert _recommended_action_for_action("fallback") == "Dispatch an approved fallback model."
+    assert (
+        _recommended_action_for_action("terminal")
+        == "No further recovery possible; inspect failure details."
+    )
+
+
+def test_recommended_action_for_action_returns_none_for_none() -> None:
+    assert _recommended_action_for_action(None) is None
+
+
+def test_parse_not_before_parses_iso_with_tz() -> None:
+    dt = datetime(2025, 3, 15, 12, 0, 0, tzinfo=UTC)
+    iso = dt.isoformat()
+    cooldown, eligible = _parse_not_before(iso)
+    assert cooldown is not None
+    assert eligible is not None
+    assert cooldown == dt
+    assert eligible == dt
+
+
+def test_parse_not_before_parses_iso_without_tz() -> None:
+    iso = "2025-03-15T12:00:00"
+    cooldown, eligible = _parse_not_before(iso)
+    assert cooldown is not None
+    assert eligible is not None
+    assert cooldown.tzinfo is not None
+    assert cooldown == datetime(2025, 3, 15, 12, 0, 0, tzinfo=UTC)
+
+
+def test_parse_not_before_returns_none_for_none() -> None:
+    assert _parse_not_before(None) == (None, None)
+
+
+def test_parse_not_before_returns_none_for_invalid() -> None:
+    assert _parse_not_before("not-a-date") == (None, None)

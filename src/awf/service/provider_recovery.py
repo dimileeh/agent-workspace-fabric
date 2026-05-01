@@ -821,29 +821,43 @@ def provider_recovery_decision_from_workspace(
     return provider_recovery_state_for_workspace(workspace)
 
 
+def _validate_recovery_action(raw: str | None) -> Literal["retry", "fallback", "terminal"] | None:
+    if raw not in {"retry", "fallback", "terminal"}:
+        return None
+    return raw  # type: ignore[return-value]
+
+
+def _recommended_action_for_action(action: Literal["retry", "fallback", "terminal"] | None) -> str | None:
+    if action == "retry":
+        return "Retry after provider cooldown."
+    if action == "fallback":
+        return "Dispatch an approved fallback model."
+    if action == "terminal":
+        return "No further recovery possible; inspect failure details."
+    return None
+
+
+def _parse_not_before(not_before_str: str | None) -> tuple[datetime | None, datetime | None]:
+    if not_before_str is None:
+        return None, None
+    try:
+        parsed = datetime.fromisoformat(not_before_str)
+        cooldown_until = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+        return cooldown_until, cooldown_until
+    except ValueError:
+        return None, None
+
+
 def _provider_recovery_state_from_task_policy(
     recovery_state: Mapping[str, Any],
 ) -> ProviderRecoveryStateView | None:
-    action_raw = _mapping_str(recovery_state, "action")
-    if action_raw not in {"retry", "fallback", "terminal"}:
-        action: Literal["retry", "fallback", "terminal"] | None = None
-    else:
-        action = action_raw  # type: ignore[assignment]
+    action = _validate_recovery_action(_mapping_str(recovery_state, "action"))
     reason_code = _mapping_str(recovery_state, "source_reason_code")
     source_provider = _mapping_str(recovery_state, "source_provider") or _mapping_str(recovery_state, "target_provider")
     source_model = _mapping_str(recovery_state, "source_model") or _mapping_str(recovery_state, "target_model")
     retry_attempt_number = _nonnegative_int(recovery_state.get("retry_attempt_number"), default=0) if "retry_attempt_number" in recovery_state else None
     fallback_attempt_number = _nonnegative_int(recovery_state.get("fallback_attempt_number"), default=0) if "fallback_attempt_number" in recovery_state else None
-    not_before_str = _mapping_str(recovery_state, "not_before")
-    cooldown_until: datetime | None = None
-    next_eligible_at: datetime | None = None
-    if not_before_str is not None:
-        try:
-            parsed = datetime.fromisoformat(not_before_str)
-            cooldown_until = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
-            next_eligible_at = cooldown_until
-        except ValueError:
-            pass
+    cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery_state, "not_before"))
     target_agent = _mapping_str(recovery_state, "target_agent")
     target_provider = _mapping_str(recovery_state, "target_provider")
     target_model = _mapping_str(recovery_state, "target_model")
@@ -857,13 +871,6 @@ def _provider_recovery_state_from_task_policy(
     source_workspace_id = _mapping_str(recovery_state, "source_workspace_id")
     source_attempt_id = _mapping_str(recovery_state, "source_attempt_id")
     terminal = action == "terminal" if action is not None else None
-    recommended_action: str | None = None
-    if action == "retry":
-        recommended_action = "Retry after provider cooldown."
-    elif action == "fallback":
-        recommended_action = "Dispatch an approved fallback model."
-    elif action == "terminal":
-        recommended_action = "No further recovery possible; inspect failure details."
     return ProviderRecoveryStateView(
         action=action,
         reason_code=reason_code,
@@ -876,7 +883,7 @@ def _provider_recovery_state_from_task_policy(
         fallback_target=fallback_target,
         source_workspace_id=source_workspace_id,
         source_attempt_id=source_attempt_id,
-        recommended_action=recommended_action,
+        recommended_action=_recommended_action_for_action(action),
         terminal=terminal,
     )
 
@@ -907,24 +914,11 @@ def _provider_recovery_state_from_events(
     recovery = payload.get("provider_recovery")
     if not isinstance(recovery, Mapping):
         recovery = payload
-    action_raw = _mapping_str(recovery, "action")
-    if action_raw not in {"retry", "fallback", "terminal"}:
-        action: Literal["retry", "fallback", "terminal"] | None = None
-    else:
-        action = action_raw  # type: ignore[assignment]
+    action = _validate_recovery_action(_mapping_str(recovery, "action"))
     reason_code = _mapping_str(recovery, "decision_reason_code") or _mapping_str(recovery, "reason_code")
     source_provider = _mapping_str(recovery, "provider") or _mapping_str(recovery, "target_provider")
     source_model = _mapping_str(recovery, "model") or _mapping_str(recovery, "target_model")
-    cooldown_until: datetime | None = None
-    next_eligible_at: datetime | None = None
-    not_before_str = _mapping_str(recovery, "not_before")
-    if not_before_str is not None:
-        try:
-            parsed = datetime.fromisoformat(not_before_str)
-            cooldown_until = parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
-            next_eligible_at = cooldown_until
-        except ValueError:
-            pass
+    cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery, "not_before"))
     target_agent = _mapping_str(recovery, "target_agent")
     target_provider = _mapping_str(recovery, "target_provider")
     target_model = _mapping_str(recovery, "target_model")
@@ -936,15 +930,7 @@ def _provider_recovery_state_from_events(
             model=target_model,
         )
     source_workspace_id = _mapping_str(payload, "source_workspace_id")
-    source_attempt_id = None
     terminal = action == "terminal" if action is not None else None
-    recommended_action: str | None = None
-    if action == "retry":
-        recommended_action = "Retry after provider cooldown."
-    elif action == "fallback":
-        recommended_action = "Dispatch an approved fallback model."
-    elif action == "terminal":
-        recommended_action = "No further recovery possible; inspect failure details."
     return ProviderRecoveryStateView(
         action=action,
         reason_code=reason_code,
@@ -956,8 +942,8 @@ def _provider_recovery_state_from_events(
         next_eligible_at=next_eligible_at,
         fallback_target=fallback_target,
         source_workspace_id=source_workspace_id,
-        source_attempt_id=source_attempt_id,
-        recommended_action=recommended_action,
+        source_attempt_id=None,
+        recommended_action=_recommended_action_for_action(action),
         terminal=terminal,
     )
 
