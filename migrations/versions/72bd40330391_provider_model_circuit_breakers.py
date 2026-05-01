@@ -1,6 +1,6 @@
 """Add provider/model circuit breakers.
 
-Revision ID: 0f1a2b3c4d5e
+Revision ID: 72bd40330391
 Revises: 8c9d0e1f2a3b
 Create Date: 2026-05-01 00:00:00.000000+00:00
 
@@ -13,7 +13,7 @@ from collections.abc import Sequence
 import sqlalchemy as sa
 from alembic import op
 
-revision: str = "0f1a2b3c4d5e"
+revision: str = "72bd40330391"
 down_revision: str | Sequence[str] | None = "8c9d0e1f2a3b"
 branch_labels: str | Sequence[str] | None = None
 depends_on: str | Sequence[str] | None = None
