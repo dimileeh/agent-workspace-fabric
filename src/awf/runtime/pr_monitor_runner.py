@@ -3065,15 +3065,16 @@ class PullRequestMonitorRunner:
                 conflicting_files=conflicting_files,
             )
             agent_run_err = None
+            if await self._provider_recovery_suppresses_cli(workspace_id):
+                raise ProviderRecoveryRetryError()
             try:
-                if not await self._provider_recovery_suppresses_cli(workspace_id):
-                    await self._deps.adapter.run(
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        prompt=prompt,
-                        workspace_id=workspace_id,
-                        log_source="recovery",
-                    )
+                await self._deps.adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=prompt,
+                    workspace_id=workspace_id,
+                    log_source="recovery",
+                )
             except AgentRunError as exc:
                 agent_run_err = exc
 
