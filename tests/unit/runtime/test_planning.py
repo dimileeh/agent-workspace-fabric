@@ -691,7 +691,14 @@ def test_classify_conformance_stall_returns_over_duration_for_wall_timeout_with_
 
 
 @pytest.mark.unit
-def test_classify_conformance_stall_skips_no_output_when_below_policy_threshold() -> None:
+def test_classify_conformance_stall_returns_no_output_for_idle_timeout_below_policy_threshold() -> (
+    None
+):
+    # AGENT_IDLE_TIMEOUT is an explicit adapter signal (e.g. when an operator
+    # sets AWF_AGENT_IDLE_TIMEOUT_SECONDS lower than the loop's
+    # policy.no_output_seconds). The classifier must honour it regardless of the
+    # loop policy threshold, otherwise the executor re-raises the idle timeout
+    # as a generic agent failure instead of AGENT_STALLED_IN_CONFORMANCE.
     history = [
         _iter_record(
             iteration=0,
@@ -716,7 +723,11 @@ def test_classify_conformance_stall_skips_no_output_when_below_policy_threshold(
         latest_error=error,
     )
 
-    assert evidence is None
+    assert evidence is not None
+    assert evidence.kind == ConformanceStallKind.no_output
+    assert evidence.iteration_index == 0
+    assert evidence.no_output_seconds == pytest.approx(30.0)
+    assert "idle timeout" in evidence.last_output_excerpt
 
 
 @pytest.mark.unit

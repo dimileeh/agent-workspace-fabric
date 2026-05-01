@@ -351,10 +351,13 @@ def classify_conformance_stall(
     error_reason_code = (
         latest_error.reason_code if latest_error is not None else last.error_reason_code
     )
-    if (
-        error_reason_code == AGENT_IDLE_TIMEOUT_REASON_CODE
-        and last.elapsed_seconds >= policy.no_output_seconds
-    ):
+    if error_reason_code == AGENT_IDLE_TIMEOUT_REASON_CODE:
+        # AGENT_IDLE_TIMEOUT is an explicit signal raised by the adapter when
+        # AWF_AGENT_IDLE_TIMEOUT_SECONDS elapses without output. That operator-
+        # configured timeout is the gate for this branch, not policy.no_output_seconds
+        # (which gates the empty-streak detector below). Gating both on the same
+        # threshold would swallow legitimate idle-timeout signals whenever the
+        # adapter's idle timeout is lower than the loop policy.
         excerpt = _stall_output_excerpt(latest_error, last)
         return ConformanceStallEvidence(
             kind=ConformanceStallKind.no_output,
