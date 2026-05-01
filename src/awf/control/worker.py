@@ -28,6 +28,7 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
@@ -325,7 +326,7 @@ class ControlWorker:
             not_before = provider_cooldown_not_before(workspace.task_policy)
             if not_before is not None and not_before > now:
                 continue
-            model = _workspace_agent_model(workspace)
+            model = agent_model_from_task_policy(workspace.task_policy)
             provider = provider_for_agent_model(workspace.agent, model)
             if provider is None or model is None:
                 allowed.add(workspace_id)
@@ -1205,12 +1206,6 @@ def _runtime_snapshot_payload(snapshot: RuntimeSnapshot) -> dict[str, Any]:
             for service in snapshot.services
         ],
     }
-
-
-def _workspace_agent_model(workspace: Workspace) -> str | None:
-    task_policy = workspace.task_policy if isinstance(workspace.task_policy, dict) else {}
-    model = task_policy.get("agent_model")
-    return model.strip() if isinstance(model, str) and model.strip() else None
 
 
 def _runtime_stranding_event_payload(

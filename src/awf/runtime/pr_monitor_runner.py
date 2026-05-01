@@ -47,6 +47,7 @@ from awf.common.compose_exec import (
 )
 from awf.common.github_client import GitHubClient, GitHubClientError, RepoRef
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.control.state_machine import WorkspaceStateMachine
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace
@@ -626,7 +627,7 @@ class PullRequestMonitorRunner:
             not_before = provider_cooldown_not_before(ws.task_policy)
             if not_before is not None and not_before > now:
                 return True
-            model = _workspace_agent_model(ws)
+            model = agent_model_from_task_policy(ws.task_policy)
             provider = provider_for_agent_model(ws.agent, model)
             if provider is None or model is None:
                 return False
@@ -4437,12 +4438,6 @@ def _target_reconcile_payload(result: object) -> dict[str, object]:
         if isinstance(payload, dict):
             return dict(payload)
     return {"result": str(result)}
-
-
-def _workspace_agent_model(workspace: Workspace) -> str | None:
-    task_policy = workspace.task_policy if isinstance(workspace.task_policy, dict) else {}
-    model = task_policy.get("agent_model")
-    return model.strip() if isinstance(model, str) and model.strip() else None
 
 
 def _target_reconcile_log_fields(payload: Mapping[str, object]) -> dict[str, object]:
