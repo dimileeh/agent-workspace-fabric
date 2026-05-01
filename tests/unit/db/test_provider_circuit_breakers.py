@@ -74,6 +74,59 @@ async def test_repeated_capacity_failures_open_provider_model_circuit(
 
 
 @pytest.mark.unit
+async def test_record_failure_reuses_row_after_stale_create_miss(
+    session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = ProviderModelCircuitBreakerRepository(session)
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    existing = await repo.record_failure(
+        provider="google",
+        model="gemini-2.5-pro",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        failure_fingerprint="capacity:first",
+        workspace_id="ws_first",
+        attempt_id="att_first",
+        now=now,
+        failure_threshold=2,
+        cooldown_seconds=600,
+    )
+
+    original_get = repo.get
+    calls = 0
+
+    async def stale_first_get(
+        *,
+        provider: str,
+        model: str,
+    ):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return None
+        return await original_get(provider=provider, model=model)
+
+    monkeypatch.setattr(repo, "get", stale_first_get)
+
+    breaker = await repo.record_failure(
+        provider="google",
+        model="gemini-2.5-pro",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        failure_fingerprint="capacity:second",
+        workspace_id="ws_second",
+        attempt_id="att_second",
+        now=now + timedelta(seconds=10),
+        failure_threshold=2,
+        cooldown_seconds=600,
+    )
+
+    assert breaker.id == existing.id
+    assert breaker.failure_count == 2
+    assert breaker.state == "open"
+    assert breaker.last_failure_fingerprint == "capacity:second"
+
+
+@pytest.mark.unit
 async def test_provider_model_circuit_expires_deterministically(
     session: AsyncSession,
 ) -> None:
