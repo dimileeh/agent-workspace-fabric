@@ -761,7 +761,7 @@ async def test_resource_saturation_provider_recovery_aggregates_via_sql(
     )
     await create_workspace(
         session_factory,
-        status=WorkspaceStatus.running,
+        status=WorkspaceStatus.failed,
         updated_at=now,
         task_policy={
             PROVIDER_RECOVERY_STATE_KEY: {
@@ -772,7 +772,7 @@ async def test_resource_saturation_provider_recovery_aggregates_via_sql(
     )
     await create_workspace(
         session_factory,
-        status=WorkspaceStatus.running,
+        status=WorkspaceStatus.failed,
         updated_at=now,
         task_policy={
             PROVIDER_RECOVERY_STATE_KEY: {

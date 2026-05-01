@@ -1098,7 +1098,10 @@ async def _provider_recovery_state_summary(
             ),
             0,
         ).label("terminal_exhausted"),
-    ).where(~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES))
+    ).where(
+        ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES)
+        | (action == "terminal")
+    )
     row = (await session.execute(stmt)).one()
     return ProviderRecoveryStateSummary(
         pending_retry=int(row.pending_retry_no_not_before + row.pending_retry_with_not_before),
