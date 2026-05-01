@@ -634,36 +634,36 @@ class TestFallbackInheritanceCompleteness:
         service = WorkspaceService(factory)
         source_response = await service.create_v2(_request())
 
-    async with factory() as session:
-        repo = WorkspaceRepository(session)
-        source = await repo.get(source_response.id)
-        assert source is not None
-        await repo.transition(
-            source, to=WorkspaceStatus.provisioning, reason_code="SEED"
-        )
-        source.branch_name = "awf/ws_old"
-        source.remote_push_branch = "awf/ws_old"
-        source.failure_reason = FailureReason.agent_failure.value
-        source.failure_message = "RESOURCE_EXHAUSTED RetryableQuotaError"
-        source.task_policy = {
-            **source.task_policy,
-            "provider_recovery_state": {"retry_attempt_number": 1},
-        }
-        await repo.transition(
-            source,
-            to=WorkspaceStatus.failed,
-            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
-            payload={
-                "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
-                "message": source.failure_message,
-                "details": {
-                    "provider": "google",
-                    "model": "gemini-2.5-pro",
-                    "retryable": True,
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            source = await repo.get(source_response.id)
+            assert source is not None
+            await repo.transition(
+                source, to=WorkspaceStatus.provisioning, reason_code="SEED"
+            )
+            source.branch_name = "awf/ws_old"
+            source.remote_push_branch = "awf/ws_old"
+            source.failure_reason = FailureReason.agent_failure.value
+            source.failure_message = "RESOURCE_EXHAUSTED RetryableQuotaError"
+            source.task_policy = {
+                **source.task_policy,
+                "provider_recovery_state": {"retry_attempt_number": 1},
+            }
+            await repo.transition(
+                source,
+                to=WorkspaceStatus.failed,
+                reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                payload={
+                    "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                    "message": source.failure_message,
+                    "details": {
+                        "provider": "google",
+                        "model": "gemini-2.5-pro",
+                        "retryable": True,
+                    },
                 },
-            },
-        )
-        await session.commit()
+            )
+            await session.commit()
 
         async with factory() as session:
             result = await create_provider_recovery_attempt_row(
