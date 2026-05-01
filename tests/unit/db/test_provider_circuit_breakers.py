@@ -158,3 +158,110 @@ async def test_provider_model_circuit_expires_deterministically(
     assert breaker is not None
     assert breaker.state == "closed"
     assert breaker.failure_count == 0
+
+
+@pytest.mark.unit
+async def test_provider_model_circuit_open_queries_close_expired_rows(
+    session: AsyncSession,
+) -> None:
+    repo = ProviderModelCircuitBreakerRepository(session)
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    breaker = await repo.record_failure(
+        provider=" google ",
+        model=" gemini-2.5-pro ",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        failure_fingerprint="capacity:first",
+        workspace_id="ws_first",
+        attempt_id=None,
+        now=now,
+        failure_threshold=1,
+        cooldown_seconds=10,
+    )
+    assert breaker.state == "open"
+
+    refreshed = await repo.record_failure(
+        provider="google",
+        model="gemini-2.5-pro",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        failure_fingerprint="capacity:second",
+        workspace_id="ws_second",
+        attempt_id="att_second",
+        now=now + timedelta(seconds=11),
+        failure_threshold=2,
+        cooldown_seconds=10,
+    )
+    assert refreshed.id == breaker.id
+    assert refreshed.state == "closed"
+    assert refreshed.failure_count == 1
+    assert refreshed.opened_at is None
+    assert refreshed.cooldown_until is None
+
+    open_breaker = await repo.record_failure(
+        provider="anthropic",
+        model="claude-sonnet",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        failure_fingerprint="capacity:anthropic",
+        workspace_id="ws_anthropic",
+        attempt_id=None,
+        now=now,
+        failure_threshold=1,
+        cooldown_seconds=10,
+    )
+    assert await repo.open_breaker(
+        provider="anthropic",
+        model="missing",
+        now=now,
+    ) is None
+    assert await repo.open_breaker(
+        provider="anthropic",
+        model="claude-sonnet",
+        now=now + timedelta(seconds=5),
+    ) == open_breaker
+    assert await repo.open_breaker(
+        provider="anthropic",
+        model="claude-sonnet",
+        now=now + timedelta(seconds=10),
+    ) is None
+
+    await repo.record_failure(
+        provider="openai",
+        model="gpt-5.5",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        failure_fingerprint="capacity:openai",
+        workspace_id="ws_openai",
+        attempt_id=None,
+        now=now,
+        failure_threshold=1,
+        cooldown_seconds=10,
+    )
+    assert await repo.open_breakers_for_pairs(pairs=[("", "gpt-5.5")], now=now) == {}
+    assert await repo.open_breakers_for_pairs(
+        pairs=[("openai", "gpt-5.5")],
+        now=now + timedelta(seconds=10),
+    ) == {}
+
+    await repo.record_failure(
+        provider="ollama",
+        model="llama3",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        failure_fingerprint="capacity:ollama",
+        workspace_id="ws_ollama",
+        attempt_id=None,
+        now=now,
+        failure_threshold=1,
+        cooldown_seconds=10,
+    )
+    active = await repo.record_failure(
+        provider="google",
+        model="gemini-flash",
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        failure_fingerprint="capacity:flash",
+        workspace_id="ws_flash",
+        attempt_id=None,
+        now=now,
+        failure_threshold=1,
+        cooldown_seconds=30,
+    )
+
+    assert await repo.list_open(now=now + timedelta(seconds=10)) == [active]
