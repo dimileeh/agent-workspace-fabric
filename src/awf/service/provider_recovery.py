@@ -854,8 +854,8 @@ def _provider_recovery_state_from_task_policy(
 ) -> ProviderRecoveryStateView | None:
     action = _validate_recovery_action(_mapping_str(recovery_state, "action"))
     reason_code = _mapping_str(recovery_state, "decision_reason_code") or _mapping_str(recovery_state, "source_reason_code")
-    source_provider = _mapping_str(recovery_state, "source_provider") or _mapping_str(recovery_state, "target_provider")
-    source_model = _mapping_str(recovery_state, "source_model") or _mapping_str(recovery_state, "target_model")
+    source_provider = _mapping_str(recovery_state, "source_provider")
+    source_model = _mapping_str(recovery_state, "source_model")
     retry_attempt_number = _nonnegative_int(recovery_state.get("retry_attempt_number"), default=0) if "retry_attempt_number" in recovery_state else None
     fallback_attempt_number = _nonnegative_int(recovery_state.get("fallback_attempt_number"), default=0) if "fallback_attempt_number" in recovery_state else None
     cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery_state, "not_before"))
@@ -917,8 +917,8 @@ def _provider_recovery_state_from_events(
         recovery = payload
     action = _validate_recovery_action(_mapping_str(recovery, "action"))
     reason_code = _mapping_str(recovery, "decision_reason_code") or _mapping_str(recovery, "reason_code")
-    source_provider = _mapping_str(recovery, "provider") or _mapping_str(recovery, "target_provider")
-    source_model = _mapping_str(recovery, "model") or _mapping_str(recovery, "target_model")
+    source_provider = _mapping_str(recovery, "source_provider") or _mapping_str(recovery, "provider")
+    source_model = _mapping_str(recovery, "source_model") or _mapping_str(recovery, "model")
     cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery, "not_before"))
     target_agent = _mapping_str(recovery, "target_agent")
     target_provider = _mapping_str(recovery, "target_provider")

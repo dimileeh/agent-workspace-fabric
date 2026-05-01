@@ -44,8 +44,8 @@ def _workspace_with_provider_recovery_state(
         "action": action,
         "decision_reason_code": reason_code,
         "source_reason_code": source_reason_code,
-        "source_provider": source_provider or target_provider,
-        "source_model": source_model or target_model,
+        "source_provider": source_provider,
+        "source_model": source_model,
         "retry_attempt_number": retry_attempt_number,
         "fallback_attempt_number": fallback_attempt_number,
         "target_agent": target_agent,
@@ -116,7 +116,11 @@ def _workspace_with_cooldown_event(
 
 def test_provider_recovery_state_for_workspace_extracts_from_task_policy() -> None:
     not_before_iso = (datetime.now(UTC) + timedelta(seconds=300)).isoformat()
-    workspace = _workspace_with_provider_recovery_state(not_before=not_before_iso)
+    workspace = _workspace_with_provider_recovery_state(
+        source_provider="openai",
+        source_model="gpt-5",
+        not_before=not_before_iso,
+    )
     view = provider_recovery_state_for_workspace(workspace)
     assert view is not None
     assert view.action == "retry"
@@ -168,7 +172,7 @@ def test_provider_recovery_state_for_workspace_returns_none_when_no_recovery() -
     assert view is None
 
 
-def test_provider_recovery_state_task_policy_falls_back_to_target_when_source_missing() -> None:
+def test_provider_recovery_state_task_policy_source_fields_none_when_missing() -> None:
     state_data: dict[str, Any] = {
         "action": "retry",
         "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
@@ -192,8 +196,8 @@ def test_provider_recovery_state_task_policy_falls_back_to_target_when_source_mi
     )
     view = provider_recovery_state_for_workspace(workspace)
     assert view is not None
-    assert view.source_provider == "openai"
-    assert view.source_model == "gpt-5"
+    assert view.source_provider is None
+    assert view.source_model is None
 
 
 def test_provider_recovery_decision_from_workspace_derives_cooldown() -> None:
