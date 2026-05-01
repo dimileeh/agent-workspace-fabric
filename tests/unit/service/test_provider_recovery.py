@@ -321,6 +321,12 @@ async def test_fallback_attempt_inherits_lineage_and_workspace_policy(
         }
         source.failure_reason = FailureReason.agent_failure.value
         source.failure_message = "RESOURCE_EXHAUSTED RetryableQuotaError"
+        source.pr_url = "https://github.com/example/provider/pull/42"
+        source.pr_number = 42
+        source.monitor_iter_count = 3
+        source.monitor_threads_addressed = 2
+        source.monitor_last_commit_sha = "abcdef1234567890"
+        source.monitor_started_at = datetime(2026, 5, 1, 10, 0, tzinfo=UTC)
         await repo.transition(
             source,
             to=WorkspaceStatus.failed,
@@ -397,6 +403,13 @@ async def test_fallback_attempt_inherits_lineage_and_workspace_policy(
     assert fallback.task_policy["provider_recovery_state"]["source_workspace_id"] == source.id
     assert fallback.task_policy["provider_recovery_state"]["fallback_attempt_number"] == 1
     assert fallback.task_policy["provider_recovery_state"]["retry_attempt_number"] == 0
+    assert fallback.pr_url == source.pr_url
+    assert fallback.pr_number == source.pr_number
+    assert fallback.branch_name == source.branch_name
+    assert fallback.monitor_iter_count == source.monitor_iter_count
+    assert fallback.monitor_threads_addressed == source.monitor_threads_addressed
+    assert fallback.monitor_last_commit_sha == source.monitor_last_commit_sha
+    assert fallback.monitor_started_at == source.monitor_started_at
     assert attempts[1].parent_attempt_id == attempts[0].id
     assert attempts[1].redispatch_from_attempt_id == attempts[0].id
     assert operations[0].type == "retry"

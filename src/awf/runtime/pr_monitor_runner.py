@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,7 +116,7 @@ _log = get_logger(__name__)
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
-Verdict = str  # "fix_committed" | "false_positive" | "defer" | "agent_failed"
+Verdict = Literal["fix_committed", "false_positive", "defer", "agent_failed", "provider_outage"]
 
 
 class PostMergeTargetReconciler(Protocol):
@@ -261,6 +261,10 @@ class _NonCheckReviewerSettleDecision:
     elapsed_seconds: float | None = None
     state_changed: bool = False
 
+
+class ProviderRecoveryFallbackError(Exception):
+    """Raised when a retryable provider failure triggers a fallback workspace."""
+    pass
 
 class PullRequestMonitorRunner:
     """Drives the ``monitoring_pr`` stage for a single workspace."""
@@ -661,13 +665,13 @@ class PullRequestMonitorRunner:
         self,
         workspace_id: str,
         exc: AgentRunError,
-    ) -> None:
+    ) -> Literal["fallback", "retry", "deterministic"]:
         message = exc.result.stderr.strip() or exc.result.stdout.strip()
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
             if ws is None:
-                return
+                return "deterministic"
             metadata = provider_recovery_metadata_from_failure(
                 reason_code=exc.reason_code,
                 message=message,
@@ -675,13 +679,16 @@ class PullRequestMonitorRunner:
                 task_policy=ws.task_policy,
             )
             if metadata is None:
-                return
-            await create_provider_recovery_attempt_row(
+                return "deterministic"
+            result = await create_provider_recovery_attempt_row(
                 s,
                 workspace_id,
                 metadata=metadata,
             )
             await s.commit()
+            if result is not None:
+                return "fallback"
+            return "retry"
 
     async def _record_pr_monitor_audit_event(
         self,
@@ -894,6 +901,15 @@ class PullRequestMonitorRunner:
                     "(likely a decision loop bug)"
                 ),
             )
+        except ProviderRecoveryFallbackError:
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.provider_fallback",
+                    "workspace_id": workspace_id,
+                },
+            )
+            return
         finally:
             await self._write_monitor_log(
                 monitor_log,
@@ -2591,6 +2607,8 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                 )
+                if verdict == "provider_outage":
+                    continue
                 state.mark_addressed(t.thread_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     threads_to_resolve.append(t.thread_id)
@@ -2604,6 +2622,8 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                 )
+                if verdict == "provider_outage":
+                    continue
                 state.mark_addressed(c.comment_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     publish_dependent_ids.append(c.comment_id)
@@ -2840,7 +2860,7 @@ class PullRequestMonitorRunner:
         result_stdout = ""
         cli_failed = False
         if await self._provider_recovery_suppresses_cli(workspace_id):
-            return "agent_failed"
+            return "provider_outage"
         try:
             result = await self._deps.adapter.run(
                 compose_project=compose_project,
@@ -2851,9 +2871,13 @@ class PullRequestMonitorRunner:
             )
             result_stdout = result.stdout
         except AgentRunError as exc:
+            action = await self._record_provider_agent_run_error(workspace_id, exc)
+            if action == "fallback":
+                raise ProviderRecoveryFallbackError() from exc
+            if action == "retry":
+                return "provider_outage"
             cli_failed = True
             result_stdout = exc.result.stdout
-            await self._record_provider_agent_run_error(workspace_id, exc)
             _log.warning(
                 "monitor.cli_nonzero_exit",
                 returncode=exc.result.returncode,
@@ -2925,7 +2949,11 @@ class PullRequestMonitorRunner:
                         log_source="recovery",
                     )
             except AgentRunError as exc:
-                await self._record_provider_agent_run_error(workspace_id, exc)
+                action = await self._record_provider_agent_run_error(workspace_id, exc)
+                if action == "fallback":
+                    raise ProviderRecoveryFallbackError() from exc
+                if action == "retry":
+                    return _GitPushResult(pushed=False, failed=True, returncode=1, stderr="provider_outage")
                 _log.warning(
                     "monitor.sync_base_cli_failed",
                     workspace_id=workspace_id,
@@ -2966,7 +2994,11 @@ class PullRequestMonitorRunner:
                     log_source="recovery",
                 )
         except AgentRunError as exc:
-            await self._record_provider_agent_run_error(workspace_id, exc)
+            action = await self._record_provider_agent_run_error(workspace_id, exc)
+            if action == "fallback":
+                raise ProviderRecoveryFallbackError() from exc
+            if action == "retry":
+                return _GitPushResult(pushed=False, failed=True, returncode=1, stderr="provider_outage")
             _log.warning(
                 "monitor.ci_fix_cli_failed",
                 workspace_id=workspace_id,

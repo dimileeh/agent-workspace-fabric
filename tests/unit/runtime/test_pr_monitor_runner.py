@@ -52,6 +52,7 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
+    ProviderRecoveryFallbackError,
     PullRequestMonitorRunner,
     _as_utc,
     _collect_defer_items,
@@ -975,22 +976,15 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
         initial_review_grace_period_seconds=75,
     )
 
-    first = await runner._address_review_comment(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        comment=ReviewComment(comment_id="C_provider", body_excerpt="please fix", author="bot"),
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-    second = await runner._address_review_comment(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        comment=ReviewComment(comment_id="C_provider", body_excerpt="please fix", author="bot"),
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await runner._address_review_comment(
+            workspace_id=workspace_id,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            comment=ReviewComment(comment_id="C_provider", body_excerpt="please fix", author="bot"),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
 
     source_policy, fallback_id, operations = await _provider_recovery_snapshot(
         factory,
@@ -999,8 +993,6 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
     state = source_policy["provider_recovery_state"]
     retry_operations = [operation for operation in operations if operation.type == "retry"]
 
-    assert first == "agent_failed"
-    assert second == "agent_failed"
     assert len(adapter.calls) == 1
     assert isinstance(state, dict)
     assert state["action"] == "fallback"
@@ -1062,15 +1054,16 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
         worktrees_root=tmp_path / "worktrees",
     )
 
-    await runner._run_ci_fix(
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        failures=(CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),),
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        workspace_id=workspace_id,
-        remote_branch=f"awf/{workspace_id}",
-    )
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
     suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
 
     source_policy, fallback_id, operations = await _provider_recovery_snapshot(
@@ -1115,15 +1108,16 @@ async def test_sync_base_provider_failure_records_recovery_and_source_cooldown(
         worktrees_root=tmp_path / "worktrees",
     )
 
-    await runner._run_sync_base(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await runner._run_sync_base(
+            workspace_id=workspace_id,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
     suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
 
     source_policy, fallback_id, operations = await _provider_recovery_snapshot(
