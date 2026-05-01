@@ -696,6 +696,17 @@ class PullRequestMonitorRunner:
                 return "fallback"
             return "retry"
 
+    async def _handle_provider_agent_run_error(
+        self,
+        workspace_id: str,
+        exc: AgentRunError,
+    ) -> None:
+        action = await self._record_provider_agent_run_error(workspace_id, exc)
+        if action == "fallback":
+            raise ProviderRecoveryFallbackError() from exc
+        if action == "retry":
+            raise ProviderRecoveryRetryError()
+
     async def _record_pr_monitor_audit_event(
         self,
         *,
@@ -2920,10 +2931,9 @@ class PullRequestMonitorRunner:
             )
             result_stdout = result.stdout
         except AgentRunError as exc:
-            action = await self._record_provider_agent_run_error(workspace_id, exc)
-            if action == "fallback":
-                raise ProviderRecoveryFallbackError() from exc
-            if action == "retry":
+            try:
+                await self._handle_provider_agent_run_error(workspace_id, exc)
+            except ProviderRecoveryRetryError:
                 return "provider_outage"
             cli_failed = True
             result_stdout = exc.result.stdout
@@ -2998,11 +3008,7 @@ class PullRequestMonitorRunner:
                         log_source="recovery",
                     )
             except AgentRunError as exc:
-                action = await self._record_provider_agent_run_error(workspace_id, exc)
-                if action == "fallback":
-                    raise ProviderRecoveryFallbackError() from exc
-                if action == "retry":
-                    raise ProviderRecoveryRetryError()
+                await self._handle_provider_agent_run_error(workspace_id, exc)
                 _log.warning(
                     "monitor.sync_base_cli_failed",
                     workspace_id=workspace_id,
@@ -3043,11 +3049,7 @@ class PullRequestMonitorRunner:
                     log_source="recovery",
                 )
         except AgentRunError as exc:
-            action = await self._record_provider_agent_run_error(workspace_id, exc)
-            if action == "fallback":
-                raise ProviderRecoveryFallbackError() from exc
-            if action == "retry":
-                raise ProviderRecoveryRetryError()
+            await self._handle_provider_agent_run_error(workspace_id, exc)
             _log.warning(
                 "monitor.ci_fix_cli_failed",
                 workspace_id=workspace_id,
