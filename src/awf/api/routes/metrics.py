@@ -308,6 +308,18 @@ class AdmissionSummaryResponse(BaseModel):
     detail: str | None = None
 
 
+class ProviderCircuitBreakerSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    provider: str
+    model: str
+    state: str
+    failure_count: int
+    cooldown_until: datetime | None = None
+    last_reason_code: str | None = None
+    last_workspace_id: str | None = None
+
+
 class CleanupReadinessResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -384,6 +396,10 @@ class ResourceSaturationSummaryResponse(BaseModel):
     )
     admission: AdmissionSummaryResponse = Field(
         description="Actionable summary explaining whether new workspace admission is blocked.",
+    )
+    provider_circuit_breakers: list[ProviderCircuitBreakerSummaryResponse] = Field(
+        default_factory=list,
+        description="Open provider/model cooldown circuits suppressing new dispatch.",
     )
 
 

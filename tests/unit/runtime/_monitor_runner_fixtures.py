@@ -62,8 +62,10 @@ class FakeAdapter(AgentAdapter):
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:  # type: ignore[override]
         return []
 
-    def queue(self, *, stdout: str = "", returncode: int = 0) -> None:
-        self._queued.append(AgentRunResult(returncode=returncode, stdout=stdout, stderr=""))
+    def queue(self, *, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+        self._queued.append(
+            AgentRunResult(returncode=returncode, stdout=stdout, stderr=stderr)
+        )
 
     async def run(  # type: ignore[override]
         self,

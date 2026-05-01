@@ -73,6 +73,7 @@ from awf.service.coordination import (
     task_policy_with_coordination_warnings,
 )
 from awf.service.disk import DiskCheck
+from awf.service.provider_recovery import provider_recovery_metadata_from_failure
 from awf.service.resource_capacity import (
     ReservedResources,
     WorkspaceResourceDefaults,
@@ -1102,6 +1103,28 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
         if field in details:
             result[field] = details[field]
 
+    provider_recovery = provider_recovery_metadata_from_failure(
+        reason_code=reason_code,
+        message=message,
+        details=details,
+        task_policy=getattr(workspace, "task_policy", None),
+    )
+    if provider_recovery is not None:
+        result["provider_recovery"] = provider_recovery
+        for field in (
+            "provider",
+            "model",
+            "retryable",
+            "recommended_action",
+            "failure_type",
+            "retry_after_seconds",
+            "cooldown_seconds",
+            "failure_fingerprint",
+            "fallback_allowed",
+        ):
+            if field in provider_recovery:
+                result[field] = provider_recovery[field]
+
     conformance_payload = _compact_conformance_payload(conformance)
     if conformance_payload is not None:
         result["conformance"] = conformance_payload
@@ -1606,6 +1629,12 @@ def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]
     if payload.task.out_of_scope_changes is not None:
         policy["out_of_scope_changes"] = payload.task.out_of_scope_changes.model_dump(
             mode="json"
+        )
+    if payload.task.provider_recovery is not None:
+        policy["provider_recovery"] = payload.task.provider_recovery.model_dump(
+            mode="json",
+            exclude_none=True,
+            exclude_unset=True,
         )
     return policy
 

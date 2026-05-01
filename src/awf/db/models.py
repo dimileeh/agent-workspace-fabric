@@ -462,6 +462,39 @@ class TaskAttempt(Base):
     )
 
 
+class ProviderModelCircuitBreaker(Base):
+    """Durable cooldown state for one provider/model pair."""
+
+    __tablename__ = "provider_model_circuit_breakers"
+    __table_args__ = (
+        UniqueConstraint("provider", "model", name="uq_provider_model_circuit_breakers_pair"),
+        Index("ix_provider_model_circuit_breakers_state", "state", "cooldown_until"),
+        Index("ix_provider_model_circuit_breakers_provider_model", "provider", "model"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    provider: Mapped[str] = mapped_column(String(128), nullable=False)
+    model: Mapped[str] = mapped_column(String(128), nullable=False)
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="closed")
+    failure_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    opened_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    cooldown_until: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    last_reason_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_failure_fingerprint: Mapped[str | None] = mapped_column(
+        String(512), nullable=True
+    )
+    last_workspace_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    last_attempt_id: Mapped[str | None] = mapped_column(String(36), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_now, onupdate=_now, nullable=False
+    )
+
+
 class WorkspaceSecretLease(Base):
     """Local control-plane metadata for a profile-declared workspace secret lease."""
 

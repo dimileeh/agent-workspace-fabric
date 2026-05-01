@@ -38,6 +38,7 @@ from awf.db.repositories import (
     _claims_non_docs_path,
     _operation_idempotency_advisory_lock_key,
     _owned_path_conflict_advisory_lock_key,
+    _provider_model_circuit_breaker_insert_if_absent_stmt,
     _resolve_session_dialect_name,
     _secret_lease_insert_if_absent_stmt,
     _wildcard_prefixes_overlap,
@@ -104,6 +105,10 @@ async def _workspace(
         (
             _callback_delivery_insert_if_absent_stmt,
             "subscription_id, dedupe_key",
+        ),
+        (
+            _provider_model_circuit_breaker_insert_if_absent_stmt,
+            "provider, model",
         ),
     ],
 )

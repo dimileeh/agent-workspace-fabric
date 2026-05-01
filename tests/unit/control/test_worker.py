@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import (
@@ -30,6 +31,7 @@ from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import (
     OperationRepository,
+    ProviderModelCircuitBreakerRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
@@ -102,7 +104,12 @@ async def _create_requested(
 
 
 async def _create_ready(
-    session_factory: async_sessionmaker[AsyncSession], origin: Path, title: str
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    *,
+    agent: str = "codex",
+    task_policy: dict[str, object] | None = None,
 ) -> str:
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -111,8 +118,9 @@ async def _create_ready(
             branch_base="development",
             task_title=title,
             task_prompt="p",
-            agent="codex",
+            agent=agent,
             test_commands=[],
+            task_policy=task_policy,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = f"awf/{ws.id}"
@@ -129,6 +137,8 @@ async def _create_monitoring_pr(
     origin: Path,
     title: str,
     *,
+    agent: str = "codex",
+    task_policy: dict[str, object] | None = None,
     pr_number: int = 123,
     with_pr_url: bool = True,
     monitor_iter_count: int = 0,
@@ -143,8 +153,9 @@ async def _create_monitoring_pr(
             branch_base="development",
             task_title=title,
             task_prompt="p",
-            agent="codex",
+            agent=agent,
             test_commands=[],
+            task_policy=task_policy,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = f"awf/{ws.id}"
@@ -446,6 +457,136 @@ class TestRunOnceExecution:
         assert dispatched == 2
         assert provisioner.calls == [requested_id]
         assert set(executor.calls) == {ready_id, requested_id}
+
+    @pytest.mark.unit
+    async def test_ready_execution_skips_open_provider_model_circuit_without_event(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "gemini-ready",
+            agent="gemini",
+            task_policy={"agent_model": "gemini-2.5-pro"},
+        )
+        async with session_factory() as session:
+            await ProviderModelCircuitBreakerRepository(session).record_failure(
+                provider="google",
+                model="gemini-2.5-pro",
+                reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                failure_fingerprint="capacity:fingerprint",
+                workspace_id="ws_previous",
+                attempt_id=None,
+                now=datetime.now(UTC),
+                failure_threshold=1,
+                cooldown_seconds=600,
+            )
+            await session.commit()
+
+        provisioner = _TransitioningProvisioner(session_factory)
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
+        )
+
+        dispatched = await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        assert dispatched == 0
+        assert executor.calls == []
+        async with session_factory() as session:
+            ws = await WorkspaceRepository(session).get(ready_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.ready.value
+            cooldown_events = [
+                event
+                for event in ws.events
+                if event.event_type == "workspace.provider_recovery_cooldown"
+            ]
+        assert cooldown_events == []
+
+    @pytest.mark.unit
+    async def test_ready_execution_batches_provider_model_circuit_lookup(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"gemini-ready-{index}",
+                agent="gemini",
+                task_policy={"agent_model": f"gemini-2.5-pro-{index}"},
+            )
+            for index in range(5)
+        ]
+        async with session_factory() as session:
+            breaker_repo = ProviderModelCircuitBreakerRepository(session)
+            for index, workspace_id in enumerate(ready_ids):
+                await breaker_repo.record_failure(
+                    provider="google",
+                    model=f"gemini-2.5-pro-{index}",
+                    reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                    failure_fingerprint=f"capacity:fingerprint:{index}",
+                    workspace_id=workspace_id,
+                    attempt_id=None,
+                    now=datetime.now(UTC),
+                    failure_threshold=1,
+                    cooldown_seconds=600,
+                )
+            await session.commit()
+
+        breaker_selects: list[str] = []
+
+        def _capture_breaker_select(
+            _conn: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.upper()
+            if (
+                normalized.lstrip().startswith("SELECT")
+                and "FROM PROVIDER_MODEL_CIRCUIT_BREAKERS" in normalized
+            ):
+                breaker_selects.append(statement)
+
+        engine = session_factory.kw["bind"]
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_breaker_select)
+        try:
+            executor = _RecordingExecutor()
+            worker = ControlWorker(
+                session_factory=session_factory,
+                provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+                executor=executor,
+                runtime_inspector=_HealthyRuntimeInspector(),
+                config=WorkerConfig(
+                    poll_interval_seconds=0.01,
+                    max_concurrent_provisions=1,
+                    max_concurrent_executions=5,
+                ),
+            )
+
+            assert await worker.run_once() == 0
+            await worker.wait_for_execution_tasks()
+        finally:
+            event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                _capture_breaker_select,
+            )
+
+        assert executor.calls == []
+        assert len(breaker_selects) == 1
 
     @pytest.mark.unit
     async def test_freshly_provisioned_workspace_is_not_counted_twice(
@@ -957,6 +1098,49 @@ class TestRunOnceMonitorRecovery:
 
         assert executor.calls == []
         assert executor.resume_calls == [monitor_id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_provider_recovery_cooldown_suppresses_resume_without_event(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-cooling-monitor",
+            agent="gemini",
+            task_policy={
+                "agent_model": "gemini-2.5-pro",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "fallback",
+                },
+            },
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=3),
+        )
+
+        assert await worker.run_once() == 0
+        await worker.wait_for_execution_tasks()
+
+        assert executor.resume_calls == []
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
+            cooldown_events = [
+                event
+                for event in workspace.events
+                if event.event_type == "workspace.provider_recovery_cooldown"
+            ]
+        assert cooldown_events == []
 
     @pytest.mark.unit
     async def test_fresh_worker_records_recovery_operation_when_resuming_monitoring_pr(

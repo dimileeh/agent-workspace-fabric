@@ -14,7 +14,9 @@ import asyncio
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
+from awf.adapters.provider_failures import classify_provider_failure
 from awf.common.commands import (
     COMMAND_IDLE_TIMEOUT_REASON,
     COMMAND_TIMEOUT_REASON,
@@ -38,41 +40,6 @@ DEFAULT_AGENT_WALL_TIMEOUT_SECONDS = 7200.0
 
 DEFAULT_AGENT_IDLE_TIMEOUT_SECONDS = 900.0
 """Default maximum stdout/stderr silence for a single agent CLI run."""
-
-
-_AUTH_FAILURE_MARKERS = (
-    "not logged in",
-    "please run /login",
-    "please set an auth method",
-    "manual authorization is required",
-    "could not authenticate",
-    "error authenticating",
-    "invalid_grant",
-    "anthropic_api_key",
-    "gemini_api_key",
-    "google_api_key",
-    "google_genai_use_vertexai",
-    "google_genai_use_gca",
-    "ollama api key",
-    "ollama cloud authentication",
-    "opencode auth",
-    "unauthorized",
-    "401",
-)
-
-_CAPACITY_EXHAUSTED_MARKERS = (
-    "resource_exhausted",
-    "model_capacity_exhausted",
-    "retryablequotaerror",
-    "http 429",
-    "429 too many requests",
-    " 429 ",
-    "rate limit",
-    "quota exhausted",
-    "usage limit",
-    "hit your usage limit",
-    "switch to another model",
-)
 
 
 # Prepended to every agent prompt. Encodes contract invariants the
@@ -126,7 +93,7 @@ class AgentRunError(Exception):
         agent: AgentRuntime,
         result: CommandResult,
         reason_code: str = "AGENT_CLI_FAILED",
-        details: dict[str, str | bool] | None = None,
+        details: dict[str, Any] | None = None,
     ) -> None:
         self.agent = agent
         self.result = result
@@ -278,7 +245,20 @@ class AgentAdapter(ABC):
                 await sinks.close()
 
         if not result.ok:
-            reason_code = _failure_reason_for_result(result)
+            provider = self.get_provider(model)
+            selected_model = model or self._default_model or "unknown"
+            provider_failure = classify_provider_failure(
+                reason_code=_failure_reason_for_result(result),
+                stdout=result.stdout,
+                stderr=result.stderr,
+                provider=provider,
+                model=selected_model,
+            )
+            reason_code = (
+                provider_failure.reason_code
+                if provider_failure is not None
+                else _failure_reason_for_result(result)
+            )
             if reason_code in {"AGENT_TIMEOUT", "AGENT_IDLE_TIMEOUT"}:
                 await cleanup_compose_exec_invocation(
                     self._runner,
@@ -300,13 +280,15 @@ class AgentAdapter(ABC):
                 stdout_bytes=len(result.stdout),
                 stderr_bytes=len(result.stderr),
             )
-            details: dict[str, str | bool] | None = None
-            if reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED":
+            details: dict[str, str | bool | int | dict[str, object]] | None = None
+            if provider_failure is not None:
+                recovery_metadata = provider_failure.to_metadata()
                 details = {
-                    "provider": self.get_provider(model),
-                    "model": model or self._default_model or "unknown",
+                    "provider": recovery_metadata.get("provider", provider),
+                    "model": recovery_metadata.get("model", selected_model),
                     "retryable": True,
-                    "recommended_action": "Retry the workspace later or fallback to a different provider.",
+                    "recommended_action": str(recovery_metadata["recommended_action"]),
+                    "provider_recovery": recovery_metadata,
                 }
             raise AgentRunError(
                 agent=self.name,
@@ -385,9 +367,13 @@ def _failure_reason_for_result(result: CommandResult) -> str:
         return "AGENT_TIMEOUT"
     if result.reason_code == COMMAND_IDLE_TIMEOUT_REASON:
         return "AGENT_IDLE_TIMEOUT"
-    output = f"{result.stderr}\n{result.stdout}".lower()
-    if any(marker in output for marker in _AUTH_FAILURE_MARKERS):
-        return "AGENT_AUTH_FAILED"
-    if any(marker in output for marker in _CAPACITY_EXHAUSTED_MARKERS):
-        return "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    provider_failure = classify_provider_failure(
+        reason_code=None,
+        stdout=result.stdout,
+        stderr=result.stderr,
+        provider=None,
+        model=None,
+    )
+    if provider_failure is not None:
+        return provider_failure.reason_code
     return "AGENT_CLI_FAILED"

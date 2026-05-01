@@ -41,6 +41,7 @@ from awf.common.ids import (
     new_merge_candidate_id,
     new_operation_id,
     new_policy_finding_id,
+    new_provider_model_circuit_breaker_id,
     new_queue_decision_id,
     new_resource_reservation_id,
     new_secret_lease_id,
@@ -67,6 +68,7 @@ from awf.db.models import (
     MergeCandidate,
     Operation,
     PolicyFinding,
+    ProviderModelCircuitBreaker,
     QueueDecision,
     ResourceReservation,
     StaleReason,
@@ -113,6 +115,10 @@ _CALLBACK_SUBSCRIPTION_IDEMPOTENCY_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
 _CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
     "subscription_id",
     "dedupe_key",
+)
+_PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS: Final[tuple[str, ...]] = (
+    "provider",
+    "model",
 )
 
 
@@ -227,6 +233,28 @@ def _callback_delivery_insert_if_absent_stmt(dialect_name: str | None) -> Any | 
             sqlite_insert(CallbackDelivery)
             .on_conflict_do_nothing(index_elements=_CALLBACK_DELIVERY_DEDUPE_CONFLICT_COLUMNS)
             .returning(CallbackDelivery.id)
+        )
+    return None
+
+
+def _provider_model_circuit_breaker_insert_if_absent_stmt(
+    dialect_name: str | None,
+) -> Any | None:
+    if dialect_name == "postgresql":
+        return (
+            postgresql_insert(ProviderModelCircuitBreaker)
+            .on_conflict_do_nothing(
+                index_elements=_PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS
+            )
+            .returning(ProviderModelCircuitBreaker.id)
+        )
+    if dialect_name == "sqlite":
+        return (
+            sqlite_insert(ProviderModelCircuitBreaker)
+            .on_conflict_do_nothing(
+                index_elements=_PROVIDER_MODEL_CIRCUIT_BREAKER_CONFLICT_COLUMNS
+            )
+            .returning(ProviderModelCircuitBreaker.id)
         )
     return None
 
@@ -481,6 +509,209 @@ class TaskAttemptRepository:
 
         stmt = stmt.order_by(TaskAttempt.created_at.desc(), TaskAttempt.id.desc()).limit(limit)
         return list((await self._session.execute(stmt)).scalars())
+
+
+class ProviderModelCircuitBreakerRepository:
+    """CRUD helpers for provider/model circuit breaker cooldown state."""
+
+    def __init__(self, session: AsyncSession, *, dialect_name: str | None = None) -> None:
+        self._session = session
+        self._dialect_name = _resolve_session_dialect_name(session, dialect_name)
+
+    async def get(
+        self,
+        *,
+        provider: str,
+        model: str,
+    ) -> ProviderModelCircuitBreaker | None:
+        stmt = select(ProviderModelCircuitBreaker).where(
+            ProviderModelCircuitBreaker.provider == provider,
+            ProviderModelCircuitBreaker.model == model,
+        )
+        return (await self._session.execute(stmt)).scalar_one_or_none()
+
+    async def record_failure(
+        self,
+        *,
+        provider: str,
+        model: str,
+        reason_code: str,
+        failure_fingerprint: str,
+        workspace_id: str | None,
+        attempt_id: str | None,
+        now: datetime,
+        failure_threshold: int,
+        cooldown_seconds: int,
+    ) -> ProviderModelCircuitBreaker:
+        normalized_provider = provider.strip()
+        normalized_model = model.strip()
+        breaker = await self.get(provider=normalized_provider, model=normalized_model)
+        if breaker is None:
+            breaker = await self._create_or_get_missing(
+                provider=normalized_provider,
+                model=normalized_model,
+            )
+
+        if _circuit_breaker_expired(breaker, now):
+            breaker.state = "closed"
+            breaker.failure_count = 0
+            breaker.opened_at = None
+            breaker.cooldown_until = None
+
+        breaker.failure_count += 1
+        breaker.last_reason_code = reason_code
+        breaker.last_failure_fingerprint = failure_fingerprint[:512]
+        breaker.last_workspace_id = workspace_id
+        breaker.last_attempt_id = attempt_id
+        if breaker.failure_count >= max(1, failure_threshold):
+            breaker.state = "open"
+            breaker.opened_at = now
+            breaker.cooldown_until = now + timedelta(seconds=max(0, cooldown_seconds))
+        await self._session.flush()
+        return breaker
+
+    async def _create_or_get_missing(
+        self,
+        *,
+        provider: str,
+        model: str,
+    ) -> ProviderModelCircuitBreaker:
+        stmt = _provider_model_circuit_breaker_insert_if_absent_stmt(self._dialect_name)
+        if stmt is not None:
+            await self._session.execute(
+                stmt.values(
+                    id=new_provider_model_circuit_breaker_id(),
+                    provider=provider,
+                    model=model,
+                    state="closed",
+                    failure_count=0,
+                )
+            )
+            breaker = await self.get(provider=provider, model=model)
+            if breaker is None:
+                raise RuntimeError("provider/model circuit breaker insert did not return a row")
+            return breaker
+
+        breaker = ProviderModelCircuitBreaker(
+            id=new_provider_model_circuit_breaker_id(),
+            provider=provider,
+            model=model,
+            state="closed",
+            failure_count=0,
+        )
+        self._session.add(breaker)
+        return breaker
+
+    async def is_suppressed(
+        self,
+        *,
+        provider: str,
+        model: str,
+        now: datetime,
+    ) -> bool:
+        breaker = await self.get(provider=provider, model=model)
+        if breaker is None:
+            return False
+        if _circuit_breaker_expired(breaker, now):
+            breaker.state = "closed"
+            breaker.failure_count = 0
+            breaker.opened_at = None
+            breaker.cooldown_until = None
+            await self._session.flush()
+            return False
+        return breaker.state == "open"
+
+    async def open_breaker(
+        self,
+        *,
+        provider: str,
+        model: str,
+        now: datetime,
+    ) -> ProviderModelCircuitBreaker | None:
+        breaker = await self.get(provider=provider, model=model)
+        if breaker is None:
+            return None
+        if _circuit_breaker_expired(breaker, now):
+            breaker.state = "closed"
+            breaker.failure_count = 0
+            breaker.opened_at = None
+            breaker.cooldown_until = None
+            await self._session.flush()
+            return None
+        return breaker if breaker.state == "open" else None
+
+    async def open_breakers_for_pairs(
+        self,
+        *,
+        pairs: Iterable[tuple[str, str]],
+        now: datetime,
+    ) -> dict[tuple[str, str], ProviderModelCircuitBreaker]:
+        normalized_pairs = {
+            (provider.strip(), model.strip())
+            for provider, model in pairs
+            if provider.strip() and model.strip()
+        }
+        if not normalized_pairs:
+            return {}
+
+        pair_filter = or_(
+            *(
+                and_(
+                    ProviderModelCircuitBreaker.provider == provider,
+                    ProviderModelCircuitBreaker.model == model,
+                )
+                for provider, model in sorted(normalized_pairs)
+            )
+        )
+        stmt = select(ProviderModelCircuitBreaker).where(
+            ProviderModelCircuitBreaker.state == "open",
+            pair_filter,
+        )
+        breakers = list((await self._session.execute(stmt)).scalars())
+        open_breakers: dict[tuple[str, str], ProviderModelCircuitBreaker] = {}
+        for breaker in breakers:
+            if _circuit_breaker_expired(breaker, now):
+                breaker.state = "closed"
+                breaker.failure_count = 0
+                breaker.opened_at = None
+                breaker.cooldown_until = None
+                continue
+            open_breakers[(breaker.provider, breaker.model)] = breaker
+        await self._session.flush()
+        return open_breakers
+
+    async def list_open(self, *, now: datetime) -> builtins.list[ProviderModelCircuitBreaker]:
+        stmt = select(ProviderModelCircuitBreaker).where(
+            ProviderModelCircuitBreaker.state == "open"
+        )
+        breakers = list((await self._session.execute(stmt)).scalars())
+        open_breakers: list[ProviderModelCircuitBreaker] = []
+        for breaker in breakers:
+            if _circuit_breaker_expired(breaker, now):
+                breaker.state = "closed"
+                breaker.failure_count = 0
+                breaker.opened_at = None
+                breaker.cooldown_until = None
+            else:
+                open_breakers.append(breaker)
+        await self._session.flush()
+        return open_breakers
+
+
+def _circuit_breaker_expired(
+    breaker: ProviderModelCircuitBreaker,
+    now: datetime,
+) -> bool:
+    cooldown_until = breaker.cooldown_until
+    if breaker.state != "open" or cooldown_until is None:
+        return False
+    return _as_utc_naive(cooldown_until) <= _as_utc_naive(now)
+
+
+def _as_utc_naive(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value
+    return value.astimezone(UTC).replace(tzinfo=None)
 
 
 class QueueDecisionRepository:

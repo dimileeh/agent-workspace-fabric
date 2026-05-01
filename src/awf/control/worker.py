@@ -28,11 +28,20 @@ from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.logging import get_logger
+from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
-from awf.db.repositories import OperationRepository, WorkspaceRepository
+from awf.db.repositories import (
+    OperationRepository,
+    ProviderModelCircuitBreakerRepository,
+    WorkspaceRepository,
+)
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
+from awf.service.provider_recovery import (
+    provider_cooldown_not_before,
+    provider_for_agent_model,
+)
 from awf.service.secret_leases import SecretLeaseService
 from awf.service.workspace_runtime_health import (
     RUNTIME_STRANDED_EVENT_TYPE,
@@ -279,11 +288,59 @@ class ControlWorker:
             return []
 
         async with self._session_factory() as session:
-            return await WorkspaceRepository(session).list_schedulable_ids(
+            ids = await WorkspaceRepository(session).list_schedulable_ids(
                 status=status,
                 limit=limit,
                 exclude_ids=exclude_ids,
             )
+            if status not in {
+                WorkspaceStatus.requested,
+                WorkspaceStatus.ready,
+                WorkspaceStatus.monitoring_pr,
+            }:
+                return ids
+            filtered = await self._filter_provider_recovery_suppressed(
+                session,
+                ids,
+            )
+            await session.commit()
+            return filtered
+
+    async def _filter_provider_recovery_suppressed(
+        self,
+        session: AsyncSession,
+        workspace_ids: list[str],
+    ) -> list[str]:
+        if not workspace_ids:
+            return []
+        now = datetime.now(UTC)
+        breaker_repo = ProviderModelCircuitBreakerRepository(session)
+        allowed: set[str] = set()
+        stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
+        rows = {workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()}
+        circuit_candidates: dict[str, tuple[str, str]] = {}
+        for workspace_id in workspace_ids:
+            workspace = rows.get(workspace_id)
+            if workspace is None:
+                continue
+            not_before = provider_cooldown_not_before(workspace.task_policy)
+            if not_before is not None and not_before > now:
+                continue
+            model = agent_model_from_task_policy(workspace.task_policy)
+            provider = provider_for_agent_model(workspace.agent, model)
+            if provider is None or model is None:
+                allowed.add(workspace_id)
+                continue
+            circuit_candidates[workspace_id] = (provider, model)
+
+        open_breakers = await breaker_repo.open_breakers_for_pairs(
+            pairs=circuit_candidates.values(),
+            now=now,
+        )
+        for workspace_id, pair in circuit_candidates.items():
+            if pair not in open_breakers:
+                allowed.add(workspace_id)
+        return [workspace_id for workspace_id in workspace_ids if workspace_id in allowed]
 
     async def _filter_current_status(
         self,

@@ -551,12 +551,14 @@ class TestClaudeCodeAdapter:
             )
 
         assert exc.value.reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
-        assert exc.value.details == {
-            "provider": "anthropic",
-            "model": "claude-3-5-sonnet",
-            "retryable": True,
-            "recommended_action": "Retry the workspace later or fallback to a different provider.",
-        }
+        assert exc.value.details["provider"] == "anthropic"
+        assert exc.value.details["model"] == "claude-3-5-sonnet"
+        assert exc.value.details["retryable"] is True
+        provider_recovery = exc.value.details["provider_recovery"]
+        assert provider_recovery["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+        assert provider_recovery["failure_type"] == "quota"
+        assert provider_recovery["provider"] == "anthropic"
+        assert provider_recovery["model"] == "claude-3-5-sonnet"
 
     @pytest.mark.unit
     async def test_codex_usage_limit_gets_structured_capacity_reason_code(self) -> None:
@@ -579,12 +581,14 @@ class TestClaudeCodeAdapter:
             )
 
         assert exc.value.reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
-        assert exc.value.details == {
-            "provider": "openai",
-            "model": "gpt-5.3-codex-spark",
-            "retryable": True,
-            "recommended_action": "Retry the workspace later or fallback to a different provider.",
-        }
+        assert exc.value.details["provider"] == "openai"
+        assert exc.value.details["model"] == "gpt-5.3-codex-spark"
+        assert exc.value.details["retryable"] is True
+        provider_recovery = exc.value.details["provider_recovery"]
+        assert provider_recovery["reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+        assert provider_recovery["failure_type"] == "usage_limit"
+        assert provider_recovery["provider"] == "openai"
+        assert provider_recovery["model"] == "gpt-5.3-codex-spark"
 
     @pytest.mark.unit
     def test_effort_mapper_preserves_non_top_effort_values(self) -> None:
