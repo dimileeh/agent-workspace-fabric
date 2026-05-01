@@ -126,6 +126,7 @@ def _provider_recovery_policy(
     fallback_agent: str = "codex",
     fallback_provider: str = "openai",
     fallback_model: str = "gpt-5.3-codex",
+    max_same_provider_retries: int = 1,
 ) -> dict[str, object]:
     return {
         "fallbacks": [
@@ -136,7 +137,7 @@ def _provider_recovery_policy(
             }
         ],
         "max_fallback_attempts": 1,
-        "max_same_provider_retries": 1,
+        "max_same_provider_retries": max_same_provider_retries,
         "cooldown_seconds": 600,
         "circuit_breaker": {
             "failure_threshold": 2,
@@ -154,6 +155,7 @@ async def _configure_provider_monitor_workspace(
     fallback_agent: str = "codex",
     fallback_provider: str = "openai",
     fallback_model: str = "gpt-5.3-codex",
+    max_same_provider_retries: int = 1,
 ) -> None:
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
@@ -167,6 +169,7 @@ async def _configure_provider_monitor_workspace(
                 fallback_agent=fallback_agent,
                 fallback_provider=fallback_provider,
                 fallback_model=fallback_model,
+                max_same_provider_retries=max_same_provider_retries,
             ),
             "pr_monitor": {"review_grace_seconds": 75},
         }
@@ -953,7 +956,11 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
     tmp_path: Path,
 ) -> None:
     workspace_id = await seed_monitoring_workspace(factory)
-    await _configure_provider_monitor_workspace(factory, workspace_id)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        max_same_provider_retries=0,
+    )
     adapter = FakeAdapter()
     adapter.queue(
         returncode=1,
@@ -1038,6 +1045,7 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
         fallback_agent="gemini",
         fallback_provider="google",
         fallback_model="gemini-2.5-pro",
+        max_same_provider_retries=0,
     )
     adapter = FakeAdapter()
     adapter.queue(

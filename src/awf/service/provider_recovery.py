@@ -150,21 +150,6 @@ def decide_provider_recovery(
     if fingerprint is not None and fingerprint in state.failure_fingerprints:
         return _terminal_decision(PROVIDER_RECOVERY_NO_LOOP_REASON, state=state)
 
-    fallback_target = _select_fallback_target(policy, state)
-    if fallback_target is not None:
-        return ProviderRecoveryDecision(
-            action="fallback",
-            retryable=True,
-            not_before=None,
-            target_agent=fallback_target.agent,
-            target_provider=fallback_target.provider,
-            target_model=fallback_target.model,
-            reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
-            terminal_reason=None,
-            fallback_attempt_number=state.fallback_attempt_number + 1,
-            retry_attempt_number=state.retry_attempt_number,
-        )
-
     if state.retry_attempt_number < policy.max_same_provider_retries:
         delay = _retry_delay_seconds(metadata, policy, state)
         return ProviderRecoveryDecision(
@@ -178,6 +163,21 @@ def decide_provider_recovery(
             terminal_reason=None,
             fallback_attempt_number=state.fallback_attempt_number,
             retry_attempt_number=state.retry_attempt_number + 1,
+        )
+
+    fallback_target = _select_fallback_target(policy, state)
+    if fallback_target is not None:
+        return ProviderRecoveryDecision(
+            action="fallback",
+            retryable=True,
+            not_before=None,
+            target_agent=fallback_target.agent,
+            target_provider=fallback_target.provider,
+            target_model=fallback_target.model,
+            reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
+            terminal_reason=None,
+            fallback_attempt_number=state.fallback_attempt_number + 1,
+            retry_attempt_number=state.retry_attempt_number,
         )
 
     return _terminal_decision("PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED", state=state)
