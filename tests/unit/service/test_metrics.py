@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -804,6 +804,44 @@ async def test_resource_saturation_provider_recovery_aggregates_via_sql(
     assert prs.terminal_no_loop == 1
     assert prs.terminal_exhausted == 1
     assert prs.circuit_breakers_open == 0
+
+
+@pytest.mark.unit
+async def test_provider_recovery_cooldown_uses_timestamp_not_string_comparison(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 11, 30, tzinfo=UTC)
+
+    not_before_edt = (
+        datetime(2026, 5, 1, 8, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
+    ).isoformat()
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": not_before_edt,
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    prs = summary.provider_recovery_state_summary
+    assert prs.pending_retry == 0
+    assert prs.in_cooldown == 1
 
 
 @pytest.mark.unit

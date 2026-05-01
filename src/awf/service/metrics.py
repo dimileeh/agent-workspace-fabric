@@ -10,6 +10,8 @@ from typing import Any
 
 from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql import expression
 
 from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.config import Settings
@@ -34,6 +36,29 @@ from awf.service.resource_capacity import (
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import workspace_failure_details_payload
+
+
+class _IsoToTimestamp(expression.FunctionElement[Any]):  # noqa: N801
+    """Dialect-portable ISO-8601 string → timestamp cast.
+
+    PostgreSQL: CAST(… AS TIMESTAMP WITH TIME ZONE) – full tz-aware comparison.
+    SQLite:     datetime(…) – normalises any offset to UTC before comparing.
+    """
+
+    inherit_cache = True
+
+
+@compiles(_IsoToTimestamp, "postgresql")
+def _pg_iso_to_timestamp(element: expression.FunctionElement[Any], compiler: Any, **kw: Any) -> str:
+    arg = compiler.process(list(element.clauses)[0], **kw)
+    return f"CAST({arg} AS TIMESTAMP WITH TIME ZONE)"
+
+
+@compiles(_IsoToTimestamp, "sqlite")
+def _sqlite_iso_to_timestamp(element: expression.FunctionElement[Any], compiler: Any, **kw: Any) -> str:
+    arg = compiler.process(list(element.clauses)[0], **kw)
+    return f"datetime({arg})"
+
 
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
 MIN_SUMMARY_WINDOW_HOURS = 1
@@ -1039,7 +1064,8 @@ async def _provider_recovery_state_summary(
     not_before = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY][
         "not_before"
     ].as_string()
-    now_iso = now.isoformat()
+    not_before_ts = _IsoToTimestamp(not_before)
+    now_ts = _IsoToTimestamp(now.astimezone(UTC).isoformat())
 
     stmt = select(
         func.coalesce(
@@ -1051,7 +1077,7 @@ async def _provider_recovery_state_summary(
         func.coalesce(
             func.sum(
                 case(
-                    (and_(action == "retry", not_before.isnot(None), not_before <= now_iso), 1),
+                    (and_(action == "retry", not_before.isnot(None), not_before_ts <= now_ts), 1),
                     else_=0,
                 )
             ),
@@ -1063,7 +1089,7 @@ async def _provider_recovery_state_summary(
         func.coalesce(
             func.sum(
                 case(
-                    (and_(action == "retry", not_before.isnot(None), not_before > now_iso), 1),
+                    (and_(action == "retry", not_before.isnot(None), not_before_ts > now_ts), 1),
                     else_=0,
                 )
             ),
