@@ -1025,7 +1025,7 @@ class TestRunOnceMonitorRecovery:
         assert executor.resume_calls == [monitor_id]
 
     @pytest.mark.unit
-    async def test_monitoring_pr_provider_recovery_cooldown_suppresses_resume(
+    async def test_monitoring_pr_provider_recovery_cooldown_suppresses_resume_without_event(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1065,9 +1065,7 @@ class TestRunOnceMonitorRecovery:
                 for event in workspace.events
                 if event.event_type == "workspace.provider_recovery_cooldown"
             ]
-        assert cooldown_events
-        assert cooldown_events[-1].reason_code == "PROVIDER_RECOVERY_NOT_BEFORE"
-        assert cooldown_events[-1].payload["workspace_status"] == "monitoring_pr"
+        assert cooldown_events == []
 
     @pytest.mark.unit
     async def test_fresh_worker_records_recovery_operation_when_resuming_monitoring_pr(

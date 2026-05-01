@@ -329,15 +329,6 @@ class ControlWorker:
                 continue
             not_before = provider_cooldown_not_before(workspace.task_policy)
             if not_before is not None and not_before > now:
-                await repo.add_event(
-                    workspace,
-                    event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
-                    reason_code="PROVIDER_RECOVERY_NOT_BEFORE",
-                    payload={
-                        "workspace_status": status.value,
-                        "not_before": not_before.isoformat(),
-                    },
-                )
                 continue
             model = _workspace_agent_model(workspace)
             provider = provider_for_agent_model(workspace.agent, model)
