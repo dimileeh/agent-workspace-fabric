@@ -21,6 +21,9 @@ from awf.runtime.planning import (
 )
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
+from awf.service.provider_recovery import (
+    ProviderRecoveryStateView,
+)
 from awf.service.resource_capacity import (
     ReservedResources,
     ResourceCapacitySummary,
@@ -117,6 +120,7 @@ class FailedWorkspaceExample:
     reason_code: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     salvage: dict[str, Any] | None = None
+    provider_recovery_state: ProviderRecoveryStateView | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,7 @@ class RootCauseCluster:
     sample_workspace_ids: tuple[str, ...]
     details: dict[str, Any] = field(default_factory=dict)
     salvage: dict[str, Any] | None = None
+    provider_recovery: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +237,16 @@ class ProviderCircuitBreakerSummary:
 
 
 @dataclass(frozen=True)
+class ProviderRecoveryStateSummary:
+    pending_retry: int
+    pending_fallback: int
+    in_cooldown: int
+    terminal_no_loop: int
+    terminal_exhausted: int
+    circuit_breakers_open: int
+
+
+@dataclass(frozen=True)
 class ResourceSaturationSummary:
     generated_at: datetime
     workspace_counts: WorkspaceSaturationCounts
@@ -245,6 +260,7 @@ class ResourceSaturationSummary:
     runtime_health: WorkspaceRuntimeHealthSummary
     admission: AdmissionSummary
     provider_circuit_breakers: list[ProviderCircuitBreakerSummary] = field(default_factory=list)
+    provider_recovery_state_summary: ProviderRecoveryStateSummary | None = None
 
 
 _UNKNOWN_FAILURE_ACTION = FailureAction(
@@ -564,6 +580,7 @@ async def _cluster_root_causes(
             sample_workspace_ids=tuple(wids[:DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT]),
             details=cluster_details.get(k, {}),
             salvage=cluster_salvage.get(k),
+            provider_recovery=_provider_recovery_from_details(cluster_details.get(k, {})),
         )
         for k, wids in clusters.items()
     ]
@@ -662,6 +679,11 @@ async def summarize_resource_saturation_for_session(
             now=generated_at
         )
     ]
+    provider_recovery_state_summary = await _provider_recovery_state_summary(
+        session,
+        circuit_breakers_open=len(provider_circuit_breakers),
+        now=generated_at,
+    )
 
     return ResourceSaturationSummary(
         generated_at=generated_at,
@@ -676,6 +698,7 @@ async def summarize_resource_saturation_for_session(
         runtime_health=resolved_runtime_health,
         admission=admission,
         provider_circuit_breakers=provider_circuit_breakers,
+        provider_recovery_state_summary=provider_recovery_state_summary,
     )
 
 
@@ -999,8 +1022,67 @@ def _details_only(details_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _provider_recovery_state_summary(
+    session: AsyncSession,
+    *,
+    circuit_breakers_open: int,
+    now: datetime,
+) -> ProviderRecoveryStateSummary:
+    stmt = select(Workspace.id, Workspace.task_policy).where(
+        ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
+    )
+    rows = (await session.execute(stmt)).all()
+    pending_retry = 0
+    pending_fallback = 0
+    in_cooldown = 0
+    terminal_no_loop = 0
+    terminal_exhausted = 0
+    for row in rows:
+        task_policy = row.task_policy if isinstance(row.task_policy, dict) else {}
+        recovery_state = task_policy.get("provider_recovery_state")
+        if not isinstance(recovery_state, dict):
+            continue
+        action = recovery_state.get("action")
+        if action == "retry":
+            not_before_str = recovery_state.get("not_before")
+            if not_before_str is not None:
+                try:
+                    not_before_dt = datetime.fromisoformat(not_before_str)
+                    if not_before_dt.tzinfo is None:
+                        not_before_dt = not_before_dt.replace(tzinfo=UTC)
+                    if not_before_dt > now:
+                        in_cooldown += 1
+                    else:
+                        pending_retry += 1
+                except ValueError:
+                    pending_retry += 1
+            else:
+                pending_retry += 1
+        elif action == "fallback":
+            pending_fallback += 1
+        elif action == "terminal":
+            source_reason = recovery_state.get("source_reason_code", "")
+            if source_reason == "REPEATED_PROVIDER_FAILURE_FINGERPRINT":
+                terminal_no_loop += 1
+            else:
+                terminal_exhausted += 1
+    return ProviderRecoveryStateSummary(
+        pending_retry=pending_retry,
+        pending_fallback=pending_fallback,
+        in_cooldown=in_cooldown,
+        terminal_no_loop=terminal_no_loop,
+        terminal_exhausted=terminal_exhausted,
+        circuit_breakers_open=circuit_breakers_open,
+    )
+
+
 def _salvage_only(details_payload: dict[str, Any]) -> dict[str, Any] | None:
     value = details_payload.get("salvage")
+    return value if isinstance(value, dict) else None
+
+
+def _provider_recovery_from_details(details_payload: dict[str, Any]) -> dict[str, Any] | None:
+    value = details_payload.get("provider_recovery")
     return value if isinstance(value, dict) else None
 
 

@@ -455,6 +455,32 @@ class WorkspaceFailurePlanningScopeResponse(BaseModel):
     fallback_model: dict[str, Any] | None = None
 
 
+class FallbackTargetResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    agent: str
+    provider: str | None = None
+    model: str
+
+
+class ProviderRecoveryStateResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    action: Literal["retry", "fallback", "terminal"] | None = None
+    reason_code: str | None = None
+    source_provider: str | None = None
+    source_model: str | None = None
+    retry_attempt_number: int | None = None
+    fallback_attempt_number: int | None = None
+    cooldown_until: datetime | None = None
+    next_eligible_at: datetime | None = None
+    fallback_target: FallbackTargetResponse | None = None
+    source_workspace_id: str | None = None
+    source_attempt_id: str | None = None
+    recommended_action: str | None = None
+    terminal: bool | None = None
+
+
 class WorkspaceFailureDetailsResponse(BaseModel):
     reason_code: str | None = None
     message: str | None = None
@@ -474,6 +500,7 @@ class WorkspaceFailureDetailsResponse(BaseModel):
     cooldown_seconds: int | None = None
     failure_fingerprint: str | None = None
     fallback_allowed: bool | None = None
+    provider_recovery_state: ProviderRecoveryStateResponse | None = None
 
 
 class CoordinationOverlapResponse(BaseModel):
@@ -561,6 +588,7 @@ class WorkspaceResponse(BaseModel):
     runtime_health: WorkspaceRuntimeHealthResponse | None = None
     secret_leases: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
     app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
+    provider_recovery_state: ProviderRecoveryStateResponse | None = None
 
     created_at: datetime
     updated_at: datetime
@@ -849,6 +877,7 @@ class MergeQueueItemResponse(BaseModel):
     latest_validation: ValidationRunSummaryResponse | None = None
     stale_reasons: list[StaleReasonResponse] = Field(default_factory=list)
     policy_findings: list[PolicyFindingResponse] = Field(default_factory=list)
+    provider_recovery_state: ProviderRecoveryStateResponse | None = None
 
 
 class MergeQueueListResponse(BaseModel):

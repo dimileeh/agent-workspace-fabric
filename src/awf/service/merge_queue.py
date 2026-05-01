@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from awf.api.schemas import (
+    FallbackTargetResponse,
     MergeBlockerReason,
     MergeCandidateReadinessResponse,
     MergeQueueBlockerResponse,
@@ -23,6 +24,7 @@ from awf.api.schemas import (
     MergeQueueItemResponse,
     MergeQueueListResponse,
     PolicyFindingResponse,
+    ProviderRecoveryStateResponse,
     StaleReasonResponse,
     WorkspaceEventResponse,
 )
@@ -50,6 +52,7 @@ from awf.runtime.merge_eligibility import (
     stale_reason_blocks_merge,
     stale_reason_required_action,
 )
+from awf.service.provider_recovery import provider_recovery_state_for_workspace
 from awf.service.validation_observability import validation_freshness_summary
 
 MERGE_QUEUE_WAIT_REASON_CODE = "MERGE_QUEUE_WAITING_FOR_OLDER_CANDIDATE"
@@ -356,6 +359,7 @@ def _item_from_candidate(
         policy_findings=[
             PolicyFindingResponse.model_validate(finding) for finding in policy_findings
         ],
+        provider_recovery_state=_provider_recovery_state_response(workspace),
     )
 
 
@@ -409,6 +413,7 @@ def _item_from_legacy_workspace(
         latest_validation=validation_summary.latest_validation,
         stale_reasons=[],
         policy_findings=[],
+        provider_recovery_state=_provider_recovery_state_response(workspace),
     )
 
 
@@ -788,4 +793,34 @@ def _blocker_from_candidate(
         pr_number=candidate.pr_number,
         status=candidate.workspace.status,
         blocker_state=blocker_state,
+    )
+
+
+def _provider_recovery_state_response(
+    workspace: Workspace,
+) -> ProviderRecoveryStateResponse | None:
+    view = provider_recovery_state_for_workspace(workspace)
+    if view is None:
+        return None
+    fallback_target_response: FallbackTargetResponse | None = None
+    if view.fallback_target is not None:
+        fallback_target_response = FallbackTargetResponse(
+            agent=view.fallback_target.agent,
+            provider=view.fallback_target.provider,
+            model=view.fallback_target.model,
+        )
+    return ProviderRecoveryStateResponse(
+        action=view.action,
+        reason_code=view.reason_code,
+        source_provider=view.source_provider,
+        source_model=view.source_model,
+        retry_attempt_number=view.retry_attempt_number,
+        fallback_attempt_number=view.fallback_attempt_number,
+        cooldown_until=view.cooldown_until,
+        next_eligible_at=view.next_eligible_at,
+        fallback_target=fallback_target_response,
+        source_workspace_id=view.source_workspace_id,
+        source_attempt_id=view.source_attempt_id,
+        recommended_action=view.recommended_action,
+        terminal=view.terminal,
     )
