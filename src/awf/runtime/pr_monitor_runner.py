@@ -266,6 +266,10 @@ class ProviderRecoveryFallbackError(Exception):
     """Raised when a retryable provider failure triggers a fallback workspace."""
     pass
 
+class ProviderRecoveryRetryError(Exception):
+    """Raised when an operation should back off and retry later due to a provider error."""
+    pass
+
 class PullRequestMonitorRunner:
     """Drives the ``monitoring_pr`` stage for a single workspace."""
 
@@ -903,6 +907,15 @@ class PullRequestMonitorRunner:
                     "(likely a decision loop bug)"
                 ),
             )
+        except ProviderRecoveryRetryError:
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.provider_retry",
+                    "workspace_id": workspace_id,
+                },
+            )
+            return
         except ProviderRecoveryFallbackError:
             await self._write_monitor_log(
                 monitor_log,
@@ -1091,6 +1104,20 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                 )
+            except ProviderRecoveryRetryError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_retry",
+                        "reason_code": "PROVIDER_OUTAGE",
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_OUTAGE",
+                    error_message="Provider recovery requested retry",
+                )
+                raise
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
                     operation,
@@ -1198,6 +1225,21 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     remote_branch=remote_branch,
                 )
+            except ProviderRecoveryRetryError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_retry",
+                        "reason_code": "PROVIDER_OUTAGE",
+                        "failure_count": len(action.failures),
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_OUTAGE",
+                    error_message="Provider recovery requested retry",
+                )
+                raise
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
                     operation,
@@ -2960,7 +3002,7 @@ class PullRequestMonitorRunner:
                 if action == "fallback":
                     raise ProviderRecoveryFallbackError() from exc
                 if action == "retry":
-                    return _GitPushResult(pushed=False, failed=True, returncode=1, stderr="provider_outage")
+                    raise ProviderRecoveryRetryError()
                 _log.warning(
                     "monitor.sync_base_cli_failed",
                     workspace_id=workspace_id,
@@ -3005,7 +3047,7 @@ class PullRequestMonitorRunner:
             if action == "fallback":
                 raise ProviderRecoveryFallbackError() from exc
             if action == "retry":
-                return _GitPushResult(pushed=False, failed=True, returncode=1, stderr="provider_outage")
+                raise ProviderRecoveryRetryError()
             _log.warning(
                 "monitor.ci_fix_cli_failed",
                 workspace_id=workspace_id,
