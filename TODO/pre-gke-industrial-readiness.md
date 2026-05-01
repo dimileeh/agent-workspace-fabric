@@ -53,6 +53,7 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | [#161](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/161) | monitoring_pr | Reattached after fixing the validate-only recovery bug locally in `faf5911`; AWF pushed/synced the PR branch to `5184b91` and is waiting for async checks/review grace before merge. |
 
 ### Reschedule Required Slices
 
@@ -63,7 +64,6 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | [#161](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/161) | reschedule_required | Work has not landed, but an open, green, mergeable PR exists. Do not launch a duplicate first; fix/rebuild the PR monitor recovery bug that repeatedly dispatches `docs_task_scope_violation` validate-only recovery on an already-validated PR, then remonitor/recover this PR. |
 | P1 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_0d9b0d2e6b1d48149c0c5291` | none | reschedule_required | No work landed. Codex Spark exited on model usage quota before producing commits; reschedule with an approved non-Spark provider/model after provider backoff/fallback support is in place. |
 | P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_90f9152eefb54c899fccbd9b`, `ws_6c5890fe7d2b43b4ba94c8ad` | branch `awf/ws_90f9152eefb54c899fccbd9b` | reschedule_required | Work has not landed. `ws_90f9152eefb54c899fccbd9b` produced useful commits but failed validation on a prompt assertion; the retry `ws_6c5890fe7d2b43b4ba94c8ad` then failed before work due Codex Spark usage quota. Recover from the preserved branch with an approved non-Spark provider/model. |
 
