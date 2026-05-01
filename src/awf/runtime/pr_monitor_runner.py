@@ -1129,6 +1129,20 @@ class PullRequestMonitorRunner:
                     error_message="Provider recovery requested retry",
                 )
                 raise
+            except ProviderRecoveryFallbackError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_fallback",
+                        "reason_code": "PROVIDER_FALLBACK",
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_FALLBACK",
+                    error_message="Provider recovery triggered fallback",
+                )
+                raise
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
                     operation,
@@ -1249,6 +1263,21 @@ class PullRequestMonitorRunner:
                     },
                     error_code="PROVIDER_OUTAGE",
                     error_message="Provider recovery requested retry",
+                )
+                raise
+            except ProviderRecoveryFallbackError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_fallback",
+                        "reason_code": "PROVIDER_FALLBACK",
+                        "failure_count": len(action.failures),
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_FALLBACK",
+                    error_message="Provider recovery triggered fallback",
                 )
                 raise
             except ComposeExecCleanupError as exc:
@@ -1380,6 +1409,20 @@ class PullRequestMonitorRunner:
                     },
                     error_code="PROVIDER_OUTAGE",
                     error_message="Provider recovery requested retry",
+                )
+                raise
+            except ProviderRecoveryFallbackError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_fallback",
+                        "reason_code": "PROVIDER_FALLBACK",
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_FALLBACK",
+                    error_message="Provider recovery triggered fallback",
                 )
                 raise
             except ComposeExecCleanupError as exc:
