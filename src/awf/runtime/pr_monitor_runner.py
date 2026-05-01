@@ -266,9 +266,11 @@ class ProviderRecoveryFallbackError(Exception):
     """Raised when a retryable provider failure triggers a fallback workspace."""
     pass
 
+
 class ProviderRecoveryRetryError(Exception):
     """Raised when an operation should back off and retry later due to a provider error."""
     pass
+
 
 class PullRequestMonitorRunner:
     """Drives the ``monitoring_pr`` stage for a single workspace."""
