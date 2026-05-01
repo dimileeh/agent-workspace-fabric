@@ -264,6 +264,7 @@ async def seed_monitoring_workspace(
             commands=[],
             base_commit=ws.base_commit,
             target_branch=ws.remote_push_branch,
+            workspace_head_sha=head_sha,
             target_head_sha=head_sha,
             log_stream_refs={},
         )

@@ -119,6 +119,7 @@ async def _finish_validation_run(
         commands=[],
         base_commit="base",
         target_branch=f"awf/{workspace_id}",
+        workspace_head_sha=head_sha,
         target_head_sha=head_sha,
         log_stream_refs={},
         started_at=started_at,
@@ -136,12 +137,12 @@ async def _seed_merge_candidate(
     *,
     task_class: str = TaskClass.refactor_task.value,
     pr_number: int = 42,
+    head_sha: str = "abc123",
     same_attempt_validation_tier: int | None = 2,
     other_attempt_validation_tier: int | None = None,
     candidate_stale_reason: str | None = None,
 ) -> CandidateSeed:
     now = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
-    head_sha = f"head-{pr_number}"
     async with factory() as session:
         workspace_repo = WorkspaceRepository(session)
         workspace = await workspace_repo.create(
@@ -369,6 +370,50 @@ async def test_auto_merge_blocks_when_required_validation_is_only_on_other_attem
         )
     ]
     assert monitor_operations == []
+
+
+@pytest.mark.unit
+async def test_pr_166_regression_auto_merge_blocks_when_pr_head_changed_after_validation(
+    factory: async_sessionmaker[AsyncSession],
+    cmd: FakeCommandRunner,
+    adapter: FakeAdapter,
+    sleep_fn: RecordedSleep,
+    tmp_path: Path,
+) -> None:
+    seed = await _seed_merge_candidate(
+        factory,
+        pr_number=508,
+        head_sha="pre-monitor-fix-head",
+        same_attempt_validation_tier=2,
+    )
+
+    terminal = await _execute_merge(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        tmp_path=tmp_path,
+        seed=seed,
+        status=replace(_status(), number=508, head_sha="post-review-fix-head"),
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(seed.workspace_id)
+        operations = await OperationRepository(session).list_all(
+            workspace_id=seed.workspace_id,
+        )
+
+    assert terminal is True
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.ready.value
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    recovery_operations = [
+        op for op in operations if op.type == OperationType.validate.value
+    ]
+    assert len(recovery_operations) == 1
+    assert recovery_operations[0].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
+    assert recovery_operations[0].payload["requested_action"] == "validate"
+    assert recovery_operations[0].payload["source_head_sha"] == "post-review-fix-head"
 
 
 @pytest.mark.unit

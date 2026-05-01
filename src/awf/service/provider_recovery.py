@@ -177,7 +177,7 @@ def decide_provider_recovery(
             reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
             terminal_reason=None,
             fallback_attempt_number=state.fallback_attempt_number + 1,
-            retry_attempt_number=state.retry_attempt_number,
+            retry_attempt_number=0,
         )
 
     return _terminal_decision("PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED", state=state)

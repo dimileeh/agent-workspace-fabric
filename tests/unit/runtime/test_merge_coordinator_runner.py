@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -212,7 +213,7 @@ class TestMergeCoordinatorRunner:
             repo_url=REPO_URL,
             repo=RepoRef.from_url(REPO_URL),
             pr_number=42,
-            status=_status(),
+            status=replace(_status(), head_sha="abc1234567890def"),
             state=MonitorState(),
             base_branch="development",
             remote_branch=f"awf/{ws_id}",

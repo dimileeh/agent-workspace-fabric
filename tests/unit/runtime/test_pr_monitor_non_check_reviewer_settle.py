@@ -80,8 +80,11 @@ def _ready_status(
 def test_monitor_config_defaults_include_narrow_greptile_policy() -> None:
     cfg = MonitorConfig()
 
-    assert cfg.non_check_reviewer_settle_seconds == 180
-    assert cfg.non_check_reviewer_logins == ("greptile-apps",)
+    assert cfg.non_check_reviewer_settle_seconds == 900
+    assert cfg.non_check_reviewer_logins == (
+        "greptile-apps",
+        "chatgpt-codex-connector",
+    )
     assert "coderabbitai" not in cfg.non_check_reviewer_logins
     assert "[bot]" not in cfg.non_check_reviewer_logins
 
@@ -270,6 +273,33 @@ def test_visible_check_skip_is_deduped_per_head() -> None:
             pr_number=93, head_sha="head-a"
         ): "visible_check"
     }
+
+
+@pytest.mark.unit
+def test_pr_166_regression_visible_greptile_check_still_waits_for_codex_review() -> None:
+    state = MonitorState()
+    cfg = MonitorConfig(
+        auto_merge=True,
+        poll_interval_seconds=60,
+        non_check_reviewer_settle_seconds=900,
+        non_check_reviewer_logins=("greptile-apps", "chatgpt-codex-connector"),
+    )
+
+    decision = _non_check_reviewer_settle_decision(
+        _ready_status(checks=(CheckTiming(name="Greptile Review", conclusion="SUCCESS"),)),
+        state,
+        cfg,
+        pr_number=166,
+        now=1000.0,
+    )
+
+    assert decision.action == "started"
+    assert decision.wait_seconds == 60
+    assert decision.visible_reviewers == ("greptile-apps",)
+    assert decision.missing_reviewers == ("chatgpt-codex-connector",)
+    assert state.threads_addressed_ids[
+        _non_check_reviewer_settle_started_key(pr_number=166, head_sha="head-a")
+    ] == "1000.000000"
 
 
 @pytest.mark.unit
@@ -636,7 +666,9 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
     cmd.queue_result(returncode=0)  # push
     cmd.queue_result(returncode=0, stdout="head-b\n")  # rev-parse
     cmd.queue_result(returncode=0, stdout=json.dumps({"data": {}}))  # resolve thread
-    # New head restarts the non-check reviewer wait.
+    # New head restarts the non-check reviewer wait. Once that quiet period
+    # elapses, the stricter merge gate must still require fresh validation for
+    # the pushed fix head before merge.
     for _ in range(4):
         cmd.queue_result(returncode=0)
         cmd.queue_result(returncode=0, stdout="0\n")
@@ -668,8 +700,16 @@ async def test_comments_arriving_during_non_check_wait_route_to_address_comments
     action_names = [entry["action"] for entry in captured if entry.get("event") == "monitor.action"]
     assert action_names[:2] == ["Merge", "AddressComments"]
     assert adapter.calls
-    assert any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
+    assert not any(call.args[:3] == ["gh", "pr", "merge"] for call in cmd.calls)
     assert clock.calls[:2] == [60, 30]
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=ws_id)
+    recovery_operations = [
+        op for op in operations if op.type == OperationType.validate.value
+    ]
+    assert recovery_operations
+    assert recovery_operations[-1].payload["reason_code"] == "VALIDATION_INSUFFICIENT_TIER"
+    assert recovery_operations[-1].payload["source_head_sha"] == "head-b"
     assert any(
         entry.get("event") == "monitor.non_check_reviewer_settle_started"
         for entry in captured

@@ -82,7 +82,10 @@ class CheckState(StrEnum):
     NEUTRAL = "NEUTRAL"
 
 
-DEFAULT_NON_CHECK_REVIEWER_LOGINS: tuple[str, ...] = ("greptile-apps",)
+DEFAULT_NON_CHECK_REVIEWER_LOGINS: tuple[str, ...] = (
+    "greptile-apps",
+    "chatgpt-codex-connector",
+)
 
 
 @dataclass(frozen=True)
@@ -222,7 +225,7 @@ class MonitorConfig:
     post comments shortly after checks first turn green; merging on the
     first green snapshot can race those reviewers."""
 
-    non_check_reviewer_settle_seconds: float = 180.0
+    non_check_reviewer_settle_seconds: float = 900.0
     """Per-head quiet-period wait for configured async reviewers that do
     not expose a GitHub-visible check/status. Set to 0 to disable."""
 

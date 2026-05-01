@@ -105,7 +105,7 @@ async def _seed_monitoring_candidate(
             task=task,
             attempt=attempt,
             workspace=workspace,
-            head_sha=f"head-{pr_number}",
+            head_sha="abc123",
             base_sha="base",
         )
         validation_repo = ValidationRunRepository(session)
@@ -116,7 +116,8 @@ async def _seed_monitoring_candidate(
             commands=[],
             base_commit="base",
             target_branch=workspace.remote_push_branch,
-            target_head_sha=f"head-{pr_number}",
+            workspace_head_sha="abc123",
+            target_head_sha="abc123",
             log_stream_refs={},
             started_at=created_at + timedelta(seconds=1),
         )

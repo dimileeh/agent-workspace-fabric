@@ -1933,6 +1933,17 @@ class PullRequestMonitorRunner:
                 ws,
                 attempt_id=candidate.attempt_id,
             )
+            if (
+                validation_reason is None
+                and current_head_sha is not None
+                and not _has_successful_validation_for_pr_head(
+                    ws,
+                    attempt_id=candidate.attempt_id,
+                    current_head_sha=current_head_sha,
+                )
+            ):
+                validation_reason = VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+                validation_action = "validate"
 
             persisted_stale_reason = (
                 candidate.stale_reason or "stale" if candidate.stale else None
@@ -4136,7 +4147,7 @@ def _has_successful_validation_for_pr_head(
             continue
         if run.status != "succeeded":
             continue
-        if run.workspace_head_sha == current_head_sha:
+        if run.workspace_head_sha == current_head_sha or run.target_head_sha == current_head_sha:
             return True
     return False
 

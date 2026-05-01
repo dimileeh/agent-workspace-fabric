@@ -215,6 +215,52 @@ def test_same_provider_retry_backoff_is_capped_by_retry_after_cap() -> None:
     assert decision.not_before == now + timedelta(seconds=600)
 
 
+def test_pr_166_regression_fallback_resets_same_provider_retry_counter() -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "provider": "google",
+            "model": "gemini-2.5-pro",
+        },
+        task_policy={
+            "provider_recovery": {
+                "fallbacks": [
+                    {
+                        "agent": "codex",
+                        "provider": "openai",
+                        "model": "gpt-5.5",
+                    }
+                ],
+                "max_fallback_attempts": 1,
+                "max_same_provider_retries": 2,
+                "cooldown_seconds": 180,
+            },
+            "provider_recovery_state": {
+                "fallback_attempt_number": 0,
+                "retry_attempt_number": 2,
+            },
+        },
+        current_agent="gemini",
+        current_model="gemini-2.5-pro",
+        now=now,
+    )
+
+    assert decision == ProviderRecoveryDecision(
+        action="fallback",
+        retryable=True,
+        not_before=None,
+        target_agent="codex",
+        target_provider="openai",
+        target_model="gpt-5.5",
+        reason_code="PROVIDER_FALLBACK_SELECTED",
+        terminal_reason=None,
+        fallback_attempt_number=1,
+        retry_attempt_number=0,
+    )
+
+
 def test_repeated_identical_fingerprint_is_terminal_no_loop() -> None:
     policy = v2_task_policy_snapshot(_request())
     metadata = provider_recovery_metadata_from_failure(
@@ -350,7 +396,7 @@ async def test_fallback_attempt_inherits_lineage_and_workspace_policy(
     assert fallback.task_policy["agent_model"] == "gpt-5.3-codex"
     assert fallback.task_policy["provider_recovery_state"]["source_workspace_id"] == source.id
     assert fallback.task_policy["provider_recovery_state"]["fallback_attempt_number"] == 1
-    assert fallback.task_policy["provider_recovery_state"]["retry_attempt_number"] == 1
+    assert fallback.task_policy["provider_recovery_state"]["retry_attempt_number"] == 0
     assert attempts[1].parent_attempt_id == attempts[0].id
     assert attempts[1].redispatch_from_attempt_id == attempts[0].id
     assert operations[0].type == "retry"

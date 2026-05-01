@@ -102,7 +102,7 @@ def _status_for_helpers(
 ) -> PRStatus:
     return PRStatus(
         number=42,
-        head_sha="abc123",
+        head_sha="abc1234567890def",
         mergeable=MergeableState.MERGEABLE,
         check_state=CheckState.SUCCESS,
         unresolved_inline_threads=threads,
@@ -1036,7 +1036,10 @@ async def test_merge_rejection_posts_human_notification_and_keeps_monitoring(
 
     assert terminal is False
     assert sleep_fn.calls == [60]
-    assert any(key.startswith("__awf_notify__:abc123:") for key in state.threads_addressed_ids)
+    assert any(
+        key.startswith("__awf_notify__:abc1234567890def:")
+        for key in state.threads_addressed_ids
+    )
     assert cmd.calls[0].args[:4] == ["gh", "pr", "merge", "42"]
     assert cmd.calls[1].args[:4] == ["gh", "pr", "comment", "42"]
     async with factory() as s:
@@ -1361,7 +1364,7 @@ async def test_non_transient_github_merge_error_records_failed_audit_and_redacts
         "operation_type": "monitor_state",
         "pr_number": 42,
         "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
-        "source_head_sha": "abc123",
+        "source_head_sha": "abc1234567890def",
         "source_base_sha": "a" * 40,
         "target_branch": "development",
         "remote_branch": f"awf/{workspace_id}",
@@ -1377,7 +1380,7 @@ async def test_non_transient_github_merge_error_records_failed_audit_and_redacts
     assert result_events[0].payload["pr_url"] == (
         "https://github.com/dimileeh/aira-web/pull/42"
     )
-    assert result_events[0].payload["source_head_sha"] == "abc123"
+    assert result_events[0].payload["source_head_sha"] == "abc1234567890def"
     assert result_events[0].payload["target_branch"] == "development"
     assert result_events[0].payload["evidence"]["operation"] == "merge_pr"
     assert result_events[0].payload["evidence"]["log_stream_refs"] == {
@@ -1719,7 +1722,9 @@ async def test_post_human_notification_dedup_skips_github_call(
         worktrees_root=tmp_path / "worktrees",
     )
     status = _status_for_helpers()
-    state = MonitorState(threads_addressed_ids={"__awf_notify__:abc123:manual": "notified"})
+    state = MonitorState(
+        threads_addressed_ids={"__awf_notify__:abc1234567890def:manual": "notified"}
+    )
 
     await runner._post_human_notification_once(
         repo=RepoRef(owner="example", name="repo"),
@@ -2183,7 +2188,7 @@ async def test_execute_report_ci_failure_dispatches_fix_and_increments_iteration
         "operation_type": "ci_repair",
         "pr_number": 42,
         "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
-        "source_head_sha": "abc123",
+        "source_head_sha": "abc1234567890def",
         "source_base_sha": "a" * 40,
         "target_branch": "development",
         "remote_branch": f"awf/{workspace_id}",
@@ -2535,7 +2540,7 @@ async def test_execute_sync_base_records_branch_push_audit(
         "operation_type": "sync_base",
         "pr_number": 42,
         "pr_url": "https://github.com/dimileeh/aira-web/pull/42",
-        "source_head_sha": "abc123",
+        "source_head_sha": "abc1234567890def",
         "source_base_sha": "a" * 40,
         "target_branch": "development",
         "remote_branch": f"awf/{workspace_id}",

@@ -43,8 +43,11 @@ def test_profile_schema_accepts_minimal_valid_profile() -> None:
     )
     assert profile.name == "go-explicit"
     assert profile.monitor.initial_review_grace_period_seconds == 900
-    assert profile.monitor.non_check_reviewer_settle_seconds == 180
-    assert profile.monitor.non_check_reviewer_logins == ["greptile-apps"]
+    assert profile.monitor.non_check_reviewer_settle_seconds == 900
+    assert profile.monitor.non_check_reviewer_logins == [
+        "greptile-apps",
+        "chatgpt-codex-connector",
+    ]
     assert profile.phases.setup[0].command == "go mod download"
     assert profile.phases.validate_commands[0].command == "go test ./..."
 

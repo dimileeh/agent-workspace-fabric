@@ -295,9 +295,9 @@ class ProfileMonitor(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     initial_review_grace_period_seconds: float = Field(default=900.0, ge=0, le=86400)
-    non_check_reviewer_settle_seconds: float = Field(default=180.0, ge=0, le=86400)
+    non_check_reviewer_settle_seconds: float = Field(default=900.0, ge=0, le=86400)
     non_check_reviewer_logins: list[str] = Field(
-        default_factory=lambda: ["greptile-apps"],
+        default_factory=lambda: ["greptile-apps", "chatgpt-codex-connector"],
         max_length=64,
     )
 

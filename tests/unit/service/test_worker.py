@@ -253,8 +253,11 @@ def test_build_worker_runtime_wires_executor_and_feature_monitor_factory(
     )
     assert default_monitor is not None
     assert created["feature_monitor_kwargs"]["initial_review_grace_period_seconds"] == 900
-    assert created["feature_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 180
-    assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == ["greptile-apps"]
+    assert created["feature_monitor_kwargs"]["non_check_reviewer_settle_seconds"] == 900
+    assert created["feature_monitor_kwargs"]["non_check_reviewer_logins"] == [
+        "greptile-apps",
+        "chatgpt-codex-connector",
+    ]
 
     profile = WorkspaceProfile(
         name="custom",

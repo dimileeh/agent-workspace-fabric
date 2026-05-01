@@ -15,9 +15,10 @@ awf:
     enforce_plan_only_changes: true
     fail_on_unexplained_deviation: true
   monitor:
-    non_check_reviewer_settle_seconds: 180
+    non_check_reviewer_settle_seconds: 900
     non_check_reviewer_logins:
       - greptile-apps
+      - chatgpt-codex-connector
   validation:
     requested_tier: 1
     coverage:
