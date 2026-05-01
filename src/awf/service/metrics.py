@@ -11,6 +11,7 @@ from typing import Any
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent
@@ -22,6 +23,8 @@ from awf.runtime.planning import (
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
 from awf.service.provider_recovery import (
+    PROVIDER_RECOVERY_NO_LOOP_REASON,
+    PROVIDER_RECOVERY_STATE_KEY,
     ProviderRecoveryStateView,
 )
 from awf.service.resource_capacity import (
@@ -516,14 +519,14 @@ async def _cluster_root_causes(
             else details_payload.get("recommended_action")
         )
 
-        if specific_reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED":
+        if specific_reason_code == AGENT_PROVIDER_CAPACITY_EXHAUSTED:
             likely_cause = _provider_likely_cause(provider_failure_type)
             action = (
                 provider_action
                 if isinstance(provider_action, str) and provider_action
                 else "Retry after provider cooldown or dispatch an approved fallback model."
             )
-        elif specific_reason_code == "AGENT_AUTH_FAILED":
+        elif specific_reason_code == AGENT_AUTH_FAILED:
             likely_cause = "Provider Auth Failed"
             action = (
                 provider_action
@@ -541,7 +544,7 @@ async def _cluster_root_causes(
             action = (
                 "Retry with the final conformance gaps and finish the remaining planned work."
             )
-        elif "AGENT_AUTH_FAILED" in msg:
+        elif AGENT_AUTH_FAILED in msg:
             likely_cause = "Agent Auth Failed"
             action = "Check agent credentials"
         elif "GitHub auth/PR creation failed" in msg:
@@ -1039,7 +1042,7 @@ async def _provider_recovery_state_summary(
     terminal_exhausted = 0
     for row in rows:
         task_policy = row.task_policy if isinstance(row.task_policy, dict) else {}
-        recovery_state = task_policy.get("provider_recovery_state")
+        recovery_state = task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
         if not isinstance(recovery_state, dict):
             continue
         action = recovery_state.get("action")
@@ -1062,7 +1065,7 @@ async def _provider_recovery_state_summary(
             pending_fallback += 1
         elif action == "terminal":
             source_reason = recovery_state.get("source_reason_code", "")
-            if source_reason == "REPEATED_PROVIDER_FAILURE_FINGERPRINT":
+            if source_reason == PROVIDER_RECOVERY_NO_LOOP_REASON:
                 terminal_no_loop += 1
             else:
                 terminal_exhausted += 1
