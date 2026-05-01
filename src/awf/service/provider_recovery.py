@@ -523,7 +523,8 @@ def _retry_delay_seconds(
     retry_after = min(retry_after, policy.retry_after_cap_seconds)
     base = policy.backoff_seconds or policy.cooldown_seconds
     backoff = base * (2 ** state.retry_attempt_number)
-    return int(max(policy.cooldown_seconds, retry_after, backoff))
+    delay = int(max(policy.cooldown_seconds, retry_after, backoff))
+    return min(delay, policy.retry_after_cap_seconds)
 
 
 def _source_suppression_not_before(

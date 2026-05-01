@@ -145,6 +145,34 @@ def test_retryable_failure_without_fallback_policy_delays_same_provider_retry() 
     )
 
 
+def test_same_provider_retry_backoff_is_capped_by_retry_after_cap() -> None:
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    decision = decide_provider_recovery(
+        {
+            "retryable": True,
+            "provider": "google",
+            "model": "gemini-2.5-pro",
+            "retry_after_seconds": 120,
+        },
+        task_policy={
+            "provider_recovery": {
+                "max_same_provider_retries": 3,
+                "cooldown_seconds": 300,
+                "backoff_seconds": 200,
+                "retry_after_cap_seconds": 600,
+            },
+            "provider_recovery_state": {"retry_attempt_number": 2},
+        },
+        current_agent="gemini",
+        current_model="gemini-2.5-pro",
+        now=now,
+    )
+
+    assert decision.action == "retry"
+    assert decision.not_before == now + timedelta(seconds=600)
+
+
 def test_repeated_identical_fingerprint_is_terminal_no_loop() -> None:
     policy = v2_task_policy_snapshot(_request())
     metadata = provider_recovery_metadata_from_failure(
