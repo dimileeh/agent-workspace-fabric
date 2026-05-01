@@ -1761,7 +1761,7 @@ def test_estimate_bytes_treats_stat_races_as_zero_or_skipped() -> None:
 
 
 @pytest.mark.unit
-async def test_no_work_superseded_workspace_not_gc_candidate_until_metadata_persisted(
+async def test_no_work_superseded_workspace_is_gc_candidate_without_recovery_metadata(
     engine: AsyncEngine,
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
