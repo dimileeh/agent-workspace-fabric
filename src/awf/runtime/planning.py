@@ -370,7 +370,11 @@ def classify_conformance_stall(
     empty_streak_seconds = 0.0
     empty_streak_iterations = 0
     for record in reversed(history):
-        if record.stdout.strip():
+        if (
+            record.stdout.strip()
+            or record.stderr.strip()
+            or record.report_digest is not None
+        ):
             break
         empty_streak_seconds += record.elapsed_seconds
         empty_streak_iterations += 1
