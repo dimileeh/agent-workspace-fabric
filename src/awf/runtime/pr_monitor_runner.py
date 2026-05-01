@@ -32,7 +32,7 @@ from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Literal, Protocol
 
 from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -116,7 +116,7 @@ _log = get_logger(__name__)
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
-Verdict = str  # "fix_committed" | "false_positive" | "defer" | "agent_failed"
+Verdict = Literal["fix_committed", "false_positive", "defer", "agent_failed"]
 
 
 class PostMergeTargetReconciler(Protocol):
@@ -260,6 +260,14 @@ class _NonCheckReviewerSettleDecision:
     started_at: float | None = None
     elapsed_seconds: float | None = None
     state_changed: bool = False
+
+
+class ProviderRecoveryFallbackError(Exception):
+    """Raised when a retryable provider failure triggers a fallback workspace."""
+
+
+class ProviderRecoveryRetryError(Exception):
+    """Raised when an operation should back off and retry later due to a provider error."""
 
 
 class PullRequestMonitorRunner:
@@ -661,13 +669,13 @@ class PullRequestMonitorRunner:
         self,
         workspace_id: str,
         exc: AgentRunError,
-    ) -> None:
+    ) -> Literal["fallback", "retry", "deterministic"]:
         message = exc.result.stderr.strip() or exc.result.stdout.strip()
         async with self._deps.session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
             if ws is None:
-                return
+                return "deterministic"
             metadata = provider_recovery_metadata_from_failure(
                 reason_code=exc.reason_code,
                 message=message,
@@ -675,13 +683,33 @@ class PullRequestMonitorRunner:
                 task_policy=ws.task_policy,
             )
             if metadata is None:
-                return
-            await create_provider_recovery_attempt_row(
+                return "deterministic"
+            result = await create_provider_recovery_attempt_row(
                 s,
                 workspace_id,
                 metadata=metadata,
             )
             await s.commit()
+            if result == "terminal":
+                return "deterministic"
+            if result is not None and result.action == "fallback":
+                return "fallback"
+            return "retry"
+
+    async def _handle_provider_agent_run_error(
+        self,
+        workspace_id: str,
+        exc: AgentRunError,
+        *,
+        state: MonitorState | None = None,
+    ) -> None:
+        if state is not None:
+            await self._persist_state(workspace_id, state)
+        action = await self._record_provider_agent_run_error(workspace_id, exc)
+        if action == "fallback":
+            raise ProviderRecoveryFallbackError() from exc
+        if action == "retry":
+            raise ProviderRecoveryRetryError()
 
     async def _record_pr_monitor_audit_event(
         self,
@@ -737,6 +765,7 @@ class PullRequestMonitorRunner:
         """Drive the monitor phase until a terminal ``MonitorAction`` fires."""
 
         monitor_log = await self._open_monitor_log(workspace_id)
+        state: MonitorState | None = None
         try:
             await self._write_monitor_log(
                 monitor_log,
@@ -894,6 +923,33 @@ class PullRequestMonitorRunner:
                     "(likely a decision loop bug)"
                 ),
             )
+        except ProviderRecoveryRetryError:
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.provider_retry",
+                    "workspace_id": workspace_id,
+                },
+            )
+            if state is not None:
+                await self._persist_state(workspace_id, state)
+            return
+        except ProviderRecoveryFallbackError:
+            await self._write_monitor_log(
+                monitor_log,
+                {
+                    "event": "monitor.provider_fallback",
+                    "workspace_id": workspace_id,
+                },
+            )
+            if state is not None:
+                await self._persist_state(workspace_id, state)
+            await self._terminate_failed(
+                workspace_id,
+                message="monitor: provider recovery fallback triggered",
+                reason_code="PROVIDER_FALLBACK",
+            )
+            return
         finally:
             await self._write_monitor_log(
                 monitor_log,
@@ -1068,6 +1124,34 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                 )
+            except ProviderRecoveryRetryError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_retry",
+                        "reason_code": "PROVIDER_OUTAGE",
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_OUTAGE",
+                    error_message="Provider recovery requested retry",
+                )
+                raise
+            except ProviderRecoveryFallbackError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_fallback",
+                        "reason_code": "PROVIDER_FALLBACK",
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_FALLBACK",
+                    error_message="Provider recovery triggered fallback",
+                )
+                raise
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
                     operation,
@@ -1175,6 +1259,36 @@ class PullRequestMonitorRunner:
                     workspace_id=workspace_id,
                     remote_branch=remote_branch,
                 )
+            except ProviderRecoveryRetryError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_retry",
+                        "reason_code": "PROVIDER_OUTAGE",
+                        "failure_count": len(action.failures),
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_OUTAGE",
+                    error_message="Provider recovery requested retry",
+                )
+                raise
+            except ProviderRecoveryFallbackError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_fallback",
+                        "reason_code": "PROVIDER_FALLBACK",
+                        "failure_count": len(action.failures),
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_FALLBACK",
+                    error_message="Provider recovery triggered fallback",
+                )
+                raise
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
                     operation,
@@ -1292,6 +1406,34 @@ class PullRequestMonitorRunner:
                     operation_id=operation.operation_id if operation is not None else None,
                     operation_type=OperationType.comment_repair.value,
                 )
+            except ProviderRecoveryRetryError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_retry",
+                        "reason_code": "PROVIDER_OUTAGE",
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_OUTAGE",
+                    error_message="Provider recovery requested retry",
+                )
+                raise
+            except ProviderRecoveryFallbackError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_fallback",
+                        "reason_code": "PROVIDER_FALLBACK",
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_FALLBACK",
+                    error_message="Provider recovery triggered fallback",
+                )
+                raise
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
                     operation,
@@ -1670,9 +1812,7 @@ class PullRequestMonitorRunner:
                 )
                 return False
 
-            if merge_gate_after_lock is not None and _merge_gate_blocks(
-                merge_gate_after_lock
-            ):
+            if merge_gate_after_lock is not None and _merge_gate_blocks(merge_gate_after_lock):
                 handled = await self._handle_merge_gate_blocker(
                     gate=merge_gate_after_lock,
                     workspace_id=workspace_id,
@@ -1906,9 +2046,9 @@ class PullRequestMonitorRunner:
         )
 
         async with self._deps.session_factory() as s:
-            candidate = await MergeCandidateRepository(
-                s
-            ).get_open_for_workspace_with_merge_inputs(workspace_id)
+            candidate = await MergeCandidateRepository(s).get_open_for_workspace_with_merge_inputs(
+                workspace_id
+            )
             if candidate is None:
                 ws = await WorkspaceRepository(s).get_with_validation_runs(workspace_id)
                 if ws is None:  # pragma: no cover - defensive invariant
@@ -1926,9 +2066,9 @@ class PullRequestMonitorRunner:
             active_stale_reasons = await StaleReasonRepository(s).list_active_for_candidate(
                 candidate.id
             )
-            active_policy_findings = await PolicyFindingRepository(
-                s
-            ).list_active_for_candidate(candidate.id)
+            active_policy_findings = await PolicyFindingRepository(s).list_active_for_candidate(
+                candidate.id
+            )
             validation_reason, validation_action = compute_stale_reason_for_attempt(
                 ws,
                 attempt_id=candidate.attempt_id,
@@ -1945,9 +2085,7 @@ class PullRequestMonitorRunner:
                 validation_reason = VALIDATION_INSUFFICIENT_TIER_STALE_REASON
                 validation_action = "validate"
 
-            persisted_stale_reason = (
-                candidate.stale_reason or "stale" if candidate.stale else None
-            )
+            persisted_stale_reason = candidate.stale_reason or "stale" if candidate.stale else None
             if not stale_reason_blocks_merge(persisted_stale_reason):
                 persisted_stale_reason = None
             if (
@@ -1999,9 +2137,10 @@ class PullRequestMonitorRunner:
                 )
             elif not ws.auto_merge:
                 notify_message = "AWF blocked auto-merge because auto_merge is disabled."
-            elif check_policy and (candidate.policy_blocked or any(
-                finding.severity == "blocking" for finding in active_policy_findings
-            )):
+            elif check_policy and (
+                candidate.policy_blocked
+                or any(finding.severity == "blocking" for finding in active_policy_findings)
+            ):
                 notify_message = (
                     "OUT_OF_SCOPE_CHANGE: changed files outside declared "
                     "owned_paths require an operator scope decision."
@@ -2122,8 +2261,7 @@ class PullRequestMonitorRunner:
                 )
                 and op.status == "failed"
                 and (
-                    latest_remonitor_at is None
-                    or _operation_observed_at(op) > latest_remonitor_at
+                    latest_remonitor_at is None or _operation_observed_at(op) > latest_remonitor_at
                 )
                 for op in ws.operations
             )
@@ -2284,9 +2422,7 @@ class PullRequestMonitorRunner:
                     recovery_mode=recovery_mode,
                     stale_reason=stale_reason,
                     log_stream_refs=(
-                        {"monitor": monitor_log.stream_id}
-                        if monitor_log is not None
-                        else None
+                        {"monitor": monitor_log.stream_id} if monitor_log is not None else None
                     ),
                 )
                 operation_repo = OperationRepository(s)
@@ -2590,6 +2726,7 @@ class PullRequestMonitorRunner:
                     thread=t,
                     compose_project=compose_project,
                     compose_file=compose_file,
+                    state=state,
                 )
                 state.mark_addressed(t.thread_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
@@ -2603,6 +2740,7 @@ class PullRequestMonitorRunner:
                     comment=c,
                     compose_project=compose_project,
                     compose_file=compose_file,
+                    state=state,
                 )
                 state.mark_addressed(c.comment_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
@@ -2797,6 +2935,7 @@ class PullRequestMonitorRunner:
         thread: ReviewThread,
         compose_project: str,
         compose_file: Path,
+        state: MonitorState | None = None,
     ) -> Verdict:
         prompt = address_thread_prompt(pr_number=pr_number, repo_slug=repo.slug(), thread=thread)
         return await self._invoke_cli_for_verdict(
@@ -2805,6 +2944,7 @@ class PullRequestMonitorRunner:
             commit_message=f"fix: address PR review thread {thread.thread_id}",
             compose_project=compose_project,
             compose_file=compose_file,
+            state=state,
         )
 
     async def _address_review_comment(
@@ -2816,6 +2956,7 @@ class PullRequestMonitorRunner:
         comment: ReviewComment,
         compose_project: str,
         compose_file: Path,
+        state: MonitorState | None = None,
     ) -> Verdict:
         prompt = address_review_comment_prompt(
             pr_number=pr_number, repo_slug=repo.slug(), comment=comment
@@ -2826,6 +2967,7 @@ class PullRequestMonitorRunner:
             commit_message=f"fix: address PR review comment {comment.comment_id}",
             compose_project=compose_project,
             compose_file=compose_file,
+            state=state,
         )
 
     async def _invoke_cli_for_verdict(
@@ -2836,11 +2978,13 @@ class PullRequestMonitorRunner:
         commit_message: str,
         compose_project: str,
         compose_file: Path,
+        state: MonitorState | None = None,
     ) -> Verdict:
         result_stdout = ""
         cli_failed = False
         if await self._provider_recovery_suppresses_cli(workspace_id):
-            return "agent_failed"
+            raise ProviderRecoveryRetryError()
+        agent_run_err = None
         try:
             result = await self._deps.adapter.run(
                 compose_project=compose_project,
@@ -2853,15 +2997,20 @@ class PullRequestMonitorRunner:
         except AgentRunError as exc:
             cli_failed = True
             result_stdout = exc.result.stdout
-            await self._record_provider_agent_run_error(workspace_id, exc)
-            _log.warning(
-                "monitor.cli_nonzero_exit",
-                returncode=exc.result.returncode,
-            )
+            agent_run_err = exc
+
         committed_dirty_changes = await self._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=commit_message,
         )
+
+        if agent_run_err is not None:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
+            _log.warning(
+                "monitor.cli_nonzero_exit",
+                returncode=agent_run_err.result.returncode,
+            )
+
         if committed_dirty_changes:
             return "fix_committed"
         if cli_failed:
@@ -2915,26 +3064,34 @@ class PullRequestMonitorRunner:
                 base_branch=base_branch,
                 conflicting_files=conflicting_files,
             )
+            agent_run_err = None
+            if await self._provider_recovery_suppresses_cli(workspace_id):
+                raise ProviderRecoveryRetryError()
             try:
-                if not await self._provider_recovery_suppresses_cli(workspace_id):
-                    await self._deps.adapter.run(
-                        compose_project=compose_project,
-                        compose_file=compose_file,
-                        prompt=prompt,
-                        workspace_id=workspace_id,
-                        log_source="recovery",
-                    )
-            except AgentRunError as exc:
-                await self._record_provider_agent_run_error(workspace_id, exc)
-                _log.warning(
-                    "monitor.sync_base_cli_failed",
+                await self._deps.adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=prompt,
                     workspace_id=workspace_id,
-                    stderr=exc.result.stderr[:400],
+                    log_source="recovery",
                 )
+            except AgentRunError as exc:
+                agent_run_err = exc
+
+            if agent_run_err is not None:
+                await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
+
             await self._commit_dirty_worktree(
                 workspace_id=workspace_id,
                 message=f"fix: resolve PR #{pr_number} base conflicts",
             )
+
+            if agent_run_err is not None:
+                _log.warning(
+                    "monitor.sync_base_cli_failed",
+                    workspace_id=workspace_id,
+                    stderr=agent_run_err.result.stderr[:400],
+                )
 
         # Whether or not we hit conflicts, push what we have.
         return await self._git_push_result(
@@ -2956,26 +3113,34 @@ class PullRequestMonitorRunner:
         remote_branch: str,
     ) -> _GitPushResult:
         prompt = fix_ci_prompt(pr_number=pr_number, repo_slug=repo.slug(), failures=failures)
+        agent_run_err = None
+        if await self._provider_recovery_suppresses_cli(workspace_id):
+            raise ProviderRecoveryRetryError()
         try:
-            if not await self._provider_recovery_suppresses_cli(workspace_id):
-                await self._deps.adapter.run(
-                    compose_project=compose_project,
-                    compose_file=compose_file,
-                    prompt=prompt,
-                    workspace_id=workspace_id,
-                    log_source="recovery",
-                )
-        except AgentRunError as exc:
-            await self._record_provider_agent_run_error(workspace_id, exc)
-            _log.warning(
-                "monitor.ci_fix_cli_failed",
+            await self._deps.adapter.run(
+                compose_project=compose_project,
+                compose_file=compose_file,
+                prompt=prompt,
                 workspace_id=workspace_id,
-                stderr=exc.result.stderr[:400],
+                log_source="recovery",
             )
+        except AgentRunError as exc:
+            agent_run_err = exc
+
+        if agent_run_err is not None:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
+
         await self._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=f"fix: address PR #{pr_number} CI failure",
         )
+
+        if agent_run_err is not None:
+            _log.warning(
+                "monitor.ci_fix_cli_failed",
+                workspace_id=workspace_id,
+                stderr=agent_run_err.result.stderr[:400],
+            )
         return await self._git_push_result(
             worktree_path=self._worktrees_root / workspace_id,
             remote_branch=remote_branch,
@@ -3955,9 +4120,7 @@ def _non_check_reviewer_settle_decision(
     pr_number: int,
     now: float,
 ) -> _NonCheckReviewerSettleDecision:
-    configured_reviewers = _normalize_non_check_reviewer_logins(
-        config.non_check_reviewer_logins
-    )
+    configured_reviewers = _normalize_non_check_reviewer_logins(config.non_check_reviewer_logins)
     if not config.auto_merge:
         return _NonCheckReviewerSettleDecision(
             action="not_auto_merge",
@@ -4139,9 +4302,7 @@ def _has_successful_validation_for_pr_head(
     if current_head_sha is None:
         return False
     state = inspect(workspace)
-    validation_runs = (
-        workspace.validation_runs if "validation_runs" not in state.unloaded else ()
-    )
+    validation_runs = workspace.validation_runs if "validation_runs" not in state.unloaded else ()
     for run in validation_runs:
         if run.attempt_id != attempt_id:
             continue
@@ -4196,8 +4357,7 @@ def _latest_successful_remonitor_at(operations: Iterable[Operation]) -> datetime
     remonitor_times = [
         _operation_observed_at(op)
         for op in operations
-        if op.type == OperationType.remonitor.value
-        and op.status == OperationStatus.succeeded.value
+        if op.type == OperationType.remonitor.value and op.status == OperationStatus.succeeded.value
     ]
     return max(remonitor_times, default=None)
 
