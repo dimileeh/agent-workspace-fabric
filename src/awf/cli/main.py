@@ -83,29 +83,41 @@ def _run_terminal_workspace_compose_teardown(
     """
     compose_file = getattr(candidate, "compose", None)
     compose_path = None if compose_file is None else getattr(compose_file, "path", None)
+    candidate_compose_file_path = getattr(candidate, "compose_file_path", None)
     workspace_id = getattr(candidate, "workspace_id", None)
     compose_project_name = getattr(candidate, "compose_project_name", None)
     compose_project_name = (
         compose_project_name if isinstance(compose_project_name, str) else None
     )
-    if not isinstance(compose_path, Path) or not isinstance(workspace_id, str):
+    compose_file_path = (
+        candidate_compose_file_path.expanduser()
+        if isinstance(candidate_compose_file_path, Path)
+        else (
+            Path(candidate_compose_file_path).expanduser()
+            if isinstance(candidate_compose_file_path, str)
+            else compose_path
+        )
+    )
+    if (
+        not isinstance(compose_file_path, Path)
+        or not isinstance(workspace_id, str)
+    ):
         return WorkspaceGCComposeTeardownResult(
             status="failed",
             reason_code="DOCKER_COMPOSE_DOWN_FAILED",
             error="candidate had unexpected workspace_id/compose shape",
         )
-    if not compose_path.exists():
+    if not compose_file_path.exists():
         return WorkspaceGCComposeTeardownResult(
             status="skipped",
             reason_code="NO_COMPOSE_STACK",
         )
-    compose_file_path: Path | None = compose_path
-    if compose_path.is_dir():
+    if compose_file_path.is_dir():
         candidate_compose_paths = (
-            compose_path / "compose.yml",
-            compose_path / "compose.yaml",
-            compose_path / "docker-compose.yml",
-            compose_path / "docker-compose.yaml",
+            compose_file_path / "compose.yml",
+            compose_file_path / "compose.yaml",
+            compose_file_path / "docker-compose.yml",
+            compose_file_path / "docker-compose.yaml",
         )
         compose_file_path = next(
             (path for path in candidate_compose_paths if path.exists()),

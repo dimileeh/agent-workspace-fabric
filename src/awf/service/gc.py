@@ -197,6 +197,7 @@ class WorkspaceGCCandidate:
     compose: WorkspaceGCPath
     auth: WorkspaceGCPath
     compose_project_name: str | None = None
+    compose_file_path: str | None = None
 
     @property
     def total_estimated_bytes(self) -> int:
@@ -940,6 +941,7 @@ def _candidate_for_workspace(
         compose=_gc_path("compose", compose_path),
         auth=_gc_path("auth", auth_path),
         compose_project_name=workspace.compose_project_name,
+        compose_file_path=workspace.compose_file_path,
     )
 
 

@@ -856,6 +856,50 @@ def test_service_gc_cli_execute_compose_teardown_prefers_persisted_project_name(
     ]
 
 
+def test_service_gc_cli_execute_compose_teardown_prefers_persisted_compose_file_path(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    compose = tmp_path / "compose" / "workspace-1"
+    compose_file = compose / "compose.prod.yml"
+    compose.mkdir(parents=True, exist_ok=True)
+    compose_file.write_text("compose: {}\n", encoding="utf-8")
+    candidate = SimpleNamespace(
+        workspace_id="workspace-1",
+        compose=SimpleNamespace(path=compose),
+        compose_file_path=str(compose_file),
+        compose_project_name="custom_workspace_project",
+    )
+    calls: list[tuple[list[str], dict[str, object]]] = []
+    import awf.cli.main as cli_main
+
+    def _run(args: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        calls.append((args, kwargs))
+        return subprocess.CompletedProcess(args, returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(cli_main.subprocess, "run", _run)
+
+    result = cli_main._run_terminal_workspace_compose_teardown(candidate)
+
+    assert result.status == "succeeded"
+    assert result.reason_code == "DOCKER_COMPOSE_DOWN_SUCCEEDED"
+    assert calls == [
+        (
+            [
+                "docker",
+                "compose",
+                "--project-name",
+                "custom_workspace_project",
+                "--file",
+                str(compose_file),
+                "down",
+                "--remove-orphans",
+            ],
+            {"check": False, "capture_output": True, "text": True},
+        )
+    ]
+
+
 @pytest.mark.unit
 def test_service_config_uses_postgres_default_and_redacts_secrets() -> None:
     from awf.service.config import (
