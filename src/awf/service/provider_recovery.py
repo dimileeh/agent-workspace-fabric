@@ -189,7 +189,7 @@ async def create_provider_recovery_attempt_row(
     *,
     now: datetime | None = None,
     metadata: Mapping[str, Any] | None = None,
-) -> ProviderRecoveryAttemptResult | None:
+) -> ProviderRecoveryAttemptResult | Literal["terminal"] | None:
     """Create a requested retry/fallback workspace for a retryable provider failure."""
 
     recovery_now = now or datetime.now(UTC)
@@ -269,7 +269,7 @@ async def create_provider_recovery_attempt_row(
             },
         )
         await session.flush()
-        return None
+        return "terminal"
 
     new_policy = _recovery_task_policy(
         source.task_policy,

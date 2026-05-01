@@ -686,6 +686,8 @@ class PullRequestMonitorRunner:
                 metadata=metadata,
             )
             await s.commit()
+            if result == "terminal":
+                return "deterministic"
             if result is not None:
                 return "fallback"
             return "retry"
