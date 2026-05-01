@@ -1245,7 +1245,7 @@ def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailur
             continue
         with stream:
             for raw_line in stream:
-                line = raw_line.strip()
+                line = raw_line.rstrip()
                 if not line:
                     continue
                 summary_match = _PYTEST_FAILURE_SUMMARY_RE.match(line)
