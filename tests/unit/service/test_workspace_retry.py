@@ -161,6 +161,8 @@ async def _mark_planning_scope_failed(
     workspace_id: str,
     *,
     approved_fallback_model: str | None = None,
+    branch_name: str = "awf/ws_scope_old",
+    remote_push_branch: str | None = "awf/ws_scope_old",
 ) -> None:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -171,8 +173,8 @@ async def _mark_planning_scope_failed(
         workspace.failure_message = (
             "planning phase changed files outside `docs/awf-plans/ws_scope_old.md`"
         )
-        workspace.branch_name = "awf/ws_scope_old"
-        workspace.remote_push_branch = "awf/ws_scope_old"
+        workspace.branch_name = branch_name
+        workspace.remote_push_branch = remote_push_branch
         workspace.task_policy = {
             **workspace.task_policy,
             **(
@@ -490,6 +492,47 @@ async def test_retry_planning_scope_violation_discards_premature_work_and_replan
     assert operations[0].result["recovery_strategy"] == "discard_and_replan"
     assert retry_created[0].payload["source_reason_code"] == AGENT_PLAN_PHASE_SCOPE_VIOLATION
     assert retry_created[0].payload["salvage_policy"] == "explicit_salvage_required"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("task_kind", "branch_name", "remote_push_branch"),
+    [
+        ("sync_release_pr", "release-sync/ws_scope_old", "development"),
+        ("sync_feature_pr", "feature-sync/ws_scope_old", "contributors/fix-123"),
+    ],
+)
+async def test_retry_planning_scope_violation_preserves_sync_remote_push_branch(
+    factory: async_sessionmaker[AsyncSession],
+    task_kind: str,
+    branch_name: str,
+    remote_push_branch: str,
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request(task_kind=task_kind))
+    await _mark_planning_scope_failed(
+        factory,
+        first.id,
+        branch_name=branch_name,
+        remote_push_branch=remote_push_branch,
+    )
+
+    retry = await service.retry_workspace(first.id)
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        original = await repo.get(first.id)
+        retried = await repo.get(retry.new_workspace_id)
+
+    assert original is not None
+    assert retried is not None
+    assert original.task_kind == task_kind
+    assert original.branch_name == branch_name
+    assert original.remote_push_branch == remote_push_branch
+
+    assert retried.task_kind == task_kind
+    assert retried.branch_name is None
+    assert retried.remote_push_branch == remote_push_branch
 
 
 @pytest.mark.unit

@@ -114,6 +114,7 @@ RETRYABLE_WORKSPACE_STATUSES = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
 )
+SYNC_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset({"sync_release_pr", "sync_feature_pr"})
 
 
 @dataclass(frozen=True)
@@ -755,7 +756,10 @@ async def retry_workspace_row(
         idempotency_key=None,
         task_kind=source.task_kind,
         remote_push_branch=(
-            None if planning_scope_context is not None else source.remote_push_branch
+            source.remote_push_branch
+            if planning_scope_context is None
+            or source.task_kind in SYNC_REMOTE_PUSH_BRANCH_TASK_KINDS
+            else None
         ),
     )
 
