@@ -801,3 +801,31 @@ async def test_conformance_retry_payload_includes_retry_attempt_number_and_gaps(
     assert isinstance(event_payload, dict)
     assert event_payload.get("attempt_number") == 2
     assert event_payload.get("source_reason_code") == PLAN_CONFORMANCE_UNSATISFIED
+
+
+@pytest.mark.unit
+async def test_conformance_retry_loop_terminates_even_without_valid_evidence(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request())
+    await _mark_conformance_failed_without_evidence(factory, first.id)
+
+    retry1 = await service.retry_workspace(first.id)
+    retried1_id = retry1.new_workspace_id
+    await _mark_conformance_failed_without_evidence(factory, retried1_id)
+
+    retry2 = await service.retry_workspace(retried1_id)
+    retried2_id = retry2.new_workspace_id
+    await _mark_conformance_failed_without_evidence(factory, retried2_id)
+
+    retry3 = await service.retry_workspace(retried2_id)
+    retried3_id = retry3.new_workspace_id
+    await _mark_conformance_failed_without_evidence(factory, retried3_id)
+
+    with pytest.raises(WorkspaceRetryExhaustedError) as exc_info:
+        await service.retry_workspace(retried3_id)
+    assert exc_info.value.detail == {
+        "attempt_count": 4,
+        "max_attempts": 4,
+    }

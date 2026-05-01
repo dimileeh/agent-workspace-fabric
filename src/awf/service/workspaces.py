@@ -727,7 +727,7 @@ async def retry_workspace_row(
     conformance_context = (
         None if planning_scope_context is not None else _conformance_retry_context(source)
     )
-    if conformance_context is not None:
+    if conformance_context is not None or _is_plan_conformance_unsatisfied(source):
         attempt_repo = TaskAttemptRepository(session)
         source_attempt = await attempt_repo.get_by_workspace_id(source.id)
         if source_attempt is not None and source_attempt.attempt_number >= MAX_CONFORMANCE_RETRY_ATTEMPTS:
@@ -1262,6 +1262,13 @@ def _compact_salvage_payload(value: object) -> dict[str, str] | None:
 def _payload_str(payload: Mapping[str, Any], key: str) -> str | None:
     value = payload.get(key)
     return value if isinstance(value, str) else None
+
+
+def _is_plan_conformance_unsatisfied(workspace: Workspace) -> bool:
+    details = workspace_failure_details_payload(workspace)
+    if details is None:
+        return False
+    return details.get("reason_code") == PLAN_CONFORMANCE_UNSATISFIED
 
 
 def _conformance_retry_context(workspace: Workspace) -> _ConformanceRetryContext | None:
