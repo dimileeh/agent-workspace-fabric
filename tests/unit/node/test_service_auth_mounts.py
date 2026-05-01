@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from awf.node import auth_mounts as auth_mounts_mod
 from awf.node.auth_mounts import ServiceAuthMountResolver, resolve_service_auth_mounts
 
 
@@ -371,6 +372,84 @@ def test_service_auth_mounts_chown_isolated_writable_auth_for_agent_user(
     assert all(uid == 1000 and gid == 1000 for _, uid, gid in chowned)
     assert all(path.is_relative_to(work_dir / "auth" / "ws_auth") for path, _, _ in chowned)
     assert host_home / ".gitconfig" not in {path for path, _, _ in chowned}
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_require_complete_owner_ids(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+
+    with pytest.raises(ValueError, match="requires both uid and gid"):
+        resolve_service_auth_mounts(
+            host_home=host_home,
+            work_dir=tmp_path / "work",
+            workspace_id="ws_auth",
+            host_env={},
+            workspace_owner_uid=1000,
+        )
+
+
+@pytest.mark.unit
+def test_service_auth_mounts_skip_readonly_mounts_for_chown(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    host_home = tmp_path / "host-home"
+    host_home.mkdir()
+    (host_home / ".gitconfig").write_text("[user]\n  name = Host\n")
+    chowned: list[Path] = []
+
+    def _record_chown(path: str | bytes, uid: int, gid: int) -> None:
+        del uid, gid
+        chowned.append(Path(path))
+
+    monkeypatch.setattr("awf.node.auth_mounts.os.chown", _record_chown)
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=tmp_path / "work",
+        workspace_id="ws_auth",
+        host_env={},
+        workspace_owner_uid=1000,
+        workspace_owner_gid=1000,
+    )
+
+    assert [mount.target for mount in mounts] == ["/home/agent/.gitconfig"]
+    assert chowned == []
+
+
+@pytest.mark.unit
+def test_chown_tree_uses_lchown_for_symlinks(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    target = tmp_path / "target"
+    target.write_text("target\n")
+    root_link = tmp_path / "root-link"
+    root_link.symlink_to(target)
+    directory = tmp_path / "directory"
+    directory.mkdir()
+    child_link = directory / "child-link"
+    child_link.symlink_to(target)
+    chowned: list[Path] = []
+    lchowned: list[Path] = []
+
+    def _record_chown(path: str | bytes, uid: int, gid: int) -> None:
+        del uid, gid
+        chowned.append(Path(path))
+
+    def _record_lchown(path: str | bytes, uid: int, gid: int) -> None:
+        del uid, gid
+        lchowned.append(Path(path))
+
+    monkeypatch.setattr("awf.node.auth_mounts.os.chown", _record_chown)
+    monkeypatch.setattr("awf.node.auth_mounts.os.lchown", _record_lchown)
+
+    auth_mounts_mod._chown_tree(root_link, 1000, 1000)
+    auth_mounts_mod._chown_tree(directory, 1000, 1000)
+
+    assert lchowned == [root_link, child_link]
+    assert chowned == [directory]
 
 
 @pytest.mark.unit

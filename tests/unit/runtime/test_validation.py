@@ -1978,6 +1978,7 @@ class TestCoverageEnforcement:
             ("uv run --python 3.12 --extra dev pytest --cov=awf", True),
             ("python -m pytest --cov awf", True),
             ("coverage run -m pytest tests && coverage report", True),
+            ("coverage run -m unittest && coverage report", False),
             ("coverage report --fail-under=90", False),
             ("pytest -q", False),
             ("pytest --cov='unterminated", False),
@@ -2006,6 +2007,24 @@ class TestCoverageEnforcement:
         assert evidence.evidence == [
             "ERROR collecting tests/unit/test_imports.py",
             "E   ModuleNotFoundError: No module named 'missing_dependency'",
+        ]
+
+    @pytest.mark.unit
+    def test_pytest_failure_parser_skips_missing_and_blank_lines(self, tmp_path: Path) -> None:
+        missing = tmp_path / "missing.txt"
+        output = tmp_path / "pytest.txt"
+        output.write_text(
+            "\nFAILED tests/unit/test_widget.py::test_handles_edges - AssertionError\n",
+            encoding="utf-8",
+        )
+
+        evidence = validation_module._parse_pytest_failure_evidence_from_files(
+            [missing, output]
+        )
+
+        assert evidence.node_ids == ["tests/unit/test_widget.py::test_handles_edges"]
+        assert evidence.evidence == [
+            "FAILED tests/unit/test_widget.py::test_handles_edges - AssertionError"
         ]
 
     @pytest.mark.unit
@@ -2064,6 +2083,15 @@ class TestCoverageEnforcement:
             == "COVERAGE_NOT_FOUND"
         )
         assert (
+            _coverage_reason_code(
+                percent=None,
+                minimum_percent=90,
+                command_result=command_failed,
+                has_pytest_failures=True,
+            )
+            == "COVERAGE_NOT_FOUND"
+        )
+        assert (
             _coverage_reason_code(percent=89.9, minimum_percent=90, command_result=command_ok)
             == "COVERAGE_BELOW_THRESHOLD"
         )
@@ -2078,6 +2106,17 @@ class TestCoverageEnforcement:
         assert _coverage_status(reason_code="COVERAGE_OK", enforce=True) == "passed"
         assert _coverage_status(reason_code="COVERAGE_NOT_FOUND", enforce=False) == "reported"
         assert _coverage_status(reason_code="COVERAGE_NOT_FOUND", enforce=True) == "failed"
+
+    @pytest.mark.unit
+    def test_pytest_failure_evidence_truncates_and_caps_duplicates(self) -> None:
+        items = ["existing"]
+
+        validation_module._append_unique_capped(items, "existing", limit=2)
+        validation_module._append_unique_capped(items, "second", limit=2)
+        validation_module._append_unique_capped(items, "third", limit=2)
+
+        assert items == ["existing", "second"]
+        assert validation_module._truncate_pytest_evidence_line("x" * 600).endswith("...")
 
     @pytest.mark.unit
     async def test_healthcheck_stderr_append_skips_invalid_stream_id(
