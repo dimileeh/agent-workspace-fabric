@@ -172,6 +172,7 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
             + "\n".join(f"  - {value}" for value in failing_values[:10])
             + "\nPrimary retry action: fix the failing pytest tests first.\n"
         )
+    failing_tests_section = f"{failing_tests_block}\n" if failing_tests_block else ""
     coverage_lines: list[str] = []
     if context.reason_code:
         coverage_lines.append(f"Reason code: {context.reason_code}")
@@ -202,7 +203,7 @@ def build_fix_prompt(context: ValidationFixContext) -> str:
         f"{stderr_block}\n\n"
         f"All validation commands that will run on the next pass:\n"
         f"{test_cmds_block}\n\n"
-        f"{failing_tests_block}\n"
+        f"{failing_tests_section}"
         f"{policy_block}\n"
         f"{coverage_block}\n\n"
         f"Your job: FIX the failure above. Inspect the tail output for "

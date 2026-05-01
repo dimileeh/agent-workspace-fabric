@@ -149,6 +149,13 @@ class TestBuildFixPrompt:
         assert "None" not in prompt
 
     @pytest.mark.unit
+    def test_omits_extra_blank_line_when_no_failing_test_evidence(self) -> None:
+        prompt = build_fix_prompt(self._ctx(test_commands=["pytest -q", "ruff check ."]))
+
+        assert "  - pytest -q\n  - ruff check .\n\nQuality-gate policy:" in prompt
+        assert "  - pytest -q\n  - ruff check .\n\n\nQuality-gate policy:" not in prompt
+
+    @pytest.mark.unit
     def test_forbids_lowering_quality_gates_on_coverage_failure(self) -> None:
         prompt = build_fix_prompt(
             self._ctx(
