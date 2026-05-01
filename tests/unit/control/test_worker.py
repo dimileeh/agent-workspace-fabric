@@ -458,7 +458,7 @@ class TestRunOnceExecution:
         assert set(executor.calls) == {ready_id, requested_id}
 
     @pytest.mark.unit
-    async def test_ready_execution_skips_open_provider_model_circuit(
+    async def test_ready_execution_skips_open_provider_model_circuit_without_event(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -508,10 +508,7 @@ class TestRunOnceExecution:
                 for event in ws.events
                 if event.event_type == "workspace.provider_recovery_cooldown"
             ]
-        assert cooldown_events
-        assert cooldown_events[-1].reason_code == "PROVIDER_MODEL_CIRCUIT_OPEN"
-        assert cooldown_events[-1].payload["provider"] == "google"
-        assert cooldown_events[-1].payload["model"] == "gemini-2.5-pro"
+        assert cooldown_events == []
 
     @pytest.mark.unit
     async def test_freshly_provisioned_workspace_is_not_counted_twice(

@@ -38,8 +38,6 @@ from awf.db.repositories import (
 from awf.node.provisioner import Provisioner
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.service.provider_recovery import (
-    PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
-    PROVIDER_RECOVERY_COOLDOWN_EVENT,
     provider_cooldown_not_before,
     provider_for_agent_model,
 )
@@ -303,7 +301,6 @@ class ControlWorker:
             filtered = await self._filter_provider_recovery_suppressed(
                 session,
                 ids,
-                status=status,
             )
             await session.commit()
             return filtered
@@ -312,13 +309,10 @@ class ControlWorker:
         self,
         session: AsyncSession,
         workspace_ids: list[str],
-        *,
-        status: WorkspaceStatus,
     ) -> list[str]:
         if not workspace_ids:
             return []
         now = datetime.now(UTC)
-        repo = WorkspaceRepository(session)
         breaker_repo = ProviderModelCircuitBreakerRepository(session)
         allowed: list[str] = []
         stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
@@ -343,21 +337,6 @@ class ControlWorker:
             if breaker is None:
                 allowed.append(workspace_id)
                 continue
-            await repo.add_event(
-                workspace,
-                event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
-                reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
-                payload={
-                    "workspace_status": status.value,
-                    "provider": provider,
-                    "model": model,
-                    "cooldown_until": breaker.cooldown_until.isoformat()
-                    if breaker.cooldown_until is not None
-                    else None,
-                    "failure_count": breaker.failure_count,
-                    "last_reason_code": breaker.last_reason_code,
-                },
-            )
         return allowed
 
     async def _filter_current_status(
