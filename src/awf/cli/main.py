@@ -84,6 +84,10 @@ def _run_terminal_workspace_compose_teardown(
     compose_file = getattr(candidate, "compose", None)
     compose_path = None if compose_file is None else getattr(compose_file, "path", None)
     workspace_id = getattr(candidate, "workspace_id", None)
+    compose_project_name = getattr(candidate, "compose_project_name", None)
+    compose_project_name = (
+        compose_project_name if isinstance(compose_project_name, str) else None
+    )
     if not isinstance(compose_path, Path) or not isinstance(workspace_id, str):
         return WorkspaceGCComposeTeardownResult(
             status="failed",
@@ -108,17 +112,18 @@ def _run_terminal_workspace_compose_teardown(
             None,
         )
         if compose_file_path is None:
-            return WorkspaceGCComposeTeardownResult(
-                status="failed",
-                reason_code="DOCKER_COMPOSE_DOWN_FAILED",
-                error="compose stack file not found",
-            )
+        return WorkspaceGCComposeTeardownResult(
+            status="failed",
+            reason_code="DOCKER_COMPOSE_DOWN_FAILED",
+            error="compose stack file not found",
+        )
+    compose_name = compose_project_name or f"awf_{workspace_id}"
 
     command = [
         "docker",
         "compose",
         "--project-name",
-        f"awf_{workspace_id}",
+        compose_name,
         "--file",
         str(compose_file_path),
         "down",
