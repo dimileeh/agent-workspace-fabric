@@ -1184,3 +1184,110 @@ def test_loaded_collection_returns_empty_for_none_relationship() -> None:
     workspace = SimpleNamespace(operations=None)
 
     assert _loaded_collection(workspace, "operations") == []
+
+
+@pytest.mark.unit
+def test_workspace_response_populates_provider_recovery_state() -> None:
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+
+    task_policy: dict[str, object] = {
+        PROVIDER_RECOVERY_STATE_KEY: {
+            "action": "fallback",
+            "decision_reason_code": "PROVIDER_FALLBACK_SELECTED",
+            "source_reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            "source_provider": "google",
+            "source_model": "gemini-2.5-pro",
+            "retry_attempt_number": 0,
+            "fallback_attempt_number": 1,
+            "target_agent": "codex",
+            "target_provider": "openai",
+            "target_model": "gpt-5",
+            "source_workspace_id": "ws-source-001",
+            "source_attempt_id": "att-001",
+        },
+        "agent_model": "openai/gpt-5",
+    }
+    workspace = SimpleNamespace(
+        id="ws-prs",
+        status="failed",
+        version=1,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws-prs",
+        base_commit="abc123",
+        task_title="Test PR state",
+        task_prompt="Exercise provider_recovery_state.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy=task_policy,
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref=None,
+        requested_profile=None,
+        resolved_profile=None,
+        test_commands=["pytest -q"],
+        requires_database=False,
+        node_id=None,
+        compose_project_name=None,
+        compose_file_path=None,
+        pr_url=None,
+        failure_reason=None,
+        failure_message=None,
+        active_policy_findings=[],
+        events=[],
+        created_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+    )
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.provider_recovery_state is not None
+    assert response.provider_recovery_state.action == "fallback"
+    assert response.provider_recovery_state.source_provider == "google"
+    assert response.provider_recovery_state.source_model == "gemini-2.5-pro"
+    assert response.provider_recovery_state.fallback_target is not None
+    assert response.provider_recovery_state.fallback_target.provider == "openai"
+    assert response.provider_recovery_state.fallback_target.model == "gpt-5"
+
+
+@pytest.mark.unit
+def test_workspace_response_provider_recovery_state_none_when_absent() -> None:
+    workspace = SimpleNamespace(
+        id="ws-no-prs",
+        status="requested",
+        version=1,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws-no-prs",
+        base_commit="abc123",
+        task_title="No PR state",
+        task_prompt="Exercise empty provider_recovery_state.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref=None,
+        requested_profile=None,
+        resolved_profile=None,
+        test_commands=["pytest -q"],
+        requires_database=False,
+        node_id=None,
+        compose_project_name=None,
+        compose_file_path=None,
+        pr_url=None,
+        failure_reason=None,
+        failure_message=None,
+        active_policy_findings=[],
+        events=[],
+        created_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+        updated_at=datetime(2026, 4, 27, 12, 0, tzinfo=UTC),
+    )
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert response.provider_recovery_state is None

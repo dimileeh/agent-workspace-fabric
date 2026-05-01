@@ -16,8 +16,10 @@ from sqlalchemy.exc import NoInspectionAvailable
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import (
+    FallbackTargetResponse,
     OperationResponse,
     OwnedPathOverlapResponse,
+    ProviderRecoveryStateResponse,
     RuntimeServiceResponse,
     ValidationFreshnessSummaryResponse,
     WorkspaceAppEndpointResponse,
@@ -73,7 +75,10 @@ from awf.service.coordination import (
     task_policy_with_coordination_warnings,
 )
 from awf.service.disk import DiskCheck
-from awf.service.provider_recovery import provider_recovery_metadata_from_failure
+from awf.service.provider_recovery import (
+    provider_recovery_metadata_from_failure,
+    provider_recovery_state_for_workspace,
+)
 from awf.service.resource_capacity import (
     ReservedResources,
     WorkspaceResourceDefaults,
@@ -918,6 +923,36 @@ def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResp
     )
 
 
+def _provider_recovery_state_response(
+    workspace: Workspace,
+) -> ProviderRecoveryStateResponse | None:
+    view = provider_recovery_state_for_workspace(workspace)
+    if view is None:
+        return None
+    fallback_target_response: FallbackTargetResponse | None = None
+    if view.fallback_target is not None:
+        fallback_target_response = FallbackTargetResponse(
+            agent=view.fallback_target.agent,
+            provider=view.fallback_target.provider,
+            model=view.fallback_target.model,
+        )
+    return ProviderRecoveryStateResponse(
+        action=view.action,
+        reason_code=view.reason_code,
+        source_provider=view.source_provider,
+        source_model=view.source_model,
+        retry_attempt_number=view.retry_attempt_number,
+        fallback_attempt_number=view.fallback_attempt_number,
+        cooldown_until=view.cooldown_until,
+        next_eligible_at=view.next_eligible_at,
+        fallback_target=fallback_target_response,
+        source_workspace_id=view.source_workspace_id,
+        source_attempt_id=view.source_attempt_id,
+        recommended_action=view.recommended_action,
+        terminal=view.terminal,
+    )
+
+
 def workspace_response(
     workspace: Workspace,
     *,
@@ -944,6 +979,7 @@ def workspace_response(
     computed_fields["resolved_profile"] = _console_safe_profile_snapshot(
         getattr(workspace, "resolved_profile", None)
     )
+    computed_fields["provider_recovery_state"] = _provider_recovery_state_response(workspace)
     return WorkspaceResponse.model_validate(
         _WorkspaceResponseSource(workspace, computed_fields)
     )
