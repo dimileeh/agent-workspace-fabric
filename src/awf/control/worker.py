@@ -294,7 +294,11 @@ class ControlWorker:
                 limit=limit,
                 exclude_ids=exclude_ids,
             )
-            if status not in {WorkspaceStatus.requested, WorkspaceStatus.ready}:
+            if status not in {
+                WorkspaceStatus.requested,
+                WorkspaceStatus.ready,
+                WorkspaceStatus.monitoring_pr,
+            }:
                 return ids
             filtered = await self._filter_provider_recovery_suppressed(
                 session,

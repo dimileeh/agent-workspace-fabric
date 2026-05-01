@@ -17,13 +17,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, TaskClass, WorkspaceStatus
-from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON
+from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON, Operation
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
@@ -118,6 +119,79 @@ def _green_status(*, pr_number: int = 42, head_sha: str = "abc1234567890def") ->
 
 def _gh_pr_merge_calls(cmd: FakeCommandRunner) -> list[list[str]]:
     return [call.args for call in cmd.calls if call.args[:3] == ["gh", "pr", "merge"]]
+
+
+def _provider_recovery_policy(
+    *,
+    fallback_agent: str = "codex",
+    fallback_provider: str = "openai",
+    fallback_model: str = "gpt-5.3-codex",
+) -> dict[str, object]:
+    return {
+        "fallbacks": [
+            {
+                "agent": fallback_agent,
+                "provider": fallback_provider,
+                "model": fallback_model,
+            }
+        ],
+        "max_fallback_attempts": 1,
+        "max_same_provider_retries": 1,
+        "cooldown_seconds": 600,
+        "circuit_breaker": {
+            "failure_threshold": 2,
+            "cooldown_seconds": 900,
+        },
+    }
+
+
+async def _configure_provider_monitor_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    agent: str = "gemini",
+    model: str = "gemini-2.5-pro",
+    fallback_agent: str = "codex",
+    fallback_provider: str = "openai",
+    fallback_model: str = "gpt-5.3-codex",
+) -> None:
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        workspace.agent = agent
+        workspace.auto_merge = False
+        workspace.initial_review_grace_period_seconds = 75
+        workspace.task_policy = {
+            "agent_model": model,
+            "provider_recovery": _provider_recovery_policy(
+                fallback_agent=fallback_agent,
+                fallback_provider=fallback_provider,
+                fallback_model=fallback_model,
+            ),
+            "pr_monitor": {"review_grace_seconds": 75},
+        }
+        await session.commit()
+
+
+async def _provider_recovery_snapshot(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+) -> tuple[dict[str, object], str, list[Operation]]:
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        source_events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.provider_recovery_requested"
+        ]
+        assert len(source_events) == 1
+        assert source_events[0].payload is not None
+        fallback_id = str(source_events[0].payload["new_workspace_id"])
+        fallback = await WorkspaceRepository(session).get(fallback_id)
+        assert fallback is not None
+        operations = list((await session.execute(select(Operation))).scalars())
+        return dict(workspace.task_policy), fallback.id, operations
 
 
 async def _mark_refactor_task(
@@ -871,6 +945,192 @@ async def test_short_circuit_completed_records_completed_monitor_state_operation
     assert operation.payload["action"] == "completed"
     assert operation.payload["reason_code"] == "SHORT_CIRCUIT_COMPLETED"
     assert operation.result == {"status": "succeeded", "outcome": "already_completed"}
+
+
+@pytest.mark.unit
+async def test_review_comment_provider_failure_records_fallback_and_suppresses_next_loop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(factory, workspace_id)
+    adapter = FakeAdapter()
+    adapter.queue(
+        returncode=1,
+        stderr="Gemini MODEL_CAPACITY_EXHAUSTED: provider is temporarily overloaded",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=75,
+    )
+
+    first = await runner._address_review_comment(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        comment=ReviewComment(comment_id="C_provider", body_excerpt="please fix", author="bot"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+    second = await runner._address_review_comment(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        comment=ReviewComment(comment_id="C_provider", body_excerpt="please fix", author="bot"),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    source_policy, fallback_id, operations = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    state = source_policy["provider_recovery_state"]
+    retry_operations = [operation for operation in operations if operation.type == "retry"]
+
+    assert first == "agent_failed"
+    assert second == "agent_failed"
+    assert len(adapter.calls) == 1
+    assert isinstance(state, dict)
+    assert state["action"] == "fallback"
+    assert state["target_agent"] == "codex"
+    assert state["target_model"] == "gpt-5.3-codex"
+    assert "not_before" in state
+    assert retry_operations
+    assert retry_operations[0].workspace_id == fallback_id
+    assert retry_operations[0].payload["provider_recovery"]["action"] == "fallback"
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(workspace_id)
+        fallback = await WorkspaceRepository(session).get(fallback_id)
+        assert source is not None
+        assert fallback is not None
+        cooldown_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+    assert source.status == WorkspaceStatus.monitoring_pr.value
+    assert fallback.status == WorkspaceStatus.requested.value
+    assert fallback.auto_merge is False
+    assert fallback.initial_review_grace_period_seconds == 75
+    assert fallback.task_policy["pr_monitor"] == {"review_grace_seconds": 75}
+    assert cooldown_events
+    assert cooldown_events[-1].payload["source"] == "pr_monitor"
+
+
+@pytest.mark.unit
+async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        agent="codex",
+        model="gpt-5.3-codex-spark",
+        fallback_agent="gemini",
+        fallback_provider="google",
+        fallback_model="gemini-2.5-pro",
+    )
+    adapter = FakeAdapter()
+    adapter.queue(
+        returncode=1,
+        stderr="Codex Spark: you've hit your usage limit. Switch to another model.",
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._run_ci_fix(
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        failures=(CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),),
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        workspace_id=workspace_id,
+        remote_branch=f"awf/{workspace_id}",
+    )
+    suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+
+    source_policy, fallback_id, operations = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    state = source_policy["provider_recovery_state"]
+    retry_operation = next(operation for operation in operations if operation.type == "retry")
+
+    assert suppressed is True
+    assert isinstance(state, dict)
+    assert state["target_agent"] == "gemini"
+    assert state["target_provider"] == "google"
+    assert state["target_model"] == "gemini-2.5-pro"
+    assert retry_operation.workspace_id == fallback_id
+    assert retry_operation.payload["provider_recovery"]["failure_type"] == "usage_limit"
+
+
+@pytest.mark.unit
+async def test_sync_base_provider_failure_records_recovery_and_source_cooldown(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(factory, workspace_id)
+    adapter = FakeAdapter()
+    adapter.queue(
+        returncode=1,
+        stderr="Gemini RESOURCE_EXHAUSTED RetryableQuotaError retry after 120",
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=0)
+    cmd.queue_result(returncode=1, stderr="merge conflict")
+    cmd.queue_result(returncode=0, stdout="UU src/conflict.py\n")
+    cmd.queue_result(returncode=0)
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    await runner._run_sync_base(
+        workspace_id=workspace_id,
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+    suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+
+    source_policy, fallback_id, operations = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    state = source_policy["provider_recovery_state"]
+    retry_operation = next(operation for operation in operations if operation.type == "retry")
+
+    assert suppressed is True
+    assert isinstance(state, dict)
+    assert state["source_workspace_id"] == workspace_id
+    assert state["source_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+    assert "not_before" in state
+    assert retry_operation.workspace_id == fallback_id
+    assert retry_operation.payload["provider_recovery"]["retry_after_seconds"] == 120
 
 
 class TestParseVerdict:

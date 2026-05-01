@@ -204,13 +204,13 @@ async def create_provider_recovery_attempt_row(
     )
     if recovery_metadata is None:
         return None
-    if _has_existing_provider_recovery_event(source, recovery_metadata):
-        return None
 
     current_model = _policy_model(source.task_policy) or _metadata_str(
         recovery_metadata,
         "model",
     )
+    policy = parse_provider_recovery_policy(source.task_policy)
+    state = parse_provider_recovery_state(source.task_policy)
     decision = decide_provider_recovery(
         recovery_metadata,
         task_policy=source.task_policy,
@@ -218,12 +218,47 @@ async def create_provider_recovery_attempt_row(
         current_model=current_model,
         now=recovery_now,
     )
+    attempt_repo = TaskAttemptRepository(session)
+    source_attempt = await attempt_repo.get_by_workspace_id(source.id)
+    source_not_before = _source_suppression_not_before(
+        recovery_metadata,
+        policy=policy,
+        state=state,
+        decision=decision,
+        now=recovery_now,
+    )
+    if source_not_before is not None or decision.action == "terminal":
+        source.task_policy = _recovery_task_policy(
+            source.task_policy,
+            source_workspace_id=source.id,
+            source_attempt=source_attempt,
+            metadata=recovery_metadata,
+            decision=decision,
+            not_before=source_not_before,
+        )
+    if source_not_before is not None:
+        await repo.add_event(
+            source,
+            event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
+            reason_code=decision.reason_code,
+            payload={
+                "source_workspace_id": source.id,
+                "provider_recovery": _decision_payload(
+                    decision,
+                    recovery_metadata,
+                    not_before=source_not_before,
+                ),
+            },
+        )
     await _record_provider_circuit_breaker(
         session,
         source,
         recovery_metadata,
         now=recovery_now,
     )
+    if _has_existing_provider_recovery_event(source, recovery_metadata):
+        await session.flush()
+        return None
     if decision.action == "terminal":
         await repo.add_event(
             source,
@@ -239,7 +274,7 @@ async def create_provider_recovery_attempt_row(
     new_policy = _recovery_task_policy(
         source.task_policy,
         source_workspace_id=source.id,
-        source_attempt=await TaskAttemptRepository(session).get_by_workspace_id(source.id),
+        source_attempt=source_attempt,
         metadata=recovery_metadata,
         decision=decision,
     )
@@ -272,8 +307,6 @@ async def create_provider_recovery_attempt_row(
         else None,
     )
 
-    attempt_repo = TaskAttemptRepository(session)
-    source_attempt = await attempt_repo.get_by_workspace_id(source.id)
     task = await _retry_task_for_source(session, source, source_attempt=source_attempt)
     attempt = await attempt_repo.create_for_workspace(
         task=task,
@@ -493,6 +526,21 @@ def _retry_delay_seconds(
     return int(max(policy.cooldown_seconds, retry_after, backoff))
 
 
+def _source_suppression_not_before(
+    metadata: Mapping[str, Any],
+    *,
+    policy: ProviderRecoveryPolicy,
+    state: ProviderRecoveryState,
+    decision: ProviderRecoveryDecision,
+    now: datetime,
+) -> datetime | None:
+    if decision.not_before is not None:
+        return decision.not_before
+    if decision.action not in {"retry", "fallback"}:
+        return None
+    return now + timedelta(seconds=_retry_delay_seconds(metadata, policy, state))
+
+
 def _terminal_decision(
     terminal_reason: str,
     *,
@@ -549,6 +597,7 @@ def _recovery_task_policy(
     source_attempt: TaskAttempt | None,
     metadata: Mapping[str, Any],
     decision: ProviderRecoveryDecision,
+    not_before: datetime | None = None,
 ) -> dict[str, Any]:
     policy = deepcopy(dict(source_policy))
     state = parse_provider_recovery_state(policy)
@@ -568,8 +617,9 @@ def _recovery_task_policy(
         "target_provider": decision.target_provider,
         "target_model": decision.target_model,
     }
-    if decision.not_before is not None:
-        recovery_state["not_before"] = decision.not_before.isoformat()
+    state_not_before = decision.not_before if not_before is None else not_before
+    if state_not_before is not None:
+        recovery_state["not_before"] = state_not_before.isoformat()
     policy[PROVIDER_RECOVERY_STATE_KEY] = {
         key: value for key, value in recovery_state.items() if value is not None
     }
@@ -579,6 +629,8 @@ def _recovery_task_policy(
 def _decision_payload(
     decision: ProviderRecoveryDecision,
     metadata: Mapping[str, Any],
+    *,
+    not_before: datetime | None = None,
 ) -> dict[str, Any]:
     payload: dict[str, Any] = {
         **dict(metadata),
@@ -591,8 +643,9 @@ def _decision_payload(
         "retry_attempt_number": decision.retry_attempt_number,
         "terminal_reason": decision.terminal_reason,
     }
-    if decision.not_before is not None:
-        payload["not_before"] = decision.not_before.isoformat()
+    state_not_before = decision.not_before if not_before is None else not_before
+    if state_not_before is not None:
+        payload["not_before"] = state_not_before.isoformat()
     return {key: value for key, value in payload.items() if value is not None}
 
 

@@ -136,6 +136,8 @@ async def _create_monitoring_pr(
     origin: Path,
     title: str,
     *,
+    agent: str = "codex",
+    task_policy: dict[str, object] | None = None,
     pr_number: int = 123,
     with_pr_url: bool = True,
     monitor_iter_count: int = 0,
@@ -150,8 +152,9 @@ async def _create_monitoring_pr(
             branch_base="development",
             task_title=title,
             task_prompt="p",
-            agent="codex",
+            agent=agent,
             test_commands=[],
+            task_policy=task_policy,
         )
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = f"awf/{ws.id}"
@@ -1020,6 +1023,51 @@ class TestRunOnceMonitorRecovery:
 
         assert executor.calls == []
         assert executor.resume_calls == [monitor_id]
+
+    @pytest.mark.unit
+    async def test_monitoring_pr_provider_recovery_cooldown_suppresses_resume(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-cooling-monitor",
+            agent="gemini",
+            task_policy={
+                "agent_model": "gemini-2.5-pro",
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "fallback",
+                },
+            },
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=3),
+        )
+
+        assert await worker.run_once() == 0
+        await worker.wait_for_execution_tasks()
+
+        assert executor.resume_calls == []
+        async with session_factory() as session:
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            assert workspace is not None
+            cooldown_events = [
+                event
+                for event in workspace.events
+                if event.event_type == "workspace.provider_recovery_cooldown"
+            ]
+        assert cooldown_events
+        assert cooldown_events[-1].reason_code == "PROVIDER_RECOVERY_NOT_BEFORE"
+        assert cooldown_events[-1].payload["workspace_status"] == "monitoring_pr"
 
     @pytest.mark.unit
     async def test_fresh_worker_records_recovery_operation_when_resuming_monitoring_pr(
