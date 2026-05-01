@@ -141,6 +141,8 @@ def validation_coverage_fields(run: ValidationRun) -> dict[str, Any]:
         "coverage_status": _json_str(coverage.get("status")),
         "coverage_reason_code": _json_str(coverage.get("reason_code")),
         "coverage_gaps": gaps,
+        "failing_test_node_ids": _json_str_list(coverage.get("failing_test_node_ids")),
+        "failing_test_evidence": _json_str_list(coverage.get("failing_test_evidence")),
     }
 
 
@@ -154,3 +156,9 @@ def _json_float(value: object) -> float | None:
 
 def _json_str(value: object) -> str | None:
     return value if isinstance(value, str) else None
+
+
+def _json_str_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str)]

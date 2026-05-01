@@ -104,6 +104,7 @@ from awf.runtime.validation import (
     DATABASE_GENERATED_SETUP_TIMEOUT,
     DATABASE_REFRESH_TIMEOUT,
     DB_GENERATED_SETUP_PHASE,
+    PYTEST_TEST_FAILURE,
     ValidationCommandResult,
     ValidationCoverageResult,
     ValidationResult,
@@ -1324,6 +1325,16 @@ class WorkspaceExecutor:
                 ),
                 baseline_coverage_percent=(
                     baseline_coverage.percent if baseline_coverage is not None else None
+                ),
+                failing_test_node_ids=(
+                    tuple(val_result.coverage.failing_test_node_ids)
+                    if val_result.coverage is not None
+                    else ()
+                ),
+                failing_test_evidence=(
+                    tuple(val_result.coverage.failing_test_evidence)
+                    if val_result.coverage is not None
+                    else ()
                 ),
             )
             fix_prompt = build_fix_prompt(fix_context)
@@ -3807,9 +3818,15 @@ def _validation_run_log_stream_refs(
 def _validation_run_reason_code(result: ValidationResult) -> str:
     if result.all_passed:
         return "VALIDATION_OK"
+    first_failure = result.first_failure
+    if (
+        first_failure is not None
+        and first_failure.reason_code == PYTEST_TEST_FAILURE
+        and _coverage_has_failing_tests(result.coverage)
+    ):
+        return PYTEST_TEST_FAILURE
     if result.coverage is not None and not result.coverage.ok:
         return result.coverage.reason_code
-    first_failure = result.first_failure
     if first_failure is None:
         return "VALIDATION_FAILED"
     return first_failure.reason_code
@@ -3871,6 +3888,8 @@ def _coverage_preserves_below_threshold_baseline(
 ) -> bool:
     if coverage is None or baseline_coverage is None:
         return False
+    if _coverage_has_failing_tests(coverage):
+        return False
     if coverage.reason_code != "COVERAGE_BELOW_THRESHOLD":
         return False
     if coverage.percent is None or baseline_coverage.percent is None:
@@ -3913,12 +3932,61 @@ def _format_coverage_gaps(gaps: list[dict[str, object]]) -> str:
     return "\n".join(lines)
 
 
+def _coverage_has_failing_tests(coverage: ValidationCoverageResult | None) -> bool:
+    if coverage is None:
+        return False
+    return bool(coverage.failing_test_node_ids or coverage.failing_test_evidence)
+
+
+def _format_failing_test_evidence(coverage: ValidationCoverageResult) -> str:
+    node_ids = [str(value) for value in coverage.failing_test_node_ids[:5]]
+    evidence = [str(value) for value in coverage.failing_test_evidence[:5]]
+    if node_ids and evidence:
+        return f"{', '.join(node_ids)}; evidence: {' | '.join(evidence)}"
+    return ", ".join(node_ids if node_ids else evidence)
+
+
+def _coverage_wrapped_pytest_failure_message(
+    coverage: ValidationCoverageResult,
+) -> str:
+    tests = _format_failing_test_evidence(coverage)
+    tests_fragment = f": {tests}" if tests else ""
+    if coverage.reason_code == "COVERAGE_BELOW_THRESHOLD" and coverage.percent is not None:
+        gap_lines = _format_coverage_gaps(coverage.gaps if coverage.gaps else [])
+        gap_text = f"\n{gap_lines}" if gap_lines else ""
+        return (
+            f"validation failed: pytest reported failing tests{tests_fragment}; "
+            f"coverage {coverage.percent:.1f}% is also below required "
+            f"{coverage.minimum_percent:.1f}%; fix the failing test first, "
+            "then address coverage if it remains below threshold"
+            f"{gap_text}"
+        )
+    if coverage.percent is not None:
+        return (
+            f"validation failed: pytest reported failing tests{tests_fragment}; "
+            f"coverage met the {coverage.minimum_percent:.1f}% requirement "
+            f"at {coverage.percent:.1f}%"
+        )
+    return (
+        f"validation failed: pytest reported failing tests{tests_fragment}; "
+        "coverage output was not available because the coverage-wrapped test command failed"
+    )
+
+
 def _validation_failure_message(
     result: ValidationResult,
     *,
     baseline_coverage: ValidationCoverageResult | None = None,
 ) -> str:
     coverage = result.coverage
+    first_fail = result.first_failure
+    if (
+        first_fail is not None
+        and first_fail.reason_code == PYTEST_TEST_FAILURE
+        and coverage is not None
+        and _coverage_has_failing_tests(coverage)
+    ):
+        return _coverage_wrapped_pytest_failure_message(coverage)
     if coverage is not None and not coverage.ok:
         baseline_debt = (
             baseline_coverage is not None
@@ -3951,7 +4019,6 @@ def _validation_failure_message(
         if coverage.reason_code == "COVERAGE_PROVIDER_UNSUPPORTED":
             return f"validation failed: unsupported coverage provider {coverage.provider}"
 
-    first_fail = result.first_failure
     if first_fail is not None and first_fail.phase == "healthcheck":
         metadata = first_fail.metadata
         name = metadata.get("healthcheck_name")

@@ -1519,6 +1519,8 @@ class TestMergeQueueList:
             "coverage_status": None,
             "coverage_reason_code": None,
             "coverage_gaps": [],
+            "failing_test_node_ids": [],
+            "failing_test_evidence": [],
         }
         assert item["validation_freshness_status"] == "stale"
         assert item["validation_reason_code"] == "validation_target_stale"

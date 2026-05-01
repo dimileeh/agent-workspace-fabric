@@ -64,11 +64,17 @@ _COVERAGE_FILE_LINE_RE = re.compile(
     r"^(?P<file>\S.*?)\s+(?P<stmts>\d+)\s+(?P<miss>\d+)\s+(?P<cover>\d+)%\s*(?P<missing>.*?)\s*$"
 )
 _COVERAGE_HEADER_RE = re.compile(r"(?i)Name\s+Stmts\s+Miss\s+Cover")
+_PYTEST_FAILURE_SUMMARY_RE = re.compile(r"^(?P<kind>FAILED|ERROR)\s+(?P<rest>.+)$")
+_PYTEST_NODE_ID_RE = re.compile(r"^[^\s]+\.py::\S+")
+_PYTEST_EVIDENCE_LIMIT = 20
+_PYTEST_NODE_ID_LIMIT = 20
+_PYTEST_EVIDENCE_MAX_CHARS = 500
 HEALTHCHECK_OK = "HEALTHCHECK_OK"
 HEALTHCHECK_TIMEOUT = "HEALTHCHECK_TIMEOUT"
 HEALTHCHECK_COMMAND_FAILED = "HEALTHCHECK_COMMAND_FAILED"
 HEALTHCHECK_HTTP_STATUS_MISMATCH = "HEALTHCHECK_HTTP_STATUS_MISMATCH"
 HEALTHCHECK_INVALID_CONFIGURATION = "HEALTHCHECK_INVALID_CONFIGURATION"
+PYTEST_TEST_FAILURE = "PYTEST_TEST_FAILURE"
 DATABASE_GENERATED_SETUP_FAILED = "DATABASE_GENERATED_SETUP_FAILED"
 DATABASE_GENERATED_SETUP_TIMEOUT = "DATABASE_GENERATED_SETUP_TIMEOUT"
 DATABASE_REFRESH_FAILED = "DATABASE_REFRESH_FAILED"
@@ -134,6 +140,18 @@ class ValidationCommandResult:
 
 
 @dataclass(frozen=True)
+class PytestFailureEvidence:
+    """Pytest failure node IDs and bounded fallback evidence parsed from output."""
+
+    node_ids: list[str] = field(default_factory=list)
+    evidence: list[str] = field(default_factory=list)
+
+    @property
+    def present(self) -> bool:
+        return bool(self.node_ids or self.evidence)
+
+
+@dataclass(frozen=True)
 class ValidationCoverageResult:
     """Coverage measurement parsed from an explicit provider command."""
 
@@ -145,6 +163,8 @@ class ValidationCoverageResult:
     reason_code: str
     command_result: ValidationCommandResult | None = None
     gaps: list[dict[str, object]] = field(default_factory=list)
+    failing_test_node_ids: list[str] = field(default_factory=list)
+    failing_test_evidence: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -162,6 +182,10 @@ class ValidationCoverageResult:
             metadata["percent"] = float(self.percent)
         if self.gaps:
             metadata["gaps"] = self.gaps
+        if self.failing_test_node_ids:
+            metadata["failing_test_node_ids"] = self.failing_test_node_ids
+        if self.failing_test_evidence:
+            metadata["failing_test_evidence"] = self.failing_test_evidence
         return metadata
 
 
@@ -813,21 +837,38 @@ class ValidationRunner:
         else:
             coverage_outputs = results
 
-        percent = _parse_python_coverage_percent_from_files(
-            _coverage_output_paths(coverage_outputs)
+        output_paths = _coverage_output_paths(coverage_outputs)
+        percent = _parse_python_coverage_percent_from_files(output_paths)
+        gaps = _parse_term_missing_gaps(output_paths)
+        pytest_evidence = (
+            _parse_pytest_failure_evidence_from_files(output_paths)
+            if _should_parse_pytest_failure_evidence(command_result)
+            else PytestFailureEvidence()
         )
         reason_code = _coverage_reason_code(
             percent=percent,
             minimum_percent=coverage.minimum_percent,
             command_result=command_result,
+            has_pytest_failures=pytest_evidence.present,
         )
         status = _coverage_status(reason_code=reason_code, enforce=coverage.enforce)
         policy_failed = status == "failed"
         if command_result is not None:
+            command_reason_code = (
+                PYTEST_TEST_FAILURE if pytest_evidence.present else reason_code
+            )
+            command_metadata = dict(command_result.metadata)
+            if pytest_evidence.node_ids:
+                command_metadata["failing_test_node_ids"] = pytest_evidence.node_ids
+            if pytest_evidence.evidence:
+                command_metadata["failing_test_evidence"] = pytest_evidence.evidence
+            if pytest_evidence.present:
+                command_metadata["coverage_reason_code"] = reason_code
             command_result = replace(
                 command_result,
-                reason_code=reason_code,
+                reason_code=command_reason_code,
                 policy_failed=policy_failed,
+                metadata=command_metadata,
             )
             results.append(command_result)
 
@@ -840,6 +881,7 @@ class ValidationRunner:
             enforce=coverage.enforce,
             reason_code=reason_code,
             status=status,
+            gap_count=len(gaps),
         )
         return ValidationCoverageResult(
             provider=coverage.provider,
@@ -849,6 +891,9 @@ class ValidationRunner:
             status=status,
             reason_code=reason_code,
             command_result=command_result,
+            gaps=gaps,
+            failing_test_node_ids=pytest_evidence.node_ids,
+            failing_test_evidence=pytest_evidence.evidence,
         )
 
     async def _exec(
@@ -1172,6 +1217,51 @@ def _coverage_output_paths(results: list[ValidationCommandResult]) -> list[Path]
     return paths
 
 
+def _should_parse_pytest_failure_evidence(
+    command_result: ValidationCommandResult | None,
+) -> bool:
+    return (
+        command_result is not None
+        and command_result.returncode != 0
+        and _is_pytest_coverage_command(command_result.command)
+    )
+
+
+def _is_pytest_coverage_command(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+
+    token_names = [_command_token_name(token) for token in tokens]
+    invokes_pytest = any(token in {"pytest", "py.test"} for token in token_names)
+    if not invokes_pytest:
+        return False
+
+    if any(_is_pytest_cov_option(token) for token in tokens):
+        return True
+
+    return _runs_pytest_under_coverage(token_names)
+
+
+def _command_token_name(token: str) -> str:
+    return token.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _is_pytest_cov_option(token: str) -> bool:
+    return token == "--cov" or token.startswith(("--cov=", "--cov-"))
+
+
+def _runs_pytest_under_coverage(token_names: list[str]) -> bool:
+    for index, token in enumerate(token_names):
+        if token != "coverage":
+            continue
+        remaining = token_names[index + 1 :]
+        if "run" in remaining and any(item in {"pytest", "py.test"} for item in remaining):
+            return True
+    return False
+
+
 def _parse_python_coverage_percent_from_files(paths: list[Path]) -> float | None:
     total_percent: float | None = None
     summary_percent: float | None = None
@@ -1189,19 +1279,93 @@ def _parse_python_coverage_percent_from_files(paths: list[Path]) -> float | None
     return total_percent if total_percent is not None else summary_percent
 
 
+def _parse_pytest_failure_evidence_from_files(paths: list[Path]) -> PytestFailureEvidence:
+    node_ids: list[str] = []
+    evidence: list[str] = []
+    fallback_evidence: list[str] = []
+    for path in paths:
+        try:
+            stream = path.open("r", encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        with stream:
+            for raw_line in stream:
+                line = raw_line.rstrip()
+                if not line:
+                    continue
+                summary_line = line.lstrip()
+                summary_match = _PYTEST_FAILURE_SUMMARY_RE.match(summary_line)
+                if summary_match is not None:
+                    _append_unique_capped(
+                        evidence,
+                        _truncate_pytest_evidence_line(summary_line),
+                        limit=_PYTEST_EVIDENCE_LIMIT,
+                    )
+                    target = _pytest_summary_target(summary_match.group("rest"))
+                    if _looks_like_pytest_node_id(target):
+                        _append_unique_capped(
+                            node_ids,
+                            target,
+                            limit=_PYTEST_NODE_ID_LIMIT,
+                        )
+                    continue
+                if _looks_like_pytest_fallback_evidence(line):
+                    _append_unique_capped(
+                        fallback_evidence,
+                        _truncate_pytest_evidence_line(line),
+                        limit=_PYTEST_EVIDENCE_LIMIT,
+                    )
+
+    for line in fallback_evidence:
+        _append_unique_capped(evidence, line, limit=_PYTEST_EVIDENCE_LIMIT)
+    return PytestFailureEvidence(node_ids=node_ids, evidence=evidence)
+
+
+def _pytest_summary_target(rest: str) -> str:
+    target, _, _details = rest.partition(" - ")
+    return target.strip()
+
+
+def _looks_like_pytest_node_id(value: str) -> bool:
+    return bool(_PYTEST_NODE_ID_RE.match(value))
+
+
+def _looks_like_pytest_fallback_evidence(line: str) -> bool:
+    return line.startswith(("E   ", "E\t"))
+
+
+def _truncate_pytest_evidence_line(line: str) -> str:
+    if len(line) <= _PYTEST_EVIDENCE_MAX_CHARS:
+        return line
+    return line[: _PYTEST_EVIDENCE_MAX_CHARS - 3] + "..."
+
+
+def _append_unique_capped(items: list[str], value: str, *, limit: int) -> None:
+    if len(items) >= limit or value in items:
+        return
+    items.append(value)
+
+
 def _coverage_reason_code(
     *,
     percent: float | None,
     minimum_percent: float,
     command_result: ValidationCommandResult | None,
+    has_pytest_failures: bool = False,
 ) -> str:
     if percent is None:
+        if has_pytest_failures:
+            return "COVERAGE_NOT_FOUND"
         if command_result is not None and command_result.returncode != 0:
             return "COVERAGE_COMMAND_FAILED"
         return "COVERAGE_NOT_FOUND"
     if percent < minimum_percent:
         return "COVERAGE_BELOW_THRESHOLD"
-    if command_result is not None and command_result.returncode != 0:
+    if (
+        command_result is not None
+        and command_result.returncode != 0
+        and not has_pytest_failures
+    ):
         return "COVERAGE_COMMAND_FAILED"
     return "COVERAGE_OK"
 

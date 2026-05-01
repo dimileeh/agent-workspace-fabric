@@ -363,6 +363,8 @@ class ValidationRunSummaryResponse(BaseModel):
     coverage_status: str | None = None
     coverage_reason_code: str | None = None
     coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
+    failing_test_node_ids: list[str] = Field(default_factory=list)
+    failing_test_evidence: list[str] = Field(default_factory=list)
 
 
 class ValidationFreshnessSummaryResponse(BaseModel):
@@ -1057,6 +1059,8 @@ class ValidationProvenanceItemResponse(BaseModel):
     coverage_status: str | None = None
     coverage_reason_code: str | None = None
     coverage_gaps: list[dict[str, Any]] = Field(default_factory=list)
+    failing_test_node_ids: list[str] = Field(default_factory=list)
+    failing_test_evidence: list[str] = Field(default_factory=list)
 
 
 class ValidationProvenanceListResponse(BaseModel):
