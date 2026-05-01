@@ -2496,8 +2496,16 @@ class WorkspaceExecutor:
         changed_paths: list[str] = []
         if baseline_sha:
             commit_count = await self._git_commit_count_since(worktree_path, baseline_sha)
-            changed = await self._committed_paths_since(worktree_path, baseline_sha)
-            changed_paths = sorted(path.as_posix() for path in changed)
+            try:
+                changed = await self._committed_paths_since(worktree_path, baseline_sha)
+            except RuntimeError:
+                _log.exception(
+                    "executor.planning_conformance_stalled_diff_failed",
+                    workspace_id=workspace.id,
+                    baseline_sha=baseline_sha,
+                )
+            else:
+                changed_paths = sorted(path.as_posix() for path in changed)
         stall_evidence_payload = build_conformance_stall_failure_evidence(
             stall=stall,
             head_sha=head_sha,
