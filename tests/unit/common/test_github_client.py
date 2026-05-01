@@ -575,6 +575,19 @@ class TestFetchPrStatus:
         [
             "fixed in commit 831a9ff17936915968882306dd6ee32b47cc909f",
             "FALSE POSITIVE: the reviewer was looking at pre-refactor code.",
+            (
+                "FALSE POSITIVE on comment 4355744677: The hardcoded "
+                "`agent_readiness` was already replaced by commit 579cf6d. "
+                "The current code dynamically computes agent readiness."
+            ),
+            (
+                "Review-level comment 4207199736 confirmed resolved: the weak "
+                "`-> Any` return type was tightened to `-> Operation` in commit 2421e80."
+            ),
+            (
+                "No further action required. The sole actionable item from review "
+                "4207859399 was already fixed in commit 8bfd188d0f."
+            ),
             "DEFER: needs maintainer input before changing API behavior.",
         ],
     )

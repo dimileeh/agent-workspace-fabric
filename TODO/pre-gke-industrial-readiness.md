@@ -40,25 +40,40 @@ Priority key:
 Status values:
 
 - `running`: workspace is actively implementing the slice.
+- `validating`: workspace is in validation or validation-recovery and the PR
+  monitor still owns the slice.
 - `monitoring_pr`: PR exists and AWF owns comment/check/merge monitoring.
 - `merged`: slice landed on `codex/awf-post-merge-fixes`.
 - `failed`: attempt failed and needs root-cause triage or a superseding retry.
+- `reschedule_required`: the previous attempt did not land; the slice remains
+  in the backlog and must be retried or recovered before it can count as done.
 - `superseded`: another workspace/PR completed the intended slice.
 
 ### Active Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope violation reason | `ws_90f9152eefb54c899fccbd9b` | - | running | Codex `gpt-5.3-codex-spark`; hardens planning prompt, structured `AGENT_PLAN_PHASE_SCOPE_VIOLATION`, salvage details, and tests after Gemini planned-and-implemented in the planning phase. |
-| P1 Provider Resilience And Automated Fallback Recovery | No-work failed idle container cleanup | `ws_cfee1e44d23a41a2aae90c8c` | - | provisioning | Codex `gpt-5.3-codex-spark`; cleans terminal no-work containers after retained logs/artifacts while preserving salvage evidence. |
-| P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | [#162](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/162) | monitoring_pr | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` was propagated to AWF API/worker service env. |
-| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | [#161](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/161) | monitoring_pr | Codex `gpt-5.3-codex-spark`; fresh restart after Gemini violated the planning-only phase in `ws_8210d159580747f88c691ef5`. |
-| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_1e79f6b47faf44d0bf8de3f0` | [#159](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/159) | monitoring_pr | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_7c8ec611a3d14b6cb4612344`. |
+| P1 Provider Resilience And Automated Fallback Recovery | No-work failed idle container cleanup | `ws_cfee1e44d23a41a2aae90c8c` | [#163](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/163) | monitoring_pr | Revived existing PR monitor instead of rescheduling; Codex `gpt-5.3-codex-spark`; comment repair has run and AWF owns checks/review/merge. |
+
+### Reschedule Required Slices
+
+These slices are not done. Do not count them as completed, and do not skip them
+when selecting the next wave after active PR-monitor slices complete and the
+local service has been pulled/rebuilt/restarted. If PR #161 and PR #163 merge,
+do not reschedule their corresponding slices.
+
+| TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
+| --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance | `ws_8c9f0ae88d5c477aac382158` | [#161](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/161) | reschedule_required | Work has not landed, but an open, green, mergeable PR exists. Do not launch a duplicate first; fix/rebuild the PR monitor recovery bug that repeatedly dispatches `docs_task_scope_violation` validate-only recovery on an already-validated PR, then remonitor/recover this PR. |
+| P1 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_0d9b0d2e6b1d48149c0c5291` | none | reschedule_required | No work landed. Codex Spark exited on model usage quota before producing commits; reschedule with an approved non-Spark provider/model after provider backoff/fallback support is in place. |
+| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_90f9152eefb54c899fccbd9b`, `ws_6c5890fe7d2b43b4ba94c8ad` | branch `awf/ws_90f9152eefb54c899fccbd9b` | reschedule_required | Work has not landed. `ws_90f9152eefb54c899fccbd9b` produced useful commits but failed validation on a prompt assertion; the retry `ws_6c5890fe7d2b43b4ba94c8ad` then failed before work due Codex Spark usage quota. Recover from the preserved branch with an approved non-Spark provider/model. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | MCP operator parity tools | `ws_1e79f6b47faf44d0bf8de3f0` | [#159](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/159) | merged | OpenCode `ollama/glm-5.1:cloud`; retry of Gemini capacity-failed `ws_7c8ec611a3d14b6cb4612344`; merged 2026-05-01. |
+| P1 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification | `ws_1e02f0a23ccb4cd99d2471c2` | [#162](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/162) | merged | Gemini `gemini-3.1-pro-preview`; retry after `GEMINI_API_KEY` propagation landed structured provider-capacity classification. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records | `ws_05365f752ad742abb7c134af` | [#160](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/160) | merged | Adds scheduler decision-record planning/docs slice after the OpenCode GLM attempt stalled in conformance. |
 | P1 Operator Console Completion | Security and egress status panels | `ws_ac64156e08454928985982eb` | [#158](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/158) | merged | Adds console security and egress status panels via OpenCode GLM retry. |
 | P1 API Contract Completion | Guard legacy endpoint compatibility | `ws_a41728907dc740d6a1ae7092` | [#157](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/157) | merged | Guards v1/legacy response compatibility until documented v2 cutover. |
@@ -291,6 +306,25 @@ Status values:
 
 ## P1: Provider Resilience And Automated Fallback Recovery
 
+- [ ] **Implement full provider/model automatic recovery loop** as one
+  comprehensive P1 slice. Recent incidents: Gemini 429/capacity failures,
+  Gemini auth failures, Codex Spark usage-limit failures in
+  `ws_6c5890fe7d2b43b4ba94c8ad` and `ws_0d9b0d2e6b1d48149c0c5291`, and PR
+  monitor recovery loops repeatedly hammering an exhausted model. Acceptance:
+  AWF detects provider/model auth, quota, capacity, usage-limit, timeout, and
+  no-work failures; stores structured reason codes, stderr fingerprints, retry
+  eligibility, retry-after/cooldown, and recommended next action; places
+  retryable no-work failures into delayed retry/backoff instead of terminal
+  generic `agent_failure`; supports per-workspace approved fallback policy at
+  creation time; creates superseding fallback attempts while preserving
+  task/attempt/canonical-attempt lineage, owned paths, validation policy,
+  auto-merge, review grace, PR monitor policy, and prompt/plan artifacts;
+  applies provider/model circuit breakers so one exhausted model does not get
+  repeatedly selected by scheduler or PR monitor recovery; cleans idle no-work
+  containers only after logs/artifacts/salvage metadata are retained; exposes
+  recovery state in API, events, operations, merge queue, metrics, and console;
+  and proves with TDD that transient provider failures recover automatically
+  while deterministic agent failures do not loop forever.
 - [ ] Detect no-output or over-duration stalls in Plan -> Execute -> Compare
   subphases, especially conformance/report generation, and classify them with
   structured reason codes such as `AGENT_STALLED_IN_CONFORMANCE` instead of
@@ -311,6 +345,10 @@ Status values:
 - [ ] Add delayed retry/backoff for no-work provider failures, preserving
   task/attempt lineage and making retry state visible in operations, events,
   API responses, merge queue context, and console surfaces.
+- [ ] Classify pytest failures inside coverage commands separately from true
+  coverage failures when coverage meets the configured threshold, including
+  failing test node IDs, coverage percent/threshold, exit status, and focused
+  retry guidance in API, console, and retry prompts.
 - [ ] Add provider/model circuit breakers that pause new dispatches to a
   failing provider/model after repeated transient capacity failures, with
   configurable cooldown windows and operator-visible reason codes.
