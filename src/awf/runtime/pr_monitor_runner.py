@@ -761,6 +761,7 @@ class PullRequestMonitorRunner:
         """Drive the monitor phase until a terminal ``MonitorAction`` fires."""
 
         monitor_log = await self._open_monitor_log(workspace_id)
+        state: MonitorState | None = None
         try:
             await self._write_monitor_log(
                 monitor_log,
@@ -926,6 +927,8 @@ class PullRequestMonitorRunner:
                     "workspace_id": workspace_id,
                 },
             )
+            if state is not None:
+                await self._persist_state(workspace_id, state)
             return
         except ProviderRecoveryFallbackError:
             await self._write_monitor_log(
@@ -935,6 +938,8 @@ class PullRequestMonitorRunner:
                     "workspace_id": workspace_id,
                 },
             )
+            if state is not None:
+                await self._persist_state(workspace_id, state)
             await self._terminate_failed(
                 workspace_id,
                 message="monitor: provider recovery fallback triggered",
