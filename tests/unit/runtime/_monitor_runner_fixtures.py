@@ -62,9 +62,16 @@ class FakeAdapter(AgentAdapter):
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:  # type: ignore[override]
         return []
 
-    def queue(self, *, stdout: str = "", stderr: str = "", returncode: int = 0) -> None:
+    def queue(
+        self,
+        *,
+        stdout: str = "",
+        stderr: str = "",
+        returncode: int = 0,
+        exc: Exception | None = None,
+    ) -> None:
         self._queued.append(
-            AgentRunResult(returncode=returncode, stdout=stdout, stderr=stderr)
+            exc if exc is not None else AgentRunResult(returncode=returncode, stdout=stdout, stderr=stderr)
         )
 
     async def run(  # type: ignore[override]
@@ -94,6 +101,8 @@ class FakeAdapter(AgentAdapter):
                 "in the test before this dispatch to avoid masking setup bugs"
             )
         r = self._queued.pop(0)
+        if isinstance(r, Exception):
+            raise r
         if r.returncode != 0:
             raise AgentRunError(
                 agent=AgentRuntime.claude_code,

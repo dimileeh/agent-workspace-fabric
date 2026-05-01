@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import pytest_mock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -36,6 +37,7 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.pr_monitor import (
+    AddressComments,
     CheckFailure,
     CheckState,
     CheckTiming,
@@ -52,6 +54,8 @@ from awf.runtime.pr_monitor import (
 )
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
+    ProviderRecoveryFallbackError,
+    ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
     _as_utc,
     _collect_defer_items,
@@ -975,22 +979,15 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
         initial_review_grace_period_seconds=75,
     )
 
-    first = await runner._address_review_comment(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        comment=ReviewComment(comment_id="C_provider", body_excerpt="please fix", author="bot"),
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
-    second = await runner._address_review_comment(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        comment=ReviewComment(comment_id="C_provider", body_excerpt="please fix", author="bot"),
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await runner._address_review_comment(
+            workspace_id=workspace_id,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            comment=ReviewComment(comment_id="C_provider", body_excerpt="please fix", author="bot"),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
 
     source_policy, fallback_id, operations = await _provider_recovery_snapshot(
         factory,
@@ -999,8 +996,6 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
     state = source_policy["provider_recovery_state"]
     retry_operations = [operation for operation in operations if operation.type == "retry"]
 
-    assert first == "agent_failed"
-    assert second == "agent_failed"
     assert len(adapter.calls) == 1
     assert isinstance(state, dict)
     assert state["action"] == "fallback"
@@ -1062,15 +1057,16 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
         worktrees_root=tmp_path / "worktrees",
     )
 
-    await runner._run_ci_fix(
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        failures=(CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),),
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        workspace_id=workspace_id,
-        remote_branch=f"awf/{workspace_id}",
-    )
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await runner._run_ci_fix(
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            failures=(CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),),
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            workspace_id=workspace_id,
+            remote_branch=f"awf/{workspace_id}",
+        )
     suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
 
     source_policy, fallback_id, operations = await _provider_recovery_snapshot(
@@ -1115,15 +1111,16 @@ async def test_sync_base_provider_failure_records_recovery_and_source_cooldown(
         worktrees_root=tmp_path / "worktrees",
     )
 
-    await runner._run_sync_base(
-        workspace_id=workspace_id,
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-    )
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._run_sync_base(
+            workspace_id=workspace_id,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+        )
     suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
 
     source_policy, fallback_id, operations = await _provider_recovery_snapshot(
@@ -1859,3 +1856,117 @@ async def test_monitor_operation_payload_redacts_secret_like_values(
     assert "token=" not in persisted
     assert "password=" not in persisted
     assert "[redacted]" in persisted
+
+@pytest.mark.unit
+async def test_review_comment_provider_failure_records_retry_and_ignores_comment(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        max_same_provider_retries=1,
+    )
+
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.create_provider_recovery_attempt_row",
+        return_value=None,
+    )
+
+    adapter = FakeAdapter()
+    adapter.queue(
+        returncode=1,
+        stderr="Gemini RESOURCE_EXHAUSTED: provider is temporarily overloaded",
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    c = ReviewComment(
+        comment_id="C_provider",
+        body_excerpt="please fix",
+        author="bot",
+    )
+    status = _status(reviews=(c,))
+    state = MonitorState(started_at=0.0)
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._execute(
+            action=AddressComments(threads=(), review_comments=(c,)),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=status,
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    assert "C_provider" not in state.threads_addressed_ids
+
+@pytest.mark.unit
+async def test_review_comment_deterministic_failure_is_marked_addressed(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    adapter = FakeAdapter()
+    adapter.queue(
+        returncode=1,
+        stderr="Syntax error: invalid character",
+    )
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0, stdout=pr_payload())
+    cmd.queue_result(returncode=0)
+
+    sleep_fn = RecordedSleep()
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=adapter,
+        sleep_fn=sleep_fn,
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    c = ReviewComment(
+        comment_id="C_deterministic",
+        body_excerpt="please fix syntax",
+        author="bot",
+    )
+    status = _status(reviews=(c,))
+    state = MonitorState(started_at=0.0)
+
+    terminal = await runner._execute(
+        action=AddressComments(threads=(), review_comments=(c,)),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        status=status,
+        state=state,
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    assert terminal is False
+    assert "C_deterministic" in state.threads_addressed_ids
+    assert state.threads_addressed_ids["C_deterministic"] == "agent_failed"
+
