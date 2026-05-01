@@ -11,8 +11,8 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 import awf.service.gc as gc
-from awf.db.enums import WorkspaceStatus
-from awf.db.models import Workspace
+from awf.db.enums import FailureReason, WorkspaceStatus
+from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
     SecretLeaseIssue,
     SecretLeaseRepository,
@@ -1848,3 +1848,147 @@ def test_classify_workspace_failed_has_work_but_expired_no_default_policy():
         res = _classify_workspace_for_gc(ws, work_dir=Path("/tmp"), now=datetime.now(UTC), cutoff_at=datetime.now(UTC) - timedelta(hours=24), default_policy=False, cleanup_enabled=True)
         assert isinstance(res, WorkspaceGCPreserved)
 
+@pytest.mark.unit
+async def test_no_work_superseded_workspace_is_gc_candidate_without_recovery_metadata(
+    engine: AsyncEngine,
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.status = "superseded"
+        workspace.compose_project_name = "awf_superseded_meta_test"
+        workspace.updated_at = now - timedelta(hours=200)
+        await session.commit()
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="stopped",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="running",
+                        command="sleep infinity",
+                    )
+                ],
+            )
+        ),
+    )
+
+    result = await run_workspace_filesystem_gc(
+        session_factory,
+        work_dir=work_dir,
+        workspace_id=workspace_id,
+        execute=True,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert result.status == "succeeded"
+    assert result.plan.candidates[0].workspace_id == workspace_id
+    assert result.plan.candidates[0].reason_code == FAILED_WORKSPACE_NO_WORK
+
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        assert workspace.status == "superseded"
+
+
+@pytest.mark.unit
+async def test_no_work_superseded_gc_candidate_includes_recovery_metadata_reference(
+    session_factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    work_dir = tmp_path / "service"
+    now = datetime(2026, 4, 26, 12, tzinfo=UTC)
+    workspace_id = await _workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now - timedelta(hours=200),
+    )
+
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        workspace.status = "superseded"
+        workspace.compose_project_name = "awf_superseded_recovery_meta"
+        workspace.updated_at = now - timedelta(hours=200)
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "RESOURCE_EXHAUSTED RetryableQuotaError"
+        workspace.failure_details = {
+            "provider": "google",
+            "model": "gemini-2.5-pro",
+            "retryable": True,
+            "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        }
+        await session.commit()
+
+        from awf.common.ids import new_event_id
+
+        session.add(
+            WorkspaceEvent(
+                id=new_event_id(),
+                workspace_id=workspace_id,
+                event_type="workspace.provider_recovery_requested",
+                reason_code="PROVIDER_FAILURE_DETECTED",
+                old_state=workspace.status,
+                new_state=workspace.status,
+                payload={"reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED"},
+            )
+        )
+        await session.commit()
+
+    monkeypatch.setattr(
+        gc,
+        "_RUNTIME_INSPECTOR",
+        _StaticRuntimeInspector(
+            RuntimeSnapshot(
+                stack_state="stopped",
+                services=[
+                    RuntimeService(
+                        name="agent",
+                        container_id="agent",
+                        image="awf-agent",
+                        state="running",
+                        command="sleep infinity",
+                    )
+                ],
+            )
+        ),
+    )
+
+    plan = await plan_terminal_workspace_gc(
+        session_factory,
+        work_dir=work_dir,
+        min_age_hours=24,
+        now=now,
+    )
+
+    assert len(plan.candidates) == 1
+    candidate = plan.candidates[0]
+    assert candidate.workspace_id == workspace_id
+    assert candidate.reason_code == FAILED_WORKSPACE_NO_WORK
+
+    async with session_factory() as session:
+        workspace = await session.get(Workspace, workspace_id)
+        assert workspace is not None
+        assert workspace.failure_reason is not None
+
+        events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
+        assert any(e.event_type == "workspace.provider_recovery_requested" for e in events)
