@@ -13,6 +13,7 @@ class RuntimeService:
     container_id: str | None
     image: str | None
     state: str
+    command: str | None = None
     status: str | None = None
     health: str | None = None
     ports: list[str] = field(default_factory=list)
@@ -68,6 +69,7 @@ class RuntimeInspector:
                     container_id=container_id,
                     image=row.get("Image"),
                     state=_state_from(row, state_data),
+                    command=_command_from(row, inspect_data),
                     status=row.get("Status"),
                     health=health,
                     ports=_ports_from(row),
@@ -136,6 +138,38 @@ def _service_name(row: dict[str, object], inspect_data: dict[str, object]) -> st
             return service
     names = row.get("Names")
     return str(names or row.get("ID") or "unknown")
+
+
+def _command_from(
+    row: dict[str, object],
+    inspect_data: dict[str, object],
+) -> str | None:
+    command = _text_or_none(row.get("Command"))
+    if command is not None:
+        return command
+    config = inspect_data.get("Config")
+    if isinstance(config, dict):
+        config_cmd = config.get("Cmd")
+        if isinstance(config_cmd, list):
+            parts: list[str] = []
+            for value in config_cmd:
+                part = _text_or_none(value)
+                if part is not None:
+                    parts.append(part)
+            if parts:
+                return " ".join(parts)
+        else:
+            command = _text_or_none(config_cmd)
+        if command is not None:
+            return command
+    return None
+
+
+def _text_or_none(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    return value if value else None
 
 
 def _state_from(row: dict[str, object], state_data: object) -> str:

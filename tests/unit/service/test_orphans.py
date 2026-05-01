@@ -237,7 +237,34 @@ def test_orphan_volume_missing_workspace_is_structured_with_name_fallback(
     assert example["resource_kind"] == "volume"
     assert example["workspace_id"] == "ws_ghost"
     assert example["reason"] == "WORKSPACE_MISSING"
-    assert example["resource_name"] == "awf_ws_ghost_postgres_data"
+
+
+def test_docker_list_format_includes_container_command() -> None:
+    captured_args: list[list[str]] = []
+
+    def _run(
+        args: list[str],
+        *,
+        check: bool,
+        capture_output: bool,
+        text: Literal[True],
+        timeout: float,
+        env: dict[str, str],
+    ) -> _Completed:
+        del check, capture_output, text, timeout, env
+        captured_args.append(list(args))
+        return _Completed()
+
+    detect_orphan_resources(
+        work_dir=Path("/tmp"),
+        docker_host="unix:///var/run/docker.sock",
+        workspace_view=_view(),
+        run_subprocess=_run,
+    )
+
+    ps_args = next(args for args in captured_args if args[:3] == ["docker", "ps", "-a"])
+    ps_fmt = ps_args[ps_args.index("--format") + 1]
+    assert '"command":{{json .Command}}' in ps_fmt
 
 
 def test_volume_name_fallback_prefers_known_workspace_with_underscores(

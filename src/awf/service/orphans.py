@@ -377,6 +377,7 @@ def _docker_list_commands() -> tuple[tuple[str, list[str]], ...]:
                 (
                     '{"id":{{json .ID}},"name":{{json .Names}},'
                     '"state":{{json .State}},"status":{{json .Status}},'
+                    '"command":{{json .Command}},'
                     '"project":{{json (.Label "com.docker.compose.project")}},'
                     '"service":{{json (.Label "com.docker.compose.service")}}}'
                 ),
@@ -534,7 +535,15 @@ def _resource_from_docker_row(
         return None
 
     detail: dict[str, str] = {}
-    for key in ("service", "state", "status", "driver", "scope", "mountpoint"):
+    for key in (
+        "service",
+        "state",
+        "status",
+        "command",
+        "driver",
+        "scope",
+        "mountpoint",
+    ):
         value = _row_text(row, key, key.title())
         if value:
             detail[key] = value
