@@ -700,7 +700,11 @@ class PullRequestMonitorRunner:
         self,
         workspace_id: str,
         exc: AgentRunError,
+        *,
+        state: MonitorState | None = None,
     ) -> None:
+        if state is not None:
+            await self._persist_state(workspace_id, state)
         action = await self._record_provider_agent_run_error(workspace_id, exc)
         if action == "fallback":
             raise ProviderRecoveryFallbackError() from exc
@@ -2722,6 +2726,7 @@ class PullRequestMonitorRunner:
                     thread=t,
                     compose_project=compose_project,
                     compose_file=compose_file,
+                    state=state,
                 )
                 state.mark_addressed(t.thread_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
@@ -2735,6 +2740,7 @@ class PullRequestMonitorRunner:
                     comment=c,
                     compose_project=compose_project,
                     compose_file=compose_file,
+                    state=state,
                 )
                 state.mark_addressed(c.comment_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
@@ -2929,6 +2935,7 @@ class PullRequestMonitorRunner:
         thread: ReviewThread,
         compose_project: str,
         compose_file: Path,
+        state: MonitorState | None = None,
     ) -> Verdict:
         prompt = address_thread_prompt(pr_number=pr_number, repo_slug=repo.slug(), thread=thread)
         return await self._invoke_cli_for_verdict(
@@ -2937,6 +2944,7 @@ class PullRequestMonitorRunner:
             commit_message=f"fix: address PR review thread {thread.thread_id}",
             compose_project=compose_project,
             compose_file=compose_file,
+            state=state,
         )
 
     async def _address_review_comment(
@@ -2948,6 +2956,7 @@ class PullRequestMonitorRunner:
         comment: ReviewComment,
         compose_project: str,
         compose_file: Path,
+        state: MonitorState | None = None,
     ) -> Verdict:
         prompt = address_review_comment_prompt(
             pr_number=pr_number, repo_slug=repo.slug(), comment=comment
@@ -2958,6 +2967,7 @@ class PullRequestMonitorRunner:
             commit_message=f"fix: address PR review comment {comment.comment_id}",
             compose_project=compose_project,
             compose_file=compose_file,
+            state=state,
         )
 
     async def _invoke_cli_for_verdict(
@@ -2968,6 +2978,7 @@ class PullRequestMonitorRunner:
         commit_message: str,
         compose_project: str,
         compose_file: Path,
+        state: MonitorState | None = None,
     ) -> Verdict:
         result_stdout = ""
         cli_failed = False
@@ -2994,7 +3005,7 @@ class PullRequestMonitorRunner:
         )
 
         if agent_run_err is not None:
-            await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err, state=state)
             _log.warning(
                 "monitor.cli_nonzero_exit",
                 returncode=agent_run_err.result.returncode,
