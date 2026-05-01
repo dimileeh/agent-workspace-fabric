@@ -397,9 +397,10 @@ class TestUnexpectedErrorDuringAgentRun:
         produces no commits, the details and reason_code should be forwarded to the
         Workspace row's failure_details and events rather than being lost.
 
-        TODO: Once fallback dispatch logic is implemented, this test should be
-        updated or replaced by a test that verifies the fallback provider is invoked
-        rather than the workspace failing immediately."""
+        This also proves that the executor correctly surfaces provider recovery
+        metadata (provider, model, retryable, recommended_action) through the
+        failure path so that create_provider_recovery_attempt_row() can consume it
+        later at the service layer."""
         ws_id = await _seed_ready(factory, agent="gemini")
 
         from awf.adapters import base as adapter_base

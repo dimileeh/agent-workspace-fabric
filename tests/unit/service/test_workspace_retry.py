@@ -699,3 +699,95 @@ async def test_retry_persists_task_kind_without_post_insert_update() -> None:
         if statement.startswith("update workspaces") and "task_kind" in statement
     ]
     assert task_kind_updates == []
+
+
+@pytest.mark.unit
+async def test_conformance_retry_loop_terminates_after_exhausted_retries(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request())
+    await _mark_conformance_failed(factory, first.id)
+
+    retry1 = await service.retry_workspace(first.id)
+    retried1_id = retry1.new_workspace_id
+    await _mark_conformance_failed(factory, retried1_id)
+
+    retry2 = await service.retry_workspace(retried1_id)
+    retried2_id = retry2.new_workspace_id
+    await _mark_conformance_failed(factory, retried2_id)
+
+    retry3 = await service.retry_workspace(retried2_id)
+    retried3_id = retry3.new_workspace_id
+    await _mark_conformance_failed(factory, retried3_id)
+
+    async with factory() as session:
+        # After 4 failed conformance attempts, max retries should be exhausted
+        repo = WorkspaceRepository(session)
+        ws3 = await repo.get(retried3_id)
+        assert ws3 is not None
+        assert ws3.status == WorkspaceStatus.failed.value
+
+        attempts = list(
+            (
+                await session.execute(
+                    select(TaskAttempt).order_by(TaskAttempt.attempt_number.asc())
+                )
+            ).scalars()
+        )
+        workspace_ids = [a.workspace_id for a in attempts]
+        assert len(workspace_ids) >= 4
+
+        operations_for_last = list(
+            (
+                await session.execute(
+                    select(Operation).where(Operation.workspace_id == retried3_id)
+                )
+            ).scalars()
+        )
+        assert len(operations_for_last) >= 1
+        payload = operations_for_last[0].payload or {}
+        assert payload.get("source_workspace_id") == retried2_id
+
+
+@pytest.mark.unit
+async def test_conformance_retry_payload_includes_retry_attempt_number_and_gaps(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request())
+    await _mark_conformance_failed(factory, first.id)
+
+    retry = await service.retry_workspace(first.id)
+
+    async with factory() as session:
+        operations = list(
+            (
+                await session.execute(
+                    select(Operation).where(
+                        Operation.workspace_id == retry.new_workspace_id
+                    )
+                )
+            ).scalars()
+        )
+        events = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == first.id,
+                        WorkspaceEvent.event_type == "workspace.retry_requested",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert len(operations) >= 1
+    result = operations[0].result or {}
+    assert result.get("attempt_number") == 2
+    assert result.get("source_reason_code") == PLAN_CONFORMANCE_UNSATISFIED
+
+    assert len(events) >= 1
+    event_payload = events[0].payload
+    assert isinstance(event_payload, dict)
+    assert event_payload.get("attempt_number") == 2
+    assert event_payload.get("reason_code") == PLAN_CONFORMANCE_UNSATISFIED
