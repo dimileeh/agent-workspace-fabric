@@ -1707,6 +1707,50 @@ class TestCoverageEnforcement:
         ]
 
     @pytest.mark.unit
+    async def test_non_pytest_coverage_command_error_stays_coverage_command_failed(
+        self, runner: tuple[FakeCommandRunner, ValidationRunner]
+    ) -> None:
+        fake, val = runner
+        fake.queue_result(
+            returncode=1,
+            stdout=(
+                "ERROR unable to write coverage XML report\n"
+                "Total coverage: 95%\n"
+            ),
+        )
+        profile = WorkspaceProfile.model_validate(
+            {
+                "name": "coverage-report-command-error",
+                "validation": {
+                    "coverage": {
+                        "minimum_percent": 90,
+                        "enforce": True,
+                        "command": "coverage report --fail-under=90",
+                    }
+                },
+            }
+        )
+
+        result = await val.run_profile_phases(
+            workspace_id="ws_coverage_report_command_error",
+            compose_project=_COMPOSE_PROJECT,
+            compose_file=_COMPOSE_FILE,
+            profile=profile,
+            phase_names=("validate",),
+        )
+
+        assert not result.all_passed
+        assert result.coverage is not None
+        assert result.coverage.percent == 95
+        assert result.coverage.status == "failed"
+        assert result.coverage.reason_code == "COVERAGE_COMMAND_FAILED"
+        assert result.coverage.failing_test_node_ids == []
+        assert result.coverage.failing_test_evidence == []
+        assert result.first_failure is not None
+        assert result.first_failure.phase == "coverage"
+        assert result.first_failure.reason_code == "COVERAGE_COMMAND_FAILED"
+
+    @pytest.mark.unit
     async def test_coverage_wrapped_pytest_failure_preserves_term_missing_gaps(
         self, runner: tuple[FakeCommandRunner, ValidationRunner]
     ) -> None:
@@ -1925,6 +1969,24 @@ class TestCoverageEnforcement:
         assert _parse_python_coverage_percent_from_files([coverage_output]) == 98
         assert _parse_python_coverage_percent_from_files([summary_only]) == 87.5
         assert _parse_python_coverage_percent_from_files([no_coverage]) is None
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("command", "expected"),
+        [
+            ("pytest --cov=awf --cov-report=term", True),
+            ("uv run --python 3.12 --extra dev pytest --cov=awf", True),
+            ("python -m pytest --cov awf", True),
+            ("coverage run -m pytest tests && coverage report", True),
+            ("coverage report --fail-under=90", False),
+            ("pytest -q", False),
+            ("pytest --cov='unterminated", False),
+        ],
+    )
+    def test_pytest_coverage_command_detection(
+        self, command: str, expected: bool
+    ) -> None:
+        assert validation_module._is_pytest_coverage_command(command) is expected
 
     @pytest.mark.unit
     def test_pytest_failure_parser_falls_back_to_best_evidence_without_node_ids(

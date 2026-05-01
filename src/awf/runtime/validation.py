@@ -842,7 +842,7 @@ class ValidationRunner:
         gaps = _parse_term_missing_gaps(output_paths)
         pytest_evidence = (
             _parse_pytest_failure_evidence_from_files(output_paths)
-            if command_result is not None and command_result.returncode != 0
+            if _should_parse_pytest_failure_evidence(command_result)
             else PytestFailureEvidence()
         )
         reason_code = _coverage_reason_code(
@@ -1215,6 +1215,51 @@ def _coverage_output_paths(results: list[ValidationCommandResult]) -> list[Path]
     for result in results:
         paths.extend((result.stdout_path, result.stderr_path))
     return paths
+
+
+def _should_parse_pytest_failure_evidence(
+    command_result: ValidationCommandResult | None,
+) -> bool:
+    return (
+        command_result is not None
+        and command_result.returncode != 0
+        and _is_pytest_coverage_command(command_result.command)
+    )
+
+
+def _is_pytest_coverage_command(command: str) -> bool:
+    try:
+        tokens = shlex.split(command)
+    except ValueError:
+        return False
+
+    token_names = [_command_token_name(token) for token in tokens]
+    invokes_pytest = any(token in {"pytest", "py.test"} for token in token_names)
+    if not invokes_pytest:
+        return False
+
+    if any(_is_pytest_cov_option(token) for token in tokens):
+        return True
+
+    return _runs_pytest_under_coverage(token_names)
+
+
+def _command_token_name(token: str) -> str:
+    return token.replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def _is_pytest_cov_option(token: str) -> bool:
+    return token == "--cov" or token.startswith(("--cov=", "--cov-"))
+
+
+def _runs_pytest_under_coverage(token_names: list[str]) -> bool:
+    for index, token in enumerate(token_names):
+        if token != "coverage":
+            continue
+        remaining = token_names[index + 1 :]
+        if "run" in remaining and any(item in {"pytest", "py.test"} for item in remaining):
+            return True
+    return False
 
 
 def _parse_python_coverage_percent_from_files(paths: list[Path]) -> float | None:
