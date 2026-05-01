@@ -1090,7 +1090,7 @@ async def _provider_recovery_state_summary(
                     (
                         and_(
                             action == "terminal",
-                            decision_reason != PROVIDER_RECOVERY_NO_LOOP_REASON,
+                            decision_reason.is_(None) | (decision_reason != PROVIDER_RECOVERY_NO_LOOP_REASON),
                         ),
                         1,
                     ),

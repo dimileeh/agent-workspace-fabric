@@ -855,6 +855,40 @@ async def test_resource_saturation_terminal_uses_decision_reason_code_over_sourc
 
 
 @pytest.mark.unit
+async def test_resource_saturation_terminal_null_source_reason_code_counted_as_exhausted(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import (
+        PROVIDER_RECOVERY_STATE_KEY,
+    )
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+    prs = summary.provider_recovery_state_summary
+    assert prs.terminal_no_loop == 0
+    assert prs.terminal_exhausted == 1
+
+
+@pytest.mark.unit
 async def test_resource_saturation_includes_orphan_resource_summary(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path,
