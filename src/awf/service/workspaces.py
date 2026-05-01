@@ -1183,6 +1183,10 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
             if field in provider_recovery:
                 result[field] = provider_recovery[field]
 
+    recovery_state_resp = _provider_recovery_state_response(workspace)
+    if recovery_state_resp is not None:
+        result["provider_recovery_state"] = recovery_state_resp
+
     conformance_payload = _compact_conformance_payload(conformance)
     if conformance_payload is not None:
         result["conformance"] = conformance_payload
