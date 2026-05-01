@@ -1262,7 +1262,7 @@ class PullRequestMonitorRunner:
             return False
 
         if isinstance(action, Merge):
-            merge_gate = await self._merge_gate_for_workspace(
+            merge_gate = await self._merge_gate_with_legacy_head_support(
                 workspace_id,
                 current_head_sha=status.head_sha,
             )
@@ -1308,7 +1308,7 @@ class PullRequestMonitorRunner:
                     monitor_log=monitor_log,
                 )
 
-            merge_gate = await self._merge_gate_for_workspace(
+            merge_gate = await self._merge_gate_with_legacy_head_support(
                 workspace_id,
                 check_policy=True,
                 current_head_sha=status.head_sha,
@@ -1471,7 +1471,7 @@ class PullRequestMonitorRunner:
                         workspace_id
                     )
                     if not queue_blockers_after_lock:
-                        merge_gate_after_lock = await self._merge_gate_for_workspace(
+                        merge_gate_after_lock = await self._merge_gate_with_legacy_head_support(
                             workspace_id,
                             check_policy=True,
                             current_head_sha=merge_status.head_sha,
@@ -1950,6 +1950,32 @@ class PullRequestMonitorRunner:
                 stale_reason=stale_reason,
                 req_action=req_action,
                 notify_message=notify_message,
+            )
+
+    async def _merge_gate_with_legacy_head_support(
+        self,
+        workspace_id: str,
+        *,
+        check_policy: bool = False,
+        current_head_sha: str | None = None,
+    ) -> _MergeGateResult:
+        if current_head_sha is None:
+            return await self._merge_gate_for_workspace(
+                workspace_id,
+                check_policy=check_policy,
+            )
+        try:
+            return await self._merge_gate_for_workspace(
+                workspace_id,
+                check_policy=check_policy,
+                current_head_sha=current_head_sha,
+            )
+        except TypeError as exc:
+            if "current_head_sha" not in str(exc):
+                raise
+            return await self._merge_gate_for_workspace(
+                workspace_id,
+                check_policy=check_policy,
             )
 
     async def _handle_merge_gate_blocker(

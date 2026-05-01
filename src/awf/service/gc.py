@@ -971,7 +971,7 @@ def _classify_workspace_for_gc(
         )
 
     if default_policy:
-        if workspace.status in _FAILED_NO_WORK_TERMINAL_STATUSES:
+        if workspace.status == WorkspaceStatus.failed.value:
             if _failed_terminal_workspace_has_no_work(workspace):
                 if updated_at <= cutoff_at:
                     return _candidate_for_workspace(
@@ -986,6 +986,21 @@ def _classify_workspace_for_gc(
                     updated_at=updated_at,
                     age_hours=age_hours,
                     reason_code=WORKSPACE_WITHIN_RETENTION,
+                )
+            return WorkspaceGCPreserved(
+                workspace_id=workspace.id,
+                status=workspace.status,
+                updated_at=updated_at,
+                age_hours=age_hours,
+                reason_code=FAILED_WORKSPACE_TRIAGE_PRESERVED,
+            )
+        if workspace.status == "superseded":
+            if _failed_terminal_workspace_has_no_work(workspace):
+                return _candidate_for_workspace(
+                    workspace,
+                    work_dir=work_dir,
+                    now=now,
+                    reason_code=FAILED_WORKSPACE_NO_WORK,
                 )
             return WorkspaceGCPreserved(
                 workspace_id=workspace.id,
