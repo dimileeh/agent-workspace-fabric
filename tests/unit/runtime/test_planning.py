@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     MAX_CONFORMANCE_TEXT_CHARS,
     PLAN_CONFORMANCE_REPORTED,
     PLAN_CONFORMANCE_UNSATISFIED,
@@ -18,6 +19,7 @@ from awf.runtime.planning import (
     build_conformance_retry_prompt,
     build_execution_prompt,
     build_planning_prompt,
+    build_planning_scope_retry_prompt,
     changed_paths_from_porcelain,
     parse_conformance_report,
     render_coordination_warning_section,
@@ -165,6 +167,56 @@ def test_prompts_reference_plan_and_report_paths() -> None:
     assert str(plan) in execution_prompt
     assert str(report) in conformance_prompt
     assert '"status"' in conformance_prompt
+
+
+@pytest.mark.unit
+def test_planning_prompt_is_plan_artifact_only_and_stops_before_implementation() -> None:
+    plan = Path("docs/awf-plans/ws_scope_prompt.md")
+
+    planning_prompt = build_planning_prompt(
+        task_prompt="Implement planning scope controls.",
+        plan_path=plan,
+    )
+
+    assert AGENT_PLAN_PHASE_SCOPE_VIOLATION == "AGENT_PLAN_PHASE_SCOPE_VIOLATION"
+    assert (
+        "Create or update only the configured plan artifact "
+        "`docs/awf-plans/ws_scope_prompt.md`" in planning_prompt
+    )
+    assert "Do not create, edit, delete, stage, or commit any other files" in planning_prompt
+    for term in ("source", "tests", "docs", "config", "migrations", "lockfiles"):
+        assert term in planning_prompt
+    assert "Do not run implementation commands" in planning_prompt
+    for command in (
+        "apply_patch",
+        "pytest",
+        "ruff",
+        "mypy",
+        "npm",
+        "build",
+        "git add",
+        "git commit",
+    ):
+        assert command in planning_prompt
+    assert "After writing the plan, stop" in planning_prompt
+
+
+@pytest.mark.unit
+def test_planning_scope_retry_prompt_discards_premature_implementation() -> None:
+    prompt = build_planning_scope_retry_prompt(
+        task_prompt="Add the feature after planning.",
+        evidence={
+            "required_paths": ["docs/awf-plans/ws_retry.md"],
+            "offending_paths": ["src/awf/runtime/planning.py", "tests/unit/test_planning.py"],
+        },
+    )
+
+    assert "Discard the premature implementation from the failed planning attempt" in prompt
+    assert "Create or update only `docs/awf-plans/ws_retry.md`" in prompt
+    assert "src/awf/runtime/planning.py" in prompt
+    assert "tests/unit/test_planning.py" in prompt
+    assert "After writing the plan, stop" in prompt
+    assert "Add the feature after planning." in prompt
 
 
 @pytest.mark.unit

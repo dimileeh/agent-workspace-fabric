@@ -15,7 +15,10 @@ from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent
 from awf.db.repositories import ResourceReservationRepository
-from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    PLAN_CONFORMANCE_UNSATISFIED,
+)
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
 from awf.service.resource_capacity import (
@@ -476,6 +479,12 @@ async def _cluster_root_causes(
         if specific_reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED":
             likely_cause = "Provider Capacity Exhausted"
             action = "Retry the workspace later or fallback to a different provider."
+        elif specific_reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION:
+            likely_cause = "Planning Scope Violation"
+            action = (
+                "Retry planning from a clean workspace; salvage the preserved branch only "
+                "after explicit operator approval."
+            )
         elif specific_reason_code == PLAN_CONFORMANCE_UNSATISFIED:
             likely_cause = "Plan Conformance Unsatisfied"
             action = (

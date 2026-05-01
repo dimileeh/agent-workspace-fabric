@@ -14,7 +14,10 @@ from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, WorkspaceEvent
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
-from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    PLAN_CONFORMANCE_UNSATISFIED,
+)
 from awf.service.workspaces import WorkspaceRetryNotFoundError, WorkspaceService
 
 
@@ -146,6 +149,73 @@ async def _mark_conformance_failed_without_evidence(
             payload={
                 "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
                 "details": {"conformance": "legacy-invalid"},
+            },
+        )
+        await session.commit()
+
+
+async def _mark_planning_scope_failed(
+    factory: async_sessionmaker[AsyncSession],
+    workspace_id: str,
+    *,
+    approved_fallback_model: str | None = None,
+) -> None:
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = (
+            "planning phase changed files outside `docs/awf-plans/ws_scope_old.md`"
+        )
+        workspace.branch_name = "awf/ws_scope_old"
+        workspace.remote_push_branch = "awf/ws_scope_old"
+        workspace.task_policy = {
+            **workspace.task_policy,
+            **(
+                {
+                    "planning_scope_recovery": {
+                        "approved_fallback_model": approved_fallback_model,
+                    }
+                }
+                if approved_fallback_model is not None
+                else {}
+            ),
+        }
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+            payload={
+                "reason_code": AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                "message": workspace.failure_message,
+                "details": {
+                    "planning_scope": {
+                        "scope_phase": "planning",
+                        "required_paths": ["docs/awf-plans/ws_scope_old.md"],
+                        "offending_paths": ["src/awf/runtime/planning.py"],
+                        "offending_commands": [],
+                        "recommended_action": (
+                            "Retry planning from a clean workspace and salvage the "
+                            "preserved branch only after explicit operator approval."
+                        ),
+                        "recovery_strategy": "discard_and_replan",
+                        "salvage_policy": "explicit_salvage_required",
+                    },
+                    "recommended_action": (
+                        "Retry planning from a clean workspace and salvage the preserved "
+                        "branch only after explicit operator approval."
+                    ),
+                    "recovery_strategy": "discard_and_replan",
+                    "salvage_policy": "explicit_salvage_required",
+                },
+                "salvage": {
+                    "hint": "Workspace worktree and branch were preserved for salvage.",
+                    "worktree_path": "/worktrees/ws_scope_old",
+                    "branch_name": "awf/ws_scope_old",
+                    "remote_push_branch": "awf/ws_scope_old",
+                },
             },
         )
         await session.commit()
@@ -329,6 +399,113 @@ async def test_retry_conformance_unsatisfied_without_evidence_uses_original_prom
     assert "source_reason_code" not in operations[0].result
     assert "source_reason_code" not in retry_created[0].payload
     assert "conformance_evidence_ref" not in retry_created[0].payload
+
+
+@pytest.mark.unit
+async def test_retry_planning_scope_violation_discards_premature_work_and_replans(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request())
+    await _mark_planning_scope_failed(factory, first.id)
+
+    retry = await service.retry_workspace(first.id)
+
+    async with factory() as session:
+        original = await WorkspaceRepository(session).get(first.id)
+        retried = await WorkspaceRepository(session).get(retry.new_workspace_id)
+        operations = list(
+            (
+                await session.execute(
+                    select(Operation).where(Operation.workspace_id == retry.new_workspace_id)
+                )
+            ).scalars()
+        )
+        retry_created = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == retry.new_workspace_id,
+                        WorkspaceEvent.event_type == "workspace.retry_created",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert original is not None
+    assert retried is not None
+    assert original.branch_name == "awf/ws_scope_old"
+    assert retried.branch_name is None
+    assert retried.pr_url is None
+    assert "Fix the intermittent validation failure." in retried.task_prompt
+    assert "Discard the premature implementation from the failed planning attempt" in (
+        retried.task_prompt
+    )
+    assert "Create or update only `docs/awf-plans/ws_scope_old.md`" in retried.task_prompt
+    assert "src/awf/runtime/planning.py" in retried.task_prompt
+    assert retried.task_policy.get("agent_model") is None
+
+    assert len(operations) == 1
+    operation_payload = operations[0].payload
+    assert operation_payload is not None
+    assert operation_payload["source_reason_code"] == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert operation_payload["planning_scope_evidence_ref"] == {
+        "source_workspace_id": first.id,
+        "event_type": "workspace.state_changed",
+        "reason_code": AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    }
+    assert operation_payload["recovery_strategy"] == "discard_and_replan"
+    assert operation_payload["salvage_policy"] == "explicit_salvage_required"
+    assert operation_payload["salvage"]["branch_name"] == "awf/ws_scope_old"
+    assert "fallback_model" not in operation_payload
+    assert operations[0].result["source_reason_code"] == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert operations[0].result["recovery_strategy"] == "discard_and_replan"
+    assert retry_created[0].payload["source_reason_code"] == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert retry_created[0].payload["salvage_policy"] == "explicit_salvage_required"
+
+
+@pytest.mark.unit
+async def test_retry_planning_scope_violation_applies_only_approved_fallback_model(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request())
+    await _mark_planning_scope_failed(
+        factory,
+        first.id,
+        approved_fallback_model="gpt-5.5",
+    )
+
+    retry = await service.retry_workspace(first.id)
+
+    async with factory() as session:
+        retried = await WorkspaceRepository(session).get(retry.new_workspace_id)
+        operations = list(
+            (
+                await session.execute(
+                    select(Operation).where(Operation.workspace_id == retry.new_workspace_id)
+                )
+            ).scalars()
+        )
+        retry_created = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == retry.new_workspace_id,
+                        WorkspaceEvent.event_type == "workspace.retry_created",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert retried is not None
+    assert retried.task_policy["agent_model"] == "gpt-5.5"
+    assert operations[0].payload["fallback_model"] == {
+        "model": "gpt-5.5",
+        "source": "task_policy.planning_scope_recovery.approved_fallback_model",
+    }
+    assert operations[0].result["fallback_model"]["model"] == "gpt-5.5"
+    assert retry_created[0].payload["fallback_model"]["model"] == "gpt-5.5"
 
 
 @pytest.mark.unit

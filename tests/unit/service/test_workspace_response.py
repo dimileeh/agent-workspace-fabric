@@ -11,7 +11,10 @@ import pytest
 from awf.api.schemas import WorkspaceResponse
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.profiles.models import WorkspaceProfile
-from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    PLAN_CONFORMANCE_UNSATISFIED,
+)
 from awf.service import workspaces as workspaces_service
 from awf.service.validation_observability import (
     _loaded_collection,
@@ -712,6 +715,126 @@ def test_workspace_response_includes_conformance_failure_details_and_salvage() -
     assert response.failure_details.conformance.gaps == ["Add tests"]
     assert response.failure_details.salvage is not None
     assert response.failure_details.salvage.worktree_path == "/worktrees/ws_conformance_failed"
+
+
+@pytest.mark.unit
+def test_workspace_response_includes_planning_scope_failure_recovery_details() -> None:
+    now = datetime(2026, 4, 29, 13, 15, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_scope_failed",
+        status=WorkspaceStatus.failed.value,
+        version=4,
+        repo_url="git@github.com:example/project.git",
+        branch_base="main",
+        branch_name="awf/ws_scope_failed",
+        base_commit="abc123",
+        task_title="Expose planning scope failure",
+        task_prompt="Exercise workspace_response planning scope failure details.",
+        task_external_id=None,
+        task_class=None,
+        owned_paths=[],
+        task_policy={},
+        auto_merge=True,
+        initial_review_grace_period_seconds=None,
+        agent="codex",
+        env_profile=None,
+        profile_ref=None,
+        requested_profile=None,
+        resolved_profile=None,
+        test_commands=[],
+        requires_database=False,
+        node_id="local",
+        compose_project_name="awf_ws_scope_failed",
+        compose_file_path="/tmp/compose.yml",
+        pr_url=None,
+        failure_reason="agent_failure",
+        failure_message="planning phase changed files outside plan artifact",
+        active_policy_findings=[],
+        operations=[],
+        events=[
+            SimpleNamespace(
+                id="evt_failed_scope",
+                workspace_id="ws_scope_failed",
+                event_type="workspace.state_changed",
+                old_state=WorkspaceStatus.running.value,
+                new_state=WorkspaceStatus.failed.value,
+                reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                payload={
+                    "reason_code": AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                    "message": "planning phase changed files outside plan artifact",
+                    "details": {
+                        "planning_scope": {
+                            "scope_phase": "planning",
+                            "required_paths": ["docs/awf-plans/ws_scope_failed.md"],
+                            "offending_paths": ["src/awf/runtime/planning.py"],
+                            "offending_commands": [],
+                            "recommended_action": (
+                                "Retry planning from a clean workspace and salvage the "
+                                "preserved branch only after explicit operator approval."
+                            ),
+                            "recovery_strategy": "discard_and_replan",
+                            "salvage_policy": "explicit_salvage_required",
+                            "fallback_model": {
+                                "model": "gpt-5.5",
+                                "source": (
+                                    "task_policy.planning_scope_recovery."
+                                    "approved_fallback_model"
+                                ),
+                            },
+                        },
+                        "recommended_action": (
+                            "Retry planning from a clean workspace and salvage the "
+                            "preserved branch only after explicit operator approval."
+                        ),
+                        "recovery_strategy": "discard_and_replan",
+                        "salvage_policy": "explicit_salvage_required",
+                        "fallback_model": {
+                            "model": "gpt-5.5",
+                            "source": (
+                                "task_policy.planning_scope_recovery.approved_fallback_model"
+                            ),
+                        },
+                    },
+                    "salvage": {
+                        "hint": "Workspace worktree and branch were preserved for salvage.",
+                        "worktree_path": "/worktrees/ws_scope_failed",
+                        "branch_name": "awf/ws_scope_failed",
+                    },
+                },
+                occurred_at=now,
+            )
+        ],
+        secret_leases=[],
+        created_at=now,
+        updated_at=now,
+    )
+
+    payload = workspace_failure_details_payload(workspace)  # type: ignore[arg-type]
+    response = workspace_response(workspace)  # type: ignore[arg-type]
+
+    assert payload is not None
+    assert payload["reason_code"] == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert payload["planning_scope"]["offending_paths"] == ["src/awf/runtime/planning.py"]
+    assert payload["recovery_strategy"] == "discard_and_replan"
+    assert payload["salvage_policy"] == "explicit_salvage_required"
+    assert payload["fallback_model"]["model"] == "gpt-5.5"
+    assert response.failure_details is not None
+    assert response.failure_details.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert response.failure_details.planning_scope is not None
+    assert response.failure_details.planning_scope.required_paths == [
+        "docs/awf-plans/ws_scope_failed.md"
+    ]
+    assert response.failure_details.planning_scope.offending_paths == [
+        "src/awf/runtime/planning.py"
+    ]
+    assert response.failure_details.salvage is not None
+    assert response.failure_details.salvage.branch_name == "awf/ws_scope_failed"
+    assert response.failure_details.recovery_strategy == "discard_and_replan"
+    assert response.failure_details.salvage_policy == "explicit_salvage_required"
+    assert response.failure_details.fallback_model == {
+        "model": "gpt-5.5",
+        "source": "task_policy.planning_scope_recovery.approved_fallback_model",
+    }
 
 
 @pytest.mark.unit

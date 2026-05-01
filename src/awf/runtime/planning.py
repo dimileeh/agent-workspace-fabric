@@ -20,6 +20,7 @@ from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
 
 PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
 PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
+AGENT_PLAN_PHASE_SCOPE_VIOLATION = "AGENT_PLAN_PHASE_SCOPE_VIOLATION"
 MAX_CONFORMANCE_GAPS = 20
 MAX_CONFORMANCE_TEXT_CHARS = 1000
 
@@ -132,9 +133,16 @@ def build_planning_prompt(
     return (
         "## Planning phase\n\n"
         "Create a concrete implementation plan for the task below.\n\n"
-        f"Write the plan to `{plan_path.as_posix()}`. Create parent directories if needed.\n"
-        "Do not modify implementation files, tests, config, migrations, lockfiles, or docs other "
-        "than the requested plan file. Do not commit.\n\n"
+        "Create or update only the configured plan artifact "
+        f"`{plan_path.as_posix()}` during planning. Create parent directories if needed.\n"
+        "Do not modify implementation files during planning.\n"
+        "Do not create, edit, delete, stage, or commit any other files. Files outside "
+        "that one plan artifact are out of scope, including source, tests, docs, "
+        "config, migrations, and lockfiles.\n"
+        "Do not run implementation commands while planning, including apply_patch, "
+        "pytest, ruff, mypy, npm, lint commands, format commands, build commands, "
+        "git add, or git commit.\n"
+        "After writing the plan, stop. Do not perform implementation work in this phase.\n\n"
         "The plan must include:\n"
         "- intended files/modules to touch;\n"
         "- tests to write first;\n"
@@ -142,6 +150,37 @@ def build_planning_prompt(
         "- risks, assumptions, and explicit non-goals.\n\n"
         f"{warning_section}"
         f"### Task\n{task_prompt}\n"
+    )
+
+
+def build_planning_scope_retry_prompt(
+    *,
+    task_prompt: str,
+    evidence: Mapping[str, Any],
+) -> str:
+    """Build a conservative retry prompt after planning wrote out-of-scope files."""
+
+    required_paths = _evidence_strings(evidence.get("required_paths"))
+    offending_paths = _evidence_strings(evidence.get("offending_paths"))
+    required = required_paths[0] if required_paths else "the configured plan artifact"
+    offending_lines = (
+        "\n".join(f"- `{path}`" for path in offending_paths)
+        if offending_paths
+        else "- No offending paths were captured."
+    )
+    return (
+        "## Retry after planning scope violation\n\n"
+        "Discard the premature implementation from the failed planning attempt. Start "
+        "from the original task and rerun planning in a clean workspace.\n\n"
+        f"Create or update only `{required}`. Do not edit source, tests, docs, config, "
+        "migrations, lockfiles, or any other file during this retry planning phase. "
+        "Do not run implementation commands such as apply_patch, pytest, ruff, mypy, "
+        "npm, build commands, git add, or git commit. After writing the plan, stop.\n\n"
+        "### Offending paths from the failed planning attempt\n"
+        f"{offending_lines}\n\n"
+        "The preserved branch/worktree is available only for explicit operator salvage; "
+        "do not reuse it in this retry unless policy explicitly approves salvage.\n\n"
+        f"### Original task\n{task_prompt}\n"
     )
 
 
@@ -422,3 +461,13 @@ def _evidence_gaps(evidence: Mapping[str, Any]) -> tuple[str, ...]:
         if _safe_conformance_text(item)
     ]
     return tuple(gaps)
+
+
+def _evidence_strings(value: object) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return ()
+    return tuple(
+        _safe_conformance_text(item)
+        for item in value[:MAX_CONFORMANCE_GAPS]
+        if _safe_conformance_text(item)
+    )

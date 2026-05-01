@@ -236,15 +236,15 @@ reschedule its corresponding slice.
 
 ## P0: Planning Phase Scope Enforcement
 
-- [ ] Make the planning-stage agent prompt/system prompt unambiguous that the
+- [x] Make the planning-stage agent prompt/system prompt unambiguous that the
   agent must create or update only the configured plan file, must not edit
   source/tests/docs outside that plan artifact, must not run implementation
   commands, and must stop after writing the plan.
-- [ ] Add regression tests proving the planning phase rejects out-of-scope file
+- [x] Add regression tests proving the planning phase rejects out-of-scope file
   edits with a structured reason such as `AGENT_PLAN_PHASE_SCOPE_VIOLATION`,
   preserves the worktree/branch for salvage, and records an actionable retry or
   fallback recommendation.
-- [ ] Add an automated recovery path for planning-scope violations: either
+- [x] Add an automated recovery path for planning-scope violations: either
   discard and retry planning with an approved fallback model or intentionally
   promote/salvage the preserved branch only when policy says the premature
   implementation is acceptable.

@@ -37,7 +37,10 @@ from awf.control.executor import (
 )
 from awf.db.enums import FailureReason, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.profiles.models import ProfilePlanning, WorkspaceProfile
-from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    PLAN_CONFORMANCE_UNSATISFIED,
+)
 from awf.runtime.validation import (
     ValidationCommandResult,
     ValidationCoverageResult,
@@ -693,10 +696,22 @@ async def test_planning_required_fails_when_plan_file_is_not_changed(tmp_path: P
         model=None,
     )
 
-    assert message == (
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.message.startswith(
         "planning phase did not create or modify required plan file "
         "`docs/awf-plans/ws_plan_missing.md`"
     )
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["scope_phase"] == "planning"
+    assert scope["required_paths"] == ["docs/awf-plans/ws_plan_missing.md"]
+    assert scope["offending_paths"] == []
+    assert scope["offending_commands"] == []
+    assert scope["recovery_strategy"] == "discard_and_replan"
+    assert scope["salvage_policy"] == "explicit_salvage_required"
+    assert "Retry planning from a clean workspace" in scope["recommended_action"]
     assert len(adapter.prompts) == 1
 
 
@@ -764,10 +779,19 @@ async def test_planning_required_rejects_extra_plan_phase_changes(tmp_path: Path
         model=None,
     )
 
-    assert message == (
-        "planning phase changed files outside `docs/awf-plans/ws_plan_extra.md`: "
-        "src/changed.py"
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.message.startswith(
+        "planning phase changed files outside `docs/awf-plans/ws_plan_extra.md`"
     )
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["required_paths"] == ["docs/awf-plans/ws_plan_extra.md"]
+    assert scope["offending_paths"] == ["src/changed.py"]
+    assert scope["recovery_strategy"] == "discard_and_replan"
+    assert "preserved branch" in scope["recommended_action"]
+    assert len(adapter.prompts) == 1
 
 
 @pytest.mark.unit
@@ -866,10 +890,17 @@ async def test_conformance_phase_rejects_extra_report_phase_changes(tmp_path: Pa
         model=None,
     )
 
-    assert message == (
-        "conformance phase changed files outside `docs/awf-plans/ws_compare.json`: "
-        "src/side_effect.py"
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.message.startswith(
+        "conformance phase changed files outside `docs/awf-plans/ws_compare.json`"
     )
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["scope_phase"] == "conformance"
+    assert scope["required_paths"] == ["docs/awf-plans/ws_compare.json"]
+    assert scope["offending_paths"] == ["src/side_effect.py"]
 
 
 @pytest.mark.unit
@@ -1656,10 +1687,14 @@ async def test_planning_required_rejects_committed_code_as_outside_plan(tmp_path
         model=None,
     )
 
-    assert message == (
-        "planning phase changed files outside `docs/awf-plans/ws_plan_code.md`: "
-        "src/awf/executor.py"
-    )
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["required_paths"] == ["docs/awf-plans/ws_plan_code.md"]
+    assert scope["offending_paths"] == ["src/awf/executor.py"]
+    assert len(adapter.prompts) == 1
 
 
 @pytest.mark.unit
@@ -1784,10 +1819,13 @@ async def test_planning_required_dirty_extra_file_still_rejected(tmp_path: Path)
         model=None,
     )
 
-    assert message == (
-        "planning phase changed files outside `docs/awf-plans/ws_plan_extra_dirty.md`: "
-        "src/extra.py"
-    )
+    assert message is not None
+    assert not isinstance(message, str)
+    assert message.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert message.details is not None
+    scope = message.details["planning_scope"]
+    assert scope["required_paths"] == ["docs/awf-plans/ws_plan_extra_dirty.md"]
+    assert scope["offending_paths"] == ["src/extra.py"]
 
 
 @pytest.mark.unit
