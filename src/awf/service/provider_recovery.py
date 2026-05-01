@@ -233,6 +233,16 @@ async def create_provider_recovery_attempt_row(
     )
     attempt_repo = TaskAttemptRepository(session)
     source_attempt = await attempt_repo.get_by_workspace_id(source.id)
+    source_canonical_attempt = (
+        await attempt_repo.get_canonical_for_task(source_attempt.task_id)
+        if source_attempt is not None
+        else None
+    )
+    lineage_payload = _source_lineage_payload(
+        source_workspace_id=source.id,
+        source_attempt=source_attempt,
+        source_canonical_attempt=source_canonical_attempt,
+    )
     source_not_before = _source_suppression_not_before(
         recovery_metadata,
         policy=policy,
@@ -245,6 +255,7 @@ async def create_provider_recovery_attempt_row(
             source.task_policy,
             source_workspace_id=source.id,
             source_attempt=source_attempt,
+            source_canonical_attempt=source_canonical_attempt,
             metadata=recovery_metadata,
             decision=decision,
             not_before=source_not_before,
@@ -255,7 +266,7 @@ async def create_provider_recovery_attempt_row(
             event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
             reason_code=decision.reason_code,
             payload={
-                "source_workspace_id": source.id,
+                **lineage_payload,
                 "provider_recovery": _decision_payload(
                     decision,
                     recovery_metadata,
@@ -278,6 +289,7 @@ async def create_provider_recovery_attempt_row(
             event_type=PROVIDER_RECOVERY_TERMINAL_EVENT,
             reason_code=decision.terminal_reason or decision.reason_code,
             payload={
+                **lineage_payload,
                 "provider_recovery": _decision_payload(decision, recovery_metadata),
             },
         )
@@ -288,6 +300,7 @@ async def create_provider_recovery_attempt_row(
         source.task_policy,
         source_workspace_id=source.id,
         source_attempt=source_attempt,
+        source_canonical_attempt=source_canonical_attempt,
         metadata=recovery_metadata,
         decision=decision,
     )
@@ -330,7 +343,7 @@ async def create_provider_recovery_attempt_row(
 
     provider_payload = _decision_payload(decision, recovery_metadata)
     event_payload = {
-        "source_workspace_id": source.id,
+        **lineage_payload,
         "new_workspace_id": retried.id,
         "attempt_number": attempt.attempt_number,
         "provider_recovery": provider_payload,
@@ -352,7 +365,7 @@ async def create_provider_recovery_attempt_row(
         operation_type=OperationType.retry,
         status=OperationStatus.running,
         payload={
-            "source_workspace_id": source.id,
+            **lineage_payload,
             "provider_recovery": provider_payload,
         },
     )
@@ -360,6 +373,7 @@ async def create_provider_recovery_attempt_row(
         operation,
         status=OperationStatus.succeeded,
         result={
+            **lineage_payload,
             "new_workspace_id": retried.id,
             "attempt_number": attempt.attempt_number,
             "provider_recovery": provider_payload,
@@ -609,6 +623,7 @@ def _recovery_task_policy(
     *,
     source_workspace_id: str,
     source_attempt: TaskAttempt | None,
+    source_canonical_attempt: TaskAttempt | None,
     metadata: Mapping[str, Any],
     decision: ProviderRecoveryDecision,
     not_before: datetime | None = None,
@@ -622,6 +637,10 @@ def _recovery_task_policy(
     recovery_state: dict[str, Any] = {
         "source_workspace_id": source_workspace_id,
         "source_attempt_id": source_attempt.id if source_attempt is not None else None,
+        "source_task_id": source_attempt.task_id if source_attempt is not None else None,
+        "source_canonical_attempt_id": (
+            source_canonical_attempt.id if source_canonical_attempt is not None else None
+        ),
         "source_reason_code": _metadata_str(metadata, "reason_code"),
         "decision_reason_code": decision.reason_code,
         "source_provider": _metadata_str(metadata, "provider"),
@@ -641,6 +660,21 @@ def _recovery_task_policy(
         key: value for key, value in recovery_state.items() if value is not None
     }
     return policy
+
+
+def _source_lineage_payload(
+    *,
+    source_workspace_id: str,
+    source_attempt: TaskAttempt | None,
+    source_canonical_attempt: TaskAttempt | None,
+) -> dict[str, Any]:
+    payload = {"source_workspace_id": source_workspace_id}
+    if source_attempt is not None:
+        payload["source_attempt_id"] = source_attempt.id
+        payload["source_task_id"] = source_attempt.task_id
+    if source_canonical_attempt is not None:
+        payload["source_canonical_attempt_id"] = source_canonical_attempt.id
+    return payload
 
 
 def _decision_payload(

@@ -8,6 +8,8 @@ from awf.adapters.provider_failures import (
     AGENT_PROVIDER_CAPACITY_EXHAUSTED,
     AGENT_TIMEOUT,
     classify_provider_failure,
+    failure_fingerprint,
+    infer_provider,
 )
 
 
@@ -111,6 +113,38 @@ def test_known_timeout_reason_codes_become_provider_recovery_metadata() -> None:
     assert idle_timeout.reason_code == AGENT_IDLE_TIMEOUT
     assert idle_timeout.failure_type == "idle_timeout"
     assert idle_timeout.retryable is True
+
+
+def test_timeout_without_provider_or_model_is_not_recovery_metadata() -> None:
+    assert (
+        classify_provider_failure(
+            reason_code=AGENT_TIMEOUT,
+            stdout="",
+            stderr="command timed out",
+            provider=None,
+            model=None,
+        )
+        is None
+    )
+
+
+def test_provider_inference_covers_anthropic_and_ollama_markers() -> None:
+    assert infer_provider(model="claude-sonnet-4.5", output=None) == "anthropic"
+    assert infer_provider(model=None, output="ollama local model is unavailable") == "ollama"
+
+
+def test_failure_fingerprint_truncates_long_output_after_redaction() -> None:
+    fingerprint = failure_fingerprint(
+        reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+        failure_type="capacity",
+        provider="openai",
+        model="gpt-5.5",
+        output="x" * 50,
+        limit=12,
+    )
+
+    assert fingerprint.endswith("|xxxxxxxxxxxx")
+    assert len(fingerprint.rsplit("|", 1)[-1]) == 12
 
 
 def test_deterministic_cli_failures_are_not_provider_failures() -> None:

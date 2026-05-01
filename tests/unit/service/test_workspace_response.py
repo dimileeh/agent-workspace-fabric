@@ -891,6 +891,69 @@ def test_planning_scope_legacy_fallback_keeps_only_present_detail_keys(
 
 
 @pytest.mark.unit
+def test_failure_details_compacts_legacy_scope_forbidden_paths_and_defaults() -> None:
+    workspace = SimpleNamespace(
+        id="ws_legacy_scope",
+        failure_message=None,
+        task_policy={"planning_scope_recovery": {"approved_fallback_model": " "}},
+        events=[
+            SimpleNamespace(
+                event_type="workspace.state_changed",
+                new_state=WorkspaceStatus.failed.value,
+                reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                payload={
+                    "reason_code": AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+                    "details": {
+                        "scope": {
+                            "recommended_action": "Retry with a narrower plan.",
+                            "forbidden_paths": ["src/generated.py", ""],
+                            "offending_commands": ["make generated", None],
+                            "fallback_model": {
+                                "model": " gpt-5.5 ",
+                                "source": " ",
+                            },
+                        }
+                    },
+                },
+            )
+        ],
+    )
+
+    payload = workspace_failure_details_payload(workspace)  # type: ignore[arg-type]
+    retry_context = workspaces_service._planning_scope_retry_context(workspace)  # type: ignore[arg-type]
+
+    assert payload is not None
+    assert payload["recommended_action"] == "Retry with a narrower plan."
+    assert payload["planning_scope"] == {
+        "recommended_action": "Retry with a narrower plan.",
+        "offending_paths": ["src/generated.py"],
+        "offending_commands": ["make generated"],
+        "fallback_model": {"model": "gpt-5.5"},
+    }
+    assert retry_context is not None
+    assert retry_context.recovery_strategy == "discard_and_replan"
+    assert retry_context.salvage_policy == "explicit_salvage_required"
+    assert retry_context.fallback_model is None
+
+
+@pytest.mark.unit
+def test_failure_detail_compactors_reject_malformed_values() -> None:
+    workspace_without_policy = SimpleNamespace(task_policy=None)
+    workspace_with_bad_model = SimpleNamespace(
+        task_policy={"planning_scope_recovery": {"approved_fallback_model": 123}}
+    )
+
+    assert workspaces_service._compact_string_list("not-a-list") == []
+    assert workspaces_service._compact_fallback_model({"model": " "}) is None
+    assert workspaces_service._approved_planning_scope_fallback_model(
+        workspace_without_policy
+    ) is None
+    assert workspaces_service._approved_planning_scope_fallback_model(
+        workspace_with_bad_model
+    ) is None
+
+
+@pytest.mark.unit
 def test_failure_details_omit_empty_payload_and_compact_malformed_conformance() -> None:
     empty_workspace = SimpleNamespace(
         failure_message=None,
