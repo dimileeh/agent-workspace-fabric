@@ -31,6 +31,7 @@ import awf.service.provider_readiness as provider_readiness
 from awf import __version__
 from awf.api.app import configure_database, create_app
 from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeCommandRunner
+from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.session import make_session_factory
 from tests.unit.helpers import create_workspace
@@ -110,15 +111,17 @@ async def ready_app_and_client(
     """App + client pair so tests can mutate ``app.state`` (inject command runner)."""
     for key in _PROVIDER_ENV_KEYS:
         monkeypatch.delenv(key, raising=False)
-    monkeypatch.setenv("AWF_HOST_HOME", str(tmp_path / "home"))
-    health_route.get_settings.cache_clear()
+    original_get_settings = health_route.get_settings
+    original_get_settings.cache_clear()
+    test_settings = Settings(_env_file=None, host_home=str(tmp_path / "home"))
+    monkeypatch.setattr(health_route, "get_settings", lambda: test_settings)
     app = create_app(use_lifespan=False)
     configure_database(app, make_session_factory(engine))
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as c:
             yield app, c
     finally:
-        health_route.get_settings.cache_clear()
+        original_get_settings.cache_clear()
 
 
 # ---- /readyz: happy path ----------------------------------------------------

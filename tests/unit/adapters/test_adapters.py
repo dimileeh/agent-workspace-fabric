@@ -593,6 +593,12 @@ class TestClaudeCodeAdapter:
 
 class TestGeminiAdapter:
     @pytest.mark.unit
+    def test_reports_google_provider(self) -> None:
+        adapter = GeminiAdapter(runner=FakeCommandRunner())
+
+        assert adapter.get_provider("gemini-3.1-pro-preview") == "google"
+
+    @pytest.mark.unit
     async def test_produces_correct_cli_invocation(self) -> None:
         runner = FakeCommandRunner()
         adapter = GeminiAdapter(runner=runner, default_model="gemini-2.5-pro")
@@ -684,6 +690,19 @@ class TestGeminiAdapter:
 
 
 class TestOpenCodeAdapter:
+    @pytest.mark.unit
+    def test_reports_provider_from_selected_or_default_model(self) -> None:
+        default_adapter = OpenCodeAdapter(runner=FakeCommandRunner())
+        openai_adapter = OpenCodeAdapter(
+            runner=FakeCommandRunner(),
+            default_model="openai/gpt-oss",
+        )
+
+        assert default_adapter.get_provider(None) == "ollama"
+        assert default_adapter.get_provider("ollama/glm-5.1:cloud") == "ollama"
+        assert openai_adapter.get_provider(None) == "openai"
+        assert openai_adapter.get_provider("anthropic/claude-sonnet") == "anthropic"
+
     @pytest.mark.unit
     @pytest.mark.parametrize("model", OPENCODE_OLLAMA_CLOUD_MODELS)
     async def test_runs_opencode_with_each_supported_ollama_cloud_model(
