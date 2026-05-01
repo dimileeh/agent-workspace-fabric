@@ -789,6 +789,7 @@ class TestHappyPath:
                         "no_output_seconds": 600,
                         "over_duration_seconds": 1800,
                         "repeated_output_threshold": 3,
+                        "recovery_action": "proceed_to_validation",
                     },
                 },
             },
@@ -891,6 +892,7 @@ class TestHappyPath:
             assert stall["plan_path"] == f"docs/awf-plans/{ws_id}.md"
             assert stall["report_path"] == f"docs/awf-plans/{ws_id}.conformance.json"
             assert stall["salvage_hint"]["implementation_commit_count"] == 2
+            assert stall["recovery_action"] == "proceed_to_validation"
             assert failed_event.payload["salvage"]["worktree_path"]
             stall_events = [
                 event
@@ -901,6 +903,7 @@ class TestHappyPath:
             assert stall_events[0].reason_code == AGENT_STALLED_IN_CONFORMANCE
             assert stall_events[0].payload is not None
             assert stall_events[0].payload["kind"] == "no_output"
+            assert stall_events[0].payload["recovery_action"] == "proceed_to_validation"
 
     @pytest.mark.unit
     async def test_planning_profile_does_not_record_stall_for_deterministic_needs_iteration_within_budget(

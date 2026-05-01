@@ -2440,6 +2440,7 @@ class WorkspaceExecutor:
                     max_iterations=planning.max_iterations,
                     plan_path=plan_path,
                     report_path=report_path,
+                    recovery_action=planning.conformance_stall.recovery_action,
                 )
 
             if compare_error is not None:
@@ -2490,6 +2491,7 @@ class WorkspaceExecutor:
         max_iterations: int,
         plan_path: Path,
         report_path: Path,
+        recovery_action: str | None = None,
     ) -> _PlanningRunFailure:
         head_sha = await self._git_rev_parse_head(worktree_path)
         commit_count = 0
@@ -2512,6 +2514,7 @@ class WorkspaceExecutor:
             base_sha=baseline_sha,
             commit_count=commit_count,
             changed_paths=changed_paths,
+            recovery_action=recovery_action,
         )
         details: dict[str, Any] = {"conformance_stall": stall_evidence_payload}
         if last_report is not None:

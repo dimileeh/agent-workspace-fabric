@@ -933,6 +933,7 @@ def test_build_conformance_stall_failure_evidence_is_structured_and_bounded() ->
         base_sha="base000",
         commit_count=2,
         changed_paths=("src/awf/foo.py", "tests/unit/test_foo.py"),
+        recovery_action="proceed_to_validation",
     )
 
     assert evidence["reason_code"] == AGENT_STALLED_IN_CONFORMANCE
@@ -944,6 +945,7 @@ def test_build_conformance_stall_failure_evidence_is_structured_and_bounded() ->
     assert evidence["plan_path"] == "docs/awf-plans/ws_e.md"
     assert evidence["report_path"] == "docs/awf-plans/ws_e.conformance.json"
     assert len(evidence["last_output_excerpt"]) <= MAX_CONFORMANCE_TEXT_CHARS
+    assert evidence["recovery_action"] == "proceed_to_validation"
     salvage = evidence["salvage_hint"]
     assert salvage["plan_path"] == "docs/awf-plans/ws_e.md"
     assert salvage["report_path"] == "docs/awf-plans/ws_e.conformance.json"
@@ -951,6 +953,30 @@ def test_build_conformance_stall_failure_evidence_is_structured_and_bounded() ->
     assert salvage["head_sha"] == "abc123"
     assert salvage["base_sha"] == "base000"
     assert salvage["changed_paths"] == ["src/awf/foo.py", "tests/unit/test_foo.py"]
+
+
+@pytest.mark.unit
+def test_build_conformance_stall_failure_evidence_omits_recovery_action_when_none() -> None:
+    stall = ConformanceStallEvidence(
+        kind=ConformanceStallKind.no_output,
+        iteration_index=0,
+        elapsed_seconds=0.0,
+        no_output_seconds=0.0,
+        repeated_output_count=0,
+        last_report_digest=None,
+        plan_path="docs/awf-plans/ws_e.md",
+        report_path="docs/awf-plans/ws_e.conformance.json",
+        last_output_excerpt="",
+    )
+
+    evidence = build_conformance_stall_failure_evidence(
+        stall=stall,
+        head_sha=None,
+        base_sha=None,
+        commit_count=0,
+    )
+
+    assert "recovery_action" not in evidence
 
 
 @pytest.mark.unit

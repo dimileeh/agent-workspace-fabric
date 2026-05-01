@@ -432,6 +432,7 @@ def build_conformance_stall_failure_evidence(
     base_sha: str | None,
     commit_count: int,
     changed_paths: Sequence[str] = (),
+    recovery_action: str | None = None,
 ) -> dict[str, Any]:
     """Return bounded structured evidence for a detected conformance stall."""
 
@@ -440,7 +441,7 @@ def build_conformance_stall_failure_evidence(
         for path in list(changed_paths)[:MAX_CONFORMANCE_GAPS]
         if _safe_conformance_text(path)
     ]
-    return {
+    payload: dict[str, Any] = {
         "reason_code": AGENT_STALLED_IN_CONFORMANCE,
         "kind": stall.kind.value,
         "iteration_index": stall.iteration_index,
@@ -460,6 +461,9 @@ def build_conformance_stall_failure_evidence(
             "changed_paths": salvage_paths,
         },
     }
+    if recovery_action is not None:
+        payload["recovery_action"] = recovery_action
+    return payload
 
 
 def build_conformance_stall_recovery_prompt(
