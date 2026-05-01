@@ -216,6 +216,8 @@ def test_planning_scope_retry_prompt_discards_premature_implementation() -> None
     assert "Prior source required plan paths from the failed planning attempt" in prompt
     assert "- `docs/awf-plans/ws_retry.md`" in prompt
     assert "Create or update only `docs/awf-plans/ws_retry.md`" not in prompt
+    assert "Aside from creating or updating the configured plan artifact" in prompt
+    assert "or any other file during this retry planning phase" not in prompt
     assert "src/awf/runtime/planning.py" in prompt
     assert "tests/unit/test_planning.py" in prompt
     assert "After writing the plan, stop" in prompt
