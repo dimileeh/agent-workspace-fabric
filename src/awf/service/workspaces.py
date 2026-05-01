@@ -1066,7 +1066,7 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
         legacy_scope = details.get("scope")
         if isinstance(legacy_scope, Mapping):
             planning_scope = legacy_scope
-        else:
+        elif reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION:
             planning_scope = {
                 key: details.get(key)
                 for key in (

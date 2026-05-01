@@ -690,7 +690,10 @@ def test_workspace_response_includes_conformance_failure_details_and_salvage() -
                             "max_iterations": 0,
                             "plan_path": "docs/awf-plans/ws.md",
                             "report_path": "docs/awf-plans/ws.conformance.json",
-                        }
+                        },
+                        "recommended_action": "Complete the missing test coverage.",
+                        "recovery_strategy": "repair_conformance",
+                        "salvage_policy": "preserve_branch",
                     },
                     "salvage": {
                         "hint": "Workspace worktree and branch were preserved for salvage.",
@@ -713,6 +716,10 @@ def test_workspace_response_includes_conformance_failure_details_and_salvage() -
     assert response.failure_details.reason_code == PLAN_CONFORMANCE_UNSATISFIED
     assert response.failure_details.conformance is not None
     assert response.failure_details.conformance.gaps == ["Add tests"]
+    assert response.failure_details.planning_scope is None
+    assert response.failure_details.recommended_action == "Complete the missing test coverage."
+    assert response.failure_details.recovery_strategy == "repair_conformance"
+    assert response.failure_details.salvage_policy == "preserve_branch"
     assert response.failure_details.salvage is not None
     assert response.failure_details.salvage.worktree_path == "/worktrees/ws_conformance_failed"
 
