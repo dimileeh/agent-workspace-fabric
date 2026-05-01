@@ -3078,13 +3078,15 @@ class PullRequestMonitorRunner:
             except AgentRunError as exc:
                 agent_run_err = exc
 
+            if agent_run_err is not None:
+                await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
+
             await self._commit_dirty_worktree(
                 workspace_id=workspace_id,
                 message=f"fix: resolve PR #{pr_number} base conflicts",
             )
 
             if agent_run_err is not None:
-                await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
                 _log.warning(
                     "monitor.sync_base_cli_failed",
                     workspace_id=workspace_id,
@@ -3125,13 +3127,15 @@ class PullRequestMonitorRunner:
         except AgentRunError as exc:
             agent_run_err = exc
 
+        if agent_run_err is not None:
+            await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
+
         await self._commit_dirty_worktree(
             workspace_id=workspace_id,
             message=f"fix: address PR #{pr_number} CI failure",
         )
 
         if agent_run_err is not None:
-            await self._handle_provider_agent_run_error(workspace_id, agent_run_err)
             _log.warning(
                 "monitor.ci_fix_cli_failed",
                 workspace_id=workspace_id,
