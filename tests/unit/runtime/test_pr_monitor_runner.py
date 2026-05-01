@@ -55,6 +55,7 @@ from awf.runtime.pr_monitor import (
 from awf.runtime.pr_monitor_runner import (
     MonitorRunnerConfig,
     ProviderRecoveryFallbackError,
+    ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
     _as_utc,
     _collect_defer_items,
@@ -1900,23 +1901,22 @@ async def test_review_comment_provider_failure_records_retry_and_ignores_comment
     status = _status(reviews=(c,))
     state = MonitorState(started_at=0.0)
 
-    terminal = await runner._execute(
-        action=AddressComments(threads=(), review_comments=(c,)),
-        workspace_id=workspace_id,
-        repo_url="git@github.com:dimileeh/aira-web.git",
-        repo=RepoRef(owner="dimileeh", name="aira-web"),
-        pr_number=42,
-        status=status,
-        state=state,
-        base_branch="development",
-        remote_branch=f"awf/{workspace_id}",
-        compose_project="proj",
-        compose_file=tmp_path / "compose.yml",
-        monitor_log=None,
-    )
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._execute(
+            action=AddressComments(threads=(), review_comments=(c,)),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=status,
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
 
-    assert terminal is False
-    assert sleep_fn.calls == [30]
     assert "C_provider" not in state.threads_addressed_ids
 
 @pytest.mark.unit

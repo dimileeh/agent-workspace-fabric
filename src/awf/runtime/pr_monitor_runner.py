@@ -116,7 +116,7 @@ _log = get_logger(__name__)
 
 # Verdicts the CLI reply parser can produce. Kept as a type alias so
 # callers (and tests) can match against a closed set.
-Verdict = Literal["fix_committed", "false_positive", "defer", "agent_failed", "provider_outage"]
+Verdict = Literal["fix_committed", "false_positive", "defer", "agent_failed"]
 
 
 class PostMergeTargetReconciler(Protocol):
@@ -1368,6 +1368,20 @@ class PullRequestMonitorRunner:
                     operation_id=operation.operation_id if operation is not None else None,
                     operation_type=OperationType.comment_repair.value,
                 )
+            except ProviderRecoveryRetryError:
+                await self._finish_monitor_operation(
+                    operation,
+                    status=OperationStatus.failed,
+                    result={
+                        "status": "failed",
+                        "outcome": "provider_retry",
+                        "reason_code": "PROVIDER_OUTAGE",
+                        "pushed": False,
+                    },
+                    error_code="PROVIDER_OUTAGE",
+                    error_message="Provider recovery requested retry",
+                )
+                raise
             except ComposeExecCleanupError as exc:
                 await self._finish_monitor_operation(
                     operation,
@@ -2667,8 +2681,6 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                 )
-                if verdict == "provider_outage":
-                    continue
                 state.mark_addressed(t.thread_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     threads_to_resolve.append(t.thread_id)
@@ -2682,8 +2694,6 @@ class PullRequestMonitorRunner:
                     compose_project=compose_project,
                     compose_file=compose_file,
                 )
-                if verdict == "provider_outage":
-                    continue
                 state.mark_addressed(c.comment_id, verdict)
                 if verdict not in {"defer", "agent_failed"}:
                     publish_dependent_ids.append(c.comment_id)
@@ -2920,7 +2930,7 @@ class PullRequestMonitorRunner:
         result_stdout = ""
         cli_failed = False
         if await self._provider_recovery_suppresses_cli(workspace_id):
-            return "provider_outage"
+            raise ProviderRecoveryRetryError()
         try:
             result = await self._deps.adapter.run(
                 compose_project=compose_project,
@@ -2934,7 +2944,7 @@ class PullRequestMonitorRunner:
             try:
                 await self._handle_provider_agent_run_error(workspace_id, exc)
             except ProviderRecoveryRetryError:
-                return "provider_outage"
+                raise
             cli_failed = True
             result_stdout = exc.result.stdout
             _log.warning(
