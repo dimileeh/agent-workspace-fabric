@@ -255,6 +255,7 @@ def test_coverage_wrapped_pytest_failure_and_coverage_below_threshold_surfaces_b
     assert result.coverage.reason_code == "COVERAGE_BELOW_THRESHOLD"
     message = _validation_failure_message(result)
     assert "tests/unit/test_widget.py::test_handles_edges" in message
+    assert "AssertionError" in message
     assert "coverage 98.0% is also below required 99.0%" in message
     assert "fix the failing test first" in message
 

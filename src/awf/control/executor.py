@@ -3921,8 +3921,11 @@ def _coverage_has_failing_tests(coverage: ValidationCoverageResult | None) -> bo
 
 
 def _format_failing_test_evidence(coverage: ValidationCoverageResult) -> str:
-    values = coverage.failing_test_node_ids or coverage.failing_test_evidence
-    return ", ".join(str(value) for value in values[:5])
+    node_ids = [str(value) for value in coverage.failing_test_node_ids[:5]]
+    evidence = [str(value) for value in coverage.failing_test_evidence[:5]]
+    if node_ids and evidence:
+        return f"{', '.join(node_ids)}; evidence: {' | '.join(evidence)}"
+    return ", ".join(node_ids if node_ids else evidence)
 
 
 def _coverage_wrapped_pytest_failure_message(
