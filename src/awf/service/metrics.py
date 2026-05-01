@@ -25,7 +25,6 @@ from awf.service.orphan_resources import OrphanResourceSummary, summary_not_coll
 from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_NO_LOOP_REASON,
     PROVIDER_RECOVERY_STATE_KEY,
-    ProviderRecoveryStateView,
 )
 from awf.service.resource_capacity import (
     ReservedResources,
@@ -123,7 +122,7 @@ class FailedWorkspaceExample:
     reason_code: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     salvage: dict[str, Any] | None = None
-    provider_recovery_state: ProviderRecoveryStateView | None = None
+    provider_recovery: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -824,6 +823,7 @@ async def _latest_failed_workspace_examples(
                 reason_code=_details_reason_code(details_payload),
                 details=_details_only(details_payload),
                 salvage=_salvage_only(details_payload),
+                provider_recovery=_provider_recovery_from_details(details_payload),
             )
         )
     return examples
