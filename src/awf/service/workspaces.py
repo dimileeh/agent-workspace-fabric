@@ -819,6 +819,7 @@ async def retry_workspace_row(
     if conformance_context is not None:
         event_payload["source_reason_code"] = conformance_context.reason_code
         event_payload["conformance_evidence_ref"] = conformance_context.evidence_ref
+        event_payload["remaining_gaps"] = conformance_context.evidence.get("gaps", [])
     if planning_scope_context is not None:
         event_payload.update(_planning_scope_recovery_payload(planning_scope_context))
     await repo.add_event(
@@ -846,6 +847,7 @@ async def retry_workspace_row(
             {
                 "source_reason_code": conformance_context.reason_code,
                 "conformance_evidence_ref": conformance_context.evidence_ref,
+                "remaining_gaps": conformance_context.evidence.get("gaps", []),
             }
             if conformance_context is not None
             else {}

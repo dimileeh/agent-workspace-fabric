@@ -802,6 +802,7 @@ async def test_conformance_retry_payload_includes_retry_attempt_number_and_gaps(
     assert result.get("attempt_number") == 2
     assert result.get("source_reason_code") == PLAN_CONFORMANCE_UNSATISFIED
     assert result.get("conformance_evidence_ref") == evidence_ref
+    assert result.get("remaining_gaps") == ["Add regression test", "Wire retry endpoint"]
 
     assert len(events) >= 1
     event_payload = events[0].payload
@@ -809,6 +810,7 @@ async def test_conformance_retry_payload_includes_retry_attempt_number_and_gaps(
     assert event_payload.get("attempt_number") == 2
     assert event_payload.get("source_reason_code") == PLAN_CONFORMANCE_UNSATISFIED
     assert event_payload.get("conformance_evidence_ref") == evidence_ref
+    assert event_payload.get("remaining_gaps") == ["Add regression test", "Wire retry endpoint"]
 
 
 @pytest.mark.unit
