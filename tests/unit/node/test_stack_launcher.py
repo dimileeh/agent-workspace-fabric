@@ -8,11 +8,20 @@ from pathlib import Path
 import pytest
 
 from awf.node import stack_launcher as stack_launcher_mod
-from awf.node.compose_manager import AuthMount, ComposeProjectPaths, WorkspaceComposeSpec
+from awf.node.compose_manager import (
+    AuthMount,
+    ComposeOperationError,
+    ComposeProjectPaths,
+    WorkspaceComposeSpec,
+)
 from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import WorktreeLayout
 from awf.node.secret_mounts import LocalSecretLeaseResolution, SecretLeaseResolutionError
-from awf.node.stack_launcher import ComposeStackLauncher, WorkspaceStackLaunchRequest
+from awf.node.stack_launcher import (
+    ComposeStackLauncher,
+    WorkspaceServiceExecutionError,
+    WorkspaceStackLaunchRequest,
+)
 from awf.profiles.models import (
     DockerMode,
     ProfileDocker,
@@ -33,6 +42,23 @@ class _RecordingCompose:
         return ComposeProjectPaths(
             project_dir=Path("/tmp/awf-compose/ws_launcher"),
             compose_file=Path("/tmp/awf-compose/ws_launcher/compose.yml"),
+        )
+
+
+class _DockerUnavailableCompose:
+    def __init__(self, *, reason_code: str = "DOCKER_UNAVAILABLE") -> None:
+        self.reason_code = reason_code
+        self.specs: list[WorkspaceComposeSpec] = []
+
+    async def up(self, spec: WorkspaceComposeSpec, *, wait: bool = True) -> ComposeProjectPaths:
+        del wait
+        self.specs.append(spec)
+        raise ComposeOperationError(
+            operation="up",
+            returncode=1,
+            stdout="",
+            stderr="docker unavailable",
+            reason_code=self.reason_code,
         )
 
 
@@ -211,6 +237,71 @@ def _layout() -> WorktreeLayout:
         worktree_path=Path("/host/awf/git/worktrees/ws_launcher"),
         branch_name="awf/ws_launcher",
     )
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_returns_none_when_docker_missing_without_required_services() -> None:
+    compose = _DockerUnavailableCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    result = await launcher.launch(
+        WorkspaceStackLaunchRequest(
+            workspace_id="ws_launcher",
+            layout=_layout(),
+            profile=WorkspaceProfile(name="generic"),
+        )
+    )
+
+    assert result is None
+    assert compose.specs[0].services == ()
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_reports_required_services_when_docker_missing() -> None:
+    compose = _DockerUnavailableCompose()
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+    profile = WorkspaceProfile(
+        name="serviceful",
+        docker=ProfileDocker(mode=DockerMode.dind),
+        services=[ProfileService(name="postgres", image="postgres:16-alpine")],
+    )
+
+    with pytest.raises(WorkspaceServiceExecutionError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=profile,
+            )
+        )
+
+    assert "required services: ['postgres', 'docker']" in str(raised.value)
+
+
+@pytest.mark.unit
+async def test_compose_stack_launcher_reraises_non_docker_unavailable_errors() -> None:
+    compose = _DockerUnavailableCompose(reason_code="COMPOSE_COMMAND_FAILED")
+    launcher = ComposeStackLauncher(
+        compose=compose,  # type: ignore[arg-type]
+        agent_runtime_image="custom-agent-runtime:dev",
+    )
+
+    with pytest.raises(ComposeOperationError) as raised:
+        await launcher.launch(
+            WorkspaceStackLaunchRequest(
+                workspace_id="ws_launcher",
+                layout=_layout(),
+                profile=WorkspaceProfile(name="generic"),
+            )
+        )
+
+    assert raised.value.reason_code == "COMPOSE_COMMAND_FAILED"
 
 
 @pytest.mark.unit
