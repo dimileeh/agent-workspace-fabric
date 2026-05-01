@@ -700,12 +700,10 @@ class WorkspaceExecutor:
             # If there's nothing to commit, the existing no-work check
             # fails the workspace with ``agent_failure`` below. If there
             # IS work, validation decides whether it's pushable.
-            #
-            # TODO: Future Circuit Breaker / Fallback Hook
-            # If exc.reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED", we should
-            # eventually implement fallback dispatch logic to transparently switch to
-            # another provider (e.g., Claude -> Gemini) instead of letting the workspace
-            # fail. This would require skipping the commit check and re-running the agent phase.
+            # Structured provider-failure metadata is preserved in
+            # ``agent_run_details``. If salvage finds no commits, the
+            # no-work failure path below persists that metadata before
+            # preparing the authorized provider retry/fallback workspace.
             agent_exit_note = (
                 f"agent CLI exited {exc.result.returncode} ({exc.reason_code}); "
                 f"continuing to salvage any uncommitted work"
@@ -974,10 +972,11 @@ class WorkspaceExecutor:
                     if agent_exit_note is not None:
                         message = f"{message}; {agent_exit_note}"
 
-                    # TODO: Future Circuit Breaker / Fallback Hook
-                    # If agent_run_reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
-                    # we should trap this failure here and initiate fallback dispatch
-                    # rather than permanently marking the workspace as failed.
+                    # Provider recovery reads the failed state event, so
+                    # persist the structured reason/details first. The
+                    # recovery service creates an authorized delayed retry
+                    # or fallback workspace and no-ops for ordinary agent
+                    # failures.
                     await self._mark_failed(
                         workspace_id=workspace_id,
                         from_status=WorkspaceStatus.running,
@@ -1404,11 +1403,10 @@ class WorkspaceExecutor:
                 # initial-run behaviour: log, remember the note, fall
                 # through to commit any salvaged work, then continue the
                 # loop (next validation will tell us if it's pushable).
-                #
-                # TODO: Future Circuit Breaker / Fallback Hook
-                # If exc.reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED" during a fix pass,
-                # we should implement fallback dispatch logic to attempt the fix with a
-                # different provider rather than proceeding with a likely incomplete salvage.
+                # Initial no-work provider failures are handled by the
+                # post-agent failure path. Fix-pass provider errors keep
+                # the validation salvage flow so review/fix recovery
+                # remains owned by the PR-monitor path.
                 _log.warning(
                     "executor.fix_pass_agent_nonzero_exit",
                     workspace_id=workspace_id,
