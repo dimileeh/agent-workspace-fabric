@@ -53,7 +53,7 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_42b3d10157fd4afbbbba0145` | pending AWF PR | validating | Current retry closes the remaining conformance gaps: discard-and-replan planning retries no longer inherit preserved remote push branch metadata, and the detailed checklist is complete. |
+| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_42b3d10157fd4afbbbba0145` | pending AWF PR | validating | Current retry closes the remaining conformance gaps: discard-and-replan planning retries no longer inherit preserved remote push branch metadata, source plan paths are prior evidence so fresh retries have one authoritative plan artifact, and the detailed checklist is complete. |
 
 ### Reschedule Required Slices
 

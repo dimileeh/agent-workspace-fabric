@@ -17,6 +17,8 @@ from awf.db.session import make_engine, make_session_factory
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
+    build_planning_prompt,
+    render_workspace_path,
 )
 from awf.service.workspaces import WorkspaceRetryNotFoundError, WorkspaceService
 
@@ -443,9 +445,33 @@ async def test_retry_planning_scope_violation_discards_premature_work_and_replan
     assert "Discard the premature implementation from the failed planning attempt" in (
         retried.task_prompt
     )
-    assert "Create or update only `docs/awf-plans/ws_scope_old.md`" in retried.task_prompt
+    assert "Rerun planning against the configured plan artifact" in retried.task_prompt
+    assert "Prior source required plan paths from the failed planning attempt" in (
+        retried.task_prompt
+    )
+    assert "Create or update only `docs/awf-plans/ws_scope_old.md`" not in (
+        retried.task_prompt
+    )
     assert "src/awf/runtime/planning.py" in retried.task_prompt
     assert retried.task_policy.get("agent_model") is None
+    assert isinstance(retried.resolved_profile, dict)
+    planning_profile = retried.resolved_profile.get("planning")
+    assert isinstance(planning_profile, dict)
+    plan_template = planning_profile.get("plan_path")
+    assert isinstance(plan_template, str)
+    retry_plan_path = render_workspace_path(plan_template, workspace_id=retried.id)
+    composed_planning_prompt = build_planning_prompt(
+        task_prompt=retried.task_prompt,
+        plan_path=retry_plan_path,
+    )
+    assert (
+        "Create or update only the configured plan artifact "
+        f"`{retry_plan_path.as_posix()}`" in composed_planning_prompt
+    )
+    assert composed_planning_prompt.count("Create or update only") == 1
+    assert "Create or update only `docs/awf-plans/ws_scope_old.md`" not in (
+        composed_planning_prompt
+    )
 
     assert len(operations) == 1
     operation_payload = operations[0].payload

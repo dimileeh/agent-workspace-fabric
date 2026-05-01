@@ -212,11 +212,39 @@ def test_planning_scope_retry_prompt_discards_premature_implementation() -> None
     )
 
     assert "Discard the premature implementation from the failed planning attempt" in prompt
-    assert "Create or update only `docs/awf-plans/ws_retry.md`" in prompt
+    assert "Rerun planning against the configured plan artifact" in prompt
+    assert "Prior source required plan paths from the failed planning attempt" in prompt
+    assert "- `docs/awf-plans/ws_retry.md`" in prompt
+    assert "Create or update only `docs/awf-plans/ws_retry.md`" not in prompt
     assert "src/awf/runtime/planning.py" in prompt
     assert "tests/unit/test_planning.py" in prompt
     assert "After writing the plan, stop" in prompt
     assert "Add the feature after planning." in prompt
+
+
+@pytest.mark.unit
+def test_composed_planning_scope_retry_prompt_has_one_authoritative_plan_artifact() -> None:
+    retry_task_prompt = build_planning_scope_retry_prompt(
+        task_prompt="Add the feature after planning.",
+        evidence={
+            "required_paths": ["docs/awf-plans/ws_scope_old.md"],
+            "offending_paths": ["src/awf/runtime/planning.py"],
+        },
+    )
+
+    composed_prompt = build_planning_prompt(
+        task_prompt=retry_task_prompt,
+        plan_path=Path("docs/awf-plans/ws_scope_new.md"),
+    )
+
+    assert (
+        "Create or update only the configured plan artifact "
+        "`docs/awf-plans/ws_scope_new.md`" in composed_prompt
+    )
+    assert composed_prompt.count("Create or update only") == 1
+    assert "Create or update only `docs/awf-plans/ws_scope_old.md`" not in composed_prompt
+    assert "Prior source required plan paths from the failed planning attempt" in composed_prompt
+    assert "- `docs/awf-plans/ws_scope_old.md`" in composed_prompt
 
 
 @pytest.mark.unit

@@ -162,7 +162,11 @@ def build_planning_scope_retry_prompt(
 
     required_paths = _evidence_strings(evidence.get("required_paths"))
     offending_paths = _evidence_strings(evidence.get("offending_paths"))
-    required = required_paths[0] if required_paths else "the configured plan artifact"
+    required_lines = (
+        "\n".join(f"- `{path}`" for path in required_paths)
+        if required_paths
+        else "- No prior required plan paths were captured."
+    )
     offending_lines = (
         "\n".join(f"- `{path}`" for path in offending_paths)
         if offending_paths
@@ -172,10 +176,16 @@ def build_planning_scope_retry_prompt(
         "## Retry after planning scope violation\n\n"
         "Discard the premature implementation from the failed planning attempt. Start "
         "from the original task and rerun planning in a clean workspace.\n\n"
-        f"Create or update only `{required}`. Do not edit source, tests, docs, config, "
-        "migrations, lockfiles, or any other file during this retry planning phase. "
-        "Do not run implementation commands such as apply_patch, pytest, ruff, mypy, "
-        "npm, build commands, git add, or git commit. After writing the plan, stop.\n\n"
+        "Rerun planning against the configured plan artifact named by this retry's "
+        "planning-phase instructions. Treat the source required paths below as prior "
+        "evidence from the failed workspace only; they are not authoritative for this "
+        "fresh retry.\n\n"
+        "Do not edit source, tests, docs, config, migrations, lockfiles, or any other "
+        "file during this retry planning phase. Do not run implementation commands "
+        "such as apply_patch, pytest, ruff, mypy, npm, build commands, git add, or "
+        "git commit. After writing the plan, stop.\n\n"
+        "### Prior source required plan paths from the failed planning attempt\n"
+        f"{required_lines}\n\n"
         "### Offending paths from the failed planning attempt\n"
         f"{offending_lines}\n\n"
         "The preserved branch/worktree is available only for explicit operator salvage; "
