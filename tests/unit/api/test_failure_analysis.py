@@ -11,7 +11,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
-from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    PLAN_CONFORMANCE_UNSATISFIED,
+)
 
 
 async def _workspace(
@@ -83,6 +86,54 @@ async def _conformance_failed_workspace(engine: AsyncEngine, *, updated_at: date
                     }
                 },
                 "salvage": {"branch_name": "awf/ws_conformance"},
+            },
+        )
+        workspace.updated_at = updated_at
+        await session.commit()
+        return workspace.id
+
+
+async def _planning_scope_failed_workspace(engine: AsyncEngine, *, updated_at: datetime) -> str:
+    factory = make_session_factory(engine)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.create(
+            repo_url="git@github.com:example/failures-api.git",
+            branch_base="main",
+            task_title="Reject premature planning work",
+            task_prompt="Create the plan only.",
+            agent="codex",
+            test_commands=[],
+        )
+        await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "planning phase changed files outside plan artifact"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+            payload={
+                "details": {
+                    "planning_scope": {
+                        "scope_phase": "planning",
+                        "required_paths": ["docs/awf-plans/ws_scope.md"],
+                        "offending_paths": ["src/awf/runtime/planning.py"],
+                        "offending_commands": [],
+                        "recommended_action": (
+                            "Retry planning from a clean workspace and salvage the "
+                            "preserved branch only after explicit operator approval."
+                        ),
+                        "recovery_strategy": "discard_and_replan",
+                        "salvage_policy": "explicit_salvage_required",
+                    },
+                    "recommended_action": (
+                        "Retry planning from a clean workspace and salvage the preserved "
+                        "branch only after explicit operator approval."
+                    ),
+                    "recovery_strategy": "discard_and_replan",
+                    "salvage_policy": "explicit_salvage_required",
+                },
+                "salvage": {"branch_name": "awf/ws_scope"},
             },
         )
         workspace.updated_at = updated_at
@@ -321,6 +372,39 @@ async def test_failure_summary_endpoint_exposes_conformance_details(
     assert body["latest_examples"][0]["salvage"] == {"branch_name": "awf/ws_conformance"}
     assert body["root_cause_clusters"][0]["reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
     assert body["root_cause_clusters"][0]["likely_cause"] == "Plan Conformance Unsatisfied"
+
+
+@pytest.mark.unit
+async def test_failure_summary_endpoint_exposes_planning_scope_violation(
+    client: AsyncClient,
+    engine: AsyncEngine,
+) -> None:
+    now = datetime.now(UTC)
+    workspace_id = await _planning_scope_failed_workspace(
+        engine,
+        updated_at=now - timedelta(minutes=3),
+    )
+
+    response = await client.get("/v1/metrics/failures/summary")
+
+    assert response.status_code == 200
+    body = response.json()
+    example = next(item for item in body["latest_examples"] if item["workspace_id"] == workspace_id)
+    assert example["reason_code"] == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    assert example["details"]["planning_scope"]["offending_paths"] == [
+        "src/awf/runtime/planning.py"
+    ]
+    assert example["details"]["salvage_policy"] == "explicit_salvage_required"
+    assert example["salvage"] == {"branch_name": "awf/ws_scope"}
+    cluster = next(
+        item for item in body["root_cause_clusters"]
+        if item["reason_code"] == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+    )
+    assert cluster["likely_cause"] == "Planning Scope Violation"
+    assert cluster["actionable_next_action"] == (
+        "Retry planning from a clean workspace; salvage the preserved branch only "
+        "after explicit operator approval."
+    )
 
 
 @pytest.mark.unit

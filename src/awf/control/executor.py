@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import inspect
 import re
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
@@ -80,6 +80,7 @@ from awf.runtime.alembic_validation import (
 )
 from awf.runtime.logs import LogStore
 from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
     PlanConformanceReport,
     build_agent_task_prompt,
@@ -171,6 +172,55 @@ class _PlanningRunFailure:
     message: str
     reason_code: str | None = None
     details: dict[str, Any] | None = None
+
+
+def _build_planning_scope_failure(
+    *,
+    scope_phase: str,
+    required_paths: Sequence[Path],
+    offending_paths: Sequence[Path],
+    summary: str,
+    offending_commands: Sequence[str] = (),
+) -> _PlanningRunFailure:
+    required = [path.as_posix() for path in required_paths]
+    offending = [path.as_posix() for path in sorted(offending_paths)]
+    commands = [command for command in offending_commands if command]
+    recommended_action = (
+        "Retry planning from a clean workspace. Discard the premature implementation "
+        "by default, and salvage the preserved branch only after explicit operator approval."
+    )
+    artifact = required[0] if required else "the configured plan artifact"
+    if offending:
+        message = f"{summary}: {', '.join(offending[:10])}. {recommended_action}"
+    else:
+        message = f"{summary}. {recommended_action}"
+    planning_scope = {
+        "scope_phase": scope_phase,
+        "required_paths": required,
+        "offending_paths": offending,
+        "offending_commands": commands,
+        "recommended_action": recommended_action,
+        "recovery_strategy": "discard_and_replan",
+        "salvage_policy": "explicit_salvage_required",
+        "plan_artifact": artifact,
+    }
+    return _PlanningRunFailure(
+        message=message,
+        reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+        details={
+            "planning_scope": planning_scope,
+            "recommended_action": recommended_action,
+            "recovery_strategy": "discard_and_replan",
+            "salvage_policy": "explicit_salvage_required",
+            # Temporary compatibility for older console code that read `scope`.
+            "scope": {
+                "scope_phase": scope_phase,
+                "required_paths": required,
+                "forbidden_paths": offending,
+                "recommended_action": recommended_action,
+            },
+        },
+    )
 
 
 class _MonitorRebaseRecoveryError(RuntimeError):
@@ -2227,12 +2277,24 @@ class WorkspaceExecutor:
         )
         after_plan = dirty_paths | committed_paths
         if plan_path not in after_plan:
-            return f"planning phase did not create or modify required plan file `{plan_path}`"
+            return _build_planning_scope_failure(
+                scope_phase="planning",
+                required_paths=(plan_path,),
+                offending_paths=sorted(after_plan - before_plan),
+                summary=(
+                    "planning phase did not create or modify required plan file "
+                    f"`{plan_path}`"
+                ),
+            )
         if planning.enforce_plan_only_changes:
             extra = sorted(after_plan - before_plan - {plan_path})
             if extra:
-                changed = ", ".join(path.as_posix() for path in extra[:10])
-                return f"planning phase changed files outside `{plan_path}`: {changed}"
+                return _build_planning_scope_failure(
+                    scope_phase="planning",
+                    required_paths=(plan_path,),
+                    offending_paths=extra,
+                    summary=f"planning phase changed files outside `{plan_path}`",
+                )
 
         gaps: tuple[str, ...] = ()
         last_report: PlanConformanceReport | None = None
@@ -2269,8 +2331,12 @@ class WorkspaceExecutor:
             if planning.fail_on_unexplained_deviation:
                 extra = sorted(after_compare - before_compare - {report_path})
                 if extra:
-                    changed = ", ".join(path.as_posix() for path in extra[:10])
-                    return f"conformance phase changed files outside `{report_path}`: {changed}"
+                    return _build_planning_scope_failure(
+                        scope_phase="conformance",
+                        required_paths=(report_path,),
+                        offending_paths=extra,
+                        summary=f"conformance phase changed files outside `{report_path}`",
+                    )
 
             report_text = (
                 _read_text_if_present(worktree_path / report_path) or compare_result.stdout

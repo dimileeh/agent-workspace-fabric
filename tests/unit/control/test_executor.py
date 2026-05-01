@@ -29,7 +29,10 @@ from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.repositories import WorkspaceEventRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeManager
-from awf.runtime.planning import PLAN_CONFORMANCE_UNSATISFIED
+from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    PLAN_CONFORMANCE_UNSATISFIED,
+)
 from awf.runtime.pr_creator import PullRequestCreator
 from awf.runtime.validation import (
     ValidationCommandResult,
@@ -731,6 +734,32 @@ class TestHappyPath:
             assert ws.status == WorkspaceStatus.failed.value
             assert ws.failure_reason == "agent_failure"
             assert "planning phase changed files outside" in (ws.failure_message or "")
+            failed_event = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            )
+            assert failed_event.reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+            assert failed_event.payload is not None
+            assert failed_event.payload["reason_code"] == AGENT_PLAN_PHASE_SCOPE_VIOLATION
+            scope = failed_event.payload["details"]["planning_scope"]
+            assert scope["scope_phase"] == "planning"
+            assert scope["required_paths"] == [f"docs/awf-plans/{ws_id}.md"]
+            assert scope["offending_paths"] == ["src/awf/oops.py"]
+            assert scope["recovery_strategy"] == "discard_and_replan"
+            assert scope["salvage_policy"] == "explicit_salvage_required"
+            assert failed_event.payload["salvage"] == {
+                "hint": "Workspace worktree and branch were preserved for salvage.",
+                "worktree_path": str(_test_worktrees_root(factory) / ws_id),
+                "branch_name": f"awf/{ws_id}",
+                "remote_push_branch": f"awf/{ws_id}",
+            }
+
+        assert not any("add" in call.args for call in fake.calls)
+        assert not any(call.args[:3] == ["gh", "pr", "create"] for call in fake.calls)
+        assert not any("push" in call.args for call in fake.calls)
+        assert not any(call.args[-1] == "pytest -q" for call in fake.calls)
 
     @pytest.mark.unit
     async def test_records_all_expected_transitions(

@@ -410,15 +410,31 @@ class WorkspaceFailureSalvageResponse(BaseModel):
     remote_push_branch: str | None = None
 
 
+class WorkspaceFailurePlanningScopeResponse(BaseModel):
+    scope_phase: str | None = None
+    required_paths: list[str] = Field(default_factory=list)
+    offending_paths: list[str] = Field(default_factory=list)
+    offending_commands: list[str] = Field(default_factory=list)
+    recommended_action: str | None = None
+    recovery_strategy: str | None = None
+    salvage_policy: str | None = None
+    plan_artifact: str | None = None
+    fallback_model: dict[str, Any] | None = None
+
+
 class WorkspaceFailureDetailsResponse(BaseModel):
     reason_code: str | None = None
     message: str | None = None
     conformance: WorkspaceFailureConformanceResponse | None = None
     salvage: WorkspaceFailureSalvageResponse | None = None
+    planning_scope: WorkspaceFailurePlanningScopeResponse | None = None
     provider: str | None = None
     model: str | None = None
     retryable: bool | None = None
     recommended_action: str | None = None
+    recovery_strategy: str | None = None
+    salvage_policy: str | None = None
+    fallback_model: dict[str, Any] | None = None
 
 
 class CoordinationOverlapResponse(BaseModel):

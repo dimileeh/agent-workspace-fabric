@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import builtins
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
@@ -55,8 +55,10 @@ from awf.profiles.resolver import resolve_workspace_profile
 from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.runtime.logs import read_log_chunk
 from awf.runtime.planning import (
+    AGENT_PLAN_PHASE_SCOPE_VIOLATION,
     PLAN_CONFORMANCE_UNSATISFIED,
     build_conformance_retry_prompt,
+    build_planning_scope_retry_prompt,
 )
 from awf.service.controls import (
     CleanerFactory,
@@ -111,6 +113,9 @@ RESOURCE_RESERVATION_PHASE_WORKSPACE = "workspace_lifecycle"
 RETRYABLE_WORKSPACE_STATUSES = (
     WorkspaceStatus.failed,
     WorkspaceStatus.cancelled,
+)
+PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS = frozenset(
+    {"monitor_release_pr", "sync_release_pr", "sync_feature_pr"}
 )
 
 
@@ -198,6 +203,17 @@ class _ConformanceRetryContext:
     reason_code: str
     evidence: Mapping[str, Any]
     evidence_ref: dict[str, str]
+
+
+@dataclass(frozen=True)
+class _PlanningScopeRetryContext:
+    reason_code: str
+    evidence: Mapping[str, Any]
+    evidence_ref: dict[str, str]
+    recovery_strategy: str
+    salvage_policy: str
+    salvage: dict[str, str] | None = None
+    fallback_model: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -692,15 +708,22 @@ async def retry_workspace_row(
     if WorkspaceStatus(source.status) not in RETRYABLE_WORKSPACE_STATUSES:
         raise WorkspaceRetryNotAllowedError(source)
 
-    conformance_context = _conformance_retry_context(source)
-    retried_prompt = (
-        build_conformance_retry_prompt(
+    planning_scope_context = _planning_scope_retry_context(source)
+    conformance_context = (
+        None if planning_scope_context is not None else _conformance_retry_context(source)
+    )
+    if planning_scope_context is not None:
+        retried_prompt = build_planning_scope_retry_prompt(
+            task_prompt=source.task_prompt,
+            evidence=planning_scope_context.evidence,
+        )
+    elif conformance_context is not None:
+        retried_prompt = build_conformance_retry_prompt(
             task_prompt=source.task_prompt,
             evidence=conformance_context.evidence,
         )
-        if conformance_context is not None
-        else source.task_prompt
-    )
+    else:
+        retried_prompt = source.task_prompt
 
     overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=source.repo_url,
@@ -716,9 +739,10 @@ async def retry_workspace_row(
         task_external_id=source.task_external_id,
         task_class=source.task_class,
         owned_paths=list(source.owned_paths),
-        task_policy=task_policy_with_coordination_warnings(
-            deepcopy(source.task_policy),
+        task_policy=_retry_task_policy(
+            source,
             owned_path_overlap_coordination_warnings(overlaps),
+            planning_scope_context=planning_scope_context,
         ),
         auto_merge=source.auto_merge,
         initial_review_grace_period_seconds=(
@@ -733,7 +757,12 @@ async def retry_workspace_row(
         requires_database=source.requires_database,
         idempotency_key=None,
         task_kind=source.task_kind,
-        remote_push_branch=source.remote_push_branch,
+        remote_push_branch=(
+            source.remote_push_branch
+            if planning_scope_context is None
+            or source.task_kind in PRESERVE_RETRY_REMOTE_PUSH_BRANCH_TASK_KINDS
+            else None
+        ),
     )
 
     attempt_repo = TaskAttemptRepository(session)
@@ -753,6 +782,8 @@ async def retry_workspace_row(
         operation_payload["conformance_evidence_ref"] = (
             conformance_context.evidence_ref
         )
+    if planning_scope_context is not None:
+        operation_payload.update(_planning_scope_recovery_payload(planning_scope_context))
     operation = await operation_repo.create(
         workspace_id=retried.id,
         operation_type=OperationType.retry,
@@ -767,6 +798,8 @@ async def retry_workspace_row(
     if conformance_context is not None:
         event_payload["source_reason_code"] = conformance_context.reason_code
         event_payload["conformance_evidence_ref"] = conformance_context.evidence_ref
+    if planning_scope_context is not None:
+        event_payload.update(_planning_scope_recovery_payload(planning_scope_context))
     await repo.add_event(
         source,
         event_type="workspace.retry_requested",
@@ -795,6 +828,11 @@ async def retry_workspace_row(
             }
             if conformance_context is not None
             else {}
+        )
+        | (
+            _planning_scope_recovery_payload(planning_scope_context)
+            if planning_scope_context is not None
+            else {}
         ),
     )
     await session.flush()
@@ -804,6 +842,40 @@ async def retry_workspace_row(
         operation=operation,
         attempt_number=attempt.attempt_number,
     )
+
+
+def _retry_task_policy(
+    source: Workspace,
+    coordination_warnings: Sequence[Mapping[str, Any]],
+    *,
+    planning_scope_context: _PlanningScopeRetryContext | None,
+) -> dict[str, Any]:
+    policy = task_policy_with_coordination_warnings(
+        deepcopy(source.task_policy),
+        coordination_warnings,
+    )
+    if (
+        planning_scope_context is not None
+        and planning_scope_context.fallback_model is not None
+    ):
+        policy["agent_model"] = planning_scope_context.fallback_model["model"]
+    return policy
+
+
+def _planning_scope_recovery_payload(
+    context: _PlanningScopeRetryContext,
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "source_reason_code": context.reason_code,
+        "planning_scope_evidence_ref": context.evidence_ref,
+        "recovery_strategy": context.recovery_strategy,
+        "salvage_policy": context.salvage_policy,
+    }
+    if context.salvage is not None:
+        payload["salvage"] = context.salvage
+    if context.fallback_model is not None:
+        payload["fallback_model"] = context.fallback_model
+    return payload
 
 
 async def _retry_task_for_source(
@@ -991,19 +1063,59 @@ def workspace_failure_details_payload(workspace: Workspace) -> dict[str, Any] | 
     if not isinstance(conformance, Mapping):
         conformance = payload.get("conformance")
     salvage = payload.get("salvage")
+    planning_scope = details.get("planning_scope")
+    if not isinstance(planning_scope, Mapping):
+        legacy_scope = details.get("scope")
+        if isinstance(legacy_scope, Mapping):
+            planning_scope = legacy_scope
+        elif reason_code == AGENT_PLAN_PHASE_SCOPE_VIOLATION:
+            planning_scope = {
+                key: details[key]
+                for key in (
+                    "scope_phase",
+                    "required_paths",
+                    "offending_paths",
+                    "offending_commands",
+                    "recommended_action",
+                    "recovery_strategy",
+                    "salvage_policy",
+                    "fallback_model",
+                    "plan_artifact",
+                )
+                if key in details
+            }
 
     result: dict[str, Any] = {
         "reason_code": reason_code,
         "message": message,
     }
 
-    for field in ("provider", "model", "retryable", "recommended_action"):
+    for field in (
+        "provider",
+        "model",
+        "retryable",
+        "recommended_action",
+        "recovery_strategy",
+        "salvage_policy",
+        "fallback_model",
+    ):
         if field in details:
             result[field] = details[field]
 
     conformance_payload = _compact_conformance_payload(conformance)
     if conformance_payload is not None:
         result["conformance"] = conformance_payload
+    planning_scope_payload = _compact_planning_scope_payload(planning_scope)
+    if planning_scope_payload is not None:
+        result["planning_scope"] = planning_scope_payload
+        for field in (
+            "recommended_action",
+            "recovery_strategy",
+            "salvage_policy",
+            "fallback_model",
+        ):
+            if field in planning_scope_payload and field not in result:
+                result[field] = planning_scope_payload[field]
     salvage_payload = _compact_salvage_payload(salvage)
     if salvage_payload is not None:
         result["salvage"] = salvage_payload
@@ -1046,6 +1158,53 @@ def _compact_conformance_payload(value: object) -> dict[str, Any] | None:
     return payload or None
 
 
+def _compact_planning_scope_payload(value: object) -> dict[str, Any] | None:
+    if not isinstance(value, Mapping):
+        return None
+    payload: dict[str, Any] = {}
+    for key in (
+        "scope_phase",
+        "recommended_action",
+        "recovery_strategy",
+        "salvage_policy",
+        "plan_artifact",
+    ):
+        item = value.get(key)
+        if isinstance(item, str) and item:
+            payload[key] = item
+    for key in ("required_paths", "offending_paths", "offending_commands"):
+        items = _compact_string_list(value.get(key))
+        if items:
+            payload[key] = items
+    if "offending_paths" not in payload:
+        forbidden = _compact_string_list(value.get("forbidden_paths"))
+        if forbidden:
+            payload["offending_paths"] = forbidden
+    fallback_model = _compact_fallback_model(value.get("fallback_model"))
+    if fallback_model is not None:
+        payload["fallback_model"] = fallback_model
+    return payload or None
+
+
+def _compact_string_list(value: object) -> list[str]:
+    if not isinstance(value, list):
+        return []
+    return [item for item in value if isinstance(item, str) and item]
+
+
+def _compact_fallback_model(value: object) -> dict[str, str] | None:
+    if not isinstance(value, Mapping):
+        return None
+    model = value.get("model")
+    source = value.get("source")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    payload = {"model": model.strip()}
+    if isinstance(source, str) and source.strip():
+        payload["source"] = source.strip()
+    return payload
+
+
 def _compact_salvage_payload(value: object) -> dict[str, str] | None:
     if not isinstance(value, Mapping):
         return None
@@ -1078,6 +1237,62 @@ def _conformance_retry_context(workspace: Workspace) -> _ConformanceRetryContext
             "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
         },
     )
+
+
+def _planning_scope_retry_context(workspace: Workspace) -> _PlanningScopeRetryContext | None:
+    details = workspace_failure_details_payload(workspace)
+    if details is None or details.get("reason_code") != AGENT_PLAN_PHASE_SCOPE_VIOLATION:
+        return None
+    evidence = details.get("planning_scope")
+    if not isinstance(evidence, Mapping):
+        return None
+    recovery_strategy_value = details.get("recovery_strategy")
+    recovery_strategy = (
+        recovery_strategy_value
+        if isinstance(recovery_strategy_value, str)
+        else "discard_and_replan"
+    )
+    salvage_policy_value = details.get("salvage_policy")
+    salvage_policy = (
+        salvage_policy_value
+        if isinstance(salvage_policy_value, str)
+        else "explicit_salvage_required"
+    )
+    fallback_model = _approved_planning_scope_fallback_model(workspace)
+    evidence_payload = dict(evidence)
+    if fallback_model is not None:
+        evidence_payload["fallback_model"] = fallback_model
+    return _PlanningScopeRetryContext(
+        reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+        evidence=evidence_payload,
+        evidence_ref={
+            "source_workspace_id": workspace.id,
+            "event_type": "workspace.state_changed",
+            "reason_code": AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+        },
+        recovery_strategy=recovery_strategy,
+        salvage_policy=salvage_policy,
+        salvage=_compact_salvage_payload(details.get("salvage")),
+        fallback_model=fallback_model,
+    )
+
+
+def _approved_planning_scope_fallback_model(
+    workspace: Workspace,
+) -> dict[str, str] | None:
+    task_policy = getattr(workspace, "task_policy", None)
+    if not isinstance(task_policy, Mapping):
+        return None
+    recovery_policy = task_policy.get("planning_scope_recovery")
+    if not isinstance(recovery_policy, Mapping):
+        return None
+    model = recovery_policy.get("approved_fallback_model")
+    if not isinstance(model, str) or not model.strip():
+        return None
+    return {
+        "model": model.strip(),
+        "source": "task_policy.planning_scope_recovery.approved_fallback_model",
+    }
 
 
 def _workspace_runtime_health_from_events(
