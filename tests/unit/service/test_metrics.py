@@ -711,6 +711,100 @@ async def test_resource_saturation_exposes_open_provider_circuit_breakers(
 
 
 @pytest.mark.unit
+async def test_resource_saturation_provider_recovery_aggregates_via_sql(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import (
+        PROVIDER_RECOVERY_NO_LOOP_REASON,
+        PROVIDER_RECOVERY_STATE_KEY,
+    )
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: {"action": "retry"}},
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": (now + timedelta(hours=1)).isoformat(),
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": (now - timedelta(hours=1)).isoformat(),
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {"action": "fallback"},
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+                "source_reason_code": PROVIDER_RECOVERY_NO_LOOP_REASON,
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+                "source_reason_code": "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: {"action": "retry"}},
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    prs = summary.provider_recovery_state_summary
+    assert prs.pending_retry == 2
+    assert prs.pending_fallback == 1
+    assert prs.in_cooldown == 1
+    assert prs.terminal_no_loop == 1
+    assert prs.terminal_exhausted == 1
+    assert prs.circuit_breakers_open == 0
+
+
+@pytest.mark.unit
 async def test_resource_saturation_includes_orphan_resource_summary(
     session_factory: async_sessionmaker[AsyncSession],
     tmp_path,

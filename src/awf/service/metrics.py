@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
@@ -1031,50 +1031,81 @@ async def _provider_recovery_state_summary(
     circuit_breakers_open: int,
     now: datetime,
 ) -> ProviderRecoveryStateSummary:
-    stmt = select(Workspace.id, Workspace.task_policy).where(
-        ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES),
-    )
-    rows = (await session.execute(stmt)).all()
-    pending_retry = 0
-    pending_fallback = 0
-    in_cooldown = 0
-    terminal_no_loop = 0
-    terminal_exhausted = 0
-    for row in rows:
-        task_policy = row.task_policy if isinstance(row.task_policy, dict) else {}
-        recovery_state = task_policy.get(PROVIDER_RECOVERY_STATE_KEY)
-        if not isinstance(recovery_state, dict):
-            continue
-        action = recovery_state.get("action")
-        if action == "retry":
-            not_before_str = recovery_state.get("not_before")
-            if not_before_str is not None:
-                try:
-                    not_before_dt = datetime.fromisoformat(not_before_str)
-                    if not_before_dt.tzinfo is None:
-                        not_before_dt = not_before_dt.replace(tzinfo=UTC)
-                    if not_before_dt > now:
-                        in_cooldown += 1
-                    else:
-                        pending_retry += 1
-                except ValueError:
-                    pending_retry += 1
-            else:
-                pending_retry += 1
-        elif action == "fallback":
-            pending_fallback += 1
-        elif action == "terminal":
-            source_reason = recovery_state.get("source_reason_code", "")
-            if source_reason == PROVIDER_RECOVERY_NO_LOOP_REASON:
-                terminal_no_loop += 1
-            else:
-                terminal_exhausted += 1
+    action = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["action"].as_string()
+    source_reason = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY][
+        "source_reason_code"
+    ].as_string()
+    not_before = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY][
+        "not_before"
+    ].as_string()
+    now_iso = now.isoformat()
+
+    stmt = select(
+        func.coalesce(
+            func.sum(
+                case((and_(action == "retry", not_before.is_(None)), 1), else_=0)
+            ),
+            0,
+        ).label("pending_retry_no_not_before"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (and_(action == "retry", not_before.isnot(None), not_before <= now_iso), 1),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("pending_retry_with_not_before"),
+        func.coalesce(
+            func.sum(case((action == "fallback", 1), else_=0)), 0
+        ).label("pending_fallback"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (and_(action == "retry", not_before.isnot(None), not_before > now_iso), 1),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("in_cooldown"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        and_(
+                            action == "terminal",
+                            source_reason == PROVIDER_RECOVERY_NO_LOOP_REASON,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("terminal_no_loop"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        and_(
+                            action == "terminal",
+                            source_reason != PROVIDER_RECOVERY_NO_LOOP_REASON,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("terminal_exhausted"),
+    ).where(~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES))
+    row = (await session.execute(stmt)).one()
     return ProviderRecoveryStateSummary(
-        pending_retry=pending_retry,
-        pending_fallback=pending_fallback,
-        in_cooldown=in_cooldown,
-        terminal_no_loop=terminal_no_loop,
-        terminal_exhausted=terminal_exhausted,
+        pending_retry=int(row.pending_retry_no_not_before + row.pending_retry_with_not_before),
+        pending_fallback=int(row.pending_fallback),
+        in_cooldown=int(row.in_cooldown),
+        terminal_no_loop=int(row.terminal_no_loop),
+        terminal_exhausted=int(row.terminal_exhausted),
         circuit_breakers_open=circuit_breakers_open,
     )
 
