@@ -651,7 +651,7 @@ def _source_lineage_payload(
     source_workspace_id: str,
     source_attempt: TaskAttempt | None,
     source_canonical_attempt: TaskAttempt | None,
-) -> dict[str, str]:
+) -> dict[str, Any]:
     payload = {"source_workspace_id": source_workspace_id}
     if source_attempt is not None:
         payload["source_attempt_id"] = source_attempt.id
