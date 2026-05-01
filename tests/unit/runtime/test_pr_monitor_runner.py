@@ -1111,7 +1111,7 @@ async def test_sync_base_provider_failure_records_recovery_and_source_cooldown(
         worktrees_root=tmp_path / "worktrees",
     )
 
-    with pytest.raises(ProviderRecoveryFallbackError):
+    with pytest.raises(ProviderRecoveryRetryError):
         await runner._run_sync_base(
             workspace_id=workspace_id,
             repo=RepoRef(owner="dimileeh", name="aira-web"),
