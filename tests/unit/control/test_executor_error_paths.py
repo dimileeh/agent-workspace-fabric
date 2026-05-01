@@ -692,16 +692,25 @@ class TestUnexpectedErrorDuringAgentRun:
             AgentRuntime.gemini,
             _StderrClassifyingGeminiAdapter,
         )
+        task_policy = _provider_recovery_policy(max_same_provider_retries=1)
+        retry_after_seconds = 45
+        expected_retry_delay = timedelta(seconds=retry_after_seconds)
+        assert task_policy["provider_recovery"]["cooldown_seconds"] < retry_after_seconds
+        assert task_policy["provider_recovery"]["backoff_seconds"] < retry_after_seconds
+
         ws_id = await _seed_ready(
             factory,
             agent="gemini",
-            task_policy=_provider_recovery_policy(max_same_provider_retries=1),
+            task_policy=task_policy,
             create_task_attempt=True,
         )
         before = datetime.now(UTC)
         fake.queue_result(
             returncode=1,
-            stderr="RESOURCE_EXHAUSTED RetryableQuotaError Retry-After: 45",
+            stderr=(
+                "RESOURCE_EXHAUSTED RetryableQuotaError "
+                f"Retry-After: {retry_after_seconds}"
+            ),
         )
         fake.queue_result(returncode=0, stdout="awf/x\n")
         fake.queue_result(returncode=0)
@@ -743,12 +752,11 @@ class TestUnexpectedErrorDuringAgentRun:
         assert state["target_model"] == "gemini-2.5-pro"
         assert state["retry_attempt_number"] == 1
         assert state["fallback_attempt_number"] == 0
-        assert not_before >= before
-        assert not_before <= after + timedelta(seconds=60)
+        assert before + expected_retry_delay <= not_before <= after + expected_retry_delay
         recovery_payload = event.payload["provider_recovery"]
         assert recovery_payload["action"] == "retry"
         assert recovery_payload["decision_reason_code"] == "PROVIDER_RETRY_DELAYED"
-        assert recovery_payload["retry_after_seconds"] == 45
+        assert recovery_payload["retry_after_seconds"] == retry_after_seconds
         assert "not_before" in recovery_payload
 
     @pytest.mark.unit
