@@ -2411,6 +2411,17 @@ class WorkspaceExecutor:
                 )
             )
 
+            # Honour conformance success before stall classification so a
+            # slow-but-satisfied iteration is not misread as over_duration.
+            if compare_error is None and report.satisfied:
+                _log.info(
+                    "executor.planning_conformance_satisfied",
+                    workspace_id=workspace.id,
+                    iteration=iteration,
+                    summary=report.summary,
+                )
+                return None
+
             stall = classify_conformance_stall(
                 history=iteration_history,
                 policy=stall_policy,
@@ -2436,14 +2447,6 @@ class WorkspaceExecutor:
                 # bubble up so the outer agent_failure handler captures it.
                 raise compare_error
 
-            if report.satisfied:
-                _log.info(
-                    "executor.planning_conformance_satisfied",
-                    workspace_id=workspace.id,
-                    iteration=iteration,
-                    summary=report.summary,
-                )
-                return None
             gaps = report.gaps or (report.summary,)
             _log.info(
                 "executor.planning_conformance_needs_iteration",
