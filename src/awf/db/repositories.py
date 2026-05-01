@@ -2743,6 +2743,8 @@ def sync_candidate_readiness(
         candidate.waiting_for_monitor = False
         candidate.manual_merge_required = False
         candidate.failed_or_cancelled = False
+        candidate.stale = False
+        candidate.stale_reason = None
 
 
 def _initial_scope_stale_reason(workspace: Workspace) -> str | None:

@@ -748,8 +748,34 @@ def _is_awf_status_issue_comment(body: str) -> bool:
         "awf did not auto-merge because" in lower
         or "all 5 awf gates are green" in lower
         or "after the blocker is cleared or a new commit lands, awf will re-verify" in lower
-        or lower.startswith("fixed in commit ")
+        or _is_awf_resolution_issue_comment(lower)
+    )
+
+
+def _is_awf_resolution_issue_comment(lower_normalized_body: str) -> bool:
+    """True when a top-level issue comment is AWF's resolution bookkeeping.
+
+    PR #159 exposed a stale human-defer loop: the monitor treated owner
+    comments like ``FALSE POSITIVE on comment ...`` and ``confirmed
+    resolved`` as fresh human review feedback. These comments close prior
+    review work; they are not new merge blockers.
+    """
+
+    lower = lower_normalized_body
+    return (
+        lower.startswith("fixed in commit ")
         or lower.startswith("false positive:")
+        or lower.startswith("false positive on ")
+        or lower.startswith("false positive for ")
+        or (
+            lower.startswith("review-level comment ")
+            and " confirmed resolved" in lower
+            and "commit " in lower
+        )
+        or (
+            lower.startswith(("no further action required", "no action required"))
+            and ("already fixed" in lower or "already resolved" in lower or "commit " in lower)
+        )
         or lower.startswith("defer:")
     )
 

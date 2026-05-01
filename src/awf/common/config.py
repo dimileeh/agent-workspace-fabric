@@ -11,9 +11,9 @@ rather than mutating a global object.
 from __future__ import annotations
 
 from functools import lru_cache
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
@@ -186,6 +186,18 @@ class Settings(BaseSettings):
             "pressure reporting. When unset, DinD availability is reported as unknown."
         ),
     )
+
+    @field_validator(
+        "local_capacity_cpu_cores",
+        "local_capacity_memory_gb",
+        "local_capacity_dind_slots",
+        mode="before",
+    )
+    @classmethod
+    def _empty_local_capacity_values_are_unset(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
 
 
 @lru_cache(maxsize=1)

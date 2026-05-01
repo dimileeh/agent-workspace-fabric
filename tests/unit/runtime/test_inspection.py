@@ -223,6 +223,15 @@ def test_runtime_helper_fallbacks() -> None:
     )
     assert inspection._service_name({"ID": "abc123"}, {"Config": {"Labels": []}}) == "abc123"
     assert inspection._service_name({}, {}) == "unknown"
+    assert (
+        inspection._command_from({}, {"Config": {"Cmd": ["sleep", "infinity"]}})
+        == "sleep infinity"
+    )
+    assert (
+        inspection._command_from({"Command": "echo hi"}, {"Config": {"Cmd": ["sleep"]}})
+        == "echo hi"
+    )
+    assert inspection._command_from({}, {"Config": {"Cmd": None}}) is None
     assert inspection._state_from({"State": "Exited"}, {}) == "exited"
     assert inspection._state_from({}, {}) == "unknown"
     assert inspection._ports_from({"Ports": ""}) == []

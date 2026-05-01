@@ -67,6 +67,21 @@ def test_planning_max_iterations_default_flows_from_environment(
 
 
 @pytest.mark.unit
+def test_empty_local_capacity_environment_values_are_treated_as_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWF_LOCAL_CAPACITY_CPU_CORES", "")
+    monkeypatch.setenv("AWF_LOCAL_CAPACITY_MEMORY_GB", "")
+    monkeypatch.setenv("AWF_LOCAL_CAPACITY_DIND_SLOTS", "")
+
+    settings = Settings(_env_file=None)
+
+    assert settings.local_capacity_cpu_cores is None
+    assert settings.local_capacity_memory_gb is None
+    assert settings.local_capacity_dind_slots is None
+
+
+@pytest.mark.unit
 def test_min_free_disk_threshold_defaults_to_conservative_10_gib_payload() -> None:
     settings = resolve_service_settings(Settings(_env_file=None), environ={})
     payload = service_config_payload(settings)

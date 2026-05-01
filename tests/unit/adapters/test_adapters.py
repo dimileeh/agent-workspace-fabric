@@ -559,6 +559,34 @@ class TestClaudeCodeAdapter:
         }
 
     @pytest.mark.unit
+    async def test_codex_usage_limit_gets_structured_capacity_reason_code(self) -> None:
+        runner = FakeCommandRunner()
+        runner.queue_result(
+            returncode=1,
+            stderr=(
+                "ERROR: You've hit your usage limit for GPT-5.3-Codex-Spark. "
+                "Switch to another model now, or try again at 10:29 PM."
+            ),
+        )
+        adapter = CodexAdapter(runner=runner)
+
+        with pytest.raises(AgentRunError) as exc:
+            await adapter.run(
+                compose_project=_COMPOSE_PROJECT,
+                compose_file=_COMPOSE_FILE,
+                prompt=_PROMPT,
+                model="gpt-5.3-codex-spark",
+            )
+
+        assert exc.value.reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+        assert exc.value.details == {
+            "provider": "openai",
+            "model": "gpt-5.3-codex-spark",
+            "retryable": True,
+            "recommended_action": "Retry the workspace later or fallback to a different provider.",
+        }
+
+    @pytest.mark.unit
     def test_effort_mapper_preserves_non_top_effort_values(self) -> None:
         assert _claude_effort_for_awf_effort("low") == "low"
 

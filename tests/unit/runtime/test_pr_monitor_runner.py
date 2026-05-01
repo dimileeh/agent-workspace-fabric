@@ -30,6 +30,7 @@ from awf.db.repositories import (
     StaleReasonCreate,
     StaleReasonRepository,
     TaskAttemptRepository,
+    ValidationRunRepository,
     WorkspaceRepository,
 )
 from awf.db.session import make_engine, make_session_factory
@@ -508,6 +509,135 @@ async def test_auto_merge_dispatches_active_stale_recovery_before_merge(
     assert len(state_events) == 1
     assert state_events[0].old_state == WorkspaceStatus.monitoring_pr.value
     assert state_events[0].new_state == WorkspaceStatus.ready.value
+
+
+@pytest.mark.unit
+async def test_auto_merge_clears_docs_scope_stale_after_current_head_validation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    pr_number = 161
+    stale_head_sha = "8" * 40
+    current_head_sha = "c" * 40
+    cmd = FakeCommandRunner()
+    cmd.queue_result(returncode=0)  # gh pr merge
+    cmd.queue_result(returncode=0, stdout="MERGESHA\n")  # merge commit lookup
+    workspace_id = await seed_monitoring_workspace(
+        factory,
+        pr_number=pr_number,
+        head_sha=stale_head_sha,
+    )
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+        candidate = await MergeCandidateRepository(
+            session
+        ).get_open_for_workspace_with_merge_inputs(workspace_id)
+        assert workspace is not None
+        assert attempt is not None
+        assert candidate is not None
+        workspace.task_class = TaskClass.docs_task.value
+        workspace.owned_paths = [
+            "src/awf/cli/**",
+            "src/awf/profiles/onboarding.py",
+            "src/awf/profiles/templates/**",
+            "docs/PROJECT_ONBOARDING.md",
+            "README.md",
+            "tests/unit/cli/**",
+            "tests/unit/profiles/**",
+            "docs/awf-plans/**",
+        ]
+        candidate.stale = True
+        candidate.stale_reason = "docs_task_scope_violation"
+        await StaleReasonRepository(session).replace_active_findings(
+            workspace_id=workspace.id,
+            candidate_id=candidate.id,
+            attempt_id=candidate.attempt_id,
+            task_id=candidate.task_id,
+            findings=[
+                StaleReasonCreate(
+                    reason_code="docs_task_scope_violation",
+                    trigger_type="task_scope",
+                    trigger_ref="docs_task",
+                    explanation="Changed files are outside the docs task scope.",
+                )
+            ],
+        )
+        validation_repo = ValidationRunRepository(session)
+        validation_run = await validation_repo.start(
+            workspace_id=workspace.id,
+            attempt_id=attempt.id,
+            tier=1,
+            commands=[],
+            base_commit=workspace.base_commit,
+            base_sha=workspace.base_commit,
+            target_branch=workspace.remote_push_branch,
+            target_head_sha=None,
+            workspace_head_sha=current_head_sha,
+            log_stream_refs={},
+        )
+        await validation_repo.finish(
+            validation_run.id,
+            status="succeeded",
+            reason_code="VALIDATION_OK",
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=cmd,
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+        initial_review_grace_period_seconds=0,
+    )
+
+    terminal = await runner._execute(
+        action=Merge(),
+        workspace_id=workspace_id,
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=pr_number,
+        status=_green_status(pr_number=pr_number, head_sha=current_head_sha),
+        state=MonitorState(started_at=0.0),
+        base_branch="development",
+        remote_branch=f"awf/{workspace_id}",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        monitor_log=None,
+    )
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
+        assert attempt is not None
+        candidate = await MergeCandidateRepository(session).get_by_attempt_id(attempt.id)
+        assert candidate is not None
+        stale_reasons = await StaleReasonRepository(session).list_for_candidate(
+            candidate.id
+        )
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+
+    assert terminal is True
+    merge_calls = _gh_pr_merge_calls(cmd)
+    assert len(merge_calls) == 1
+    assert merge_calls[0][:4] == ["gh", "pr", "merge", str(pr_number)]
+    assert workspace is not None
+    assert workspace.status == WorkspaceStatus.completed.value
+    assert workspace.pr_merge_sha == "MERGESHA"
+    assert candidate.status == "merged"
+    assert candidate.head_sha == current_head_sha
+    assert candidate.stale is False
+    assert candidate.stale_reason is None
+    assert [(reason.reason_code, reason.status) for reason in stale_reasons] == [
+        ("docs_task_scope_violation", "resolved")
+    ]
+    assert not any(
+        op.type == "validate"
+        and op.status == OperationStatus.pending.value
+        and op.payload.get("reason_code") == "DOCS_TASK_SCOPE_VIOLATION"
+        for op in operations
+    )
 
 
 @pytest.mark.unit

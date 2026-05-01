@@ -69,6 +69,9 @@ _CAPACITY_EXHAUSTED_MARKERS = (
     " 429 ",
     "rate limit",
     "quota exhausted",
+    "usage limit",
+    "hit your usage limit",
+    "switch to another model",
 )
 
 

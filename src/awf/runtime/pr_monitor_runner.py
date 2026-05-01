@@ -34,6 +34,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Protocol
 
+from sqlalchemy import inspect
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.base import AgentAdapter, AgentRunError
@@ -1261,7 +1262,10 @@ class PullRequestMonitorRunner:
             return False
 
         if isinstance(action, Merge):
-            merge_gate = await self._merge_gate_for_workspace(workspace_id)
+            merge_gate = await self._merge_gate_for_workspace(
+                workspace_id,
+                current_head_sha=status.head_sha,
+            )
             handled = await self._handle_merge_gate_blocker(
                 gate=merge_gate,
                 workspace_id=workspace_id,
@@ -1307,6 +1311,7 @@ class PullRequestMonitorRunner:
             merge_gate = await self._merge_gate_for_workspace(
                 workspace_id,
                 check_policy=True,
+                current_head_sha=status.head_sha,
             )
             handled = await self._handle_merge_gate_blocker(
                 gate=merge_gate,
@@ -1469,6 +1474,7 @@ class PullRequestMonitorRunner:
                         merge_gate_after_lock = await self._merge_gate_for_workspace(
                             workspace_id,
                             check_policy=True,
+                            current_head_sha=merge_status.head_sha,
                         )
                     if (
                         not queue_blockers_after_lock
@@ -1803,6 +1809,7 @@ class PullRequestMonitorRunner:
         workspace_id: str,
         *,
         check_policy: bool = False,
+        current_head_sha: str | None = None,
     ) -> _MergeGateResult:
         from awf.db.repositories import (
             MergeCandidateRepository,
@@ -1812,6 +1819,7 @@ class PullRequestMonitorRunner:
             sync_candidate_readiness,
         )
         from awf.runtime.merge_eligibility import (
+            DOCS_TASK_SCOPE_VIOLATION_STALE_REASON,
             VALIDATION_INSUFFICIENT_TIER_STALE_REASON,
             compute_stale_reason_for_attempt,
             stale_reason_blocks_merge,
@@ -1857,8 +1865,31 @@ class PullRequestMonitorRunner:
                 and persisted_stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
             ):
                 persisted_stale_reason = None
+            docs_scope_validated_current_head = (
+                validation_reason is None
+                and persisted_stale_reason == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
+                and _has_successful_validation_for_pr_head(
+                    ws,
+                    attempt_id=candidate.attempt_id,
+                    current_head_sha=current_head_sha,
+                )
+            )
+            if docs_scope_validated_current_head:
+                persisted_stale_reason = None
+                if current_head_sha is not None:
+                    candidate.head_sha = current_head_sha
+                for reason in active_stale_reasons:
+                    if reason.reason_code == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON:
+                        reason.status = "resolved"
+                        reason.resolved_at = datetime.now(UTC)
             blocking_stale_reasons = [
-                reason for reason in active_stale_reasons if reason.blocks_merge
+                reason
+                for reason in active_stale_reasons
+                if reason.blocks_merge
+                and not (
+                    docs_scope_validated_current_head
+                    and reason.reason_code == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
+                )
             ]
             active_stale_reason = (
                 blocking_stale_reasons[0].reason_code if blocking_stale_reasons else None
@@ -1892,9 +1923,16 @@ class PullRequestMonitorRunner:
             elif active_stale_reason is not None:
                 candidate.stale = True
                 candidate.stale_reason = active_stale_reason
-            elif candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON or (
-                candidate.stale_reason is not None
-                and not stale_reason_blocks_merge(candidate.stale_reason)
+            elif (
+                candidate.stale_reason == VALIDATION_INSUFFICIENT_TIER_STALE_REASON
+                or (
+                    docs_scope_validated_current_head
+                    and candidate.stale_reason == DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
+                )
+                or (
+                    candidate.stale_reason is not None
+                    and not stale_reason_blocks_merge(candidate.stale_reason)
+                )
             ):
                 candidate.stale = False
                 candidate.stale_reason = None
@@ -3967,6 +4005,28 @@ def _normalize_non_check_reviewer_identity(value: object) -> str:
 
 def _merge_gate_blocks(gate: _MergeGateResult) -> bool:
     return gate.stale_reason is not None or gate.notify_message is not None
+
+
+def _has_successful_validation_for_pr_head(
+    workspace: Workspace,
+    *,
+    attempt_id: str,
+    current_head_sha: str | None,
+) -> bool:
+    if current_head_sha is None:
+        return False
+    state = inspect(workspace)
+    validation_runs = (
+        workspace.validation_runs if "validation_runs" not in state.unloaded else ()
+    )
+    for run in validation_runs:
+        if run.attempt_id != attempt_id:
+            continue
+        if run.status != "succeeded":
+            continue
+        if run.workspace_head_sha == current_head_sha:
+            return True
+    return False
 
 
 def _candidate_stale_required_action(reason: str | None) -> str | None:
