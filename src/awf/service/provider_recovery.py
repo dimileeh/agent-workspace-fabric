@@ -320,15 +320,16 @@ async def create_provider_recovery_attempt_row(
         else None,
     )
 
-    for field in (
-        "pr_url",
-        "pr_number",
-        "branch_name",
-        "monitor_iter_count",
-        "monitor_threads_addressed",
-        "monitor_last_commit_sha",
-    ):
-        setattr(retried, field, getattr(source, field))
+    if decision.action == "fallback":
+        for field in (
+            "pr_url",
+            "pr_number",
+            "branch_name",
+            "monitor_iter_count",
+            "monitor_threads_addressed",
+            "monitor_last_commit_sha",
+        ):
+            setattr(retried, field, getattr(source, field))
 
     task = await _retry_task_for_source(session, source, source_attempt=source_attempt)
     attempt = await attempt_repo.create_for_workspace(
