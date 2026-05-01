@@ -623,6 +623,7 @@ def _recovery_task_policy(
         "source_workspace_id": source_workspace_id,
         "source_attempt_id": source_attempt.id if source_attempt is not None else None,
         "source_reason_code": _metadata_str(metadata, "reason_code"),
+        "decision_reason_code": decision.reason_code,
         "source_provider": _metadata_str(metadata, "provider"),
         "source_model": _metadata_str(metadata, "model"),
         "failure_fingerprints": fingerprints,
@@ -852,7 +853,7 @@ def _provider_recovery_state_from_task_policy(
     recovery_state: Mapping[str, Any],
 ) -> ProviderRecoveryStateView | None:
     action = _validate_recovery_action(_mapping_str(recovery_state, "action"))
-    reason_code = _mapping_str(recovery_state, "source_reason_code")
+    reason_code = _mapping_str(recovery_state, "decision_reason_code") or _mapping_str(recovery_state, "source_reason_code")
     source_provider = _mapping_str(recovery_state, "source_provider") or _mapping_str(recovery_state, "target_provider")
     source_model = _mapping_str(recovery_state, "source_model") or _mapping_str(recovery_state, "target_model")
     retry_attempt_number = _nonnegative_int(recovery_state.get("retry_attempt_number"), default=0) if "retry_attempt_number" in recovery_state else None

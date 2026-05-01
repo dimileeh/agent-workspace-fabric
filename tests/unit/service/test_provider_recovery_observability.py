@@ -28,6 +28,7 @@ def _workspace_with_provider_recovery_state(
     *,
     action: str = "retry",
     reason_code: str = PROVIDER_RETRY_DELAYED_REASON,
+    source_reason_code: str = "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
     retry_attempt_number: int = 1,
     fallback_attempt_number: int = 0,
     target_agent: str = "codex",
@@ -41,7 +42,8 @@ def _workspace_with_provider_recovery_state(
 ) -> SimpleNamespace:
     state: dict[str, Any] = {
         "action": action,
-        "source_reason_code": reason_code,
+        "decision_reason_code": reason_code,
+        "source_reason_code": source_reason_code,
         "source_provider": source_provider or target_provider,
         "source_model": source_model or target_model,
         "retry_attempt_number": retry_attempt_number,
@@ -169,7 +171,8 @@ def test_provider_recovery_state_for_workspace_returns_none_when_no_recovery() -
 def test_provider_recovery_state_task_policy_falls_back_to_target_when_source_missing() -> None:
     state_data: dict[str, Any] = {
         "action": "retry",
-        "source_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+        "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+        "source_reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
         "retry_attempt_number": 1,
         "fallback_attempt_number": 0,
         "target_agent": "codex",
@@ -394,3 +397,40 @@ def test_parse_not_before_returns_none_for_none() -> None:
 
 def test_parse_not_before_returns_none_for_invalid() -> None:
     assert _parse_not_before("not-a-date") == (None, None)
+
+
+def test_provider_recovery_state_reason_code_prefers_decision_reason_code() -> None:
+    workspace = _workspace_with_provider_recovery_state(
+        action="retry",
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        source_reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.reason_code == PROVIDER_RETRY_DELAYED_REASON
+
+
+def test_provider_recovery_state_reason_code_falls_back_to_source_reason_code() -> None:
+    state_data: dict[str, Any] = {
+        "action": "retry",
+        "source_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+        "retry_attempt_number": 1,
+        "fallback_attempt_number": 0,
+        "target_agent": "codex",
+        "target_provider": "openai",
+        "target_model": "gpt-5",
+        "source_workspace_id": "ws-source-001",
+        "source_attempt_id": "att-001",
+    }
+    workspace = SimpleNamespace(
+        id="ws-001",
+        status="failed",
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: state_data},
+        failure_reason="agent_failure",
+        failure_message="Provider exhausted",
+        agent="codex",
+        events=[],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.reason_code == PROVIDER_RETRY_DELAYED_REASON
