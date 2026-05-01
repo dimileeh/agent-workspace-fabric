@@ -53,6 +53,8 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 Provider Resilience And Automated Fallback Recovery | Provider/model backoff, circuit breakers, fallback policy, and fallback attempt lineage | `ws_a012908420364984b230df51` | pending AWF PR | running | Codex `gpt-5.5`; scoped to the core retry/backoff/fallback recovery loop. |
+| P0 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_310bcd7bcf1949e9a8421915` | pending AWF PR | running | Codex `gpt-5.5`; retry of reschedule-required slice from `ws_0d9b0d2e6b1d48149c0c5291`. |
 
 ### Reschedule Required Slices
 
@@ -63,7 +65,6 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P0 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_0d9b0d2e6b1d48149c0c5291` | none | reschedule_required | No work landed. Codex Spark exited on model usage quota before producing commits; reschedule with an approved non-Spark provider/model after provider backoff/fallback support is in place. |
 
 ### Completed Slices
 
