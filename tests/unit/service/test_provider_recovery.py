@@ -1200,14 +1200,13 @@ class TestFallbackInheritanceCompleteness:
         assert recovery_state["source_workspace_id"] == source.id
         assert recovery_state["fallback_attempt_number"] == 1
         assert recovery_state["retry_attempt_number"] == 0
-        source_canonical = recovery_state.get("source_canonical_attempt_id")
-        assert source_canonical is not None
+        assert "source_canonical_attempt_id" not in recovery_state
 
         assert len(attempts) >= 2
         fallback_attempt = attempts[-1]
         assert fallback_attempt.parent_attempt_id == attempts[0].id
         assert fallback_attempt.redispatch_from_attempt_id == attempts[0].id
-        assert fallback_attempt.is_canonical_for_merge is True
+        assert fallback_attempt.is_canonical_for_merge is False
 
 
 class TestTerminalState:

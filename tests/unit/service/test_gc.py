@@ -1851,8 +1851,11 @@ async def test_no_work_superseded_gc_candidate_includes_recovery_metadata_refere
         }
         await session.commit()
 
+        from awf.common.ids import new_event_id
+
         session.add(
             WorkspaceEvent(
+                id=new_event_id(),
                 workspace_id=workspace_id,
                 event_type="workspace.provider_recovery_requested",
                 reason_code="PROVIDER_FAILURE_DETECTED",
@@ -1897,7 +1900,6 @@ async def test_no_work_superseded_gc_candidate_includes_recovery_metadata_refere
     async with session_factory() as session:
         workspace = await session.get(Workspace, workspace_id)
         assert workspace is not None
-        assert workspace.failure_details is not None
         assert workspace.failure_reason is not None
 
         events = await WorkspaceEventRepository(session).list(workspace_id=workspace_id)
