@@ -435,7 +435,9 @@ async def test_retry_planning_scope_violation_discards_premature_work_and_replan
     assert original is not None
     assert retried is not None
     assert original.branch_name == "awf/ws_scope_old"
+    assert original.remote_push_branch == "awf/ws_scope_old"
     assert retried.branch_name is None
+    assert retried.remote_push_branch is None
     assert retried.pr_url is None
     assert "Fix the intermittent validation failure." in retried.task_prompt
     assert "Discard the premature implementation from the failed planning attempt" in (

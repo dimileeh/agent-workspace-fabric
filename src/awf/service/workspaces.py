@@ -754,7 +754,9 @@ async def retry_workspace_row(
         requires_database=source.requires_database,
         idempotency_key=None,
         task_kind=source.task_kind,
-        remote_push_branch=source.remote_push_branch,
+        remote_push_branch=(
+            None if planning_scope_context is not None else source.remote_push_branch
+        ),
     )
 
     attempt_repo = TaskAttemptRepository(session)

@@ -53,6 +53,7 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_42b3d10157fd4afbbbba0145` | pending AWF PR | validating | Current retry closes the remaining conformance gaps: discard-and-replan planning retries no longer inherit preserved remote push branch metadata, and the detailed checklist is complete. |
 
 ### Reschedule Required Slices
 
@@ -64,7 +65,6 @@ reschedule its corresponding slice.
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
 | P1 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_0d9b0d2e6b1d48149c0c5291` | none | reschedule_required | No work landed. Codex Spark exited on model usage quota before producing commits; reschedule with an approved non-Spark provider/model after provider backoff/fallback support is in place. |
-| P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_90f9152eefb54c899fccbd9b`, `ws_6c5890fe7d2b43b4ba94c8ad`, `ws_ce97e6cd47134be49c522843` | branch `awf/ws_90f9152eefb54c899fccbd9b` | reschedule_required | Work has not landed. `ws_90f9152eefb54c899fccbd9b` produced useful commits but failed validation on a prompt assertion; retry `ws_6c5890fe7d2b43b4ba94c8ad` failed before work due Codex Spark usage quota; superseding Codex `gpt-5.5` retry `ws_ce97e6cd47134be49c522843` was operator-cancelled after cleanup/state churn. Recover from the preserved branch with an approved model only when the operator restarts this slice. |
 
 ### Completed Slices
 
