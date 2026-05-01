@@ -324,6 +324,25 @@ class _RecordingRuntimeInspector:
         return self._snapshots[compose_project_name]
 
 
+class _HealthyRuntimeInspector:
+    def __init__(self) -> None:
+        self.calls: list[str | None] = []
+
+    async def inspect(self, compose_project_name: str | None) -> RuntimeSnapshot:
+        self.calls.append(compose_project_name)
+        return RuntimeSnapshot(
+            stack_state="running",
+            services=[
+                RuntimeService(
+                    name="agent",
+                    container_id="agent",
+                    image="awf-agent:latest",
+                    state="running",
+                )
+            ],
+        )
+
+
 class _RaisingRuntimeInspector:
     def __init__(self, exc: Exception) -> None:
         self.exc = exc
@@ -417,6 +436,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=provisioner,  # type: ignore[arg-type]
             executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
             config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
         )
 
@@ -475,6 +495,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=provisioner,  # type: ignore[arg-type]
             executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,
@@ -507,6 +528,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,
@@ -683,6 +705,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=_CancellingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
             config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
         )
 
@@ -754,6 +777,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
             config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=3),
         )
 
@@ -862,6 +886,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,
@@ -872,6 +897,7 @@ class TestRunOnceExecution:
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,
@@ -1310,6 +1336,7 @@ class TestRunOnceMonitorRecovery:
             session_factory=session_factory,
             provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
             executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
             config=WorkerConfig(
                 poll_interval_seconds=0.01,
                 max_concurrent_provisions=1,

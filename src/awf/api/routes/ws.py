@@ -124,7 +124,7 @@ async def _send_initial_state(
                         ),
                     }
                 )
-        if {"agent", "validation", "services"} & selected:
+        if selected - {"events"}:
             streams = await WorkspaceLogStreamRepository(session).list_for_workspace(workspace_id)
             for stream in streams:
                 if not _stream_selected(stream.source, selected):

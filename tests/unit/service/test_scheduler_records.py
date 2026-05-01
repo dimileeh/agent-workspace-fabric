@@ -119,7 +119,15 @@ def _disk_check() -> DiskCheck:
 @pytest.mark.unit
 async def test_create_v2_writes_admitted_decision_and_local_reservation(
     factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    settings = Settings(
+        _env_file=None,
+        local_capacity_cpu_cores=None,
+        local_capacity_memory_gb=None,
+        local_capacity_dind_slots=None,
+    )
+    monkeypatch.setattr(workspaces, "get_settings", lambda: settings)
     service = WorkspaceService(factory)
 
     created = await service.create_v2(_request())

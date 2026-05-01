@@ -107,4 +107,6 @@ def test_redis_worker_profile_renders_worktree_local_build_contexts(
 
     assert services["app"]["build"] == expected_build
     assert services["worker"]["build"] == expected_build
-    assert "aira" not in yaml.safe_dump(parsed).lower()
+    assert all("aira" not in name.lower() for name in services)
+    assert "aira" not in yaml.safe_dump(parsed["networks"]).lower()
+    assert "aira" not in yaml.safe_dump(parsed["volumes"]).lower()

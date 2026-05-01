@@ -1657,6 +1657,8 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         ) -> None:
             created["git_work_dir"] = work_dir
             created["git_env"] = env
+            created["git_worktree_owner_uid"] = worktree_owner_uid
+            created["git_worktree_owner_gid"] = worktree_owner_gid
 
     class _ComposeManager:
         def __init__(self, *, work_dir: Path, template_path: Path) -> None:
@@ -1760,6 +1762,8 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
     assert created["session_engine"] is engine
     assert created["git_work_dir"] == host_work_dir / "git"
     assert created["git_env"]["HOME"] == str((tmp_path / "host-home").resolve())
+    assert created["git_worktree_owner_uid"] == 1000
+    assert created["git_worktree_owner_gid"] == 1000
     assert created["compose_work_dir"] == host_work_dir
     assert created["compose_template_path"].name == "workspace.base.yml.j2"
     assert created["stack_compose"].__class__ is _ComposeManager

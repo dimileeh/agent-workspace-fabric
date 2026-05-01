@@ -41,7 +41,7 @@ def test_sqlite_identity_reports_missing_and_existing_files(tmp_path: Path) -> N
 def test_require_api_token_reports_missing_and_invalid_tokens() -> None:
     previous = os.environ.get("AWF_API_TOKEN")
     try:
-        os.environ.pop("AWF_API_TOKEN", None)
+        os.environ["AWF_API_TOKEN"] = ""
         get_settings.cache_clear()
         with pytest.raises(HTTPException) as missing:
             deps.require_api_token(None)

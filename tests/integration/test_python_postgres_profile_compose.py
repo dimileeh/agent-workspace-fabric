@@ -116,7 +116,11 @@ async def test_python_postgres_profile_runs_setup_health_validate_and_cleans_up(
             validation_result.commands[0].stdout_path.read_text(encoding="utf-8")
             == "refresh ok\n"
         )
-        assert validation_result.commands[1].stdout_path.read_text(encoding="utf-8") == "ok\n"
+        healthcheck_stdout = validation_result.commands[1].stdout_path.read_text(
+            encoding="utf-8"
+        )
+        assert healthcheck_stdout.splitlines()[0].startswith("[healthcheck attempt 1 elapsed ")
+        assert healthcheck_stdout.endswith("ok\n")
         assert (
             validation_result.commands[2].stdout_path.read_text(encoding="utf-8")
             == "validated awf-db-profile-fixture\n"

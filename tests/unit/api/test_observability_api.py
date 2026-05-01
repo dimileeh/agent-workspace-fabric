@@ -1195,12 +1195,21 @@ class TestWorkspaceWebSocket:
                 with sync_client.websocket_connect(
                     f"/v1/workspaces/{ws_id}/ws?channels=monitor,recovery&tail_bytes=100",
                     headers={"Authorization": "Bearer secret"},
-                ):
-                    # Don't try to loop receive_json because if no logs, it hangs.
-                    # I will assert the logic using _stream_selected unit test which is much safer.
-                    pass
+                ) as websocket:
+                    snapshot = websocket.receive_json()
+                    first_tail = websocket.receive_json()
+                    second_tail = websocket.receive_json()
+                    websocket.close()
             finally:
                 asyncio.run(engine.dispose())
+
+        assert snapshot["type"] == "snapshot"
+        assert snapshot["workspace"]["id"] == ws_id
+        tails = {first_tail["stream_id"]: first_tail, second_tail["stream_id"]: second_tail}
+        assert tails["monitor.log"]["source"] == "monitor"
+        assert tails["monitor.log"]["data"] == "monitor data\n"
+        assert tails["recovery.stdout"]["source"] == "recovery"
+        assert tails["recovery.stdout"]["data"] == "recovery data\n"
 
 class TestOperationsAndControls:
     @pytest.mark.unit
@@ -1322,7 +1331,7 @@ def _make_sync_test_client(
     api_token: str | None = "secret",
 ) -> tuple[str, TestClient, AsyncEngine]:
     if api_token is None:
-        monkeypatch.delenv("AWF_API_TOKEN", raising=False)
+        monkeypatch.setenv("AWF_API_TOKEN", "")
     else:
         monkeypatch.setenv("AWF_API_TOKEN", api_token)
     get_settings.cache_clear()
@@ -1422,7 +1431,7 @@ def _temporary_api_token(token: str | None) -> object:
     previous = os.environ.get("AWF_API_TOKEN")
     try:
         if token is None:
-            os.environ.pop("AWF_API_TOKEN", None)
+            os.environ["AWF_API_TOKEN"] = ""
         else:
             os.environ["AWF_API_TOKEN"] = token
         get_settings.cache_clear()
