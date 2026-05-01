@@ -1032,9 +1032,10 @@ async def _provider_recovery_state_summary(
     now: datetime,
 ) -> ProviderRecoveryStateSummary:
     action = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["action"].as_string()
-    source_reason = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY][
-        "source_reason_code"
-    ].as_string()
+    decision_reason = func.coalesce(
+        Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["decision_reason_code"].as_string(),
+        Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["source_reason_code"].as_string(),
+    )
     not_before = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY][
         "not_before"
     ].as_string()
@@ -1074,7 +1075,7 @@ async def _provider_recovery_state_summary(
                     (
                         and_(
                             action == "terminal",
-                            source_reason == PROVIDER_RECOVERY_NO_LOOP_REASON,
+                            decision_reason == PROVIDER_RECOVERY_NO_LOOP_REASON,
                         ),
                         1,
                     ),
@@ -1089,7 +1090,7 @@ async def _provider_recovery_state_summary(
                     (
                         and_(
                             action == "terminal",
-                            source_reason != PROVIDER_RECOVERY_NO_LOOP_REASON,
+                            decision_reason != PROVIDER_RECOVERY_NO_LOOP_REASON,
                         ),
                         1,
                     ),

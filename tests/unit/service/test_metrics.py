@@ -766,7 +766,8 @@ async def test_resource_saturation_provider_recovery_aggregates_via_sql(
         task_policy={
             PROVIDER_RECOVERY_STATE_KEY: {
                 "action": "terminal",
-                "source_reason_code": PROVIDER_RECOVERY_NO_LOOP_REASON,
+                "decision_reason_code": PROVIDER_RECOVERY_NO_LOOP_REASON,
+                "source_reason_code": "PROVIDER_RETRY_DELAYED",
             },
         },
     )
@@ -777,7 +778,8 @@ async def test_resource_saturation_provider_recovery_aggregates_via_sql(
         task_policy={
             PROVIDER_RECOVERY_STATE_KEY: {
                 "action": "terminal",
-                "source_reason_code": "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
+                "decision_reason_code": "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
+                "source_reason_code": "PROVIDER_RETRY_DELAYED",
             },
         },
     )
@@ -802,6 +804,54 @@ async def test_resource_saturation_provider_recovery_aggregates_via_sql(
     assert prs.terminal_no_loop == 1
     assert prs.terminal_exhausted == 1
     assert prs.circuit_breakers_open == 0
+
+
+@pytest.mark.unit
+async def test_resource_saturation_terminal_uses_decision_reason_code_over_source_reason_code(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import (
+        PROVIDER_RECOVERY_NO_LOOP_REASON,
+        PROVIDER_RECOVERY_STATE_KEY,
+    )
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+                "source_reason_code": "PROVIDER_RETRY_DELAYED",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+                "decision_reason_code": PROVIDER_RECOVERY_NO_LOOP_REASON,
+                "source_reason_code": "PROVIDER_RETRY_DELAYED",
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+    prs = summary.provider_recovery_state_summary
+    assert prs.terminal_no_loop == 1
+    assert prs.terminal_exhausted == 1
 
 
 @pytest.mark.unit
