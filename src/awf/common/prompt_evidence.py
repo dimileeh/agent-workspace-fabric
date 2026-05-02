@@ -67,4 +67,9 @@ def _clean_provenance_value(value: object | None) -> str | None:
 
 
 def _quoted_text_lines(text: str) -> list[str]:
-    return [f"{EVIDENCE_QUOTE_PREFIX}{line}" for line in text.split("\n")]
+    lines = text.splitlines()
+    if not lines:
+        lines = [""]
+    elif text.endswith(("\n", "\r", "\v", "\f", "\x1c", "\x1d", "\x1e", "\x85", "\u2028", "\u2029")):
+        lines.append("")
+    return [f"{EVIDENCE_QUOTE_PREFIX}{line}" for line in lines]

@@ -85,3 +85,35 @@ def test_untrusted_evidence_quotes_every_line_of_adversarial_text() -> None:
 
     fence_lines = [line for line in rendered.splitlines() if "```" in line]
     assert fence_lines == ["AWF-EVIDENCE> ```", "AWF-EVIDENCE> ```"]
+
+
+@pytest.mark.unit
+def test_untrusted_evidence_quotes_every_recognized_line_boundary() -> None:
+    line_boundaries = [
+        ("carriage return", "\r"),
+        ("line feed", "\n"),
+        ("windows newline", "\r\n"),
+        ("vertical tab", "\v"),
+        ("form feed", "\f"),
+        ("file separator", "\x1c"),
+        ("group separator", "\x1d"),
+        ("record separator", "\x1e"),
+        ("next line", "\x85"),
+        ("line separator", "\u2028"),
+        ("paragraph separator", "\u2029"),
+    ]
+    text = "".join(f"{line}{boundary}" for line, boundary in line_boundaries)
+    rendered = render_untrusted_evidence(
+        UntrustedEvidence(
+            source_kind="github_pr_review_comment",
+            source_name="GitHub review comment",
+            text=text,
+        )
+    )
+
+    quoted_text = rendered.split("Quoted text:\n", maxsplit=1)[1]
+
+    assert quoted_text.splitlines() == [
+        *(f"AWF-EVIDENCE> {line}" for line, _boundary in line_boundaries),
+        "AWF-EVIDENCE> ",
+    ]
