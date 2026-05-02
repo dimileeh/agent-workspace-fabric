@@ -505,45 +505,63 @@ def _run_init_service_bootstrap(
         raise typer.Exit(code=2) from exc
 
     pretty = fmt == OutputFormat.pretty
-    settings = resolve_service_settings()
 
-    if pretty:
-        typer.echo("AWF init: local service bootstrap")
+    try:
+        settings = resolve_service_settings()
 
-    docker_report = asyncio.run(
-        collect_doctor_report(
-            settings,
-            strict_providers=frozenset(),
-            provider_environ=os.environ,
-            environ=os.environ,
-        )
-    )
-    docker_diag = _docker_diagnostic_from_report(docker_report)
-    if docker_diag is not None and getattr(docker_diag, "status", "ok") == "fail":
-        message = getattr(docker_diag, "message", "Docker is not available.")
-        action = getattr(docker_diag, "action", "")
-        reason = getattr(docker_diag, "reason", "DOCKER_DAEMON_UNREACHABLE")
         if pretty:
-            typer.echo(f"  docker: {message}")
-            if action:
-                typer.echo(f"  action: {action}")
-            typer.echo("")
-            typer.echo("Docker is not available; cannot bootstrap local service.")
+            typer.echo("AWF init: local service bootstrap")
+
+        docker_report = asyncio.run(
+            collect_doctor_report(
+                settings,
+                strict_providers=frozenset(),
+                provider_environ=os.environ,
+                environ=os.environ,
+            )
+        )
+        docker_diag = _docker_diagnostic_from_report(docker_report)
+        if docker_diag is not None and getattr(docker_diag, "status", "ok") == "fail":
+            message = getattr(docker_diag, "message", "Docker is not available.")
+            action = getattr(docker_diag, "action", "")
+            reason = getattr(docker_diag, "reason", "DOCKER_DAEMON_UNREACHABLE")
+            if pretty:
+                typer.echo(f"  docker: {message}")
+                if action:
+                    typer.echo(f"  action: {action}")
+                typer.echo("")
+                typer.echo("Docker is not available; cannot bootstrap local service.")
+            else:
+                _emit(
+                    {
+                        "status": "failed",
+                        "reason_code": reason,
+                        "message": message,
+                        "action": action,
+                    },
+                    fmt,
+                )
+            raise typer.Exit(code=1)
+
+        state_dir = _resolve_state_directory(os.environ)
+        created = not state_dir.exists()
+        state_dir.mkdir(parents=True, exist_ok=True)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        if pretty:
+            typer.echo(f"error: could not collect local checks: {exc}", err=True)
         else:
             _emit(
                 {
                     "status": "failed",
-                    "reason_code": reason,
-                    "message": message,
-                    "action": action,
+                    "reason_code": "BOOTSTRAP_LOCAL_CHECKS_FAILED",
+                    "message": str(exc),
                 },
                 fmt,
             )
-        raise typer.Exit(code=1)
+        raise typer.Exit(code=1) from exc
 
-    state_dir = _resolve_state_directory(os.environ)
-    created = not state_dir.exists()
-    state_dir.mkdir(parents=True, exist_ok=True)
     if pretty:
         typer.echo(f"  state directory: {state_dir}")
         typer.echo(f"  created: {'true' if created else 'false'}")
