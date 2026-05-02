@@ -4,6 +4,7 @@ import re
 from pathlib import Path
 
 import pytest
+from fastapi.routing import APIRoute, APIWebSocketRoute
 
 from tests.unit.mcp._parity_utils import (
     _parity_rows,
@@ -14,40 +15,17 @@ REPO_ROOT = Path(__file__).resolve().parents[3]
 SRC_ROOT = REPO_ROOT / "src" / "awf"
 
 
-def _extract_rest_paths_from_source() -> dict[str, str]:
+def _extract_rest_paths_from_app() -> dict[str, str]:
+    from awf.api.app import create_app
+
+    app = create_app(use_lifespan=False)
     paths: dict[str, str] = {}
-    routes_dir = SRC_ROOT / "api" / "routes"
-    router_decl_pattern = re.compile(
-        r"(?P<var>\w+)\s*=\s*APIRouter\([^)]*prefix\s*=\s*\"(?P<prefix>[^\"]+)\"",
-    )
-    router_decl_no_prefix = re.compile(
-        r"(?P<var>\w+)\s*=\s*APIRouter\((?![^)]*prefix\s*=)",
-    )
-    route_pattern = re.compile(
-        r"@(?P<router>\w+)\.(get|post|put|delete|patch|websocket)\s*\(\s*[\n\r]*['\"]([^'\"]*?)['\"]",
-        re.MULTILINE,
-    )
-    for route_file in routes_dir.glob("*.py"):
-        if route_file.name.startswith("_"):
-            continue
-        content = route_file.read_text(encoding="utf-8")
-        router_prefixes: dict[str, str] = {}
-        for m in router_decl_pattern.finditer(content):
-            router_prefixes[m.group("var")] = m.group("prefix")
-        for m in router_decl_no_prefix.finditer(content):
-            if m.group("var") not in router_prefixes:
-                router_prefixes[m.group("var")] = ""
-        for m in route_pattern.finditer(content):
-            router_var = m.group("router")
-            if router_var not in router_prefixes:
-                continue
-            prefix = router_prefixes[router_var]
-            method = m.group(2).upper()
-            if method == "WEBSOCKET":
-                method = "WS"
-            path_suffix = m.group(3)
-            full_path = prefix + path_suffix
-            paths[f"{method} {full_path}"] = full_path
+    for route in app.routes:
+        if isinstance(route, APIWebSocketRoute):
+            paths[f"WS {route.path}"] = route.path
+        elif isinstance(route, APIRoute):
+            for method in route.methods or set():
+                paths[f"{method} {route.path}"] = route.path
     return paths
 
 
@@ -109,7 +87,7 @@ _SCHEMA_NAMES = None
 def _get_rest_paths() -> dict[str, str]:
     global _REST_PATHS
     if _REST_PATHS is None:
-        _REST_PATHS = _extract_rest_paths_from_source()
+        _REST_PATHS = _extract_rest_paths_from_app()
     return _REST_PATHS
 
 
