@@ -1,11 +1,11 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-01
+Last updated: 2026-05-02
 
 This checklist is the standing plan for moving AWF from a strong local
-agent-workspace fabric into a robust industrial system that is ready for a
-GKE deployment design. It is based on the current codebase compared against
-`docs/awf_prd_v2.2.md`.
+agent-workspace fabric into a robust, open-source-ready local Core that is
+worth using on an engineer's computer before GKE deployment design begins. It
+is based on the current codebase compared against `docs/awf_prd_v2.2.md`.
 
 ## Current PRD Alignment
 
@@ -21,7 +21,9 @@ validation policy, security, and production operations.
 ## How To Use This File
 
 - Treat checked items as implemented enough to build on.
-- Treat unchecked P0/P1 items as blockers before serious GKE work.
+- Treat unchecked P0/P1 items as blockers before GKE discussion. The bar is:
+  AWF Core should be superbly reliable as a local open-source developer tool
+  before we shift attention to Kubernetes/GKE design.
 - Treat the Active / Completed Slices ledger as the durable anti-duplication
   record for AWF dogfood tasks. Do not launch a new workspace for a slice that
   is already `running`, `monitoring_pr`, or `merged`.
@@ -31,9 +33,9 @@ validation policy, security, and production operations.
 
 Priority key:
 
-- P0: required before GKE design starts.
-- P1: required before a credible GKE pilot.
-- P2: can be planned during or after the first GKE pilot.
+- P0: urgent Core reliability blockers; finish first.
+- P1: local open-source Core readiness blockers; finish before GKE discussion.
+- P2: GKE design and deployment work; do not start until P0 and P1 are complete.
 
 ## Active / Completed AWF Slices
 
@@ -54,11 +56,11 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P0 Provider Resilience And Automated Fallback Recovery | Executor provider fallback end-to-end behavior | `ws_3434c0301e7744d6aefbd315` | pending AWF PR | running | Codex `gpt-5.5`; owns executor/service fallback attempt creation and lineage tests. |
-| P0 Provider Resilience And Automated Fallback Recovery | Conformance stall detection and recovery | `ws_52d8415a02424c4aa4730fa1` | pending AWF PR | running | Claude Code `claude-opus-4-7`; owns `AGENT_STALLED_IN_CONFORMANCE` and conformance-only recovery semantics. |
-| P0 Provider Resilience And Automated Fallback Recovery | PR monitor provider outage recovery | `ws_2a6d2ef4186d4c48960411ec` | pending AWF PR | running | Gemini `gemini-3.1-pro-preview`; owns PR-monitor fallback/cooldown behavior for comment/fix/rebase monitor agents. |
-| P0 Provider Resilience And Automated Fallback Recovery | Provider recovery API, metrics, merge queue, and console surfacing | `ws_ebad989fc19b41d39cb150b7` | pending AWF PR | running | OpenCode `ollama/glm-5.1:cloud`; owns operator-visible recovery state and schema compatibility. |
-| P0 Provider Resilience And Automated Fallback Recovery | Provider fallback contract and no-loop regression coverage | `ws_bae976c92edc4a2eacc89830` | pending AWF PR | running | OpenCode `ollama/deepseek-v4-pro:cloud`; owns cross-provider failure contract/no-loop/cleanup evidence tests. |
+| P1 Security, Secrets, And Egress Policy | Explicit workspace network postures | `ws_6c58298db1c14c8cb6a6f906` | pending | running | Codex `gpt-5.5`; launched 2026-05-02 after P0 provider resilience drain, pull, rebuild, restart, and GC. |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness priority and decision records | `ws_fcee67cfbc274297b5b692df` | pending | running | Codex `gpt-5.5`; launched 2026-05-02; has advisory overlap with security slice on `src/awf/api/schemas.py`. |
+| P1 Control-Plane Restart Recovery Hardening | Monitoring PR restart claim recovery | `ws_50038cfe37f64e3ebb11bdae` | pending | running | Codex `gpt-5.5`; launched 2026-05-02; has advisory overlap with scheduler slice on `src/awf/db/**`. |
+| P1 Operator Console Completion | Dark theme and accessibility controls | `ws_55a1e9ab508e42038e965097` | pending | running | Codex `gpt-5.5`; launched 2026-05-02; console-owned slice with expected broad test-name overlap warnings. |
+| P1 MCP And Project Onboarding Client Parity | API / CLI / MCP parity matrix | `ws_b5a63a8954c94df5b38454f9` | pending | running | Codex `gpt-5.5`; launched 2026-05-02; docs/MCP slice with advisory docs/README overlap warnings. |
 
 ### Reschedule Required Slices
 
@@ -74,6 +76,13 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P0 Provider Resilience And Automated Fallback Recovery | Prevent duplicate full retry from live PR monitor | `ws_f58d575afe79430aac35ed7c` | [#173](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/173) | merged | Codex `gpt-5.5`; merged 2026-05-02 after comment handling, validation recovery, non-check reviewer settle, and auto-merge; owns the no-duplicate retry regression for live PR monitors. |
+| P0 Provider Resilience And Automated Fallback Recovery | Terminal-state stale callback guard | `ws_2e6835c9c3cb4e38a0c29ec3` | [#172](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/172) | merged | Codex `gpt-5.5`; merged 2026-05-02 after validation, comment handling, non-check reviewer settle, and auto-merge; owns destroyed/destroying/completed/cancelled/failed callback authority regression. |
+| P0 Provider Resilience And Automated Fallback Recovery | Provider recovery API, metrics, merge queue, and console surfacing | `ws_ebad989fc19b41d39cb150b7` | [#171](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/171) | merged | OpenCode `ollama/glm-5.1:cloud`; merged 2026-05-02 after comment handling, validate-only and rebase-only recovery, and non-check reviewer settle. |
+| P0 Provider Resilience And Automated Fallback Recovery | Conformance stall detection and recovery | `ws_52d8415a02424c4aa4730fa1` | [#169](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/169) | merged | Claude Code `claude-opus-4-7`; merged 2026-05-02 after comment handling, stale-overlap rebase recovery, validation recovery, and non-check reviewer settle. |
+| P0 Provider Resilience And Automated Fallback Recovery | PR monitor provider outage recovery | `ws_2a6d2ef4186d4c48960411ec` | [#170](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/170) | merged | Gemini `gemini-3.1-pro-preview`; merged 2026-05-01 after validate-only recovery, sync-base, and non-check reviewer settle. |
+| P0 Provider Resilience And Automated Fallback Recovery | Provider fallback contract and no-loop regression coverage | `ws_bae976c92edc4a2eacc89830` | [#168](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/168) | merged | OpenCode `ollama/deepseek-v4-pro:cloud`; merged 2026-05-01 after validate-only recovery and non-check reviewer settle. |
+| P0 Provider Resilience And Automated Fallback Recovery | Executor provider fallback end-to-end behavior | `ws_3434c0301e7744d6aefbd315` | [#167](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/167) | merged | Codex `gpt-5.5`; merged 2026-05-01; owns executor/service fallback attempt creation and lineage tests. |
 | P0 Provider Resilience And Automated Fallback Recovery | Coverage-wrapped pytest failure classification | `ws_310bcd7bcf1949e9a8421915` | [#165](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/165) | merged | Codex `gpt-5.5`; classifies pytest failures inside coverage commands separately from true coverage-threshold failures. |
 | P0 Provider Resilience And Automated Fallback Recovery | Provider/model backoff, circuit breakers, fallback policy, and fallback attempt lineage | `ws_a012908420364984b230df51` | [#166](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/166) | merged | Codex `gpt-5.5`; landed core retry/backoff/fallback recovery loop, with follow-up commit `75704ad` fixing fallback retry counter inheritance and final-head monitor gating. |
 | P0 Planning Phase Scope Enforcement | Planning-only prompt and scope failure details | `ws_42b3d10157fd4afbbbba0145` | [#164](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/164) | merged | Codex `gpt-5.5`; merged 2026-05-01 after resolving planning retry, plan artifact, and monitor recovery review comments. |
@@ -168,6 +177,7 @@ reschedule its corresponding slice.
 | P0 Operation And Recovery Truth | Persist operation audit details and log stream references | `ws_83f4e614951446cf883f5c09` | failed | PR [#101](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/101) merged, so no feature retry is needed; the workspace failure exposed the stale-rebase recovery bug fixed locally before service rebuild. |
 | P1 API Contract Completion | External operator callback subscriptions | `ws_0e2fc82ece7541659287e063` | failed | Agent produced local commits and passed validation/coverage, but exhausted the Plan -> Execute -> Compare iteration budget with one remaining conformance gap: event type validation was prefix-based and still allowed internal-looking namespaced event types such as `workspace.internal_secret`. Recover by redispatching a narrow callback hardening/completion slice or salvaging the preserved worktree branch. |
 | P0 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification via Gemini 3.1 | `ws_033d1772828042c9afa6a491` | failed | No-work Gemini auth failure: container had copied `~/.gemini` files but no Gemini/Google auth env; Gemini CLI 0.39.1 selected API-key auth and exited 41 `AGENT_AUTH_FAILED` requiring `GEMINI_API_KEY`. |
+| P0 Provider Resilience And Automated Fallback Recovery | Duplicate full retry spawned from live PR monitor | `ws_46a6c903fc7c42098a63edad` | destroyed | Duplicate retry of active workspace `ws_52d8415a02424c4aa4730fa1` / PR #169 after `AGENT_IDLE_TIMEOUT`; no PR or useful work produced. Destroyed manually and tracked as urgent P0 regression under provider recovery. |
 | P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_927647b0535242c58879f7b8` | failed | Same no-work Gemini auth failure as `ws_033d1772828042c9afa6a491`; retry only after Gemini container auth/readiness is fixed or with a different provider/model. |
 | P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_8210d159580747f88c691ef5` | superseded | Gemini produced a useful local commit but did so during AWF's planning-only phase, touching `src/awf/cli/main.py` and `tests/unit/cli/test_init.py` before execution was allowed. AWF correctly failed the workspace for planning scope violation; retried fresh with Codex Spark as `ws_8c9f0ae88d5c477aac382158`. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness and scheduler decision records via Gemini | `ws_19b11c564c3343c0965eee45` | superseded | Gemini service returned repeated 429 `MODEL_CAPACITY_EXHAUSTED` before any code was produced; retried with OpenCode GLM as `ws_5031649e68b34b108f23782b`. |
@@ -288,6 +298,32 @@ reschedule its corresponding slice.
 - [x] Enforce egress policy at Docker network/profile level in local mode.
 - [x] Add provider-specific least-privilege credential checks for Codex, Claude, Gemini, OpenCode/Ollama, GitHub, and Docker.
 - [x] Add audit trails for PR creation, push, merge, comment resolution, and destructive operations.
+- [ ] Add explicit workspace network posture profiles in `.awf/workspace.yml`:
+  `offline`, `restricted`, and `open`. `open` should remain available for
+  trusted local dogfood work such as AWF self-development, but it must be
+  declared intentionally and surfaced as unrestricted internet access in API,
+  MCP, console, `awf profile preview`, and `awf doctor`.
+- [ ] Add reusable restricted egress allowlist templates for common local
+  engineering needs: GitHub/git remotes, configured model provider APIs,
+  package registries such as PyPI/npm/uv indexes, OS package mirrors when
+  declared, and documentation domains. New project onboarding should recommend
+  restricted mode by default and explain when to choose open mode.
+- [ ] Add outbound egress audit evidence without leaking secrets: record
+  workspace id, policy posture, destination host/category, allow/deny decision,
+  timestamp, and reason code for policy-controlled network attempts; expose
+  summary counts in service status, workspace detail, MCP, metrics, and console
+  security panels.
+- [ ] Add prompt-injection boundary controls for untrusted external content:
+  GitHub comments, PR review text, issues, webpages, package READMEs, and CI
+  logs must be passed to agents as quoted evidence with source provenance, not
+  as authority over AWF/system/task policy. Add regression tests proving
+  adversarial external text cannot override owned paths, validation policy,
+  secret handling, merge gates, or cleanup rules.
+- [ ] Add supply-chain guardrails for agent-run package installation and remote
+  script execution. Profiles should be able to choose warn/block modes for
+  unpinned dependency installs, curl-pipe-shell patterns, unexpected registry
+  hosts, and lockfile changes outside owned paths; violations should produce
+  structured findings and operator-visible recovery guidance.
 
 ## P1: Workspace Services And Realistic Project Profiles
 
@@ -313,7 +349,7 @@ reschedule its corresponding slice.
 
 ## P0: Provider Resilience And Automated Fallback Recovery
 
-- [ ] **Implement full provider/model automatic recovery loop** as one
+- [x] **Implement full provider/model automatic recovery loop** as one
   comprehensive P0 slice. Recent incidents: Gemini 429/capacity failures,
   Gemini auth failures, Codex Spark usage-limit failures in
   `ws_6c5890fe7d2b43b4ba94c8ad` and `ws_0d9b0d2e6b1d48149c0c5291`, and PR
@@ -332,12 +368,12 @@ reschedule its corresponding slice.
   recovery state in API, events, operations, merge queue, metrics, and console;
   and proves with TDD that transient provider failures recover automatically
   while deterministic agent failures do not loop forever.
-- [ ] Detect no-output or over-duration stalls in Plan -> Execute -> Compare
+- [x] Detect no-output or over-duration stalls in Plan -> Execute -> Compare
   subphases, especially conformance/report generation, and classify them with
   structured reason codes such as `AGENT_STALLED_IN_CONFORMANCE` instead of
   leaving the workspace indefinitely `running` or collapsing it into generic
   `agent_failure`.
-- [ ] Recover stalled conformance attempts by preserving the worktree, local
+- [x] Recover stalled conformance attempts by preserving the worktree, local
   commits, validation logs, and saved plan; then either retry only the
   conformance/report phase with an approved fallback model or proceed to
   validation when the implementation is complete and the missing artifact is
@@ -349,9 +385,24 @@ reschedule its corresponding slice.
 - [x] Store structured provider failure reason codes such as
   `AGENT_PROVIDER_CAPACITY_EXHAUSTED` instead of collapsing retryable provider
   outages into generic `agent_failure`.
-- [ ] Add delayed retry/backoff for no-work provider failures, preserving
+- [x] Add delayed retry/backoff for no-work provider failures, preserving
   task/attempt lineage and making retry state visible in operations, events,
   API responses, merge queue context, and console surfaces.
+- [x] Prevent provider-recovery retries from spawning a duplicate full feature
+  workspace when the source workspace is already `monitoring_pr` with an open
+  PR and an active monitor can continue. Regression case:
+  `ws_52d8415a02424c4aa4730fa1` hit `AGENT_IDLE_TIMEOUT` while monitoring
+  PR #169, but AWF created duplicate retry workspace
+  `ws_46a6c903fc7c42098a63edad`. Recovery must retry or fall back the monitor
+  in place, or attach a monitor-only fallback to the existing PR/branch, unless
+  the source workspace is terminal or explicitly abandoned.
+- [x] Block stale executor/provider-recovery callbacks from moving a workspace
+  out of `destroyed`, `destroying`, `completed`, `cancelled`, or `failed`.
+  Regression case: after operator destroy removed duplicate workspace
+  `ws_46a6c903fc7c42098a63edad`, an in-flight executor callback observed the
+  removed worktree and moved the record from `destroyed` to `validating` and
+  then `failed`. Destroy/cancel/terminal state must remain authoritative, with
+  stale callbacks recorded as ignored audit events.
 - [x] Classify pytest failures inside coverage commands separately from true
   coverage failures when coverage meets the configured threshold, including
   failing test node IDs, coverage percent/threshold, exit status, and focused
@@ -366,7 +417,7 @@ reschedule its corresponding slice.
 - [x] Clean up no-work failed containers, networks, and pressure directories
   after logs/artifacts are durably retained, without removing evidence needed
   for failure analysis or retries.
-- [ ] Add TDD coverage proving provider-capacity failures retry or fallback
+- [x] Add TDD coverage proving provider-capacity failures retry or fallback
   automatically, non-transient agent failures do not loop forever, and fallback
   attempts inherit validation, owned paths, profile, auto-merge, and monitor
   policy correctly.
@@ -406,10 +457,26 @@ coding agent in any project to use AWF for a feature.
 - [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
 - [ ] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
 - [ ] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
+- [ ] Convert the parity matrix into an implementation driver: every surface marked
+  missing or partial must map to a concrete P1 implementation issue/slice, with
+  REST endpoint, CLI command, MCP tool name, schema/error-code contract, and
+  security boundary recorded. The matrix should not be considered complete if it
+  only documents gaps without creating executable follow-up work.
 - [ ] Add MCP tools for merge queue, task attempts, validation provenance, stale reasons, artifacts, metrics, locks/overlap graph, and service health/status.
 - [ ] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics.
+- [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
+  for each safe read/control operation, either expose the corresponding CLI
+  command with the same auth/idempotency/concurrency/error semantics, or document
+  why that surface is intentionally MCP/API-only.
 - [ ] Keep MCP read/control scoped: expose AWF-managed runtime snapshots, logs, operations, and controls, but do not expose arbitrary shell or unrestricted Docker exec.
-- [ ] Add contract tests proving MCP tool payloads stay aligned with the corresponding REST API schemas and reason codes.
+- [ ] Add contract tests proving REST API, CLI, and MCP stay aligned: request
+  payloads, response payloads, reason codes, idempotency keys, `If-Match` /
+  workspace-version concurrency, auth failures, and structured error semantics
+  must not drift across the three clients.
+- [ ] Add a docs/status consistency test for the parity matrix so entries marked
+  implemented must correspond to real REST routes, CLI commands, MCP tools, and
+  contract-test coverage; partial or missing entries must remain visible as
+  unchecked backlog work.
 - [x] Add `docs/PROJECT_ONBOARDING.md` for Codex, Claude Code, Gemini, OpenCode, OpenClaw, and human operators.
 - [x] Add `awf project init` or `awf profile init` to inspect a repository and generate a draft `.awf/workspace.yml`.
 - [x] Add profile templates for common project shapes: generic, Python, Node/Next.js, Docker Compose, Python+Postgres, Node+browser/Playwright, and multi-service app.
@@ -435,6 +502,11 @@ coding agent in any project to use AWF for a feature.
   warnings so operators can distinguish a genuinely working agent from a
   stuck `running` workspace whose row `updated_at` has not changed.
 - [x] Add security/secret/egress status panels.
+- [ ] Add a polished dark theme and accessibility controls for the web console,
+  including larger font-size options, high-contrast mode, preserved operator
+  preference, keyboard/focus-visible coverage, and browser-verified responsive
+  screenshots for the main dashboard, workspace inspector, logs, and merge
+  queue.
 - [ ] Restructure the wide-screen console so global dashboard panes stay
   stable, while workspace-specific panes open in a dismissible embedded
   inspector that can be closed to reset the selected workspace.
@@ -450,8 +522,9 @@ coding agent in any project to use AWF for a feature.
 
 ## P2: GKE Readiness Design
 
-Do not begin implementation here until P0 is complete and most P1 items are either
-complete or consciously deferred.
+Do not begin implementation here until P0 and P1 are complete. Deferring a P1
+requires an explicit ledger note explaining why it is not needed for a superb
+local open-source AWF Core.
 
 - [ ] Define GKE control-plane deployment topology.
 - [ ] Define worker/node-agent split for Kubernetes.
@@ -466,11 +539,17 @@ complete or consciously deferred.
 
 ## Ready For GKE Discussion When
 
+- [ ] All P0 items are complete, including active AWF dogfood slices and the
+  umbrella provider-recovery acceptance item.
+- [ ] All P1 items are complete, or explicitly deferred with a written reason
+  that preserves the local open-source Core readiness bar.
 - [ ] PR monitor and merge queue can safely handle many parallel PRs with overlap.
 - [ ] Stale detection and validation tier policy are enforced as merge blockers.
 - [ ] Recovery operations are idempotent, observable, and restart-safe.
 - [ ] Cleanup is reliable and measured.
-- [ ] Secret and egress policy has real enforcement, not just schema.
+- [ ] Secret and egress policy has real enforcement, not just schema, including
+  explicit network posture, restricted allowlists, egress audit evidence,
+  prompt-injection boundaries, and supply-chain guardrails.
 - [ ] Provider/model capacity failures are classified, retried or routed through
   approved fallback policy, and cleaned up without manual intervention.
 - [ ] The console can explain every blocked workspace without reading raw logs.

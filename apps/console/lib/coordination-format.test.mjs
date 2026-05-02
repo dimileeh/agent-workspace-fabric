@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { summarizeCoordinationWarnings } from "./coordination-format.ts";
+import {
+  summarizeCoordinationWarnings,
+  summarizeVisibleCoordinationWarnings,
+} from "./coordination-format.ts";
 
 test("summarizeCoordinationWarnings handles empty warning lists", () => {
   assert.deepEqual(summarizeCoordinationWarnings([]), {
@@ -86,4 +89,37 @@ test("summarizeCoordinationWarnings reports truncation", () => {
   assert.equal(summary.label, "2 advisory overlaps");
   assert.equal(summary.overflowCount, 1);
   assert.match(summary.detail, /\+1 more/);
+});
+
+test("summarizeVisibleCoordinationWarnings hides advisory overlaps for completed workspaces", () => {
+  const warnings = [
+    {
+      warning_code: "OWNED_PATH_OVERLAP_RISK",
+      message: "Owned paths overlap active workspaces.",
+      severity: "advisory",
+      blocks_launch: false,
+      workspace_ids: ["ws_existing"],
+      overlaps: [
+        {
+          workspace_id: "ws_existing",
+          existing_path: "src/awf/service/**",
+          requested_path: "src/awf/service/workspaces.py",
+        },
+      ],
+      stale_policy_context: {
+        stale_reason_code: "STALE_OVERLAP",
+      },
+      overlap_count: 1,
+      overlaps_truncated: false,
+    },
+  ];
+
+  assert.equal(summarizeVisibleCoordinationWarnings(warnings, "running").count, 1);
+  assert.deepEqual(summarizeVisibleCoordinationWarnings(warnings, "completed"), {
+    count: 0,
+    label: "none",
+    detail: "no coordination warnings",
+    overflowCount: 0,
+    warnings: [],
+  });
 });

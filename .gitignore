@@ -65,6 +65,8 @@ workspaces/
 *.db
 *.sqlite
 *.sqlite3
+/comments.json
+/reviews.json
 
 # Docker
 .dockerignore.bak

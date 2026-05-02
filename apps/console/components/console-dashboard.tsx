@@ -70,7 +70,7 @@ import {
   formatOperationFailure,
   formatOperationTitle,
 } from "@/lib/operation-format";
-import { summarizeCoordinationWarnings } from "@/lib/coordination-format";
+import { summarizeVisibleCoordinationWarnings } from "@/lib/coordination-format";
 import {
   extractProfileSecrets,
   extractProfileSecurity,
@@ -1434,7 +1434,7 @@ function WorkspaceList({
     <div className="max-h-[calc(100vh-205px)] overflow-y-auto overflow-x-hidden">
       {items.map((item) => {
         const recoveryBadge = formatRecoveryBadge(item.recovery, item.status);
-        const coordinationSummary = summarizeCoordinationWarnings(item.coordination_warnings);
+        const coordinationSummary = summarizeVisibleCoordinationWarnings(item.coordination_warnings, item.status);
         return (
           <div
             key={item.workspace_id}
@@ -1565,7 +1565,7 @@ function TaskDetailsModal({
             <Fact label="Repository" value={workspace.repo_url} />
             <Fact label="Branch" value={workspace.branch_name ?? "—"} mono />
           </div>
-          <CoordinationWarningBlock warnings={workspace.coordination_warnings} />
+          <CoordinationWarningBlock warnings={workspace.coordination_warnings} status={workspace.status} />
           <section className="grid gap-2 rounded-md border border-slate-200 bg-slate-50 p-3">
             <div className="text-xs font-semibold text-slate-500">Prompt sent to AWF</div>
             <TaskPromptBody prompt={workspace.task_prompt} />
@@ -1719,7 +1719,7 @@ function WorkspaceSummary({
         {recovery && overview.status !== "completed" ? (
           <RecoveryCallout recovery={recovery} status={overview.status} />
         ) : null}
-        <CoordinationWarningBlock warnings={coordinationWarnings} />
+        <CoordinationWarningBlock warnings={coordinationWarnings} status={overview.status} />
         {overview.failure_reason || overview.failure_message ? (
           <div className="rounded-md border border-red-200 bg-red-50 p-3 text-sm text-red-900">
             <div className="font-semibold">{overview.failure_reason ?? "failure"}</div>
@@ -2010,10 +2010,12 @@ function RecoveryCallout({
 
 function CoordinationWarningBlock({
   warnings,
+  status,
 }: {
   warnings: Workspace["coordination_warnings"] | WorkspaceOverview["coordination_warnings"];
+  status: WorkspaceStatus;
 }) {
-  const summary = summarizeCoordinationWarnings(warnings);
+  const summary = summarizeVisibleCoordinationWarnings(warnings, status);
   if (summary.count === 0) {
     return null;
   }

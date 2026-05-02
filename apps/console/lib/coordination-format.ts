@@ -1,4 +1,4 @@
-import type { WorkspaceCoordinationWarning } from "@/lib/types";
+import type { WorkspaceCoordinationWarning, WorkspaceStatus } from "@/lib/types";
 import { compactId } from "./format.ts";
 
 export interface CoordinationWarningSummary {
@@ -41,6 +41,17 @@ export function summarizeCoordinationWarnings(
     overflowCount,
     warnings: visible,
   };
+}
+
+export function summarizeVisibleCoordinationWarnings(
+  warnings: WorkspaceCoordinationWarning[] | null | undefined,
+  status: WorkspaceStatus,
+  options: { maxWarnings?: number } = {},
+): CoordinationWarningSummary {
+  if (status === "completed") {
+    return summarizeCoordinationWarnings([], options);
+  }
+  return summarizeCoordinationWarnings(warnings, options);
 }
 
 function formatCoordinationWarningDetail(warning: WorkspaceCoordinationWarning): string {
