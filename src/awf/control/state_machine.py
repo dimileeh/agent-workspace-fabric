@@ -79,6 +79,7 @@ _CALLBACK_TERMINAL: Final[frozenset[WorkspaceStatus]] = frozenset(
     {
         WorkspaceStatus.cancelled,
         WorkspaceStatus.destroyed,
+        WorkspaceStatus.destroying,
         WorkspaceStatus.failed,
         WorkspaceStatus.completed,
     }

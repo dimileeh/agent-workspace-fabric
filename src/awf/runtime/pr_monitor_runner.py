@@ -690,7 +690,7 @@ class PullRequestMonitorRunner:
                 metadata=metadata,
             )
             await s.commit()
-            if result == "terminal":
+            if result == "terminal" or result == "stale":
                 return "deterministic"
             if (
                 result is not None

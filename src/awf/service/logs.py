@@ -25,13 +25,13 @@ class ServiceLogName(StrEnum):
 
 class CompletedProcessLike(Protocol):
     @property
-    def returncode(self) -> int: ...
+    def returncode(self) -> int: ...  # pragma: no cover
 
     @property
-    def stdout(self) -> str | None: ...
+    def stdout(self) -> str | None: ...  # pragma: no cover
 
     @property
-    def stderr(self) -> str | None: ...
+    def stderr(self) -> str | None: ...  # pragma: no cover
 
 
 class SubprocessRun(Protocol):
@@ -42,7 +42,7 @@ class SubprocessRun(Protocol):
         check: bool,
         capture_output: bool,
         text: Literal[True],
-    ) -> CompletedProcessLike: ...
+    ) -> CompletedProcessLike: ...  # pragma: no cover
 
 
 @dataclass(frozen=True)

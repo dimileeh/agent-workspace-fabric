@@ -19,14 +19,19 @@ from awf.control.executor import (
     _agent_pr_identity,
     _apply_baseline_coverage_ratchet,
     _call_pr_monitor_factory,
+    _coverage_has_failing_tests,
     _coverage_preserves_below_threshold_baseline,
+    _coverage_wrapped_pytest_failure_message,
     _failure_reason_for_phase,
     _failure_salvage_payload,
+    _format_failing_test_evidence,
     _get_active_recovery_payload,
     _MonitorRebaseRecoveryError,
     _profile_with_planning_iteration_default,
     _raw_profile_has_explicit_planning_max_iterations,
     _read_text_if_present,
+    _RebaseRecoveryResult,
+    _validate_only_recovery_needs_existing_pr_push,
     _validation_command_count,
     _validation_failure_message,
     _validation_run_command_records,
@@ -82,6 +87,58 @@ def _coverage(
         status=status,
         reason_code=reason_code,
         command_result=command_result if command_result is not None else _command_result(tmp_path),
+    )
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("recovery_payload", "head_sha", "rebase_result", "expected"),
+    [
+        (
+            {"recovery_mode": "rebase_only", "source_head_sha": "old"},
+            "new",
+            None,
+            False,
+        ),
+        (
+            {"recovery_mode": "validate_only", "source_head_sha": "old"},
+            "new",
+            _RebaseRecoveryResult(base_sha="base", head_sha="rebased"),
+            False,
+        ),
+        (
+            {"recovery_mode": "validate_only", "source_head_sha": "old"},
+            None,
+            None,
+            False,
+        ),
+        (
+            {"recovery_mode": "validate_only", "source_head_sha": "old"},
+            "",
+            None,
+            False,
+        ),
+        (
+            {"recovery_mode": "validate_only", "source_head_sha": "old"},
+            "new",
+            None,
+            True,
+        ),
+    ],
+)
+def test_validate_only_recovery_needs_existing_pr_push_edges(
+    recovery_payload: dict[str, object],
+    head_sha: str | None,
+    rebase_result: _RebaseRecoveryResult | None,
+    expected: bool,
+) -> None:
+    assert (
+        _validate_only_recovery_needs_existing_pr_push(
+            recovery_payload,
+            validated_workspace_head_sha=head_sha,
+            rebase_recovery_result=rebase_result,
+        )
+        is expected
     )
 
 
@@ -1355,6 +1412,69 @@ def test_validation_coverage_metadata_includes_baseline_fields(tmp_path: Path) -
         "status": "failed",
         "reason_code": "COVERAGE_NOT_FOUND",
     }
+
+
+@pytest.mark.unit
+def test_coverage_helpers_handle_failing_pytest_evidence(tmp_path: Path) -> None:
+    coverage = _coverage(
+        tmp_path,
+        percent=88,
+        minimum=99,
+        reason_code="COVERAGE_BELOW_THRESHOLD",
+    )
+    coverage = ValidationCoverageResult(
+        provider=coverage.provider,
+        percent=coverage.percent,
+        minimum_percent=coverage.minimum_percent,
+        enforce=coverage.enforce,
+        status=coverage.status,
+        reason_code=coverage.reason_code,
+        command_result=coverage.command_result,
+        gaps=[{"file": "src/awf/service/provider_recovery.py", "missing_lines": [10]}],
+        failing_test_node_ids=["tests/test_provider.py::test_capacity"],
+        failing_test_evidence=["AssertionError: capacity"],
+    )
+    baseline = _coverage(tmp_path, percent=88, minimum=99)
+
+    assert _coverage_has_failing_tests(None) is False
+    assert _coverage_has_failing_tests(coverage) is True
+    assert (
+        _format_failing_test_evidence(
+            ValidationCoverageResult(
+                provider="python",
+                percent=None,
+                minimum_percent=99,
+                enforce=True,
+                status="failed",
+                reason_code="PYTEST_FAILED",
+                failing_test_evidence=["traceback summary"],
+            )
+        )
+        == "traceback summary"
+    )
+    assert not _coverage_preserves_below_threshold_baseline(
+        coverage,
+        baseline_coverage=baseline,
+    )
+    assert "fix the failing test first" in _coverage_wrapped_pytest_failure_message(coverage)
+    assert "top uncovered areas" in _coverage_wrapped_pytest_failure_message(coverage)
+
+
+@pytest.mark.unit
+def test_coverage_wrapped_pytest_failure_message_handles_missing_coverage() -> None:
+    coverage = ValidationCoverageResult(
+        provider="python",
+        percent=None,
+        minimum_percent=99,
+        enforce=True,
+        status="failed",
+        reason_code="PYTEST_FAILED",
+        failing_test_node_ids=["tests/test_provider.py::test_failure"],
+    )
+
+    assert "coverage output was not available" in _coverage_wrapped_pytest_failure_message(
+        coverage
+    )
 
 
 @pytest.mark.unit

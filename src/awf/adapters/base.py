@@ -139,10 +139,10 @@ class AgentAdapter(ABC):
 
     @property
     @abstractmethod
-    def name(self) -> AgentRuntime: ...
+    def name(self) -> AgentRuntime: ...  # pragma: no cover
 
     @abstractmethod
-    def get_provider(self, model: str | None) -> str: ...
+    def get_provider(self, model: str | None) -> str: ...  # pragma: no cover
 
     @abstractmethod
     def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
