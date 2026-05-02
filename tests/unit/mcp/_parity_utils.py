@@ -20,7 +20,10 @@ def _parse_markdown_table(text: str) -> list[dict[str, str]]:
                 headers = []
             continue
         cells = [c.strip() for c in stripped.split("|")]
-        cells = [c for c in cells if c != ""]
+        if cells and cells[0] == "":
+            cells.pop(0)
+        if cells and cells[-1] == "":
+            cells.pop()
         if not headers:
             headers = cells
             in_table = True
