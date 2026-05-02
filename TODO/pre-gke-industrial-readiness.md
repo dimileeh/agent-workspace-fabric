@@ -37,6 +37,25 @@ Priority key:
 - P1: local open-source Core readiness blockers; finish before GKE discussion.
 - P2: GKE design and deployment work; do not start until P0 and P1 are complete.
 
+## DX Review Notes
+
+Plan DevEx review on 2026-05-02 classified AWF Core as a developer-facing
+platform with CLI, REST API, MCP, console, docs, and future SDK/client surfaces.
+Primary persona for the local open-source Core release: an experienced
+platform/product engineer evaluating whether AWF is trustworthy enough to run
+multiple coding agents on their own repository. Their tolerance is roughly five
+minutes to first proof and one terminal session before they decide whether AWF
+is real.
+
+Competitive benchmark: current parallel-agent tools such as Coder Mux,
+Stoneforge, webmux/workmux, and SwarmClaw emphasize fast workspace creation,
+visible agent activity, and copy-paste onboarding. AWF's differentiator is not
+"launch many agents"; it is integration trust: isolated workspace lifecycle,
+profile-driven validation, PR monitor discipline, reason codes, retry lineage,
+cleanup, and release-readiness evidence. The backlog below adds P1 DX gates so
+that value is visible immediately instead of buried in deep docs or operator
+history.
+
 ## Active / Completed AWF Slices
 
 Status values:
@@ -530,6 +549,62 @@ coding agent in any project to use AWF for a feature.
 - [x] Add an optional smoke-workspace generator that creates a tiny no-op/check-only AWF workspace request from the generated profile.
 - [x] Add regression tests for onboarding detection, generated profile validity, preview output, and smoke request shape.
 
+## P1: Developer Experience And Public Core Surface
+
+Decision: treat local AWF Core as an open-source developer product, not only an
+operator-controlled internal system. A new evaluator should be able to install
+AWF, run one proof, understand failures, and discover API/CLI/MCP contracts
+without reading the whole repo.
+
+- [ ] Add a top-level "Start Here" quickstart that gets a fresh evaluator from
+  clone/install to meaningful AWF proof in under five minutes. Acceptance:
+  three commands or fewer for the recommended path, expected output snippets,
+  prerequisites called out before the first command, and links to deeper docs
+  only after the first successful proof.
+- [ ] Split the README into a short product landing plus focused docs:
+  getting started, concepts, CLI reference, REST API reference, MCP reference,
+  troubleshooting, trust model, and contributor guide. Acceptance: README
+  remains scannable under roughly 300 lines and points to one canonical doc for
+  each developer journey stage.
+- [ ] Add an executable first-run DX smoke command, such as `awf demo run` or
+  `awf smoke run`, that prints a step-by-step report for service readiness,
+  profile preview, workspace request, validation evidence, PR/monitor evidence
+  or mocked-local equivalent, and cleanup evidence. Acceptance: it is safe to
+  run repeatedly, works without live GitHub when using mocked-local mode, and
+  produces clear next actions on failure.
+- [ ] Publish a stable OpenAPI artifact and API examples for the Core control
+  plane. Acceptance: `openapi.json` can be generated in CI, linked from docs,
+  and paired with copy-paste `curl` examples for create workspace, list status,
+  read logs/events, request validation, remonitor, retry, and release
+  readiness.
+- [ ] Decide the SDK stance before open-source Core release: either ship a
+  minimal Python client for the stable operator flows or explicitly document
+  that REST + CLI + MCP are the supported client surfaces for v0.1. Acceptance:
+  the decision is reflected in README, API docs, and the parity matrix so
+  integrators do not write against accidental internal modules.
+- [ ] Add a searchable reason-code and error-code catalog. Acceptance: common
+  API/CLI/MCP failures include problem, likely cause, operator fix, related
+  command, and docs link; release readiness fails if new public reason codes
+  lack catalog coverage.
+- [ ] Improve CLI help text for first-time users. Acceptance: `awf --help`,
+  `awf init --help`, `awf service bootstrap --help`, and workspace commands
+  explain the recommended first path, safety defaults, dry-run behavior, and
+  whether the command mutates local state, Docker, GitHub, or Git branches.
+- [ ] Add a troubleshooting guide organized by first-run failure symptom:
+  Docker unavailable, Postgres unavailable, GitHub auth missing, provider auth
+  missing, package install failure, disk pressure, port conflict, provider
+  outage, stale PR monitor, and cleanup/orphan warning. Acceptance: every item
+  includes the exact command to diagnose and the safest recovery command.
+- [ ] Add docs search/readability checks for public docs. Acceptance: CI or a
+  docs-status test confirms every public guide is linked from the docs index,
+  key commands still exist in CLI help, and snippets marked copy-paste are
+  syntactically valid.
+- [ ] Add a "first-time evaluator" telemetry-free feedback loop for local Core,
+  such as a generated `awf doctor --bundle` redacted support artifact or a
+  GitHub issue template path from failed readiness output. Acceptance: no
+  secrets are included, and developers can file useful issues without manually
+  collecting ten logs.
+
 ## P1: Operator Console Completion
 
 - [x] Show exact agent model and thinking/effort settings for every workspace.
@@ -611,3 +686,9 @@ local open-source AWF Core.
 - [ ] The maintained `examples/awf-core-demo` golden path proves onboarding,
   profile preview, smoke request generation, workspace lifecycle, validation,
   PR monitor path, and cleanup end to end.
+- [ ] A first-time evaluator can install or clone AWF Core, run the recommended
+  quickstart, see a meaningful release/demo proof, and understand failures in
+  under five minutes without reading the full README.
+- [ ] Public API/CLI/MCP docs and the SDK/no-SDK stance are explicit enough that
+  external integrators know which surfaces are stable and which internals are
+  unsupported.
