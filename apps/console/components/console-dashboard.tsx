@@ -325,6 +325,10 @@ export function ConsoleDashboard() {
   }, [overview]);
 
   useEffect(() => {
+    setModelFilter("all");
+  }, [agentFilter, statusFilter, repoFilter]);
+
+  useEffect(() => {
     if (modelFilter !== "all" && !availableModels.includes(modelFilter)) {
       setModelFilter("all");
     }
