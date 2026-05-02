@@ -1342,6 +1342,7 @@ class TestRunOnceMonitorRecovery:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         stale_execution_expires_at = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
         monitor_id = await _create_monitoring_pr(
@@ -1356,6 +1357,34 @@ class TestRunOnceMonitorRecovery:
             ws.execution_claimed_by = "dead-execution-worker"
             ws.execution_claim_expires_at = stale_execution_expires_at
             await s.commit()
+
+        original_claim_monitoring_pr = WorkspaceRepository.claim_monitoring_pr
+        claim_cutoffs: list[datetime | None] = []
+
+        async def claim_monitoring_pr_with_cutoff_spy(
+            self: WorkspaceRepository,
+            workspace_id: str,
+            *,
+            owner_id: str,
+            lease_expires_at: datetime,
+            now: datetime | None = None,
+            clear_stale_execution_claim_cutoff: datetime | None = None,
+        ) -> bool:
+            claim_cutoffs.append(clear_stale_execution_claim_cutoff)
+            return await original_claim_monitoring_pr(
+                self,
+                workspace_id,
+                owner_id=owner_id,
+                lease_expires_at=lease_expires_at,
+                now=now,
+                clear_stale_execution_claim_cutoff=clear_stale_execution_claim_cutoff,
+            )
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "claim_monitoring_pr",
+            claim_monitoring_pr_with_cutoff_spy,
+        )
 
         executor = _BlockingMonitorExecutor()
         worker = ControlWorker(
@@ -1373,6 +1402,8 @@ class TestRunOnceMonitorRecovery:
         assert await asyncio.wait_for(worker.run_once(), timeout=1.0) == 1
         await asyncio.wait_for(executor.started.wait(), timeout=1.0)
 
+        assert len(claim_cutoffs) == 1
+        assert claim_cutoffs[0] is not None
         assert executor.calls == []
         assert executor.resume_calls == [monitor_id]
         async with session_factory() as s:
@@ -1551,6 +1582,7 @@ class TestRunOnceMonitorRecovery:
             owner_id: str,
             lease_expires_at: datetime,
             now: datetime | None = None,
+            clear_stale_execution_claim_cutoff: datetime | None = None,
         ) -> bool:
             await self._session.execute(
                 update(Workspace)
@@ -1567,6 +1599,7 @@ class TestRunOnceMonitorRecovery:
                 owner_id=owner_id,
                 lease_expires_at=lease_expires_at,
                 now=now,
+                clear_stale_execution_claim_cutoff=clear_stale_execution_claim_cutoff,
             )
 
         monkeypatch.setattr(

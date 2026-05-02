@@ -877,35 +877,28 @@ class ControlWorker:
                 return False
             previous_claim = _workspace_claim_snapshot(ws)
             runtime_stranding_reason = _latest_runtime_stranding_reason(ws.events)
+            execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
+                ws,
+                claim_cutoff=now,
+            )
             claimed = await repo.claim_monitoring_pr(
                 workspace_id,
                 owner_id=self._worker_id,
                 lease_expires_at=lease_expires_at,
                 now=now,
+                clear_stale_execution_claim_cutoff=now,
             )
             if claimed:
                 await session.refresh(ws)
-                execution_claim_cleanup = (
-                    _monitor_recovery_execution_claim_cleanup_payload(
+                if (
+                    ws.execution_claimed_by is not None
+                    or ws.execution_claim_expires_at is not None
+                    or execution_claim_cleanup["action"] == "preserved_unexpired"
+                ):
+                    execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
                         ws,
                         claim_cutoff=now,
                     )
-                )
-                if _monitor_recovery_execution_claim_needs_clear(ws, claim_cutoff=now):
-                    cleared_stale_execution_claim = (
-                        await repo.clear_stale_monitor_recovery_execution_claim(
-                            workspace_id,
-                            claim_cutoff=now,
-                        )
-                    )
-                    await session.refresh(ws)
-                    if not cleared_stale_execution_claim:
-                        execution_claim_cleanup = (
-                            _monitor_recovery_execution_claim_cleanup_payload(
-                                ws,
-                                claim_cutoff=now,
-                            )
-                        )
                 claim_cleanup = _monitor_recovery_claim_cleanup_payload(
                     ws,
                     claim_cutoff=now,
@@ -1237,16 +1230,6 @@ def _monitor_recovery_execution_claim_cleanup_payload(
         "action": "preserved_unexpired",
         "reason_code": _MONITOR_RECOVERY_EXECUTION_CLAIM_PRESERVED_REASON_CODE,
     }
-
-
-def _monitor_recovery_execution_claim_needs_clear(
-    workspace: Workspace,
-    *,
-    claim_cutoff: datetime,
-) -> bool:
-    if workspace.execution_claimed_by is None and workspace.execution_claim_expires_at is None:
-        return False
-    return _execution_claim_is_stale(workspace, claim_cutoff)
 
 
 def _latest_runtime_stranding_reason(events: list[WorkspaceEvent]) -> str | None:
