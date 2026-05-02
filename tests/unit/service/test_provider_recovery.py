@@ -1819,6 +1819,72 @@ async def test_create_provider_recovery_attempt_row_no_target_model_and_existing
         )
         assert result is None
 
+
+@pytest.mark.unit
+async def test_create_provider_recovery_attempt_row_existing_event_does_not_double_count_circuit_breaker(factory):
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/repo.git",
+            branch_base="main",
+            task_title="title",
+            task_prompt="prompt",
+            agent="gemini",
+            task_policy={
+                "provider_recovery": {
+                    "circuit_breaker": {
+                        "failure_threshold": 2,
+                        "cooldown_seconds": 600,
+                    }
+                }
+            },
+            test_commands=[],
+            owned_paths=[],
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.provider_recovery_requested",
+            payload={"provider_recovery": {"failure_fingerprint": "capacity:f1"}},
+        )
+        await ProviderModelCircuitBreakerRepository(session).record_failure(
+            provider="google",
+            model="gemini",
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            failure_fingerprint="capacity:f1",
+            workspace_id=ws.id,
+            attempt_id=None,
+            now=now,
+            failure_threshold=2,
+            cooldown_seconds=600,
+        )
+        await session.commit()
+        ws_id = ws.id
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            ws_id,
+            metadata={
+                "retryable": True,
+                "provider": "google",
+                "model": "gemini",
+                "failure_fingerprint": "capacity:f1",
+                "reason_code": AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            },
+            now=now + timedelta(seconds=10),
+        )
+        breaker = await ProviderModelCircuitBreakerRepository(session).get(
+            provider="google",
+            model="gemini",
+        )
+
+        assert result is None
+        assert breaker is not None
+        assert breaker.failure_count == 1
+        assert breaker.state == "closed"
+
+
 @pytest.mark.unit
 async def test_create_provider_recovery_attempt_row_no_metadata_from_workspace(factory):
     async with factory() as session:

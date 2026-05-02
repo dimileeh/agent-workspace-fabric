@@ -277,12 +277,17 @@ async def create_provider_recovery_attempt_row(
         decision=decision,
         not_before=source_not_before,
     )
-    await _record_provider_circuit_breaker(
-        session,
+    has_existing_provider_recovery_event = _has_existing_provider_recovery_event(
         source,
         recovery_metadata,
-        now=recovery_now,
     )
+    if not has_existing_provider_recovery_event:
+        await _record_provider_circuit_breaker(
+            session,
+            source,
+            recovery_metadata,
+            now=recovery_now,
+        )
     if source_not_before is not None or decision.action == "terminal":
         source.task_policy = source_policy
     elif monitor_in_place_recovery and decision.action in {"retry", "fallback"}:
@@ -308,7 +313,7 @@ async def create_provider_recovery_attempt_row(
                 ),
             },
         )
-    if _has_existing_provider_recovery_event(source, recovery_metadata):
+    if has_existing_provider_recovery_event:
         await session.flush()
         return None
     if decision.action == "terminal":
