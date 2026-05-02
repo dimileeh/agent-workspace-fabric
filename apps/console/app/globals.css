@@ -2,7 +2,7 @@
 
 :root {
   color-scheme: light;
-  font-size: 16px;
+  font-size: 100%;
   --background: #f7f8fa;
   --foreground: #17202b;
   --panel: #ffffff;
@@ -86,7 +86,7 @@
 }
 
 :root[data-awf-font-size="large"] {
-  font-size: 18px;
+  font-size: 112.5%;
 }
 
 * {
