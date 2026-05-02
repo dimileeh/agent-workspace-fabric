@@ -1,0 +1,22 @@
+{
+  "status": "satisfied",
+  "summary": "Required onboarding plan validation passed for the targeted onboarding and CLI surface: project-onboarding, init, and profile-init tests plus ruff and mypy checks are all clean.",
+  "gaps": [],
+  "validation": [
+    {
+      "command": "uv run --python 3.12 --extra dev pytest tests/unit/profiles/test_project_onboarding.py tests/unit/cli/test_init.py tests/unit/cli/test_profile_init.py -q",
+      "exit_code": 0,
+      "output": "........................................................................ [ 96%]\n...                                                                      [100%]\n75 passed in 0.93s"
+    },
+    {
+      "command": "uv run --python 3.12 --extra dev ruff check src/awf tests/unit/cli tests/unit/profiles",
+      "exit_code": 0,
+      "output": "All checks passed!"
+    },
+    {
+      "command": "uv run --python 3.12 --extra dev mypy src/awf",
+      "exit_code": 0,
+      "output": "Success: no issues found in 137 source files"
+    }
+  ]
+}
