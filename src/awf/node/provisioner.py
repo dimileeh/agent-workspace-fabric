@@ -83,6 +83,30 @@ class Provisioner:
             if ws is None:
                 return  # Workspace disappeared or wasn't requested; nothing to do.
 
+        await self._provision_claimed_workspace(workspace_id, ws)
+
+    async def provision_claimed(self, workspace_id: str) -> None:
+        """Drive a workspace already claimed into ``provisioning`` by the worker."""
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                _log.warning("provisioner.skip_unknown", workspace_id=workspace_id)
+                return
+            if ws.status != WorkspaceStatus.provisioning.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    ws,
+                    action="provision",
+                    expected=WorkspaceStatus.provisioning,
+                    reason_code="PROVISIONER_STALE_STATUS",
+                )
+                await session.commit()
+                return
+
+        await self._provision_claimed_workspace(workspace_id, ws)
+
+    async def _provision_claimed_workspace(self, workspace_id: str, ws: Workspace) -> None:
         if not await self._recheck_status(
             workspace_id,
             expected=WorkspaceStatus.provisioning,

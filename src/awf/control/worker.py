@@ -194,14 +194,22 @@ class ControlWorker:
             action="provision",
         )
         if requested_ids:
-            await self._record_ordered_decisions(
-                requested_ids,
-                reason_code=ORDERED_REQUESTED_PROVISIONING_REASON,
-            )
-            await asyncio.gather(
-                *(self._safely_provision(ws_id) for ws_id in requested_ids),
-                return_exceptions=False,
-            )
+            requested_ids = await self._claim_requested_ids(requested_ids)
+        if requested_ids:
+            provision_tasks = [
+                asyncio.create_task(
+                    self._safely_provision_claimed(ws_id),
+                    name=f"awf-provision-{ws_id}",
+                )
+                for ws_id in requested_ids
+            ]
+            try:
+                await self._record_ordered_decisions(
+                    requested_ids,
+                    reason_code=ORDERED_REQUESTED_PROVISIONING_REASON,
+                )
+            finally:
+                await asyncio.gather(*provision_tasks, return_exceptions=False)
             dispatched_ids.update(requested_ids)
 
         if self._executor is not None:
@@ -891,11 +899,11 @@ class ControlWorker:
     def _forget_execution_task(self, workspace_id: str, _task: asyncio.Task[None]) -> None:
         self._execution_tasks.pop(workspace_id, None)
 
-    async def _safely_provision(self, workspace_id: str) -> None:
+    async def _safely_provision_claimed(self, workspace_id: str) -> None:
         try:
-            await self._provisioner.provision(workspace_id)
+            await self._provisioner.provision_claimed(workspace_id)
         except Exception:
-            # Provisioner.provision() already logged + transitioned to failed;
+            # Provisioner.provision_claimed() already logged + transitioned to failed;
             # we swallow here so one bad workspace doesn't abort the batch.
             _log.exception("worker.provision_failed", workspace_id=workspace_id)
 
@@ -963,6 +971,36 @@ class ControlWorker:
             operation_id=recovery_operation_id,
             status=OperationStatus.succeeded,
         )
+
+    async def _claim_requested_ids(self, workspace_ids: list[str]) -> list[str]:
+        claimed: list[str] = []
+        for workspace_id in workspace_ids:
+            if await self._claim_requested_for_provisioning(workspace_id):
+                claimed.append(workspace_id)
+        return claimed
+
+    async def _claim_requested_for_provisioning(self, workspace_id: str) -> bool:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                workspace_id,
+                from_status=WorkspaceStatus.requested,
+                to=WorkspaceStatus.provisioning,
+                reason_code="WORKER_CLAIMED",
+            )
+            if ws is not None:
+                await session.commit()
+                return True
+
+            current = await repo.get(workspace_id)
+            _log.info(
+                "worker.skip_stale_dispatch",
+                workspace_id=workspace_id,
+                action="provision",
+                expected_status=WorkspaceStatus.requested.value,
+                status=current.status if current is not None else None,
+            )
+            return False
 
     async def _claim_monitoring_pr_ids(self, workspace_ids: list[str], *, limit: int) -> list[str]:
         claimed: list[str] = []

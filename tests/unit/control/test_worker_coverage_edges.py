@@ -38,6 +38,9 @@ class _NoopProvisioner:
     async def provision(self, workspace_id: str) -> None:
         del workspace_id
 
+    async def provision_claimed(self, workspace_id: str) -> None:
+        del workspace_id
+
 
 class _RecordingExecutor:
     def __init__(self, *, fail: bool = False) -> None:

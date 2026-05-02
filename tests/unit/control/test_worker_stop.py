@@ -67,7 +67,10 @@ async def test_safely_provision_swallows_provisioner_exceptions(
         await s.commit()
 
     provisioner = AsyncMock()
-    provisioner.provision.side_effect = [RuntimeError("boom"), None]  # first fails, second ok
+    provisioner.provision_claimed.side_effect = [
+        RuntimeError("boom"),
+        None,
+    ]  # first fails, second ok
 
     worker = ControlWorker(
         session_factory=factory,
@@ -78,7 +81,7 @@ async def test_safely_provision_swallows_provisioner_exceptions(
     # run_once must not raise even though one provision threw.
     dispatched = await worker.run_once()
     assert dispatched == 2
-    assert provisioner.provision.call_count == 2
+    assert provisioner.provision_claimed.call_count == 2
 
     # Both workspaces were looked up from the DB; assert shape.
     async with factory() as s:

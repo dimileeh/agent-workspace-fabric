@@ -94,10 +94,15 @@ def worker(session_factory: async_sessionmaker[AsyncSession], tmp_path: Path) ->
 
 
 async def _create_requested(
-    session_factory: async_sessionmaker[AsyncSession], origin: Path, title: str
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    *,
+    create_task_attempt: bool = False,
 ) -> str:
     async with session_factory() as s:
-        ws = await WorkspaceRepository(s).create(
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
             repo_url=str(origin),
             branch_base="development",
             task_title=title,
@@ -105,6 +110,18 @@ async def _create_requested(
             agent="codex",
             test_commands=[],
         )
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
         await s.commit()
         return ws.id
 
@@ -335,12 +352,18 @@ class _TransitioningProvisioner:
         self.calls: list[str] = []
 
     async def provision(self, workspace_id: str) -> None:
+        await self.provision_claimed(workspace_id)
+
+    async def provision_claimed(self, workspace_id: str) -> None:
         self.calls.append(workspace_id)
         async with self._session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
             assert ws is not None
-            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            if ws.status == WorkspaceStatus.requested.value:
+                await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            elif ws.status != WorkspaceStatus.provisioning.value:
+                return
             ws.branch_name = f"awf/{workspace_id}"
             ws.base_commit = "b" * 40
             ws.compose_project_name = f"awf_{workspace_id}"
@@ -478,6 +501,62 @@ class TestRunOnce:
                 )
             )
             assert count == 5
+
+    @pytest.mark.unit
+    async def test_requested_race_skip_does_not_record_ordered_decision(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "race-requested-ordering",
+            create_task_attempt=True,
+        )
+
+        class _UnexpectedProvisioner:
+            async def provision(self, workspace_id: str) -> None:
+                raise AssertionError(f"unexpected provision call for {workspace_id}")
+
+            async def provision_claimed(self, workspace_id: str) -> None:
+                raise AssertionError(f"unexpected provision call for {workspace_id}")
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_UnexpectedProvisioner(),  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        async def _race_after_filter(
+            workspace_ids: list[str],
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+        ) -> list[str]:
+            assert workspace_ids == [requested_id]
+            assert expected == WorkspaceStatus.requested
+            assert action == "provision"
+            async with session_factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.transition_if_current(
+                    requested_id,
+                    from_status=WorkspaceStatus.requested,
+                    to=WorkspaceStatus.provisioning,
+                    reason_code="OTHER_WORKER_CLAIMED",
+                )
+                assert ws is not None
+                await session.commit()
+            return [requested_id]
+
+        worker._filter_current_status = _race_after_filter  # type: ignore[method-assign]
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
+
+        assert decisions == []
 
 
 class TestRunOnceExecution:
@@ -1418,18 +1497,9 @@ class TestRunOnceExecution:
 
         class _ClaimingProvisioner:
             async def provision(self, workspace_id: str) -> None:
-                async with session_factory() as s:
-                    repo = WorkspaceRepository(s)
-                    ws = await repo.transition_if_current(
-                        workspace_id,
-                        from_status=WorkspaceStatus.requested,
-                        to=WorkspaceStatus.provisioning,
-                        reason_code="TEST_CLAIM",
-                    )
-                    if ws is None:
-                        return
-                    await s.commit()
+                await self.provision_claimed(workspace_id)
 
+            async def provision_claimed(self, workspace_id: str) -> None:
                 calls.append(workspace_id)
                 started.set()
                 await release.wait()
