@@ -35,26 +35,48 @@ def _extract_mcp_tool_names() -> set[str]:
 
 
 def _extract_cli_commands() -> set[str]:
-    main_content = (SRC_ROOT / "cli" / "main.py").read_text(encoding="utf-8")
-    commands: set[str] = set()
-    cli_map: dict[str, str] = {}
-    for m in re.finditer(
-        r"app\.add_typer\(\s*(\w+)\s*,\s*name\s*=\s*\"([^\"]+)\"",
-        main_content,
-    ):
-        cli_map[m.group(1)] = m.group(2)
-    for m in re.finditer(
-        r"@(\w+)\.command\(\s*(?:\"([^\"]+)\")?\s*\)",
-        main_content,
-    ):
-        app_var = m.group(1)
-        cmd_name = m.group(2)
-        if app_var == "app":
-            commands.add(f"awf {cmd_name}" if cmd_name else "awf")
-        elif app_var in cli_map:
-            prefix = cli_map[app_var]
-            commands.add(f"awf {prefix} {cmd_name}" if cmd_name else f"awf {prefix}")
-    return commands
+    from typer.main import get_command
+
+    from awf.cli.main import app
+
+    grp = get_command(app)
+
+    def _walk(grp: object, prefix: str) -> set[str]:
+        result: set[str] = set()
+        for name, cmd in getattr(grp, "commands", {}).items():
+            full = f"{prefix} {name}".replace("  ", " ")
+            if hasattr(cmd, "commands"):
+                result.update(_walk(cmd, full))
+            else:
+                result.add(full)
+        return result
+
+    return _walk(grp, "awf")
+
+
+def _extract_cli_flags() -> dict[str, set[str]]:
+    from typer.main import get_command
+
+    from awf.cli.main import app
+
+    grp = get_command(app)
+
+    def _walk(grp: object, prefix: str) -> dict[str, set[str]]:
+        result: dict[str, set[str]] = {}
+        for name, cmd in getattr(grp, "commands", {}).items():
+            full = f"{prefix} {name}".replace("  ", " ")
+            if hasattr(cmd, "commands"):
+                result.update(_walk(cmd, full))
+            else:
+                flags: set[str] = set()
+                for param in getattr(cmd, "params", []):
+                    for opt in getattr(param, "opts", ()):
+                        if opt.startswith("--"):
+                            flags.add(opt)
+                result[full] = flags
+        return result
+
+    return _walk(grp, "awf")
 
 
 def _extract_error_codes() -> set[str]:
@@ -105,6 +127,7 @@ def _extract_schema_class_names() -> set[str]:
 _REST_PATHS = None
 _MCP_TOOLS = None
 _CLI_COMMANDS = None
+_CLI_FLAGS = None
 _ERROR_CODES = None
 _SCHEMA_NAMES = None
 
@@ -128,6 +151,13 @@ def _get_cli_commands() -> set[str]:
     if _CLI_COMMANDS is None:
         _CLI_COMMANDS = _extract_cli_commands()
     return _CLI_COMMANDS
+
+
+def _get_cli_flags() -> dict[str, set[str]]:
+    global _CLI_FLAGS
+    if _CLI_FLAGS is None:
+        _CLI_FLAGS = _extract_cli_flags()
+    return _CLI_FLAGS
 
 
 def _get_error_codes() -> set[str]:
@@ -218,6 +248,7 @@ def test_parity_matrix_mcp_tools_exist_in_server() -> None:
 def test_parity_matrix_cli_commands_or_absent() -> None:
     rows = _parity_rows()
     cli_commands = _get_cli_commands()
+    cli_flags = _get_cli_flags()
     missing: list[str] = []
     for row in rows:
         cli_cell = row.get("CLI surface", "").strip()
@@ -231,11 +262,27 @@ def test_parity_matrix_cli_commands_or_absent() -> None:
             if not part.startswith("awf "):
                 missing.append(f"{row.get('Capability', '?')}: {part} (malformed CLI entry)")
                 continue
-            base_cmd = part.split(" --")[0]
+            tokens = part.split()
+            base_end = len(tokens)
+            for i, t in enumerate(tokens):
+                if t.startswith("--"):
+                    base_end = i
+                    break
+            base_cmd = " ".join(tokens[:base_end])
             if base_cmd not in cli_commands:
                 missing.append(f"{row.get('Capability', '?')}: {part}")
+                continue
+            allowed = cli_flags.get(base_cmd, set())
+            for token in tokens:
+                if not token.startswith("--"):
+                    continue
+                flag_name = token.split("=")[0]
+                if flag_name not in allowed:
+                    missing.append(
+                        f"{row.get('Capability', '?')}: {part} (unsupported flag {flag_name})"
+                    )
     assert not missing, (
-        "CLI commands in parity matrix not found in CLI app:\n"
+        "CLI commands/flags in parity matrix not found in CLI app:\n"
         + "\n".join(missing)
     )
 
