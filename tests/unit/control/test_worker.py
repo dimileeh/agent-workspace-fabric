@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import event, update
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import (
@@ -837,6 +837,77 @@ class TestRunOnceExecution:
         assert executor.calls == [allowed_id]
 
     @pytest.mark.unit
+    async def test_provider_recovery_filter_reuses_schedulable_workspace_rows(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        await _create_ready(
+            session_factory,
+            origin_repo,
+            "cooling-ready",
+            agent="gemini",
+            task_class="refactor_task",
+            task_policy={
+                "agent_model": "gemini-2.5-pro",
+                "scheduler": {"base_priority": 100},
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                },
+            },
+        )
+        allowed_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "allowed-ready",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        workspace_selects: list[str] = []
+
+        def _capture_workspace_select(
+            _conn: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.upper()
+            if (
+                normalized.lstrip().startswith("SELECT")
+                and "FROM WORKSPACES" in normalized
+            ):
+                workspace_selects.append(statement)
+
+        engine = session_factory.kw["bind"]
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_workspace_select)
+        try:
+            worker = ControlWorker(
+                session_factory=session_factory,
+                provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+                executor=_RecordingExecutor(),
+                runtime_inspector=_HealthyRuntimeInspector(),
+                config=WorkerConfig(
+                    poll_interval_seconds=0.01,
+                    max_concurrent_provisions=0,
+                    max_concurrent_executions=1,
+                ),
+            )
+
+            assert await worker._list_ready(limit=1) == [allowed_id]
+        finally:
+            event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                _capture_workspace_select,
+            )
+
+        assert len(workspace_selects) == 1
+
+    @pytest.mark.unit
     async def test_provider_cooldown_refill_keeps_exclusions_bounded(
         self,
         monkeypatch: pytest.MonkeyPatch,
@@ -873,27 +944,33 @@ class TestRunOnceExecution:
         base_exclude_ids = {"active-workspace"}
         queries: list[tuple[int, set[str]]] = []
 
-        async def _list_schedulable_ids(
+        async def _list_schedulable_workspaces(
             self: WorkspaceRepository,
             *,
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
             offset: int = 0,
-        ) -> list[str]:
-            del self
+        ) -> list[Workspace]:
             assert status == WorkspaceStatus.ready
             excluded = set(exclude_ids or set())
             queries.append((offset, excluded))
             visible = [
                 workspace_id for workspace_id in ordered_ids if workspace_id not in excluded
             ]
-            return visible[offset : offset + limit]
+            visible = visible[offset : offset + limit]
+            if not visible:
+                return []
+            result = await self._session.execute(
+                select(Workspace).where(Workspace.id.in_(visible))
+            )
+            rows = {workspace.id: workspace for workspace in result.scalars()}
+            return [rows[workspace_id] for workspace_id in visible]
 
         monkeypatch.setattr(
             WorkspaceRepository,
-            "list_schedulable_ids",
-            _list_schedulable_ids,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
             raising=False,
         )
         worker = ControlWorker(
@@ -1304,22 +1381,22 @@ class TestRunOnceExecution:
     ) -> None:
         queries: list[tuple[WorkspaceStatus, int, set[str]]] = []
 
-        async def _list_schedulable_ids(
+        async def _list_schedulable_workspaces(
             self: WorkspaceRepository,
             *,
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
             offset: int = 0,
-        ) -> list[str]:
+        ) -> list[Workspace]:
             del self, offset
             queries.append((status, limit, set(exclude_ids or set())))
             return []
 
         monkeypatch.setattr(
             WorkspaceRepository,
-            "list_schedulable_ids",
-            _list_schedulable_ids,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
             raising=False,
         )
 

@@ -2492,6 +2492,57 @@ class WorkspaceRepository:
         if limit <= 0:
             return []
 
+        candidates = await self._list_schedulable_candidates(
+            status=status,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            offset=offset,
+        )
+        if not candidates or isinstance(candidates[0], str):
+            return cast("builtins.list[str]", candidates[:limit])
+
+        workspace_candidates = cast("builtins.list[Workspace]", candidates)
+        return [
+            workspace.id
+            for workspace in self._sort_schedulable_workspaces(workspace_candidates, limit)
+        ]
+
+    async def list_schedulable_workspaces(
+        self,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+        offset: int = 0,
+    ) -> builtins.list[Workspace]:
+        """Return ordered candidate workspaces for one worker poll."""
+        if limit <= 0:
+            return []
+
+        candidates = await self._list_schedulable_candidates(
+            status=status,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            offset=offset,
+        )
+        if not candidates:
+            return []
+        if isinstance(candidates[0], str):
+            raise TypeError("schedulable workspace query returned IDs, not Workspace rows")
+
+        return self._sort_schedulable_workspaces(
+            cast("builtins.list[Workspace]", candidates),
+            limit,
+        )
+
+    async def _list_schedulable_candidates(
+        self,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+        offset: int = 0,
+    ) -> builtins.list[Workspace] | builtins.list[str]:
         stmt = _schedulable_workspace_ids_stmt(
             status=status,
             limit=limit,
@@ -2501,19 +2552,22 @@ class WorkspaceRepository:
             claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
         )
         result = await self._session.execute(stmt)
-        candidates = list(result.scalars().all())
-        if not candidates or isinstance(candidates[0], str):
-            return cast("builtins.list[str]", candidates[:limit])
+        return list(result.scalars().all())
 
+    @staticmethod
+    def _sort_schedulable_workspaces(
+        candidates: builtins.list[Workspace],
+        limit: int,
+    ) -> builtins.list[Workspace]:
         now = datetime.now(UTC)
         scored = sorted(
             (
-                (scheduler_score_from_workspace(workspace, now=now), workspace.id)
+                (scheduler_score_from_workspace(workspace, now=now), workspace)
                 for workspace in candidates
             ),
             key=lambda item: scheduler_order_key(item[0]),
         )
-        return [workspace_id for _score, workspace_id in scored[:limit]]
+        return [workspace for _score, workspace in scored[:limit]]
 
     async def transition(
         self,

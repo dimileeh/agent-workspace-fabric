@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from time import monotonic
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from sqlalchemy import and_, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -355,25 +355,25 @@ class ControlWorker:
             candidate_offset = 0
             repo = WorkspaceRepository(session)
             while len(filtered) < limit:
-                ids = await repo.list_schedulable_ids(
+                workspaces = await repo.list_schedulable_workspaces(
                     status=status,
                     limit=candidate_limit,
                     exclude_ids=base_exclude_ids,
                     offset=candidate_offset,
                 )
-                if not ids:
+                if not workspaces:
                     break
-                candidate_offset += len(ids)
+                candidate_offset += len(workspaces)
                 eligible = await self._filter_provider_recovery_suppressed(
                     session,
-                    ids,
+                    workspaces,
                 )
                 for workspace_id in eligible:
                     if workspace_id not in filtered:
                         filtered.append(workspace_id)
                     if len(filtered) >= limit:
                         break
-                if len(ids) < candidate_limit:
+                if len(workspaces) < candidate_limit:
                     break
             await session.commit()
             return filtered[:limit]
@@ -381,15 +381,21 @@ class ControlWorker:
     async def _filter_provider_recovery_suppressed(
         self,
         session: AsyncSession,
-        workspace_ids: list[str],
+        workspaces: list[Workspace] | list[str],
     ) -> list[str]:
-        if not workspace_ids:
+        if not workspaces:
             return []
+        if isinstance(workspaces[0], str):
+            workspace_ids = cast("list[str]", workspaces)
+            stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
+            rows = {workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()}
+        else:
+            workspace_rows = cast("list[Workspace]", workspaces)
+            workspace_ids = [workspace.id for workspace in workspace_rows]
+            rows = {workspace.id: workspace for workspace in workspace_rows}
         now = datetime.now(UTC)
         breaker_repo = ProviderModelCircuitBreakerRepository(session)
         allowed: set[str] = set()
-        stmt = select(Workspace).where(Workspace.id.in_(workspace_ids))
-        rows = {workspace.id: workspace for workspace in (await session.execute(stmt)).scalars()}
         circuit_candidates: dict[str, tuple[str, str]] = {}
         for workspace_id in workspace_ids:
             workspace = rows.get(workspace_id)
