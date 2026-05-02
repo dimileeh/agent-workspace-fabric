@@ -7,6 +7,7 @@ import {
   ArrowUp,
   Bot,
   Boxes,
+  Contrast,
   ChevronDown,
   ChevronUp,
   CheckCircle2,
@@ -25,7 +26,10 @@ import {
   Server,
   Shield,
   KeyRound,
+  Moon,
   Terminal,
+  Sun,
+  Type,
   X,
   XCircle,
 } from "lucide-react";
@@ -80,7 +84,16 @@ import {
   summarizeWorkspaceOperatorFailure,
   summarizeWorkspaceOperatorSuccess,
 } from "@/lib/workspace-operator-controls";
+import {
+  DEFAULT_OPERATOR_PREFERENCES,
+  OPERATOR_PREFERENCES_STORAGE_KEY,
+  decodeOperatorPreferences,
+  encodeOperatorPreferences,
+  normalizeOperatorPreferences,
+  operatorPreferenceAttributes,
+} from "@/lib/operator-preferences";
 import type { WorkspaceOperatorControl } from "@/lib/workspace-operator-controls";
+import type { OperatorPreferences } from "@/lib/operator-preferences";
 import type {
   ApiEnvelope,
   AwfStreamFrame,
@@ -286,6 +299,10 @@ const emptyDetail: DetailState = {
 };
 
 export function ConsoleDashboard() {
+  const [operatorPreferences, setOperatorPreferences] = useState<OperatorPreferences>(
+    DEFAULT_OPERATOR_PREFERENCES,
+  );
+  const [operatorPreferencesHydrated, setOperatorPreferencesHydrated] = useState(false);
   const [overview, setOverview] = useState<WorkspaceOverview[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<DetailState>(emptyDetail);
@@ -323,6 +340,23 @@ export function ConsoleDashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+
+  useEffect(() => {
+    setOperatorPreferences(readStoredOperatorPreferences());
+    setOperatorPreferencesHydrated(true);
+  }, []);
+
+  useEffect(() => {
+    if (!operatorPreferencesHydrated) {
+      return;
+    }
+    applyOperatorPreferenceAttributes(operatorPreferences);
+    writeStoredOperatorPreferences(operatorPreferences);
+  }, [operatorPreferences, operatorPreferencesHydrated]);
+
+  const updateOperatorPreferences = useCallback((next: Partial<OperatorPreferences>) => {
+    setOperatorPreferences((current) => normalizeOperatorPreferences({ ...current, ...next }));
+  }, []);
 
   const overviewPath = useMemo(() => {
     const params = new URLSearchParams({ limit: "100" });
@@ -867,12 +901,14 @@ export function ConsoleDashboard() {
   );
 
   return (
-    <main className="min-h-screen bg-[var(--background)] text-[var(--foreground)]">
+    <main className="min-h-screen w-full max-w-[100vw] overflow-x-hidden bg-[var(--background)] text-[var(--foreground)]">
       <TopBar
         apiState={apiState}
         streamState={streamState}
         lastRefresh={lastRefresh}
         selectedId={selectedId}
+        preferences={operatorPreferences}
+        onPreferencesChange={updateOperatorPreferences}
         onRefresh={() =>
           startTransition(() => {
             void loadOverview();
@@ -884,7 +920,7 @@ export function ConsoleDashboard() {
         isPending={isPending}
       />
 
-      <div className="grid min-h-[calc(100vh-57px)] grid-cols-1 border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
+      <div className="grid min-h-[calc(100vh-57px)] w-full max-w-full grid-cols-1 overflow-x-hidden border-t border-[var(--border)] xl:grid-cols-[440px_minmax(0,1fr)] 2xl:grid-cols-[500px_minmax(0,1fr)]">
         <aside className="min-w-0 border-b border-[var(--border)] bg-white xl:border-r xl:border-b-0">
           <WorkspaceFilters
             statusFilter={statusFilter}
@@ -922,7 +958,7 @@ export function ConsoleDashboard() {
 
         <section className="min-w-0">
           {error ? <ErrorBanner message={error} /> : null}
-          <div className="grid gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
+          <div className="grid min-w-0 gap-4 p-4 pb-0 2xl:grid-cols-[minmax(0,1fr)_minmax(460px,0.85fr)]">
             <ResourceCapacityPanel 
               saturation={resourceSaturation} 
               error={resourceError} 
@@ -944,7 +980,7 @@ export function ConsoleDashboard() {
             </div>
           </div>
           {selectedId && selectedOverview ? (
-            <div className="grid gap-4 p-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(420px,0.9fr)]">
+            <div className="grid min-w-0 gap-4 p-4 xl:grid-cols-[minmax(0,1.1fr)_minmax(420px,0.9fr)]">
               <div className="grid min-w-0 gap-4">
                 <WorkspaceSummary
                   overview={selectedOverview}
@@ -1032,6 +1068,8 @@ function TopBar({
   streamState,
   lastRefresh,
   selectedId,
+  preferences,
+  onPreferencesChange,
   isPending,
   onRefresh,
 }: {
@@ -1039,12 +1077,14 @@ function TopBar({
   streamState: "idle" | "connecting" | "live" | "error";
   lastRefresh: Date | null;
   selectedId: string | null;
+  preferences: OperatorPreferences;
+  onPreferencesChange: (next: Partial<OperatorPreferences>) => void;
   isPending: boolean;
   onRefresh: () => void;
 }) {
   return (
     <header className="flex min-h-14 flex-wrap items-center justify-between gap-3 bg-white px-4 py-2">
-      <div className="flex items-center gap-3">
+      <div className="flex min-w-0 items-center gap-3">
         <div className="flex h-9 w-9 items-center justify-center rounded-md border border-slate-200 bg-slate-950 text-white">
           <Boxes size={18} aria-hidden />
         </div>
@@ -1055,7 +1095,8 @@ function TopBar({
           </p>
         </div>
       </div>
-      <div className="flex flex-wrap items-center gap-2 text-xs">
+      <div className="flex w-full min-w-0 flex-wrap items-center justify-start gap-2 text-xs sm:w-auto sm:flex-1 sm:justify-end">
+        <PreferenceControls preferences={preferences} onChange={onPreferencesChange} />
         <StatePill icon={<HeartPulse size={13} />} label="API" state={apiState} />
         <StatePill icon={<Radio size={13} />} label="Stream" state={streamState} />
         <span className="rounded-md border border-slate-200 bg-slate-50 px-2.5 py-1 text-slate-600">
@@ -1074,6 +1115,87 @@ function TopBar({
   );
 }
 
+function PreferenceControls({
+  preferences,
+  onChange,
+}: {
+  preferences: OperatorPreferences;
+  onChange: (next: Partial<OperatorPreferences>) => void;
+}) {
+  return (
+    <div
+      className="flex flex-wrap items-center gap-1 rounded-md border border-slate-200 bg-slate-50 p-1"
+      aria-label="Display preferences"
+    >
+      <PreferenceButton
+        label="Use light theme"
+        pressed={preferences.theme === "light"}
+        onClick={() => onChange({ theme: "light" })}
+      >
+        <Sun size={14} aria-hidden />
+      </PreferenceButton>
+      <PreferenceButton
+        label="Use dark theme"
+        pressed={preferences.theme === "dark"}
+        onClick={() => onChange({ theme: "dark" })}
+      >
+        <Moon size={14} aria-hidden />
+      </PreferenceButton>
+      <PreferenceButton
+        label="Enable high contrast"
+        pressed={preferences.contrast === "high"}
+        onClick={() =>
+          onChange({
+            contrast: preferences.contrast === "high" ? "normal" : "high",
+          })
+        }
+      >
+        <Contrast size={14} aria-hidden />
+      </PreferenceButton>
+      <PreferenceButton
+        label="Use larger font size"
+        pressed={preferences.fontSize === "large"}
+        onClick={() =>
+          onChange({
+            fontSize: preferences.fontSize === "large" ? "standard" : "large",
+          })
+        }
+      >
+        <Type size={14} aria-hidden />
+      </PreferenceButton>
+    </div>
+  );
+}
+
+function PreferenceButton({
+  label,
+  pressed,
+  onClick,
+  children,
+}: {
+  label: string;
+  pressed: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+}) {
+  return (
+    <button
+      type="button"
+      aria-label={label}
+      aria-pressed={pressed}
+      title={label}
+      onClick={onClick}
+      className={`inline-flex h-8 w-8 items-center justify-center rounded-md border text-slate-700 transition hover:bg-white ${
+        pressed
+          ? "border-blue-400 bg-blue-50 text-blue-800 shadow-[inset_0_0_0_1px_var(--accent)]"
+          : "border-transparent bg-transparent"
+      }`}
+    >
+      {children}
+    </button>
+  );
+}
+
 function StatePill({
   icon,
   label,
@@ -1085,7 +1207,7 @@ function StatePill({
 }) {
   const tone = state === "ok" || state === "live" ? "good" : state === "error" ? "bad" : "info";
   return (
-    <span className={`inline-flex h-8 items-center gap-1.5 rounded-md border px-2.5 ${toneClass(tone)}`}>
+    <span className={`inline-flex min-h-8 items-center gap-1.5 rounded-md border px-2.5 py-1 ${toneClass(tone)}`}>
       {icon}
       {label}: {state}
     </span>
@@ -1402,16 +1524,23 @@ function TaskDetailsModal({
   workspace: WorkspaceOverview;
   onClose: () => void;
 }) {
+  const labelId = `task-details-label-${workspace.workspace_id}`;
+  const titleId = `task-details-title-${workspace.workspace_id}`;
   return (
-    <div className="fixed inset-0 z-50 grid bg-slate-950/45 p-3 sm:p-6" role="dialog" aria-modal="true">
+    <div
+      className="fixed inset-0 z-50 grid bg-slate-950/45 p-3 sm:p-6"
+      role="dialog"
+      aria-modal="true"
+      aria-labelledby={`${labelId} ${titleId}`}
+    >
       <div className="m-auto grid max-h-[92vh] w-full max-w-5xl overflow-hidden rounded-md border border-slate-300 bg-white shadow-xl">
         <header className="flex min-h-14 items-start justify-between gap-3 border-b border-slate-200 px-4 py-3">
           <div className="min-w-0">
-            <div className="flex items-center gap-2 text-sm font-semibold text-slate-950">
+            <div id={labelId} className="flex items-center gap-2 text-sm font-semibold text-slate-950">
               <FileText size={16} aria-hidden />
               Task details
             </div>
-            <h2 className="mt-1 line-clamp-2 text-base font-semibold text-slate-950">
+            <h2 id={titleId} className="mt-1 line-clamp-2 text-base font-semibold text-slate-950">
               {workspace.title}
             </h2>
             <div className="mono mt-1 truncate text-xs text-slate-500">{workspace.workspace_id}</div>
@@ -1562,15 +1691,15 @@ function WorkspaceSummary({
         </div>
       }
     >
-      <div className="grid gap-4">
+      <div className="grid min-w-0 gap-4">
         <div className="flex flex-wrap items-start justify-between gap-3">
-          <div className="min-w-0">
+          <div className="min-w-0 flex-1">
             <h2 className="truncate text-lg font-semibold">{overview.title}</h2>
             <p className="mt-1 truncate text-sm text-[var(--muted)]">{overview.repo_url}</p>
           </div>
           <Badge value={overview.status} />
         </div>
-        <div className="grid gap-2 sm:grid-cols-2 xl:grid-cols-4">
+        <div className="grid min-w-0 gap-2 sm:grid-cols-2 xl:grid-cols-4">
           <Fact label="Workspace" value={overview.workspace_id} mono />
           <Fact label="Agent" value={formatAgentLabel(overview)} />
           <Fact label="Effort" value={formatAgentEffort(overview)} />
@@ -2687,7 +2816,7 @@ function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
             <EndpointTable endpoints={appEndpoints} />
           ) : null}
           <div className="overflow-auto rounded-md border border-slate-200">
-            <table className="w-full min-w-[720px] text-left text-xs">
+            <table className="w-full min-w-full table-fixed text-left text-xs md:min-w-[720px]">
               <thead className="bg-slate-50 text-slate-600">
                 <tr>
                   <Th>Name</Th>
@@ -2720,7 +2849,7 @@ function RuntimePanel({ runtime }: { runtime: WorkspaceRuntime | null }) {
 function EndpointTable({ endpoints }: { endpoints: WorkspaceAppEndpoint[] }) {
   return (
     <div className="overflow-auto rounded-md border border-slate-200">
-      <table className="w-full min-w-[680px] text-left text-xs">
+      <table className="w-full min-w-full table-fixed text-left text-xs md:min-w-[680px]">
         <thead className="bg-slate-50 text-slate-600">
           <tr>
             <Th>Name</Th>
@@ -2922,7 +3051,7 @@ function LogsPanel({
       title="Logs"
       icon={<Terminal size={16} aria-hidden />}
       action={
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center justify-end gap-2">
           <button
             type="button"
             onClick={onToggleSortDirection}
@@ -3565,15 +3694,15 @@ function Panel({
   children: React.ReactNode;
 }) {
   return (
-    <section className="rounded-md border border-[var(--border)] bg-white">
-      <div className="flex min-h-11 items-center justify-between gap-3 border-b border-slate-100 px-3">
+    <section className="min-w-0 w-full max-w-full rounded-md border border-[var(--border)] bg-white">
+      <div className="flex min-h-11 min-w-0 flex-wrap items-center justify-between gap-3 border-b border-slate-100 px-3 py-2">
         <h2 className="flex items-center gap-2 text-sm font-semibold">
           {icon}
           {title}
         </h2>
         {action}
       </div>
-      <div className="p-3">{children}</div>
+      <div className="min-w-0 p-3">{children}</div>
     </section>
   );
 }
@@ -3635,6 +3764,33 @@ function SmallExternalAnchor({ href, label }: { href: string; label: string }) {
   );
 }
 
+function readStoredOperatorPreferences(): OperatorPreferences {
+  try {
+    return decodeOperatorPreferences(window.localStorage.getItem(OPERATOR_PREFERENCES_STORAGE_KEY));
+  } catch {
+    return { ...DEFAULT_OPERATOR_PREFERENCES };
+  }
+}
+
+function writeStoredOperatorPreferences(preferences: OperatorPreferences) {
+  try {
+    window.localStorage.setItem(
+      OPERATOR_PREFERENCES_STORAGE_KEY,
+      encodeOperatorPreferences(preferences),
+    );
+  } catch {
+    // Storage can be unavailable in locked-down browsers; the in-memory setting still applies.
+  }
+}
+
+function applyOperatorPreferenceAttributes(preferences: OperatorPreferences) {
+  const root = document.documentElement;
+  const attributes = operatorPreferenceAttributes(preferences);
+  for (const [name, value] of Object.entries(attributes)) {
+    root.setAttribute(name, value);
+  }
+}
+
 function openExternalHref(href: string) {
   const opened = window.open(href, "_blank", "noopener,noreferrer");
   if (!opened) {
@@ -3674,7 +3830,7 @@ function MutedLine({ children }: { children: React.ReactNode }) {
 }
 
 function Th({ children }: { children: React.ReactNode }) {
-  return <th className="px-3 py-2 font-medium">{children}</th>;
+  return <th className="min-w-0 overflow-hidden px-3 py-2 font-medium">{children}</th>;
 }
 
 function Td({
@@ -3684,7 +3840,7 @@ function Td({
   children: React.ReactNode;
   className?: string;
 }) {
-  return <td className={`px-3 py-2 align-top ${className}`}>{children}</td>;
+  return <td className={`min-w-0 overflow-hidden px-3 py-2 align-top ${className}`}>{children}</td>;
 }
 
 function retryErrorMessage(result: Extract<ApiEnvelope<unknown>, { ok: false }>): string {
@@ -4095,7 +4251,7 @@ function FailureAnalysisPanel({
              <div className="grid gap-2">
                <h3 className="text-xs font-semibold text-slate-700">Latest Examples</h3>
                <div className="max-h-[320px] overflow-auto rounded-md border border-slate-200">
-                 <table className="w-full min-w-[720px] text-left text-xs">
+                 <table className="w-full min-w-full table-fixed text-left text-xs md:min-w-[720px]">
                    <thead className="sticky top-0 bg-slate-50 text-slate-600 shadow-[0_1px_0_var(--border)]">
                      <tr>
                        <Th>Workspace</Th>
@@ -4130,8 +4286,8 @@ function FailureAnalysisPanel({
                            </div>
                          </Td>
                          <Td>
-                           <div className="flex items-center gap-2">
-                             <span className="text-slate-500 whitespace-nowrap">{formatDateTime(example.timestamp)}</span>
+                           <div className="flex min-w-0 flex-wrap items-center gap-2">
+                             <span className="text-slate-500">{formatDateTime(example.timestamp)}</span>
                              {example.pr_url ? <SmallExternalAnchor href={example.pr_url} label="PR" /> : null}
                            </div>
                          </Td>
