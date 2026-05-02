@@ -1040,6 +1040,36 @@ class TestOwnedPathOverlapLookup:
         assert "workspaces.id NOT IN ('ws_active')" in sql
 
     @pytest.mark.unit
+    async def test_postgres_scheduler_workspace_rows_apply_candidate_limit(self) -> None:
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[
+                _recorded_workspace_row("ws_first", status=WorkspaceStatus.ready),
+                _recorded_workspace_row("ws_second", status=WorkspaceStatus.ready),
+            ],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.ready,
+            limit=2,
+            exclude_ids={"ws_active"},
+        )
+
+        assert [workspace.id for workspace in listed] == ["ws_first", "ws_second"]
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" in sql
+        assert "SKIP LOCKED" in sql
+        assert "LIMIT 2" in sql
+        assert "workspaces.id NOT IN ('ws_active')" in sql
+
+    @pytest.mark.unit
     async def test_sqlite_scheduler_lists_use_portable_select(self) -> None:
         session = _RecordingSchedulerSession(
             "sqlite",

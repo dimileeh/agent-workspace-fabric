@@ -2592,18 +2592,18 @@ class WorkspaceRepository:
         exclude_ids: set[str] | None = None,
         offset: int = 0,
     ) -> builtins.list[Workspace]:
-        """Return globally ordered candidate workspaces for one worker poll."""
+        """Return ordered candidate workspaces for one worker poll."""
         if limit <= 0:
             return []
 
         candidates = await self._list_schedulable_candidates(
             status=status,
-            limit=None,
+            limit=limit,
             exclude_ids=exclude_ids,
+            offset=offset,
         )
-        ordered = self._sort_schedulable_workspaces(candidates, limit=None)
 
-        return ordered[offset : offset + limit]
+        return self._sort_schedulable_workspaces(candidates, limit)
 
     async def _list_schedulable_candidates(
         self,
