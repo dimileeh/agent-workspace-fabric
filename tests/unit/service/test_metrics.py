@@ -890,6 +890,84 @@ async def test_resource_saturation_malformed_not_before_does_not_crash_query(
 
 
 @pytest.mark.unit
+async def test_resource_saturation_structurally_invalid_timestamps_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-99-99T99:99:99",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-05-01T11:00:00Zextra",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-13-01T11:00:00Z",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-05-01T25:00:00Z",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-05-01T11:00:00Z",
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    prs = summary.provider_recovery_state_summary
+    assert prs.pending_retry == 1
+    assert prs.in_cooldown == 0
+
+
+@pytest.mark.unit
 async def test_resource_saturation_terminal_uses_decision_reason_code_over_source_reason_code(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -2313,3 +2391,49 @@ async def test_cleanup_and_recovery_include_cancelled_operations(
     assert summary.recovery_total == 2
     assert summary.recovery_succeeded == 1
     assert summary.recovery_failed_count == 0
+
+
+@pytest.mark.unit
+class TestIso8601PostgresGuardRegex:
+    from awf.service.metrics import _ISO8601_TS_PG
+
+    _PATTERN = _ISO8601_TS_PG
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2026-05-01T11:00:00Z",
+            "2026-05-01T11:00:00+00:00",
+            "2026-05-01T11:00:00-04:00",
+            "2026-05-01T11:00:00+0000",
+            "2026-05-01T23:59:59Z",
+            "2026-12-31T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+        ],
+    )
+    def test_valid_timestamps_match(self, value: str) -> None:
+        import re
+
+        assert re.match(self._PATTERN, value), f"Expected valid timestamp to match: {value}"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2026-99-99T99:99:99",
+            "2026-13-01T11:00:00Z",
+            "2026-00-01T11:00:00Z",
+            "2026-05-01T25:00:00Z",
+            "2026-05-01T11:60:00Z",
+            "2026-05-01T11:00:60Z",
+            "2026-05-01T11:00:00Zextra",
+            "2026-05-01T11:00:00 Z",
+            "not-a-date",
+            "",
+            "2026-05-01",
+            "2026-05-01T11:00",
+        ],
+    )
+    def test_invalid_timestamps_rejected(self, value: str) -> None:
+        import re
+
+        assert not re.match(self._PATTERN, value), f"Expected invalid timestamp to be rejected: {value}"

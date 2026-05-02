@@ -48,11 +48,18 @@ class _IsoToTimestamp(expression.FunctionElement[Any]):  # noqa: N801
     inherit_cache = True
 
 
+_ISO8601_TS_PG = (
+    r'^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])'
+    r'T([01]\d|2[0-3]):[0-5]\d:[0-5]\d'
+    r'([+-]([01]\d|2[0-3]):?[0-5]\d|Z)?$'
+)
+
+
 @compiles(_IsoToTimestamp, "postgresql")
 def _pg_iso_to_timestamp(element: expression.FunctionElement[Any], compiler: Any, **kw: Any) -> str:
     arg = compiler.process(list(element.clauses)[0], **kw)
     return (
-        f"CASE WHEN {arg} ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}'"
+        f"CASE WHEN {arg} ~ '{_ISO8601_TS_PG}'"
         f" THEN CAST({arg} AS TIMESTAMP WITH TIME ZONE) ELSE NULL END"
     )
 
