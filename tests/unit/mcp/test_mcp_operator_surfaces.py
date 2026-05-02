@@ -232,6 +232,7 @@ async def _workspace(
     failure_reason: FailureReason | str | None = None,
     failure_message: str | None = None,
     task_policy: dict[str, Any] | None = None,
+    resolved_profile: dict[str, Any] | None = None,
 ) -> str:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -246,6 +247,7 @@ async def _workspace(
             task_policy=task_policy,
             agent=AgentRuntime.codex.value,
             test_commands=["pytest -q"],
+            resolved_profile=resolved_profile,
         )
         workspace.status = status.value
         workspace.branch_name = f"awf/{workspace.id}"
@@ -923,6 +925,10 @@ class TestMcpOperatorSurfaceParity:
             title="Overview parity",
             status=WorkspaceStatus.running,
             task_policy={"agent_model": "gpt-5.3-codex", "agent_effort": "high"},
+            resolved_profile={
+                "name": "operator-open",
+                "security": {"egress": {"mode": "open"}},
+            },
         )
         async with operator_stack.factory() as session:
             await OperationRepository(session).create(
@@ -951,6 +957,7 @@ class TestMcpOperatorSurfaceParity:
         assert item["active_operation"] == "validate"
         assert item["last_event"]["reason_code"] == "TEST_EVENT"
         assert item["agent_model"] == "gpt-5.3-codex"
+        assert item["network_posture"] == "open"
 
     @pytest.mark.unit
     async def test_validation_provenance_tool_matches_rest_payload(

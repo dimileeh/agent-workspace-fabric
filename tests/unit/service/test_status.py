@@ -389,6 +389,43 @@ def test_status_db_helpers_handle_engine_construction_failures(
 
 
 @pytest.mark.unit
+def test_default_workspace_lookup_extracts_network_posture_from_resolved_profile(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
+    engine = make_engine(database_url)
+
+    async def _setup() -> str:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/repo.git",
+                branch_base="development",
+                task_title="open profile",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "open-profile",
+                    "security": {"egress": {"mode": "open"}},
+                },
+            )
+            workspace.status = WorkspaceStatus.running.value
+            await session.commit()
+            return workspace.id
+
+    workspace_id = asyncio.run(_setup())
+    view = asyncio.run(_default_workspace_id_lookup(database_url))
+    asyncio.run(engine.dispose())
+
+    assert view.available is True
+    assert view.active_ids == frozenset({workspace_id})
+    assert view.snapshots[0].network_posture == "open"
+
+
+@pytest.mark.unit
 def test_orphan_resources_check_payload_handles_missing_resource_counts() -> None:
     payload = _orphan_resources_check_payload(
         {
@@ -435,6 +472,109 @@ def test_service_status_provider_warnings_do_not_fail_by_default(tmp_path: Path)
     assert readiness["providers"]["github"]["reason"] == "GITHUB_TOKEN_ENV_MISSING"
     assert readiness["providers"]["docker"]["status"] == "ok"
     assert "DOCKER_HOST_BROAD_CONTROL" in readiness["security"]["reason_codes"]
+
+
+@pytest.mark.unit
+def test_service_status_includes_network_posture_counts_and_open_warning(
+    tmp_path: Path,
+) -> None:
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset(
+                {
+                    "ws_open",
+                    "ws_restricted",
+                    "ws_offline",
+                    "ws_unknown",
+                    "ws_missing_snapshot",
+                }
+            ),
+            terminal_ids=frozenset(),
+            available=True,
+            snapshots=(
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_open",
+                    status=WorkspaceStatus.running.value,
+                    updated_at=datetime.now(UTC),
+                    network_posture="open",
+                ),
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_restricted",
+                    status=WorkspaceStatus.running.value,
+                    updated_at=datetime.now(UTC),
+                    network_posture="restricted",
+                ),
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_offline",
+                    status=WorkspaceStatus.ready.value,
+                    updated_at=datetime.now(UTC),
+                    network_posture="offline",
+                ),
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_unknown",
+                    status=WorkspaceStatus.running.value,
+                    updated_at=datetime.now(UTC),
+                    network_posture=None,
+                ),
+            ),
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=""),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    posture = status["checks"]["network_posture"]
+    assert posture["ok"] is True
+    assert posture["status"] == "warn"
+    assert posture["reason"] == "NETWORK_POSTURE_OPEN_ACTIVE"
+    assert posture["active_counts_by_posture"] == {
+        "restricted": 1,
+        "offline": 1,
+        "open": 1,
+        "unknown": 2,
+    }
+    assert posture["open_examples"] == [
+        {"workspace_id": "ws_open", "status": "running", "pr_url": None}
+    ]
+
+
+@pytest.mark.unit
+def test_service_status_reports_network_posture_unavailable_when_db_lookup_fails(
+    tmp_path: Path,
+) -> None:
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset(),
+            terminal_ids=frozenset(),
+            available=False,
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=""),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    posture = status["checks"]["network_posture"]
+    assert posture["ok"] is True
+    assert posture["status"] == "unknown"
+    assert posture["reason"] == "NETWORK_POSTURE_UNAVAILABLE"
 
 
 @pytest.mark.unit

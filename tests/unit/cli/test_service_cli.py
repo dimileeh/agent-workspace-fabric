@@ -1252,6 +1252,53 @@ def test_service_status_pretty_output_includes_disk_check(
 
 
 @pytest.mark.unit
+def test_service_status_pretty_output_includes_network_posture_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from awf.service import config as config_mod
+    from awf.service import status as status_mod
+
+    settings = object()
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+
+    async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
+        assert received is settings
+        return {
+            "service": "awf",
+            "status": "ok",
+            "checks": {
+                "network_posture": {
+                    "ok": True,
+                    "status": "warn",
+                    "reason": "NETWORK_POSTURE_OPEN_ACTIVE",
+                    "active_counts_by_posture": {
+                        "restricted": 2,
+                        "offline": 0,
+                        "open": 1,
+                        "unknown": 0,
+                    },
+                    "open_examples": [
+                        {
+                            "workspace_id": "ws_open",
+                            "status": "running",
+                            "pr_url": None,
+                        }
+                    ],
+                }
+            },
+        }
+
+    monkeypatch.setattr(status_mod, "collect_service_status", _collect)
+
+    result = _runner.invoke(app, ["service", "status", "--format", "pretty"])
+
+    assert result.exit_code == 0, result.output
+    assert "checks.network_posture.reason: NETWORK_POSTURE_OPEN_ACTIVE" in result.stdout
+    assert "checks.network_posture.active_counts_by_posture.open: 1" in result.stdout
+    assert "checks.network_posture.open_examples[0].workspace_id: ws_open" in result.stdout
+
+
+@pytest.mark.unit
 def test_service_status_pretty_output_includes_provider_reason(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

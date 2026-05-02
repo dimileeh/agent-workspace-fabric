@@ -54,6 +54,7 @@ WorkspaceOverlapPathMatchReasonCode = Literal[
     "OWNED_PATH_WILDCARD_MATCH",
 ]
 CallbackEventType = Annotated[str, Field(min_length=1, max_length=64)]
+NetworkPosture = Literal["offline", "restricted", "open"]
 
 _MAX_LOG_STREAM_REF_DEPTH = 64
 
@@ -556,6 +557,7 @@ class WorkspaceResponse(BaseModel):
     profile_ref: str | None
     requested_profile: dict[str, Any] | None
     resolved_profile: dict[str, Any] | None
+    network_posture: NetworkPosture | None = None
 
     test_commands: list[str]
     requires_database: bool
@@ -757,6 +759,7 @@ class WorkspaceOverviewResponse(BaseModel):
     agent_effort: str | None = None
     agent_model_source: AgentIdentitySource = "unavailable"
     agent_effort_source: AgentIdentitySource = "unavailable"
+    network_posture: NetworkPosture | None = None
     lifecycle: list[WorkspaceLifecycleStageResponse] = Field(default_factory=list)
     llm_usage: WorkspaceLlmUsageSummaryResponse = Field(
         default_factory=lambda: WorkspaceLlmUsageSummaryResponse()

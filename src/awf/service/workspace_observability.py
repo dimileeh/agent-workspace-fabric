@@ -24,6 +24,7 @@ from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
 from awf.service.coordination import coordination_warnings_from_task_policy
+from awf.service.profile_metadata import network_posture_from_profile_snapshot
 from awf.service.provider_recovery import (
     ProviderRecoveryStateView,
     provider_recovery_state_for_workspace,
@@ -292,6 +293,9 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         agent_effort=observability["agent_effort"],
         agent_model_source=observability["agent_model_source"],
         agent_effort_source=observability["agent_effort_source"],
+        network_posture=network_posture_from_profile_snapshot(
+            getattr(ws, "resolved_profile", None)
+        ),
         lifecycle=observability["lifecycle"],
         llm_usage=observability["llm_usage"],
         recovery=observability["recovery"],

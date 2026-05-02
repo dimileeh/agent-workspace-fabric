@@ -268,17 +268,13 @@ the subset that Compose can represent safely:
 
 | Mode | Local Docker behavior |
 | --- | --- |
-| `open` | Default. The workspace network remains public and the agent keeps `host.docker.internal:host-gateway`. |
+| `restricted` | Default. The workspace Compose network renders `internal: true`, and the agent host-gateway mapping is omitted. Destination-level filtering is not implemented in this local slice. |
 | `offline` | The workspace Compose network renders `internal: true`, and the agent host-gateway mapping is omitted. Profile services remain reachable on `awf_net`. |
-| `mirrored` with no allowlist | Uses the same internal-network behavior as `offline`, for profiles that provide in-stack mirror sidecars. |
-| `allowlist` | Rejected before `docker compose up`; local Compose cannot enforce destination allowlists generically. |
-| `mirrored` with allowlist entries | Rejected before `docker compose up`; external destination filtering needs a future proxy/firewall backend. |
+| `open` | Explicit trusted-local posture. The workspace network remains public and the agent keeps `host.docker.internal:host-gateway`, which is unrestricted internet access. |
 
-Policy rejections fail the workspace as `policy_failure` while preserving a
-specific terminal event reason code:
-
-- `LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED`
-- `LOCAL_EGRESS_MIRRORED_ALLOWLIST_UNSUPPORTED`
+Legacy `allowlist` and `mirrored` egress modes are rejected by profile schema
+validation. Destination-level proxy/firewall audit and allowlisting are a
+separate future security slice.
 
 This local slice does not implement cloud `NetworkPolicy`, host firewall rules,
 iptables/nftables mutation, DNS filtering, transparent proxies, or package

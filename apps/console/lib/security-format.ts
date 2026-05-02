@@ -8,7 +8,7 @@ import type {
 
 type StatusTone = "neutral" | "info" | "good" | "warn" | "bad";
 
-const VALID_EGRESS_MODES = new Set(["open", "allowlist", "offline", "mirrored", "unavailable"]);
+const VALID_EGRESS_MODES = new Set(["open", "restricted", "offline", "unavailable"]);
 const VALID_MOUNT_POLICY_MODES = new Set(["block", "warn", "unavailable"]);
 
 export type ProfileSecretsResult =
@@ -40,14 +40,11 @@ export function extractProfileEgress(
   const security = (profile as Record<string, unknown> | null | undefined)?.security as Record<string, unknown> | null | undefined;
   const egressObj = security?.egress as Record<string, unknown> | null | undefined;
   if (!egressObj || typeof egressObj !== "object") {
-    return { mode: "unavailable", allowlist: [] };
+    return { mode: "unavailable" };
   }
   const rawMode = typeof egressObj.mode === "string" ? egressObj.mode : "";
   const mode = VALID_EGRESS_MODES.has(rawMode) ? (rawMode as ProfileEgress["mode"]) : "unavailable";
-  const allowlist = Array.isArray(egressObj.allowlist)
-    ? egressObj.allowlist.filter((item): item is string => typeof item === "string")
-    : [];
-  return { mode, allowlist };
+  return { mode };
 }
 
 export function extractHostHomeAuthMountPolicy(
@@ -105,21 +102,11 @@ export function summarizeEgressStatus(egress: ProfileEgress): {
 } {
   switch (egress.mode) {
     case "open":
-      return { label: "open", tone: "good", detail: "no restrictions" };
-    case "allowlist":
-      return {
-        label: "allowlist",
-        tone: "warn",
-        detail: `${egress.allowlist.length} allowed host${egress.allowlist.length === 1 ? "" : "s"}`,
-      };
+      return { label: "open", tone: "warn", detail: "unrestricted internet" };
+    case "restricted":
+      return { label: "restricted", tone: "good", detail: "default local-only" };
     case "offline":
       return { label: "offline", tone: "info", detail: "no external access" };
-    case "mirrored":
-      return {
-        label: "mirrored",
-        tone: "neutral",
-        detail: `${egress.allowlist.length} mirror host${egress.allowlist.length === 1 ? "" : "s"}`,
-      };
     case "unavailable":
       return { label: "unavailable", tone: "neutral", detail: "egress config not provided" };
   }

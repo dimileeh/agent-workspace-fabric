@@ -26,7 +26,6 @@ from awf.db.repositories import (
 )
 from awf.db.session import make_engine, make_session_factory
 from awf.node.compose_manager import ComposeOperationError, ComposeProjectPaths
-from awf.node.egress_policy import LocalEgressPolicyError
 from awf.node.git_manager import GitManager, GitOperationError, WorktreeLayout
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.node.stack_launcher import ComposeStackLauncher
@@ -673,7 +672,7 @@ class TestFailureHandling:
             ) == 1
 
     @pytest.mark.unit
-    async def test_local_egress_policy_failure_marks_failed_before_compose_up(
+    async def test_legacy_allowlist_profile_marks_resolution_failed_before_compose_up(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         git_manager: GitManager,
@@ -721,26 +720,25 @@ class TestFailureHandling:
             await s.commit()
             ws_id = ws.id
 
-        with pytest.raises(LocalEgressPolicyError) as raised:
+        with pytest.raises(ProfileResolutionError):
             await provisioner.provision(ws_id)
 
-        assert raised.value.reason_code == "LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED"
         assert compose.up_calls == []
         async with session_factory() as s:
             reloaded = await WorkspaceRepository(s).get(ws_id)
             assert reloaded is not None
             assert reloaded.status == WorkspaceStatus.failed.value
-            assert reloaded.failure_reason == "policy_failure"
+            assert reloaded.failure_reason == "profile_resolution_failure"
             assert reloaded.failure_message is not None
             assert len(reloaded.failure_message) <= 2000
-            assert "LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED" in reloaded.failure_message
+            assert "security.egress.mode" in reloaded.failure_message
             failed_events = [
                 event
                 for event in reloaded.events
                 if event.event_type == "workspace.state_changed"
                 and event.new_state == WorkspaceStatus.failed.value
             ]
-            assert failed_events[-1].reason_code == "LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED"
+            assert failed_events[-1].reason_code == "PROFILE_RESOLUTION_FAILURE"
 
     @pytest.mark.unit
     async def test_missing_base_branch_marks_workspace_failed(

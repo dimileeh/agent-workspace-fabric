@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import os
 import subprocess
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
@@ -29,6 +30,10 @@ from awf.service.orphans import (
     WorkspaceLifecycleSnapshot,
     detect_orphan_resources,
     workspace_id_from_project,
+)
+from awf.service.profile_metadata import (
+    NetworkPosture,
+    network_posture_from_profile_snapshot,
 )
 from awf.service.provider_readiness import HttpGet as ProviderHttpGet
 from awf.service.provider_readiness import collect_agent_readiness
@@ -173,12 +178,14 @@ async def collect_service_status(
         workspace_view,
         runtime_docker_scan,
     )
+    network_posture_check = _network_posture_check_payload(workspace_view)
     checks = {
         "api": api_check,
         "db": db_check,
         "docker": docker_check,
         "agent_runtime_image": image_check,
         "disk": disk_check.to_dict(),
+        "network_posture": network_posture_check,
         "stranded_workspaces": stranded_workspaces_check,
         "orphan_resources": orphan_resources_check,
         "orphan_workspaces": orphan_workspaces_check,
@@ -377,6 +384,66 @@ def _stranded_workspaces_check_payload(
     return summary.to_check_payload()
 
 
+def _network_posture_check_payload(workspace_view: WorkspaceIdView) -> CheckPayload:
+    if not workspace_view.available:
+        return {
+            "ok": True,
+            "status": "unknown",
+            "reason": "NETWORK_POSTURE_UNAVAILABLE",
+            "active_counts_by_posture": {
+                "restricted": 0,
+                "offline": 0,
+                "open": 0,
+                "unknown": 0,
+            },
+            "open_examples": [],
+        }
+
+    active_ids = workspace_view.active_ids
+    active_snapshots = [
+        snapshot for snapshot in workspace_view.snapshots if snapshot.workspace_id in active_ids
+    ]
+    counts: Counter[str] = Counter()
+    open_examples: list[dict[str, object]] = []
+    for snapshot in active_snapshots:
+        posture = _known_network_posture(snapshot.network_posture)
+        counts[posture or "unknown"] += 1
+        if posture == "open" and len(open_examples) < 5:
+            open_examples.append(
+                {
+                    "workspace_id": snapshot.workspace_id,
+                    "status": snapshot.status,
+                    "pr_url": snapshot.pr_url,
+                }
+            )
+    counts["unknown"] += len(active_ids - {snapshot.workspace_id for snapshot in active_snapshots})
+
+    active_counts = {
+        "restricted": counts.get("restricted", 0),
+        "offline": counts.get("offline", 0),
+        "open": counts.get("open", 0),
+        "unknown": counts.get("unknown", 0),
+    }
+    open_count = active_counts["open"]
+    return {
+        "ok": True,
+        "status": "warn" if open_count else "ok",
+        "reason": (
+            "NETWORK_POSTURE_OPEN_ACTIVE"
+            if open_count
+            else "NETWORK_POSTURE_NO_ACTIVE_OPEN"
+        ),
+        "active_counts_by_posture": active_counts,
+        "open_examples": open_examples,
+    }
+
+
+def _known_network_posture(value: object) -> NetworkPosture | None:
+    if value in {"restricted", "offline", "open"}:
+        return cast(NetworkPosture, value)
+    return None
+
+
 def _runtime_workspaces_from_view(
     workspace_view: WorkspaceIdView,
 ) -> tuple[RuntimeWorkspace, ...]:
@@ -453,6 +520,7 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
         Workspace.compose_project_name,
         Workspace.compose_file_path,
         Workspace.pr_url,
+        Workspace.resolved_profile,
     ).where(Workspace.status.in_(KNOWN_WORKSPACE_STATUSES))
     engine = None
     try:
@@ -477,6 +545,7 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
         ws_id, status, updated_at, compose_project_name = values[:4]
         compose_file_path = values[4] if len(values) > 4 else None
         pr_url = values[5] if len(values) > 5 else None
+        resolved_profile = values[6] if len(values) > 6 else None
         ws_id_str = str(ws_id)
         status_str = str(status)
         snapshots.append(
@@ -491,6 +560,7 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
                     str(compose_file_path) if compose_file_path is not None else None
                 ),
                 pr_url=str(pr_url) if pr_url is not None else None,
+                network_posture=network_posture_from_profile_snapshot(resolved_profile),
             )
         )
         if status_str in ACTIVE_WORKSPACE_STATUSES:

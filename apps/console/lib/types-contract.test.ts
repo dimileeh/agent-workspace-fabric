@@ -270,8 +270,7 @@ type ProfileEgressShape = Expect<
   Equal<
     ProfileEgress,
     {
-      mode: "open" | "allowlist" | "offline" | "mirrored" | "unavailable";
-      allowlist: string[];
+      mode: "open" | "restricted" | "offline" | "unavailable";
     }
   >
 >;

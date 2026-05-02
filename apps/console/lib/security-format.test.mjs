@@ -5,11 +5,8 @@ import {
   extractHostHomeAuthMountPolicy,
   extractProfileEgress,
   extractProfileSecurity,
-  extractProfileSecrets,
   formatHostHomeMountPolicy,
   summarizeEgressStatus,
-  summarizeProviderCredentialReadiness,
-  summarizeSecretLeaseReadiness,
 } from "./security-format.ts";
 
 test("extractHostHomeAuthMountPolicy returns unavailable when policy is missing", () => {
@@ -71,9 +68,22 @@ test("formatHostHomeMountPolicy renders unavailable as neutral", () => {
 });
 
 test("extractProfileEgress returns unavailable when egress is missing", () => {
-  assert.deepEqual(extractProfileEgress(null), { mode: "unavailable", allowlist: [] });
-  assert.deepEqual(extractProfileEgress(undefined), { mode: "unavailable", allowlist: [] });
-  assert.deepEqual(extractProfileEgress({}), { mode: "unavailable", allowlist: [] });
+  assert.deepEqual(extractProfileEgress(null), { mode: "unavailable" });
+  assert.deepEqual(extractProfileEgress(undefined), { mode: "unavailable" });
+  assert.deepEqual(extractProfileEgress({}), { mode: "unavailable" });
+});
+
+test("summarizeEgressStatus treats open as unrestricted and restricted as default", () => {
+  assert.deepEqual(summarizeEgressStatus({ mode: "open" }), {
+    label: "open",
+    tone: "warn",
+    detail: "unrestricted internet",
+  });
+  assert.deepEqual(summarizeEgressStatus({ mode: "restricted" }), {
+    label: "restricted",
+    tone: "good",
+    detail: "default local-only",
+  });
 });
 
 test("extractProfileSecurity composes egress and host_home_auth_mounts", () => {
@@ -84,7 +94,7 @@ test("extractProfileSecurity composes egress and host_home_auth_mounts", () => {
     },
   };
   const result = extractProfileSecurity(profile);
-  assert.deepEqual(result.egress, { mode: "open", allowlist: [] });
+  assert.deepEqual(result.egress, { mode: "open" });
   assert.deepEqual(result.host_home_auth_mounts, { mode: "block" });
 });
 

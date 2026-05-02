@@ -75,6 +75,7 @@ from awf.service.coordination import (
     task_policy_with_coordination_warnings,
 )
 from awf.service.disk import DiskCheck
+from awf.service.profile_metadata import network_posture_from_profile_snapshot
 from awf.service.provider_recovery import (
     provider_recovery_metadata_from_failure,
     provider_recovery_state_for_workspace,
@@ -999,6 +1000,9 @@ def workspace_response(
         getattr(workspace, "requested_profile", None)
     )
     computed_fields["resolved_profile"] = _console_safe_profile_snapshot(
+        getattr(workspace, "resolved_profile", None)
+    )
+    computed_fields["network_posture"] = network_posture_from_profile_snapshot(
         getattr(workspace, "resolved_profile", None)
     )
     computed_fields["provider_recovery_state"] = _provider_recovery_state_response(workspace)

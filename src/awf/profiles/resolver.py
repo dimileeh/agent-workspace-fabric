@@ -115,6 +115,7 @@ class ProfileResolver:
 
         return ProfileResolution(
             profile=profile,
+            network_posture=profile.security.egress.mode.value,
             reason=reason,
             candidates_considered=considered,
             lint_findings=list(lint_findings),

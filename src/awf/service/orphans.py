@@ -65,6 +65,7 @@ class WorkspaceLifecycleSnapshot:
     compose_project_name: str | None = None
     compose_file_path: str | None = None
     pr_url: str | None = None
+    network_posture: str | None = None
 
 
 @dataclass(frozen=True)

@@ -3462,11 +3462,6 @@ function SecurityEgressPanel({
           tone={findingsUnavailable ? "neutral" : activeFindings.length > 0 ? "warn" : "neutral"}
         />
       </div>
-      {security.egress.mode === "allowlist" && security.egress.allowlist.length > 0 ? (
-        <div className="mt-2 text-[11px] text-slate-500">
-          Allowed: {security.egress.allowlist.join(", ")}
-        </div>
-      ) : null}
     </Panel>
   );
 }
