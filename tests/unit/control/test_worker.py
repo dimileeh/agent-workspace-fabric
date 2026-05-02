@@ -1445,6 +1445,81 @@ class TestRunOnceMonitorRecovery:
         assert remonitor_operations[0].status == OperationStatus.succeeded.value
 
     @pytest.mark.unit
+    async def test_restart_recovery_cleans_orphaned_execution_expiry_without_reporting_claim_clear(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        orphaned_execution_expires_at = datetime(2026, 4, 27, 12, 0, tzinfo=UTC)
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "monitor-with-orphaned-execution-expiry",
+            pr_number=458,
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            ws.execution_claimed_by = None
+            ws.execution_claim_expires_at = orphaned_execution_expires_at
+            await s.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_executions=1,
+                node_id="worker-node-a",
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
+        assert executor.resume_calls == [monitor_id]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(monitor_id)
+            assert ws is not None
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            operations = await OperationRepository(s).list_all(workspace_id=monitor_id)
+            recovery_events = await WorkspaceEventRepository(s).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+
+        remonitor_operations = [
+            operation
+            for operation in operations
+            if operation.type == OperationType.remonitor.value
+        ]
+        assert len(remonitor_operations) == 1
+        operation = remonitor_operations[0]
+        assert operation.payload is not None
+        assert operation.payload["previous_claim"] == {
+            "monitor_claimed_by": None,
+            "monitor_claim_expires_at": None,
+            "execution_claimed_by": None,
+            "execution_claim_expires_at": orphaned_execution_expires_at.isoformat(),
+        }
+        assert operation.payload["claim_cleanup"]["execution_claim"] == {
+            "action": "none",
+            "reason_code": "NO_EXECUTION_CLAIM_DURING_MONITOR_RECOVERY",
+            "previous_claimed_by": None,
+            "previous_expires_at": orphaned_execution_expires_at.isoformat(),
+        }
+        assert len(recovery_events) == 1
+        assert recovery_events[0].payload is not None
+        assert recovery_events[0].payload["claim_cleanup"] == operation.payload[
+            "claim_cleanup"
+        ]
+
+    @pytest.mark.unit
     async def test_restart_recovery_rechecks_execution_claim_before_stale_clear(
         self,
         session_factory: async_sessionmaker[AsyncSession],

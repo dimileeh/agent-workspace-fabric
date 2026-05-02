@@ -891,7 +891,7 @@ class ControlWorker:
                         claim_cutoff=now,
                     )
                 )
-                if execution_claim_cleanup["action"] == "cleared_stale":
+                if _monitor_recovery_execution_claim_needs_clear(ws, claim_cutoff=now):
                     cleared_stale_execution_claim = (
                         await repo.clear_stale_monitor_recovery_execution_claim(
                             workspace_id,
@@ -1222,7 +1222,7 @@ def _monitor_recovery_execution_claim_cleanup_payload(
         "previous_claimed_by": previous_claimed_by,
         "previous_expires_at": previous_expires_at,
     }
-    if previous_claimed_by is None and workspace.execution_claim_expires_at is None:
+    if previous_claimed_by is None:
         return payload
 
     if _execution_claim_is_stale(workspace, claim_cutoff):
@@ -1237,6 +1237,16 @@ def _monitor_recovery_execution_claim_cleanup_payload(
         "action": "preserved_unexpired",
         "reason_code": _MONITOR_RECOVERY_EXECUTION_CLAIM_PRESERVED_REASON_CODE,
     }
+
+
+def _monitor_recovery_execution_claim_needs_clear(
+    workspace: Workspace,
+    *,
+    claim_cutoff: datetime,
+) -> bool:
+    if workspace.execution_claimed_by is None and workspace.execution_claim_expires_at is None:
+        return False
+    return _execution_claim_is_stale(workspace, claim_cutoff)
 
 
 def _latest_runtime_stranding_reason(events: list[WorkspaceEvent]) -> str | None:
