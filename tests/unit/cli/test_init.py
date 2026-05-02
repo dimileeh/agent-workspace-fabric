@@ -677,6 +677,24 @@ def test_init_with_path_rejects_no_write_env_flag(
 
 
 @pytest.mark.unit
+def test_init_with_path_rejects_format_json_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--format", "json"],
+    )
+
+    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    assert result.exit_code == 2
+    assert "--format" in output
+    assert "without a project path" in output or "no path" in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.unit
 def test_readme_recommends_awf_init_for_local_bootstrap() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 

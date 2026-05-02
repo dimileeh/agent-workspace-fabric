@@ -319,6 +319,8 @@ def init(
         bootstrap_only_flags.append("--poll-interval-seconds")
     if not write_env:
         bootstrap_only_flags.append("--no-write-env")
+    if fmt != OutputFormat.pretty:
+        bootstrap_only_flags.append("--format")
     if bootstrap_only_flags:
         typer.echo(
             "error: bootstrap-only flag(s) "
