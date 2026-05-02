@@ -2668,6 +2668,34 @@ class WorkspaceRepository:
         )
         return result.scalar_one_or_none() is not None
 
+    async def clear_stale_monitor_recovery_execution_claim(
+        self,
+        workspace_id: str,
+        *,
+        claim_cutoff: datetime,
+    ) -> bool:
+        """Clear a stale execution claim during monitor recovery."""
+        result = await self._session.execute(
+            update(Workspace)
+            .where(
+                Workspace.id == workspace_id,
+                Workspace.status == WorkspaceStatus.monitoring_pr.value,
+                or_(
+                    Workspace.execution_claimed_by.is_(None),
+                    Workspace.execution_claim_expires_at.is_(None),
+                    Workspace.execution_claim_expires_at <= claim_cutoff,
+                ),
+            )
+            .values(
+                execution_claimed_by=None,
+                execution_claim_expires_at=None,
+                updated_at=Workspace.updated_at,
+            )
+            .returning(Workspace.id)
+            .execution_options(synchronize_session=False)
+        )
+        return result.scalar_one_or_none() is not None
+
     async def refresh_monitoring_pr_claim(
         self,
         workspace_id: str,
