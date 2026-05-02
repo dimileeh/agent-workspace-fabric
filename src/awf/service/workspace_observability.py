@@ -24,6 +24,10 @@ from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
 from awf.service.coordination import coordination_warnings_from_task_policy
+from awf.service.provider_recovery import (
+    ProviderRecoveryStateView,
+    provider_recovery_state_for_workspace,
+)
 
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
@@ -132,6 +136,7 @@ class WorkspaceRecoverySummary:
     current_operation: WorkspaceRecoveryCurrentOperation | None
     summary: str
     payload: dict[str, Any] | None
+    provider_recovery: ProviderRecoveryStateView | None = None
 
 
 class AgentIdentityPayload(TypedDict):
@@ -179,6 +184,7 @@ class WorkspaceRecoveryPayload(TypedDict):
     current_operation: WorkspaceRecoveryCurrentOperationPayload | None
     summary: str
     payload: dict[str, Any] | None
+    provider_recovery: dict[str, Any] | None
 
 
 class WorkspaceObservabilityPayload(AgentIdentityPayload):
@@ -564,6 +570,7 @@ def workspace_recovery_summary(
         else None
     )
     payload = _bounded_payload(operation_payload or event_payload or reverse_payload)
+    provider_recovery_view = provider_recovery_state_for_workspace(workspace)
 
     return WorkspaceRecoverySummary(
         from_state=getattr(reverse_event, "old_state", None),
@@ -582,6 +589,7 @@ def workspace_recovery_summary(
             current_operation=current_operation,
         ),
         payload=payload,
+        provider_recovery=provider_recovery_view,
     )
 
 
@@ -615,6 +623,41 @@ def recovery_payload(
         ),
         "summary": summary.summary,
         "payload": summary.payload,
+        "provider_recovery": (
+            {
+                "action": summary.provider_recovery.action,
+                "reason_code": summary.provider_recovery.reason_code,
+                "source_provider": summary.provider_recovery.source_provider,
+                "source_model": summary.provider_recovery.source_model,
+                "retry_attempt_number": summary.provider_recovery.retry_attempt_number,
+                "fallback_attempt_number": summary.provider_recovery.fallback_attempt_number,
+                "fallback_target": (
+                    {
+                        "agent": summary.provider_recovery.fallback_target.agent,
+                        "provider": summary.provider_recovery.fallback_target.provider,
+                        "model": summary.provider_recovery.fallback_target.model,
+                    }
+                    if summary.provider_recovery.fallback_target is not None
+                    else None
+                ),
+                "cooldown_until": (
+                    summary.provider_recovery.cooldown_until.isoformat()
+                    if summary.provider_recovery.cooldown_until is not None
+                    else None
+                ),
+                "next_eligible_at": (
+                    summary.provider_recovery.next_eligible_at.isoformat()
+                    if summary.provider_recovery.next_eligible_at is not None
+                    else None
+                ),
+                "source_workspace_id": summary.provider_recovery.source_workspace_id,
+                "source_attempt_id": summary.provider_recovery.source_attempt_id,
+                "recommended_action": summary.provider_recovery.recommended_action,
+                "terminal": summary.provider_recovery.terminal,
+            }
+            if summary.provider_recovery is not None
+            else None
+        ),
     }
 
 

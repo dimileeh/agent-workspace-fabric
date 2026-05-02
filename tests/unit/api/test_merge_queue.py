@@ -486,6 +486,7 @@ class TestMergeQueueList:
             "latest_validation",
             "stale_reasons",
             "policy_findings",
+            "provider_recovery_state",
         }
         assert item["stale_reasons"] == []
         assert item["policy_findings"] == []

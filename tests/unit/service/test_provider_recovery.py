@@ -36,6 +36,7 @@ from awf.service.provider_recovery import (
     _nonnegative_int,
     _policy_model,
     _record_provider_circuit_breaker,
+    _recovery_task_policy,
     _retry_task_for_source,
     _select_fallback_target,
     _source_suppression_not_before,
@@ -1107,6 +1108,37 @@ def test_select_fallback_target_more():
     policy2 = ProviderRecoveryPolicy(fallbacks=(), max_fallback_attempts=1)
     state2 = ProviderRecoveryState(fallback_attempt_number=0)
     assert _select_fallback_target(policy2, state2) is None
+
+
+def test_recovery_task_policy_persists_recommended_action():
+    decision = ProviderRecoveryDecision(
+        action="retry",
+        retryable=True,
+        not_before=None,
+        target_agent="codex",
+        target_provider="openai",
+        target_model="gpt-5",
+        reason_code="PROVIDER_RETRY_DELAYED",
+        terminal_reason=None,
+        fallback_attempt_number=0,
+        retry_attempt_number=1,
+    )
+    metadata = {
+        "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        "provider": "openai",
+        "model": "gpt-5",
+        "recommended_action": "Refresh credentials and retry.",
+    }
+    policy = _recovery_task_policy(
+        {},
+        source_workspace_id="ws-001",
+        source_attempt=None,
+        source_canonical_attempt=None,
+        metadata=metadata,
+        decision=decision,
+    )
+    state = policy.get("provider_recovery_state", {})
+    assert state.get("recommended_action") == "Refresh credentials and retry."
 
 def test_source_suppression_not_before_more():
     decision = ProviderRecoveryDecision(

@@ -8,9 +8,12 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
 
-from sqlalchemy import case, func, select
+from sqlalchemy import and_, case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.ext.compiler import compiles
+from sqlalchemy.sql import expression
 
+from awf.adapters.provider_failures import AGENT_AUTH_FAILED, AGENT_PROVIDER_CAPACITY_EXHAUSTED
 from awf.common.config import Settings
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Workspace, WorkspaceEvent
@@ -21,6 +24,10 @@ from awf.runtime.planning import (
 )
 from awf.service.disk import DiskCheck, DiskUsage, check_disk_space
 from awf.service.orphan_resources import OrphanResourceSummary, summary_not_collected
+from awf.service.provider_recovery import (
+    PROVIDER_RECOVERY_NO_LOOP_REASON,
+    PROVIDER_RECOVERY_STATE_KEY,
+)
 from awf.service.resource_capacity import (
     ReservedResources,
     ResourceCapacitySummary,
@@ -29,6 +36,43 @@ from awf.service.resource_capacity import (
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 from awf.service.workspaces import workspace_failure_details_payload
+
+
+class _IsoToTimestamp(expression.FunctionElement[Any]):  # noqa: N801
+    """Dialect-portable ISO-8601 string → timestamp cast.
+
+    PostgreSQL: CAST(… AS TIMESTAMP WITH TIME ZONE) – full tz-aware comparison.
+    SQLite:     datetime(…) – normalises any offset to UTC before comparing.
+    """
+
+    inherit_cache = True
+
+
+_ISO8601_TS_PG = (
+    r'^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])'
+    r'T([01]\d|2[0-3]):[0-5]\d:[0-5]\d'
+    r'(\.\d+)?'
+    r'([+-]([01]\d|2[0-3]):?[0-5]\d|Z)?$'
+)
+
+
+@compiles(_IsoToTimestamp, "postgresql")
+def _pg_iso_to_timestamp(element: expression.FunctionElement[Any], compiler: Any, **kw: Any) -> str:
+    arg = compiler.process(list(element.clauses)[0], **kw)
+    return (
+        f"CASE WHEN {arg} ~ '{_ISO8601_TS_PG}'"
+        f" THEN CAST({arg} AS TIMESTAMP WITH TIME ZONE) ELSE NULL END"
+    )
+
+
+@compiles(_IsoToTimestamp, "sqlite")
+def _sqlite_iso_to_timestamp(element: expression.FunctionElement[Any], compiler: Any, **kw: Any) -> str:
+    arg = compiler.process(list(element.clauses)[0], **kw)
+    return (
+        f"CASE WHEN {arg} LIKE '____-__-__T__:__:__%'"
+        f" THEN datetime({arg}) ELSE NULL END"
+    )
+
 
 DEFAULT_SUMMARY_WINDOW_HOURS = 24
 MIN_SUMMARY_WINDOW_HOURS = 1
@@ -117,6 +161,7 @@ class FailedWorkspaceExample:
     reason_code: str | None = None
     details: dict[str, Any] = field(default_factory=dict)
     salvage: dict[str, Any] | None = None
+    provider_recovery: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +176,7 @@ class RootCauseCluster:
     sample_workspace_ids: tuple[str, ...]
     details: dict[str, Any] = field(default_factory=dict)
     salvage: dict[str, Any] | None = None
+    provider_recovery: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -232,6 +278,16 @@ class ProviderCircuitBreakerSummary:
 
 
 @dataclass(frozen=True)
+class ProviderRecoveryStateSummary:
+    pending_retry: int
+    pending_fallback: int
+    in_cooldown: int
+    terminal_no_loop: int
+    terminal_exhausted: int
+    circuit_breakers_open: int
+
+
+@dataclass(frozen=True)
 class ResourceSaturationSummary:
     generated_at: datetime
     workspace_counts: WorkspaceSaturationCounts
@@ -245,6 +301,7 @@ class ResourceSaturationSummary:
     runtime_health: WorkspaceRuntimeHealthSummary
     admission: AdmissionSummary
     provider_circuit_breakers: list[ProviderCircuitBreakerSummary] = field(default_factory=list)
+    provider_recovery_state_summary: ProviderRecoveryStateSummary | None = None
 
 
 _UNKNOWN_FAILURE_ACTION = FailureAction(
@@ -500,14 +557,14 @@ async def _cluster_root_causes(
             else details_payload.get("recommended_action")
         )
 
-        if specific_reason_code == "AGENT_PROVIDER_CAPACITY_EXHAUSTED":
+        if specific_reason_code == AGENT_PROVIDER_CAPACITY_EXHAUSTED:
             likely_cause = _provider_likely_cause(provider_failure_type)
             action = (
                 provider_action
                 if isinstance(provider_action, str) and provider_action
                 else "Retry after provider cooldown or dispatch an approved fallback model."
             )
-        elif specific_reason_code == "AGENT_AUTH_FAILED":
+        elif specific_reason_code == AGENT_AUTH_FAILED:
             likely_cause = "Provider Auth Failed"
             action = (
                 provider_action
@@ -525,7 +582,7 @@ async def _cluster_root_causes(
             action = (
                 "Retry with the final conformance gaps and finish the remaining planned work."
             )
-        elif "AGENT_AUTH_FAILED" in msg:
+        elif AGENT_AUTH_FAILED in msg:
             likely_cause = "Agent Auth Failed"
             action = "Check agent credentials"
         elif "GitHub auth/PR creation failed" in msg:
@@ -564,6 +621,7 @@ async def _cluster_root_causes(
             sample_workspace_ids=tuple(wids[:DEFAULT_ROOT_CAUSE_SAMPLE_LIMIT]),
             details=cluster_details.get(k, {}),
             salvage=cluster_salvage.get(k),
+            provider_recovery=_provider_recovery_from_details(cluster_details.get(k, {})),
         )
         for k, wids in clusters.items()
     ]
@@ -662,6 +720,11 @@ async def summarize_resource_saturation_for_session(
             now=generated_at
         )
     ]
+    provider_recovery_state_summary = await _provider_recovery_state_summary(
+        session,
+        circuit_breakers_open=len(provider_circuit_breakers),
+        now=generated_at,
+    )
 
     return ResourceSaturationSummary(
         generated_at=generated_at,
@@ -676,6 +739,7 @@ async def summarize_resource_saturation_for_session(
         runtime_health=resolved_runtime_health,
         admission=admission,
         provider_circuit_breakers=provider_circuit_breakers,
+        provider_recovery_state_summary=provider_recovery_state_summary,
     )
 
 
@@ -798,6 +862,7 @@ async def _latest_failed_workspace_examples(
                 reason_code=_details_reason_code(details_payload),
                 details=_details_only(details_payload),
                 salvage=_salvage_only(details_payload),
+                provider_recovery=_provider_recovery_from_details(details_payload),
             )
         )
     return examples
@@ -999,8 +1064,103 @@ def _details_only(details_payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _provider_recovery_state_summary(
+    session: AsyncSession,
+    *,
+    circuit_breakers_open: int,
+    now: datetime,
+) -> ProviderRecoveryStateSummary:
+    action = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["action"].as_string()
+    decision_reason = func.coalesce(
+        Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["decision_reason_code"].as_string(),
+        Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY]["source_reason_code"].as_string(),
+    )
+    not_before = Workspace.task_policy[PROVIDER_RECOVERY_STATE_KEY][
+        "not_before"
+    ].as_string()
+    not_before_ts = _IsoToTimestamp(not_before)
+    now_ts = _IsoToTimestamp(now.astimezone(UTC).isoformat())
+
+    stmt = select(
+        func.coalesce(
+            func.sum(
+                case((and_(action == "retry", not_before.is_(None)), 1), else_=0)
+            ),
+            0,
+        ).label("pending_retry_no_not_before"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (and_(action == "retry", not_before.isnot(None), not_before_ts <= now_ts), 1),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("pending_retry_with_not_before"),
+        func.coalesce(
+            func.sum(case((action == "fallback", 1), else_=0)), 0
+        ).label("pending_fallback"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (and_(action == "retry", not_before.isnot(None), not_before_ts > now_ts), 1),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("in_cooldown"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        and_(
+                            action == "terminal",
+                            decision_reason == PROVIDER_RECOVERY_NO_LOOP_REASON,
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("terminal_no_loop"),
+        func.coalesce(
+            func.sum(
+                case(
+                    (
+                        and_(
+                            action == "terminal",
+                            decision_reason.is_(None) | (decision_reason != PROVIDER_RECOVERY_NO_LOOP_REASON),
+                        ),
+                        1,
+                    ),
+                    else_=0,
+                )
+            ),
+            0,
+        ).label("terminal_exhausted"),
+    ).where(
+        ~Workspace.status.in_(TERMINAL_WORKSPACE_STATUSES)
+        | (action == "terminal")
+    )
+    row = (await session.execute(stmt)).one()
+    return ProviderRecoveryStateSummary(
+        pending_retry=int(row.pending_retry_no_not_before + row.pending_retry_with_not_before),
+        pending_fallback=int(row.pending_fallback),
+        in_cooldown=int(row.in_cooldown),
+        terminal_no_loop=int(row.terminal_no_loop),
+        terminal_exhausted=int(row.terminal_exhausted),
+        circuit_breakers_open=circuit_breakers_open,
+    )
+
+
 def _salvage_only(details_payload: dict[str, Any]) -> dict[str, Any] | None:
     value = details_payload.get("salvage")
+    return value if isinstance(value, dict) else None
+
+
+def _provider_recovery_from_details(details_payload: dict[str, Any]) -> dict[str, Any] | None:
+    value = details_payload.get("provider_recovery")
     return value if isinstance(value, dict) else None
 
 

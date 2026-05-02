@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator, Callable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 from typing import Any
 
 import pytest
@@ -708,6 +708,345 @@ async def test_resource_saturation_exposes_open_provider_circuit_breakers(
     assert breaker.state == "open"
     assert breaker.failure_count == 1
     assert breaker.last_workspace_id == "ws_capacity"
+
+
+@pytest.mark.unit
+async def test_resource_saturation_provider_recovery_aggregates_via_sql(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import (
+        PROVIDER_RECOVERY_NO_LOOP_REASON,
+        PROVIDER_RECOVERY_STATE_KEY,
+    )
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: {"action": "retry"}},
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": (now + timedelta(hours=1)).isoformat(),
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": (now - timedelta(hours=1)).isoformat(),
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {"action": "fallback"},
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+                "decision_reason_code": PROVIDER_RECOVERY_NO_LOOP_REASON,
+                "source_reason_code": "PROVIDER_RETRY_DELAYED",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+                "decision_reason_code": "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED",
+                "source_reason_code": "PROVIDER_RETRY_DELAYED",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.completed,
+        updated_at=now,
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: {"action": "retry"}},
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    prs = summary.provider_recovery_state_summary
+    assert prs.pending_retry == 2
+    assert prs.pending_fallback == 1
+    assert prs.in_cooldown == 1
+    assert prs.terminal_no_loop == 1
+    assert prs.terminal_exhausted == 1
+    assert prs.circuit_breakers_open == 0
+
+
+@pytest.mark.unit
+async def test_provider_recovery_cooldown_uses_timestamp_not_string_comparison(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 11, 30, tzinfo=UTC)
+
+    not_before_edt = (
+        datetime(2026, 5, 1, 8, 0, 0, tzinfo=timezone(timedelta(hours=-4)))
+    ).isoformat()
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": not_before_edt,
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    prs = summary.provider_recovery_state_summary
+    assert prs.pending_retry == 0
+    assert prs.in_cooldown == 1
+
+
+@pytest.mark.unit
+async def test_resource_saturation_malformed_not_before_does_not_crash_query(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "not-a-date",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-05-01T11:00:00Z",
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    prs = summary.provider_recovery_state_summary
+    assert prs.pending_retry == 1
+    assert prs.in_cooldown == 0
+
+
+@pytest.mark.unit
+async def test_resource_saturation_structurally_invalid_timestamps_rejected(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-99-99T99:99:99",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-05-01T11:00:00Zextra",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-13-01T11:00:00Z",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-05-01T25:00:00Z",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-05-01T11:00:00Z",
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    prs = summary.provider_recovery_state_summary
+    assert prs.pending_retry == 1
+    assert prs.in_cooldown == 0
+
+
+@pytest.mark.unit
+async def test_resource_saturation_terminal_uses_decision_reason_code_over_source_reason_code(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import (
+        PROVIDER_RECOVERY_NO_LOOP_REASON,
+        PROVIDER_RECOVERY_STATE_KEY,
+    )
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+                "source_reason_code": "PROVIDER_RETRY_DELAYED",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+                "decision_reason_code": PROVIDER_RECOVERY_NO_LOOP_REASON,
+                "source_reason_code": "PROVIDER_RETRY_DELAYED",
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+    prs = summary.provider_recovery_state_summary
+    assert prs.terminal_no_loop == 1
+    assert prs.terminal_exhausted == 1
+
+
+@pytest.mark.unit
+async def test_resource_saturation_terminal_null_source_reason_code_counted_as_exhausted(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import (
+        PROVIDER_RECOVERY_STATE_KEY,
+    )
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.failed,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "terminal",
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+    prs = summary.provider_recovery_state_summary
+    assert prs.terminal_no_loop == 0
+    assert prs.terminal_exhausted == 1
 
 
 @pytest.mark.unit
@@ -2052,3 +2391,69 @@ async def test_cleanup_and_recovery_include_cancelled_operations(
     assert summary.recovery_total == 2
     assert summary.recovery_succeeded == 1
     assert summary.recovery_failed_count == 0
+
+
+@pytest.mark.unit
+class TestIso8601PostgresGuardRegex:
+    from awf.service.metrics import _ISO8601_TS_PG
+
+    _PATTERN = _ISO8601_TS_PG
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2026-05-01T11:00:00Z",
+            "2026-05-01T11:00:00+00:00",
+            "2026-05-01T11:00:00-04:00",
+            "2026-05-01T11:00:00+0000",
+            "2026-05-01T23:59:59Z",
+            "2026-12-31T00:00:00Z",
+            "2026-01-01T00:00:00Z",
+            "2026-05-01T11:00:00.123456+00:00",
+            "2026-05-01T11:00:00.123456Z",
+            "2026-05-01T11:00:00.1-04:00",
+            "2026-05-01T12:00:00.0+00:00",
+        ],
+    )
+    def test_valid_timestamps_match(self, value: str) -> None:
+        import re
+
+        assert re.match(self._PATTERN, value), f"Expected valid timestamp to match: {value}"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2026-99-99T99:99:99",
+            "2026-13-01T11:00:00Z",
+            "2026-00-01T11:00:00Z",
+            "2026-05-01T25:00:00Z",
+            "2026-05-01T11:60:00Z",
+            "2026-05-01T11:00:60Z",
+            "2026-05-01T11:00:00Zextra",
+            "2026-05-01T11:00:00 Z",
+            "not-a-date",
+            "",
+            "2026-05-01",
+            "2026-05-01T11:00",
+        ],
+    )
+    def test_invalid_timestamps_rejected(self, value: str) -> None:
+        import re
+
+        assert not re.match(self._PATTERN, value), f"Expected invalid timestamp to be rejected: {value}"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2026-02-30T11:00:00Z",
+            "2026-04-31T11:00:00Z",
+            "2025-02-29T11:00:00Z",
+        ],
+    )
+    def test_calendar_invalid_but_syntactically_valid_timestamps_match(self, value: str) -> None:
+        import re
+
+        assert re.match(self._PATTERN, value), (
+            "Regex accepts syntactically valid timestamps even if calendar-invalid; "
+            "safe because not_before is always produced by datetime.isoformat()"
+        )

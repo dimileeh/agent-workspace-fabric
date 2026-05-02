@@ -114,6 +114,7 @@ class FailedWorkspaceExampleResponse(BaseModel):
     reason_code: str | None = None
     details: dict[str, Any] = Field(default_factory=dict)
     salvage: dict[str, Any] | None = None
+    provider_recovery: dict[str, Any] | None = None
 
 
 class RootCauseClusterResponse(BaseModel):
@@ -129,6 +130,7 @@ class RootCauseClusterResponse(BaseModel):
     sample_workspace_ids: list[str]
     details: dict[str, Any] = Field(default_factory=dict)
     salvage: dict[str, Any] | None = None
+    provider_recovery: dict[str, Any] | None = None
 
 
 class FailureAnalysisSummaryResponse(BaseModel):
@@ -320,6 +322,17 @@ class ProviderCircuitBreakerSummaryResponse(BaseModel):
     last_workspace_id: str | None = None
 
 
+class ProviderRecoveryStateSummaryResponse(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
+    pending_retry: int
+    pending_fallback: int
+    in_cooldown: int
+    terminal_no_loop: int
+    terminal_exhausted: int
+    circuit_breakers_open: int
+
+
 class CleanupReadinessResponse(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -400,6 +413,10 @@ class ResourceSaturationSummaryResponse(BaseModel):
     provider_circuit_breakers: list[ProviderCircuitBreakerSummaryResponse] = Field(
         default_factory=list,
         description="Open provider/model cooldown circuits suppressing new dispatch.",
+    )
+    provider_recovery_state_summary: ProviderRecoveryStateSummaryResponse | None = Field(
+        default=None,
+        description="Provider recovery state counts by phase.",
     )
 
 
