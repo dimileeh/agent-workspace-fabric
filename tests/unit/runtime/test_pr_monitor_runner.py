@@ -21,10 +21,11 @@ import pytest_mock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.adapters.base import AgentRunError
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.base import Base
-from awf.db.enums import OperationStatus, TaskClass, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStatus
 from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON, Operation
 from awf.db.repositories import (
     MergeCandidateRepository,
@@ -1919,6 +1920,55 @@ async def test_review_comment_provider_failure_records_retry_and_ignores_comment
 
     assert "C_provider" not in state.threads_addressed_ids
 
+
+@pytest.mark.unit
+async def test_provider_failure_stale_callback_is_deterministic(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(factory, workspace_id)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        workspace = await repo.get(workspace_id)
+        assert workspace is not None
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.completed,
+            reason_code="TEST_COMPLETED",
+        )
+        await session.commit()
+
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    exc = AgentRunError(
+        agent=AgentRuntime.claude_code,
+        result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="Gemini RESOURCE_EXHAUSTED: provider is temporarily overloaded",
+        ),
+        reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        details={"provider": "google", "model": "gemini-2.5-pro"},
+    )
+
+    action = await runner._record_provider_agent_run_error(workspace_id, exc)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        event_types = [event.event_type for event in workspace.events]
+
+    assert action == "deterministic"
+    assert "workspace.stale_callback_ignored" in event_types
+    assert "workspace.provider_recovery_requested" not in event_types
+
+
 @pytest.mark.unit
 async def test_review_comment_deterministic_failure_is_marked_addressed(
     factory: async_sessionmaker[AsyncSession],
@@ -1969,4 +2019,3 @@ async def test_review_comment_deterministic_failure_is_marked_addressed(
     assert terminal is False
     assert "C_deterministic" in state.threads_addressed_ids
     assert state.threads_addressed_ids["C_deterministic"] == "agent_failed"
-

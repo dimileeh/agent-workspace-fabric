@@ -102,6 +102,53 @@ def _request() -> WorkspaceCreateV2Request:
     )
 
 
+def _retryable_capacity_metadata(fingerprint: str) -> dict[str, object]:
+    return {
+        "reason_code": "AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+        "retryable": True,
+        "provider": "google",
+        "model": "gemini-2.5-pro",
+        "failure_fingerprint": fingerprint,
+    }
+
+
+async def _move_workspace_to_status(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    status: WorkspaceStatus,
+) -> None:
+    if status == WorkspaceStatus.cancelled:
+        await repo.transition(workspace, to=WorkspaceStatus.cancelled, reason_code="SEED")
+        return
+
+    await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="SEED")
+    if status == WorkspaceStatus.failed:
+        workspace.failure_reason = FailureReason.agent_failure.value
+        workspace.failure_message = "agent failed without provider-recovery metadata"
+        await repo.transition(
+            workspace,
+            to=WorkspaceStatus.failed,
+            reason_code="AGENT_CLI_FAILED",
+            payload={
+                "reason_code": "AGENT_CLI_FAILED",
+                "message": workspace.failure_message,
+                "details": {"exit_code": 1},
+            },
+        )
+        return
+
+    await repo.transition(workspace, to=WorkspaceStatus.ready, reason_code="SEED")
+    await repo.transition(workspace, to=WorkspaceStatus.running, reason_code="SEED")
+    await repo.transition(workspace, to=WorkspaceStatus.validating, reason_code="SEED")
+    await repo.transition(workspace, to=WorkspaceStatus.completed, reason_code="SEED")
+    if status == WorkspaceStatus.completed:
+        return
+    await repo.transition(workspace, to=WorkspaceStatus.destroying, reason_code="SEED")
+    if status == WorkspaceStatus.destroying:
+        return
+    await repo.transition(workspace, to=WorkspaceStatus.destroyed, reason_code="SEED")
+
+
 def test_v2_task_policy_snapshot_persists_provider_fallback_policy() -> None:
     policy = v2_task_policy_snapshot(_request())
 
@@ -543,6 +590,134 @@ async def test_provider_recovery_attempt_returns_none_for_unknown_source(
         result = await create_provider_recovery_attempt_row(session, "ws_missing")
 
     assert result is None
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    "final_status",
+    [
+        WorkspaceStatus.destroyed,
+        WorkspaceStatus.destroying,
+        WorkspaceStatus.completed,
+        WorkspaceStatus.cancelled,
+    ],
+)
+async def test_provider_recovery_stale_terminal_callback_is_ignored(
+    factory: async_sessionmaker[AsyncSession],
+    final_status: WorkspaceStatus,
+) -> None:
+    service = WorkspaceService(factory)
+    source_response = await service.create_v2(_request())
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        source = await repo.get(source_response.id)
+        assert source is not None
+        await _move_workspace_to_status(repo, source, final_status)
+        await session.commit()
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_response.id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata=_retryable_capacity_metadata(f"capacity:stale:{final_status.value}"),
+        )
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_response.id)
+        assert source is not None
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        requested_events = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == source_response.id,
+                        WorkspaceEvent.event_type
+                        == "workspace.provider_recovery_requested",
+                    )
+                )
+            ).scalars()
+        )
+        ignored_events = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == source_response.id,
+                        WorkspaceEvent.event_type == "workspace.stale_callback_ignored",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert result == "stale"
+    assert source.status == final_status.value
+    assert "provider_recovery_state" not in source.task_policy
+    assert len(workspaces) == 1
+    assert requested_events == []
+    assert len(ignored_events) == 1
+    assert ignored_events[0].reason_code == "STALE_CALLBACK_IGNORED"
+    assert ignored_events[0].payload == {
+        "callback_source": "provider_recovery",
+        "callback_action": "create_attempt",
+        "expected_status": "recoverable_provider_failure",
+        "actual_status": final_status.value,
+        "reason_code": "PROVIDER_RECOVERY_STALE_SOURCE",
+    }
+
+
+@pytest.mark.unit
+async def test_provider_recovery_failed_without_provider_metadata_is_ignored(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    service = WorkspaceService(factory)
+    source_response = await service.create_v2(_request())
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        source = await repo.get(source_response.id)
+        assert source is not None
+        await _move_workspace_to_status(repo, source, WorkspaceStatus.failed)
+        await session.commit()
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_response.id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata=_retryable_capacity_metadata("capacity:stale:failed"),
+        )
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_response.id)
+        assert source is not None
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        ignored_events = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == source_response.id,
+                        WorkspaceEvent.event_type == "workspace.stale_callback_ignored",
+                    )
+                )
+            ).scalars()
+        )
+
+    assert result == "stale"
+    assert source.status == WorkspaceStatus.failed.value
+    assert "provider_recovery_state" not in source.task_policy
+    assert len(workspaces) == 1
+    assert len(ignored_events) == 1
+    assert ignored_events[0].reason_code == "STALE_CALLBACK_IGNORED"
+    assert ignored_events[0].payload == {
+        "callback_source": "provider_recovery",
+        "callback_action": "create_attempt",
+        "expected_status": "recoverable_provider_failure",
+        "actual_status": WorkspaceStatus.failed.value,
+        "reason_code": "PROVIDER_RECOVERY_STALE_SOURCE",
+    }
 
 
 @pytest.mark.unit

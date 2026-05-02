@@ -147,6 +147,7 @@ class TestTerminalDetection:
         [
             WorkspaceStatus.cancelled,
             WorkspaceStatus.destroyed,
+            WorkspaceStatus.destroying,
             WorkspaceStatus.failed,
             WorkspaceStatus.completed,
         ],
@@ -165,7 +166,6 @@ class TestTerminalDetection:
             WorkspaceStatus.validating,
             WorkspaceStatus.pushing,
             WorkspaceStatus.monitoring_pr,
-            WorkspaceStatus.destroying,
         ],
     )
     def test_not_callback_terminal(self, state: WorkspaceStatus) -> None:

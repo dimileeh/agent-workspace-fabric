@@ -17,6 +17,8 @@ from awf.service.provider_recovery import (
     PROVIDER_RECOVERY_REQUESTED_EVENT,
     PROVIDER_RECOVERY_STATE_KEY,
     PROVIDER_RETRY_DELAYED_REASON,
+    ProviderRecoveryStateView,
+    _merge_recovery_views,
     _parse_not_before,
     _recommended_action_for_action,
     _validate_recovery_action,
@@ -944,3 +946,77 @@ def test_provider_recovery_state_from_events_falls_back_to_event_reason_code() -
     assert view is not None
     assert view.action == "retry"
     assert view.reason_code == PROVIDER_RETRY_DELAYED_REASON
+
+
+def test_provider_recovery_state_ignores_event_with_non_mapping_payload() -> None:
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_REQUESTED_EVENT,
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        payload="not-a-mapping",
+        occurred_at=datetime.now(UTC),
+    )
+    workspace = SimpleNamespace(
+        id="ws-non-mapping-event",
+        status="failed",
+        task_policy={},
+        events=[event],
+    )
+
+    assert provider_recovery_state_for_workspace(workspace) is None
+
+
+def test_provider_recovery_state_from_event_uses_flat_payload_when_nested_missing() -> None:
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_REQUESTED_EVENT,
+        reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
+        payload={
+            "source_workspace_id": "ws-source-flat",
+            "source_attempt_id": "att-flat",
+            "action": "fallback",
+            "decision_reason_code": PROVIDER_FALLBACK_SELECTED_REASON,
+            "provider": "google",
+            "model": "gemini-2.5-pro",
+            "target_agent": "codex",
+            "target_provider": "openai",
+            "target_model": "gpt-5.3-codex",
+            "fallback_attempt_number": 1,
+        },
+        occurred_at=datetime.now(UTC),
+    )
+    workspace = SimpleNamespace(
+        id="ws-flat-event",
+        status="failed",
+        task_policy={},
+        events=[event],
+    )
+
+    view = provider_recovery_state_for_workspace(workspace)
+
+    assert view is not None
+    assert view.action == "fallback"
+    assert view.source_provider == "google"
+    assert view.source_model == "gemini-2.5-pro"
+    assert view.source_workspace_id == "ws-source-flat"
+    assert view.source_attempt_id == "att-flat"
+    assert view.fallback_target is not None
+    assert view.fallback_target.agent == "codex"
+
+
+def test_merge_recovery_views_returns_event_view_when_policy_absent() -> None:
+    event_view = ProviderRecoveryStateView(
+        action="retry",
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        source_provider="google",
+        source_model="gemini-2.5-pro",
+        retry_attempt_number=1,
+        fallback_attempt_number=0,
+        cooldown_until=None,
+        next_eligible_at=None,
+        fallback_target=None,
+        source_workspace_id="ws-source",
+        source_attempt_id="att-source",
+        recommended_action="Retry after provider cooldown.",
+        terminal=False,
+    )
+
+    assert _merge_recovery_views(None, event_view) is event_view

@@ -16,7 +16,8 @@ from awf.adapters.provider_failures import (
     infer_provider,
 )
 from awf.common.redaction import redact_secrets
-from awf.db.enums import OperationStatus, OperationType
+from awf.control.state_machine import WorkspaceStateMachine
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Task, TaskAttempt, Workspace
 from awf.db.repositories import (
     OperationRepository,
@@ -37,6 +38,8 @@ PROVIDER_FALLBACK_SELECTED_REASON = "PROVIDER_FALLBACK_SELECTED"
 PROVIDER_RECOVERY_NO_LOOP_REASON = "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
 NON_RETRYABLE_PROVIDER_FAILURE = "NON_RETRYABLE_PROVIDER_FAILURE"
 PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED = "PROVIDER_RECOVERY_ATTEMPTS_EXHAUSTED"
+PROVIDER_RECOVERY_STALE_SOURCE = "PROVIDER_RECOVERY_STALE_SOURCE"
+PROVIDER_RECOVERY_EXPECTED_SOURCE = "recoverable_provider_failure"
 
 PROVIDER_RECOVERY_REASON_CODES: frozenset[str] = frozenset(
     {
@@ -202,7 +205,7 @@ async def create_provider_recovery_attempt_row(
     *,
     now: datetime | None = None,
     metadata: Mapping[str, Any] | None = None,
-) -> ProviderRecoveryAttemptResult | Literal["terminal"] | None:
+) -> ProviderRecoveryAttemptResult | Literal["terminal", "stale"] | None:
     """Create a requested retry/fallback workspace for a retryable provider failure."""
 
     recovery_now = now or datetime.now(UTC)
@@ -210,10 +213,21 @@ async def create_provider_recovery_attempt_row(
     source = await repo.get_for_update(source_workspace_id)
     if source is None:
         return None
+    source_metadata = provider_recovery_metadata_from_workspace(source)
+    if _is_stale_provider_recovery_source(source, source_metadata=source_metadata):
+        await repo.record_ignored_stale_callback(
+            source,
+            callback_source="provider_recovery",
+            callback_action="create_attempt",
+            expected_status=PROVIDER_RECOVERY_EXPECTED_SOURCE,
+            reason_code=PROVIDER_RECOVERY_STALE_SOURCE,
+        )
+        await session.flush()
+        return "stale"
     recovery_metadata = (
         dict(metadata)
         if metadata is not None
-        else provider_recovery_metadata_from_workspace(source)
+        else source_metadata
     )
     if recovery_metadata is None:
         return None
@@ -419,6 +433,22 @@ def provider_recovery_metadata_from_workspace(workspace: Workspace) -> dict[str,
         details=details,
         task_policy=workspace.task_policy,
     )
+
+
+def _is_stale_provider_recovery_source(
+    source: Workspace,
+    *,
+    source_metadata: Mapping[str, Any] | None,
+) -> bool:
+    try:
+        status = WorkspaceStatus(source.status)
+    except ValueError:  # pragma: no cover - defensive for legacy bad rows
+        return False
+    if not WorkspaceStateMachine.is_callback_terminal(status):
+        return False
+    if status == WorkspaceStatus.failed:
+        return source_metadata is None
+    return True
 
 
 def parse_provider_recovery_policy(
