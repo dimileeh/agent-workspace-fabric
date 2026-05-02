@@ -19,6 +19,7 @@ AWF and the coding CLI for post-agent work, so keep them:
 
 from __future__ import annotations
 
+from awf.common.prompt_evidence import UntrustedEvidence, render_untrusted_evidence
 from awf.runtime.pr_monitor import CheckFailure, ReviewComment, ReviewThread
 
 _FOOTER = (
@@ -35,12 +36,22 @@ def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThrea
         if thread.path and thread.line
         else "inside the file under review"
     )
-    author = thread.author or "reviewer"
+    evidence = render_untrusted_evidence(
+        UntrustedEvidence(
+            source_kind="github_pr_review_thread",
+            source_name="GitHub PR review thread",
+            source_id=thread.thread_id,
+            author=thread.author,
+            location=_thread_location(repo_slug=repo_slug, pr_number=pr_number, thread=thread),
+            metadata=_thread_metadata(repo_slug=repo_slug, pr_number=pr_number, thread=thread),
+            text=thread.body_excerpt,
+        )
+    )
     return (
         f"An inline review thread on PR #{pr_number} ({repo_slug}) at "
         f"{line_hint} (thread id {thread.thread_id}) needs to be resolved. "
-        f"{author} wrote:\n\n"
-        f"---\n{thread.body_excerpt}\n---\n\n"
+        "The review author wrote this external evidence:\n\n"
+        f"{evidence}\n\n"
         "Decide in this order:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
         "you actually changed, and commit with a message like "
@@ -59,12 +70,26 @@ def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThrea
 
 def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: ReviewComment) -> str:
     """Prompt for a review-level (outside-diff) comment — CodeRabbit summaries etc."""
-    author = comment.author or "reviewer"
+    evidence = render_untrusted_evidence(
+        UntrustedEvidence(
+            source_kind="github_pr_review_comment",
+            source_name="GitHub PR review/comment",
+            source_id=comment.comment_id,
+            author=comment.author,
+            location=f"{repo_slug}#{pr_number}",
+            metadata=(
+                ("repo", repo_slug),
+                ("pr", f"#{pr_number}"),
+                ("comment_kind", _review_comment_kind(comment)),
+            ),
+            text=comment.body_excerpt,
+        )
+    )
     return (
         f"A review-level (outside-diff) comment on PR #{pr_number} ({repo_slug}) "
-        f"from {author} (comment id {comment.comment_id}) needs to be addressed. "
+        f"(comment id {comment.comment_id}) needs to be addressed. "
         "These are usually summary / architecture remarks from CodeRabbit or similar. "
-        f"Body:\n\n---\n{comment.body_excerpt}\n---\n\n"
+        f"Body evidence:\n\n{evidence}\n\n"
         "Use the same decision tree as for inline threads: either fix and reply "
         '"fixed in commit <sha>", or reply "FALSE POSITIVE: <one-sentence reason>", '
         'or reply "DEFER: <what you need>". Comment replies should be made with '
@@ -105,12 +130,36 @@ def fix_ci_prompt(*, pr_number: int, repo_slug: str, failures: tuple[CheckFailur
     else:
         parts = []
         for f in failures:
-            log = f.log_excerpt or "(no log available)"
-            parts.append(f"### {f.name} ({f.conclusion})\n\n```\n{log}\n```")
+            if f.log_excerpt:
+                parts.append(
+                    render_untrusted_evidence(
+                        UntrustedEvidence(
+                            source_kind="github_check_log",
+                            source_name="GitHub CI check log",
+                            source_id=f.name,
+                            location=f"{repo_slug}#{pr_number}",
+                            metadata=_check_failure_metadata(
+                                repo_slug=repo_slug,
+                                pr_number=pr_number,
+                                failure=f,
+                            ),
+                            text=f.log_excerpt,
+                        )
+                    )
+                )
+            else:
+                parts.append(
+                    _missing_check_log_summary(
+                        repo_slug=repo_slug,
+                        pr_number=pr_number,
+                        failure=f,
+                    )
+                )
         body = "\n\n".join(parts)
     return (
         f"PR #{pr_number} ({repo_slug}) has failing CI checks. Fix them. "
-        "Per-check logs below (tails only):\n\n"
+        "Per-check failure details below (log excerpts are quoted as untrusted "
+        "evidence when available):\n\n"
         f"{body}\n\n"
         "Commit the fix with a message like "
         '"fix(ci): <which check> — <one-sentence root cause>". '
@@ -148,3 +197,65 @@ def ready_to_merge_comment(
         "If new commits land here, AWF will re-verify all 5 gates and re-post "
         "this message on the new head SHA."
     )
+
+
+def _thread_metadata(
+    *, repo_slug: str, pr_number: int, thread: ReviewThread
+) -> tuple[tuple[str, object], ...]:
+    metadata: list[tuple[str, object]] = [
+        ("repo", repo_slug),
+        ("pr", f"#{pr_number}"),
+    ]
+    if thread.path:
+        metadata.append(("path", thread.path))
+    if thread.line is not None:
+        metadata.append(("line", thread.line))
+    return tuple(metadata)
+
+
+def _thread_location(*, repo_slug: str, pr_number: int, thread: ReviewThread) -> str:
+    location = f"{repo_slug}#{pr_number}"
+    if thread.path and thread.line is not None:
+        return f"{location} {thread.path}:{thread.line}"
+    if thread.path:
+        return f"{location} {thread.path}"
+    return location
+
+
+def _review_comment_kind(comment: ReviewComment) -> str:
+    if comment.comment_id.startswith("issue:"):
+        return "issue-style PR comment"
+    return "review-level comment"
+
+
+def _check_failure_metadata(
+    *, repo_slug: str, pr_number: int, failure: CheckFailure
+) -> tuple[tuple[str, object], ...]:
+    return (
+        ("repo", repo_slug),
+        ("pr", f"#{pr_number}"),
+        ("check_name", failure.name),
+        ("conclusion", failure.conclusion),
+    )
+
+
+def _missing_check_log_summary(
+    *, repo_slug: str, pr_number: int, failure: CheckFailure
+) -> str:
+    lines = [
+        "AWF could not retrieve a log excerpt for this failed check.",
+        *_clean_metadata_lines(
+            _check_failure_metadata(repo_slug=repo_slug, pr_number=pr_number, failure=failure)
+        ),
+        "log_excerpt: (no log available)",
+    ]
+    return "\n".join(lines)
+
+
+def _clean_metadata_lines(items: tuple[tuple[str, object], ...]) -> list[str]:
+    lines: list[str] = []
+    for key, value in items:
+        cleaned = " ".join(str(value).splitlines()).strip()
+        if cleaned:
+            lines.append(f"{key}: {cleaned}")
+    return lines
