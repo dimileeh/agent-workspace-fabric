@@ -16,7 +16,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final, cast
+from typing import Any, Final
 
 from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
@@ -2579,13 +2579,9 @@ class WorkspaceRepository:
             exclude_ids=exclude_ids,
             offset=offset,
         )
-        if not candidates or isinstance(candidates[0], str):
-            return cast("builtins.list[str]", candidates[:limit])
-
-        workspace_candidates = cast("builtins.list[Workspace]", candidates)
         return [
             workspace.id
-            for workspace in self._sort_schedulable_workspaces(workspace_candidates, limit)
+            for workspace in self._sort_schedulable_workspaces(candidates, limit)
         ]
 
     async def list_schedulable_workspaces(
@@ -2606,15 +2602,8 @@ class WorkspaceRepository:
             exclude_ids=exclude_ids,
             offset=offset,
         )
-        if not candidates:
-            return []
-        if isinstance(candidates[0], str):
-            raise TypeError("schedulable workspace query returned IDs, not Workspace rows")
 
-        return self._sort_schedulable_workspaces(
-            cast("builtins.list[Workspace]", candidates),
-            limit,
-        )
+        return self._sort_schedulable_workspaces(candidates, limit)
 
     async def _list_schedulable_candidates(
         self,
@@ -2623,7 +2612,7 @@ class WorkspaceRepository:
         limit: int,
         exclude_ids: set[str] | None = None,
         offset: int = 0,
-    ) -> builtins.list[Workspace] | builtins.list[str]:
+    ) -> builtins.list[Workspace]:
         stmt = _schedulable_workspace_ids_stmt(
             status=status,
             limit=limit,

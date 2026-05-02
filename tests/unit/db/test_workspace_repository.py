@@ -76,21 +76,21 @@ async def _create_policy_workspace(
 
 
 class _FakeScalarResult:
-    def __init__(self, values: list[str]) -> None:
+    def __init__(self, values: list[object]) -> None:
         self._values = values
 
     def scalars(self) -> _FakeScalarResult:
         return self
 
-    def all(self) -> list[str]:
+    def all(self) -> list[object]:
         return self._values
 
-    def scalar_one_or_none(self) -> str | None:
+    def scalar_one_or_none(self) -> object | None:
         return self._values[0] if self._values else None
 
 
 class _RecordingSchedulerSession:
-    def __init__(self, dialect_name: str, values: list[str] | None = None) -> None:
+    def __init__(self, dialect_name: str, values: list[object] | None = None) -> None:
         del dialect_name
         self.info: dict[str, object] = {}
         self.values = list(values or [])
@@ -104,6 +104,28 @@ class _RecordingSchedulerSession:
         del parameters
         self.executed.append(statement)
         return _FakeScalarResult(self.values)
+
+
+def _recorded_workspace_row(
+    workspace_id: str,
+    *,
+    status: WorkspaceStatus = WorkspaceStatus.requested,
+) -> Workspace:
+    queued_at = datetime(2026, 1, 1, tzinfo=UTC)
+    return Workspace(
+        id=workspace_id,
+        status=status.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="scheduler row",
+        task_prompt="p",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        created_at=queued_at,
+        updated_at=queued_at,
+        owned_paths=[],
+        task_policy={},
+    )
 
 
 class TestCreate:
@@ -991,7 +1013,10 @@ class TestOwnedPathOverlapLookup:
         self,
         status: WorkspaceStatus,
     ) -> None:
-        session = _RecordingSchedulerSession("postgresql", values=["ws_claimed"])
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_claimed", status=status)],
+        )
         repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
 
         listed = await repo.list_schedulable_ids(
@@ -1016,7 +1041,10 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     async def test_sqlite_scheduler_lists_use_portable_select(self) -> None:
-        session = _RecordingSchedulerSession("sqlite", values=["ws_claimed"])
+        session = _RecordingSchedulerSession(
+            "sqlite",
+            values=[_recorded_workspace_row("ws_claimed")],
+        )
         repo = WorkspaceRepository(session, dialect_name="sqlite")  # type: ignore[arg-type]
 
         listed = await repo.list_schedulable_ids(
@@ -1072,7 +1100,10 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     async def test_session_info_dialect_drives_scheduler_locking(self) -> None:
-        session = _RecordingSchedulerSession("postgresql", values=["ws_claimed"])
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_claimed")],
+        )
         session.info[SESSION_DIALECT_NAME_KEY] = "postgresql"
         repo = WorkspaceRepository(session)  # type: ignore[arg-type]
 
