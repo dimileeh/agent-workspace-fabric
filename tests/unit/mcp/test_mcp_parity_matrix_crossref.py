@@ -58,13 +58,29 @@ def _extract_cli_commands() -> set[str]:
 
 
 def _extract_error_codes() -> set[str]:
-    controls_content = (SRC_ROOT / "service" / "controls.py").read_text(encoding="utf-8")
     codes: set[str] = set()
+    controls_content = (SRC_ROOT / "service" / "controls.py").read_text(encoding="utf-8")
     for m in re.finditer(r'error_code[^=]*=\s*"?([A-Z_]{3,})"?', controls_content):
         code = m.group(1)
         if code.isupper() and "_" in code:
             codes.add(code)
+    for route_file in (SRC_ROOT / "api" / "routes").glob("*.py"):
+        content = route_file.read_text(encoding="utf-8")
+        for m in re.finditer(r'"error_code":\s*"([A-Z_]+)"', content):
+            codes.add(m.group(1))
+        for m in re.finditer(r'error_code="([A-Z_]+)"', content):
+            codes.add(m.group(1))
     return codes
+
+
+FRAMEWORK_RESPONSE_TYPES = {
+    "FileResponse",
+    "StreamingResponse",
+    "JSONResponse",
+    "HTMLResponse",
+    "RedirectResponse",
+    "Response",
+}
 
 
 def _extract_schema_class_names() -> set[str]:
@@ -250,6 +266,8 @@ def test_parity_matrix_schema_names_exist_in_schemas_module() -> None:
         for word in re.split(r"[;,]\s*", cleaned):
             word = word.strip()
             if re.match(r"^[A-Z]", word) and "Response" in word and word not in schema_names:
+                if word in FRAMEWORK_RESPONSE_TYPES:
+                    continue
                 missing.append(f"{row.get('Capability', '?')}: {word}")
     assert not missing, (
         "Schema names in parity matrix not found in schemas.py:\n"
