@@ -108,6 +108,7 @@ class ProviderRecoveryAttemptResult:
     action: RecoveryAction
     reason_code: str
     provider_recovery: dict[str, Any]
+    in_place: bool = False
 
 
 def provider_recovery_metadata_from_failure(
@@ -206,7 +207,7 @@ async def create_provider_recovery_attempt_row(
     now: datetime | None = None,
     metadata: Mapping[str, Any] | None = None,
 ) -> ProviderRecoveryAttemptResult | Literal["terminal", "stale"] | None:
-    """Create a requested retry/fallback workspace for a retryable provider failure."""
+    """Create or attach a requested retry/fallback recovery for a retryable provider failure."""
 
     recovery_now = now or datetime.now(UTC)
     repo = WorkspaceRepository(session)
@@ -257,6 +258,7 @@ async def create_provider_recovery_attempt_row(
         source_attempt=source_attempt,
         source_canonical_attempt=source_canonical_attempt,
     )
+    monitor_in_place_recovery = _is_recoverable_monitoring_pr_source(source)
     source_not_before = _source_suppression_not_before(
         recovery_metadata,
         policy=policy,
@@ -264,16 +266,46 @@ async def create_provider_recovery_attempt_row(
         decision=decision,
         now=recovery_now,
     )
-    if source_not_before is not None or decision.action == "terminal":
-        source.task_policy = _recovery_task_policy(
-            source.task_policy,
-            source_workspace_id=source.id,
-            source_attempt=source_attempt,
-            source_canonical_attempt=source_canonical_attempt,
-            metadata=recovery_metadata,
-            decision=decision,
-            not_before=source_not_before,
+    if monitor_in_place_recovery and decision.action == "fallback":
+        source_not_before = None
+    source_policy = _recovery_task_policy(
+        source.task_policy,
+        source_workspace_id=source.id,
+        source_attempt=source_attempt,
+        source_canonical_attempt=source_canonical_attempt,
+        metadata=recovery_metadata,
+        decision=decision,
+        not_before=source_not_before,
+    )
+    has_existing_provider_recovery_event = _has_existing_provider_recovery_event(
+        source,
+        recovery_metadata,
+    )
+    if not has_existing_provider_recovery_event:
+        await _record_provider_circuit_breaker(
+            session,
+            source,
+            recovery_metadata,
+            now=recovery_now,
         )
+    if (
+        has_existing_provider_recovery_event
+        and monitor_in_place_recovery
+        and decision.action != "terminal"
+    ):
+        await session.flush()
+        return None
+    if source_not_before is not None or decision.action == "terminal":
+        source.task_policy = source_policy
+    elif monitor_in_place_recovery and decision.action in {"retry", "fallback"}:
+        source.task_policy = source_policy
+        if decision.action == "fallback":
+            source.agent = decision.target_agent or source.agent
+            if decision.target_model is not None:
+                source.task_policy = {
+                    **source.task_policy,
+                    "agent_model": decision.target_model,
+                }
     if source_not_before is not None:
         await repo.add_event(
             source,
@@ -288,13 +320,7 @@ async def create_provider_recovery_attempt_row(
                 ),
             },
         )
-    await _record_provider_circuit_breaker(
-        session,
-        source,
-        recovery_metadata,
-        now=recovery_now,
-    )
-    if _has_existing_provider_recovery_event(source, recovery_metadata):
+    if has_existing_provider_recovery_event and decision.action != "terminal":
         await session.flush()
         return None
     if decision.action == "terminal":
@@ -309,6 +335,16 @@ async def create_provider_recovery_attempt_row(
         )
         await session.flush()
         return "terminal"
+    if monitor_in_place_recovery and decision.action in {"retry", "fallback"}:
+        return await _record_monitor_in_place_recovery(
+            session,
+            repo,
+            source,
+            lineage_payload=lineage_payload,
+            decision=decision,
+            recovery_metadata=recovery_metadata,
+            not_before=source_not_before,
+        )
 
     new_policy = _recovery_task_policy(
         source.task_policy,
@@ -657,6 +693,57 @@ async def _record_provider_circuit_breaker(
         now=now,
         failure_threshold=policy.circuit_breaker_failure_threshold,
         cooldown_seconds=policy.circuit_breaker_cooldown_seconds,
+    )
+
+
+def _is_recoverable_monitoring_pr_source(source: Workspace) -> bool:
+    if source.status != WorkspaceStatus.monitoring_pr.value:
+        return False
+    has_remote_push_branch = bool(source.remote_push_branch) or (
+        source.task_kind == "feature_branch_pr" and bool(source.branch_name)
+    )
+    return bool(
+        source.pr_url
+        and source.pr_number is not None
+        and has_remote_push_branch
+        and source.compose_project_name
+        and source.compose_file_path
+    )
+
+
+async def _record_monitor_in_place_recovery(
+    session: AsyncSession,
+    repo: WorkspaceRepository,
+    source: Workspace,
+    *,
+    lineage_payload: Mapping[str, Any],
+    decision: ProviderRecoveryDecision,
+    recovery_metadata: Mapping[str, Any],
+    not_before: datetime | None,
+) -> ProviderRecoveryAttemptResult:
+    provider_payload = _decision_payload(
+        decision,
+        recovery_metadata,
+        not_before=not_before,
+    )
+    await repo.add_event(
+        source,
+        event_type=PROVIDER_RECOVERY_REQUESTED_EVENT,
+        reason_code=decision.reason_code,
+        payload={
+            **dict(lineage_payload),
+            "recovery_scope": "monitor_in_place",
+            "provider_recovery": provider_payload,
+        },
+    )
+    await session.flush()
+    return ProviderRecoveryAttemptResult(
+        source_workspace_id=source.id,
+        new_workspace_id=source.id,
+        action=decision.action,
+        reason_code=decision.reason_code,
+        provider_recovery=provider_payload,
+        in_place=True,
     )
 
 

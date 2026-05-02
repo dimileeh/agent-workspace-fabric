@@ -222,6 +222,22 @@ async def test_list_pending_delegates_to_requested_query_without_extra_filter() 
 
 
 @pytest.mark.unit
+async def test_provider_recovery_filter_skips_stale_scheduler_ids(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    workspace_id = await _seed_status(factory, WorkspaceStatus.ready, title="claimable")
+    worker = _worker(factory)
+
+    async with factory() as session:
+        filtered = await worker._filter_provider_recovery_suppressed(
+            session,
+            ["ws_deleted_before_claim", workspace_id],
+        )
+
+    assert filtered == [workspace_id]
+
+
+@pytest.mark.unit
 async def test_dispatch_ready_executions_respects_limit_and_existing_tasks(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

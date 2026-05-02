@@ -241,6 +241,7 @@ async def seed_monitoring_workspace(
         ws.remote_push_branch = ws.branch_name
         ws.base_commit = "a" * 40
         ws.compose_project_name = f"awf_{ws.id}"
+        ws.compose_file_path = f"/tmp/awf/{ws.id}/compose.yml"
         ws.pr_url = f"https://github.com/dimileeh/aira-web/pull/{pr_number}"
         ws.pr_number = pr_number
         task = await TaskRepository(s).create_or_get(

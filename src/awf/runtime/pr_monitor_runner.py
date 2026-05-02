@@ -692,7 +692,11 @@ class PullRequestMonitorRunner:
             await s.commit()
             if result == "terminal" or result == "stale":
                 return "deterministic"
-            if result is not None and result.action == "fallback":
+            if (
+                result is not None
+                and result.action == "fallback"
+                and not result.in_place
+            ):
                 return "fallback"
             return "retry"
 

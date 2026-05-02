@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.adapters.provider_failures import (
     AGENT_AUTH_FAILED,
+    AGENT_IDLE_TIMEOUT,
     AGENT_PROVIDER_CAPACITY_EXHAUSTED,
     AGENT_TIMEOUT,
     classify_provider_failure,
@@ -17,8 +18,8 @@ from awf.adapters.provider_failures import (
 from awf.api.schemas import WorkspaceCreateV2Request
 from awf.db.base import Base
 from awf.db.enums import FailureReason, WorkspaceStatus
-from awf.db.models import Operation, TaskAttempt, Workspace, WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
+from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.service import provider_recovery as provider_recovery_mod
@@ -27,11 +28,14 @@ from awf.service.provider_recovery import (
     ProviderRecoveryDecision,
     ProviderRecoveryPolicy,
     ProviderRecoveryState,
+    ProviderRecoveryStateView,
     _classification_metadata,
     _decision_payload,
     _fallback_targets,
     _has_existing_provider_recovery_event,
+    _is_recoverable_monitoring_pr_source,
     _latest_failed_state_event,
+    _merge_recovery_views,
     _nested_value,
     _nonnegative_int,
     _policy_model,
@@ -48,6 +52,7 @@ from awf.service.provider_recovery import (
     provider_for_agent_model,
     provider_recovery_metadata_from_failure,
     provider_recovery_metadata_from_workspace,
+    provider_recovery_state_for_workspace,
 )
 from awf.service.workspaces import WorkspaceService, v2_task_policy_snapshot
 
@@ -100,6 +105,60 @@ def _request() -> WorkspaceCreateV2Request:
         validation={"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
         resources={},
     )
+
+
+async def _seed_monitoring_provider_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    *,
+    max_same_provider_retries: int,
+) -> str:
+    service = WorkspaceService(factory)
+    response = await service.create_v2(_request())
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        source = await repo.get(response.id)
+        assert source is not None
+        source.agent = "gemini"
+        source.branch_name = f"awf/{source.id}"
+        source.remote_push_branch = source.branch_name
+        source.base_commit = "a" * 40
+        source.compose_project_name = f"awf_{source.id}"
+        source.compose_file_path = f"/tmp/awf/{source.id}/compose.yml"
+        source.pr_url = "https://github.com/example/provider/pull/169"
+        source.pr_number = 169
+        source.monitor_iter_count = 7
+        source.monitor_threads_addressed = {"thread-1": "fix_committed"}
+        source.monitor_last_commit_sha = "b" * 40
+        source.task_policy = {
+            **source.task_policy,
+            "agent_model": "gemini-2.5-pro",
+            "provider_recovery": {
+                "fallbacks": [
+                    {
+                        "agent": "codex",
+                        "provider": "openai",
+                        "model": "gpt-5.3-codex",
+                    }
+                ],
+                "max_fallback_attempts": 1,
+                "max_same_provider_retries": max_same_provider_retries,
+                "cooldown_seconds": 180,
+            },
+            "pr_monitor": {"review_grace_seconds": 45},
+        }
+        for target in (
+            WorkspaceStatus.provisioning,
+            WorkspaceStatus.ready,
+            WorkspaceStatus.running,
+            WorkspaceStatus.validating,
+            WorkspaceStatus.pushing,
+            WorkspaceStatus.monitoring_pr,
+        ):
+            await repo.transition(source, to=target, reason_code="SEED")
+        await session.commit()
+
+    return response.id
 
 
 def _retryable_capacity_metadata(fingerprint: str) -> dict[str, object]:
@@ -899,6 +958,455 @@ async def test_non_capacity_provider_failure_skips_circuit_recording(
 
 
 @pytest.mark.unit
+async def test_monitoring_pr_fallback_recovery_reuses_existing_pr_workspace(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+
+    async with factory() as session:
+        before_workspaces = list((await session.execute(select(Workspace))).scalars())
+        before_attempts = list((await session.execute(select(TaskAttempt))).scalars())
+        before_candidates = list((await session.execute(select(MergeCandidate))).scalars())
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata={
+                "reason_code": AGENT_IDLE_TIMEOUT,
+                "failure_type": "idle_timeout",
+                "retryable": True,
+                "provider": "google",
+                "model": "gemini-2.5-pro",
+                "failure_fingerprint": "idle-timeout:pr-169",
+                "recommended_action": "Retry PR monitor on another provider.",
+            },
+        )
+        assert result is not None
+        assert result != "terminal"
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        attempts = list(
+            (
+                await session.execute(
+                    select(TaskAttempt).order_by(TaskAttempt.attempt_number.asc())
+                )
+            ).scalars()
+        )
+        candidates = list((await session.execute(select(MergeCandidate))).scalars())
+        recovery_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_requested"
+        ]
+        cooldown_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+
+    assert result.action == "fallback"
+    assert result.new_workspace_id == source_id
+    assert result.in_place is True
+    assert len(workspaces) == len(before_workspaces)
+    assert len(attempts) == len(before_attempts)
+    assert len(candidates) == len(before_candidates) == 1
+    assert source.status == WorkspaceStatus.monitoring_pr.value
+    assert source.agent == "codex"
+    assert source.task_policy["agent_model"] == "gpt-5.3-codex"
+    assert source.pr_url == "https://github.com/example/provider/pull/169"
+    assert source.pr_number == 169
+    assert source.branch_name == f"awf/{source_id}"
+    assert source.remote_push_branch == f"awf/{source_id}"
+    assert source.auto_merge is False
+    assert source.initial_review_grace_period_seconds == 45
+    assert source.task_policy["pr_monitor"] == {"review_grace_seconds": 45}
+    assert source.monitor_iter_count == 7
+    assert source.monitor_threads_addressed == {"thread-1": "fix_committed"}
+    assert source.monitor_last_commit_sha == "b" * 40
+    assert attempts[0].workspace_id == source_id
+    assert attempts[0].is_canonical_for_merge is True
+    assert candidates[0].workspace_id == source_id
+    assert candidates[0].attempt_id == attempts[0].id
+    assert candidates[0].status == "open"
+    state = source.task_policy["provider_recovery_state"]
+    assert state["source_workspace_id"] == source_id
+    assert state["source_attempt_id"] == attempts[0].id
+    assert state["source_task_id"] == attempts[0].task_id
+    assert state["source_canonical_attempt_id"] == attempts[0].id
+    assert state["source_reason_code"] == AGENT_IDLE_TIMEOUT
+    assert state["decision_reason_code"] == "PROVIDER_FALLBACK_SELECTED"
+    assert state["source_provider"] == "google"
+    assert state["source_model"] == "gemini-2.5-pro"
+    assert state["action"] == "fallback"
+    assert state["target_agent"] == "codex"
+    assert state["target_provider"] == "openai"
+    assert state["target_model"] == "gpt-5.3-codex"
+    assert state["fallback_attempt_number"] == 1
+    assert state["retry_attempt_number"] == 0
+    assert "not_before" not in state
+    assert len(recovery_events) == 1
+    event = recovery_events[0]
+    assert event.reason_code == "PROVIDER_FALLBACK_SELECTED"
+    assert event.payload is not None
+    assert "new_workspace_id" not in event.payload
+    assert event.payload["source_workspace_id"] == source_id
+    assert event.payload["source_attempt_id"] == attempts[0].id
+    assert event.payload["source_task_id"] == attempts[0].task_id
+    assert event.payload["source_canonical_attempt_id"] == attempts[0].id
+    assert event.payload["recovery_scope"] == "monitor_in_place"
+    assert event.payload["provider_recovery"]["action"] == "fallback"
+    assert event.payload["provider_recovery"]["decision_reason_code"] == (
+        "PROVIDER_FALLBACK_SELECTED"
+    )
+    assert cooldown_events == []
+
+
+@pytest.mark.unit
+async def test_monitoring_pr_fallback_missing_monitor_metadata_creates_workspace(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        source.compose_file_path = None
+        before_workspaces = list((await session.execute(select(Workspace))).scalars())
+        await session.commit()
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata={
+                "reason_code": AGENT_IDLE_TIMEOUT,
+                "failure_type": "idle_timeout",
+                "retryable": True,
+                "provider": "google",
+                "model": "gemini-2.5-pro",
+                "failure_fingerprint": "idle-timeout:missing-monitor-metadata",
+                "recommended_action": "Retry PR monitor on another provider.",
+            },
+        )
+        assert result is not None
+        assert result != "terminal"
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        fallback = next(workspace for workspace in workspaces if workspace.id != source_id)
+        recovery_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_requested"
+        ]
+
+    assert result.action == "fallback"
+    assert result.new_workspace_id == fallback.id
+    assert result.in_place is False
+    assert len(workspaces) == len(before_workspaces) + 1
+    assert source.status == WorkspaceStatus.monitoring_pr.value
+    assert source.agent == "gemini"
+    assert fallback.status == WorkspaceStatus.requested.value
+    assert fallback.agent == "codex"
+    assert fallback.pr_url == source.pr_url
+    assert fallback.pr_number == source.pr_number
+    assert fallback.remote_push_branch == source.remote_push_branch
+    assert len(recovery_events) == 1
+    assert recovery_events[0].payload is not None
+    assert recovery_events[0].payload["new_workspace_id"] == fallback.id
+    assert "recovery_scope" not in recovery_events[0].payload
+
+
+@pytest.mark.unit
+async def test_monitoring_pr_duplicate_in_place_fallback_does_not_mutate_source(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+    metadata = {
+        "reason_code": AGENT_IDLE_TIMEOUT,
+        "failure_type": "idle_timeout",
+        "retryable": True,
+        "provider": "google",
+        "model": "gemini-2.5-pro",
+        "failure_fingerprint": "idle-timeout:duplicate-pr-169",
+        "recommended_action": "Retry PR monitor on another provider.",
+    }
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        source = await repo.get(source_id)
+        assert source is not None
+        await repo.add_event(
+            source,
+            event_type="workspace.provider_recovery_requested",
+            reason_code="PROVIDER_FALLBACK_SELECTED",
+            payload={
+                "recovery_scope": "monitor_in_place",
+                "provider_recovery": {
+                    "action": "fallback",
+                    "failure_fingerprint": metadata["failure_fingerprint"],
+                },
+            },
+        )
+        await session.commit()
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata=metadata,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        recovery_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_requested"
+        ]
+        cooldown_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+
+    assert result is None
+    assert source.agent == "gemini"
+    assert source.task_policy["agent_model"] == "gemini-2.5-pro"
+    assert "provider_recovery_state" not in source.task_policy
+    assert len(recovery_events) == 1
+    assert cooldown_events == []
+
+
+@pytest.mark.unit
+async def test_monitoring_pr_repeated_in_place_fingerprint_records_terminal_no_loop(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+    metadata = {
+        "reason_code": AGENT_IDLE_TIMEOUT,
+        "failure_type": "idle_timeout",
+        "retryable": True,
+        "provider": "google",
+        "model": "gemini-2.5-pro",
+        "failure_fingerprint": "idle-timeout:repeat-pr-169",
+        "recommended_action": "Retry PR monitor on another provider.",
+    }
+
+    async with factory() as session:
+        first_result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata=metadata,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        second_result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 5, tzinfo=UTC),
+            metadata=metadata,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        recovery_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_requested"
+        ]
+        terminal_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_terminal"
+        ]
+        cooldown_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+
+    assert first_result is not None
+    assert first_result != "terminal"
+    assert first_result.action == "fallback"
+    assert second_result == "terminal"
+    assert len(workspaces) == 1
+    assert len(recovery_events) == 1
+    assert cooldown_events == []
+    assert len(terminal_events) == 1
+    assert terminal_events[0].reason_code == "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
+    assert terminal_events[0].payload["provider_recovery"]["action"] == "terminal"
+    assert terminal_events[0].payload["provider_recovery"]["terminal_reason"] == (
+        "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
+    )
+    state = source.task_policy["provider_recovery_state"]
+    assert state["action"] == "terminal"
+    assert state["decision_reason_code"] == "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
+    assert state["failure_fingerprints"] == ["idle-timeout:repeat-pr-169"]
+
+
+@pytest.mark.unit
+async def test_monitoring_pr_capacity_fallback_records_circuit_for_source_model(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata={
+                "reason_code": AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+                "failure_type": "capacity",
+                "retryable": True,
+                "provider": "google",
+                "failure_fingerprint": "capacity:pr-169:no-model",
+                "recommended_action": "Retry PR monitor on another provider.",
+            },
+        )
+        assert result is not None
+        assert result != "terminal"
+        await session.commit()
+
+    async with factory() as session:
+        breaker_repo = ProviderModelCircuitBreakerRepository(session)
+        source_breaker = await breaker_repo.get(
+            provider="google",
+            model="gemini-2.5-pro",
+        )
+        fallback_breaker = await breaker_repo.get(
+            provider="google",
+            model="gpt-5.3-codex",
+        )
+
+    assert result.action == "fallback"
+    assert source_breaker is not None
+    assert source_breaker.failure_count == 1
+    assert fallback_breaker is None
+
+
+@pytest.mark.unit
+async def test_monitoring_pr_same_provider_retry_keeps_pr_workspace_on_cooldown(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=1,
+    )
+
+    async with factory() as session:
+        before_workspaces = list((await session.execute(select(Workspace))).scalars())
+        before_attempts = list((await session.execute(select(TaskAttempt))).scalars())
+        before_candidates = list((await session.execute(select(MergeCandidate))).scalars())
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata={
+                "reason_code": AGENT_IDLE_TIMEOUT,
+                "failure_type": "idle_timeout",
+                "retryable": True,
+                "provider": "google",
+                "model": "gemini-2.5-pro",
+                "failure_fingerprint": "idle-timeout:retry-pr-169",
+                "recommended_action": "Retry PR monitor after cooldown.",
+            },
+        )
+        assert result is not None
+        assert result != "terminal"
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        attempts = list(
+            (
+                await session.execute(
+                    select(TaskAttempt).order_by(TaskAttempt.attempt_number.asc())
+                )
+            ).scalars()
+        )
+        candidates = list((await session.execute(select(MergeCandidate))).scalars())
+        recovery_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_requested"
+        ]
+        cooldown_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+
+    assert result.action == "retry"
+    assert result.new_workspace_id == source_id
+    assert result.in_place is True
+    assert len(workspaces) == len(before_workspaces)
+    assert len(attempts) == len(before_attempts)
+    assert len(candidates) == len(before_candidates) == 1
+    assert source.status == WorkspaceStatus.monitoring_pr.value
+    assert source.agent == "gemini"
+    state = source.task_policy["provider_recovery_state"]
+    assert state["action"] == "retry"
+    assert state["decision_reason_code"] == "PROVIDER_RETRY_DELAYED"
+    assert state["source_workspace_id"] == source_id
+    assert state["source_attempt_id"] == attempts[0].id
+    assert state["source_canonical_attempt_id"] == attempts[0].id
+    assert state["retry_attempt_number"] == 1
+    assert state["fallback_attempt_number"] == 0
+    assert state["not_before"] == "2026-05-01T12:03:00+00:00"
+    assert candidates[0].status == "open"
+    assert len(recovery_events) == 1
+    assert recovery_events[0].payload is not None
+    assert "new_workspace_id" not in recovery_events[0].payload
+    assert recovery_events[0].payload["recovery_scope"] == "monitor_in_place"
+    assert recovery_events[0].payload["provider_recovery"]["action"] == "retry"
+    assert len(cooldown_events) == 1
+    assert cooldown_events[0].reason_code == "PROVIDER_RETRY_DELAYED"
+    assert cooldown_events[0].payload["source_workspace_id"] == source_id
+    assert cooldown_events[0].payload["provider_recovery"]["not_before"] == (
+        "2026-05-01T12:03:00+00:00"
+    )
+
+
+@pytest.mark.unit
 async def test_retry_recovery_without_source_attempt_creates_retry_task(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1230,6 +1738,112 @@ def test_has_existing_provider_recovery_event_edge_cases():
     assert _has_existing_provider_recovery_event(ws, {"failure_fingerprint": "fingerprint2"}) is False
     assert _has_existing_provider_recovery_event(ws, {}) is False
 
+
+def test_monitoring_pr_recovery_guard_requires_open_pr() -> None:
+    ws = Workspace(
+        status=WorkspaceStatus.running.value,
+        pr_url="https://github.com/example/repo/pull/1",
+        pr_number=1,
+        remote_push_branch="awf/ws_1",
+    )
+    assert _is_recoverable_monitoring_pr_source(ws) is False
+
+    ws.status = WorkspaceStatus.monitoring_pr.value
+    ws.pr_url = None
+    assert _is_recoverable_monitoring_pr_source(ws) is False
+
+    ws.pr_url = "https://github.com/example/repo/pull/1"
+    ws.pr_number = None
+    assert _is_recoverable_monitoring_pr_source(ws) is False
+
+    ws.pr_number = 1
+    ws.remote_push_branch = "feature/head"
+    assert _is_recoverable_monitoring_pr_source(ws) is False
+
+    ws.compose_project_name = "awf_ws_1"
+    assert _is_recoverable_monitoring_pr_source(ws) is False
+
+    ws.compose_file_path = "/tmp/awf/ws_1/compose.yml"
+    assert _is_recoverable_monitoring_pr_source(ws) is True
+
+    ws.remote_push_branch = None
+    ws.branch_name = "awf/ws_1"
+    ws.task_kind = "feature_branch_pr"
+    assert _is_recoverable_monitoring_pr_source(ws) is True
+
+    ws.task_kind = "sync_feature_pr"
+    assert _is_recoverable_monitoring_pr_source(ws) is False
+
+    ws.task_kind = "future_monitor_kind"
+    ws.branch_name = None
+    assert _is_recoverable_monitoring_pr_source(ws) is False
+
+
+def test_provider_recovery_state_view_handles_event_payload_fallbacks() -> None:
+    non_mapping_payload = Workspace()
+    non_mapping_payload.events = [
+        WorkspaceEvent(
+            event_type="workspace.provider_recovery_requested",
+            reason_code="PROVIDER_RETRY_DELAYED",
+            payload=True,
+        )
+    ]
+    assert provider_recovery_state_for_workspace(non_mapping_payload) is None
+
+    flat_payload = Workspace()
+    flat_payload.events = [
+        WorkspaceEvent(
+            event_type="workspace.provider_recovery_requested",
+            reason_code="PROVIDER_FALLBACK_SELECTED",
+            payload={
+                "source_workspace_id": "ws_source",
+                "source_attempt_id": "attempt_source",
+                "action": "fallback",
+                "provider": "google",
+                "model": "gemini-2.5-pro",
+                "target_agent": "codex",
+                "target_provider": "openai",
+                "target_model": "gpt-5.3-codex",
+            },
+        )
+    ]
+
+    view = provider_recovery_state_for_workspace(flat_payload)
+
+    assert view is not None
+    assert view.action == "fallback"
+    assert view.reason_code == "PROVIDER_FALLBACK_SELECTED"
+    assert view.source_provider == "google"
+    assert view.source_model == "gemini-2.5-pro"
+    assert view.source_workspace_id == "ws_source"
+    assert view.source_attempt_id == "attempt_source"
+    assert view.fallback_target == FallbackTarget(
+        agent="codex",
+        provider="openai",
+        model="gpt-5.3-codex",
+    )
+
+
+def test_merge_recovery_views_returns_event_view_when_policy_missing() -> None:
+    event_view = ProviderRecoveryStateView(
+        action="retry",
+        reason_code="PROVIDER_RETRY_DELAYED",
+        source_provider="google",
+        source_model="gemini-2.5-pro",
+        retry_attempt_number=1,
+        fallback_attempt_number=0,
+        cooldown_until=None,
+        next_eligible_at=None,
+        fallback_target=None,
+        source_workspace_id="ws_source",
+        source_attempt_id="attempt_source",
+        recommended_action="Retry after provider cooldown.",
+        terminal=False,
+    )
+
+    assert _merge_recovery_views(None, event_view) is event_view
+
+
 @pytest.mark.unit
 async def test_retry_task_for_source_no_attempt(factory):
     async with factory() as session:
@@ -1415,6 +2029,72 @@ async def test_create_provider_recovery_attempt_row_no_target_model_and_existing
             now=datetime.now(UTC)
         )
         assert result is None
+
+
+@pytest.mark.unit
+async def test_create_provider_recovery_attempt_row_existing_event_does_not_double_count_circuit_breaker(factory):
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        ws = await repo.create(
+            repo_url="git@github.com:example/repo.git",
+            branch_base="main",
+            task_title="title",
+            task_prompt="prompt",
+            agent="gemini",
+            task_policy={
+                "provider_recovery": {
+                    "circuit_breaker": {
+                        "failure_threshold": 2,
+                        "cooldown_seconds": 600,
+                    }
+                }
+            },
+            test_commands=[],
+            owned_paths=[],
+        )
+        await repo.add_event(
+            ws,
+            event_type="workspace.provider_recovery_requested",
+            payload={"provider_recovery": {"failure_fingerprint": "capacity:f1"}},
+        )
+        await ProviderModelCircuitBreakerRepository(session).record_failure(
+            provider="google",
+            model="gemini",
+            reason_code=AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            failure_fingerprint="capacity:f1",
+            workspace_id=ws.id,
+            attempt_id=None,
+            now=now,
+            failure_threshold=2,
+            cooldown_seconds=600,
+        )
+        await session.commit()
+        ws_id = ws.id
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            ws_id,
+            metadata={
+                "retryable": True,
+                "provider": "google",
+                "model": "gemini",
+                "failure_fingerprint": "capacity:f1",
+                "reason_code": AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+            },
+            now=now + timedelta(seconds=10),
+        )
+        breaker = await ProviderModelCircuitBreakerRepository(session).get(
+            provider="google",
+            model="gemini",
+        )
+
+        assert result is None
+        assert breaker is not None
+        assert breaker.failure_count == 1
+        assert breaker.state == "closed"
+
 
 @pytest.mark.unit
 async def test_create_provider_recovery_attempt_row_no_metadata_from_workspace(factory):

@@ -1143,6 +1143,85 @@ class TestRunOnceMonitorRecovery:
         assert cooldown_events == []
 
     @pytest.mark.unit
+    async def test_monitoring_pr_in_place_fallback_resumes_monitor_not_feature_execution(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "provider-fallback-monitor",
+            agent="codex",
+            task_policy={
+                "agent_model": "gpt-5.3-codex",
+                "provider_recovery_state": {
+                    "action": "fallback",
+                    "decision_reason_code": "PROVIDER_FALLBACK_SELECTED",
+                    "source_workspace_id": "ws_source",
+                    "source_provider": "google",
+                    "source_model": "gemini-2.5-pro",
+                    "target_agent": "codex",
+                    "target_provider": "openai",
+                    "target_model": "gpt-5.3-codex",
+                    "fallback_attempt_number": 1,
+                    "retry_attempt_number": 0,
+                },
+            },
+            pr_number=169,
+            monitor_iter_count=4,
+            monitor_threads_addressed={"thread-1": "fix_committed"},
+            monitor_last_commit_sha="e" * 40,
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=3),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
+        assert executor.resume_calls == [monitor_id]
+        async with session_factory() as session:
+            requested_ids = await WorkspaceRepository(session).list_schedulable_ids(
+                status=WorkspaceStatus.requested,
+                limit=10,
+            )
+            workspace = await WorkspaceRepository(session).get(monitor_id)
+            operations = await OperationRepository(session).list_all(
+                workspace_id=monitor_id
+            )
+            events = await WorkspaceEventRepository(session).list(
+                workspace_id=monitor_id,
+                event_type="workspace.monitor_recovery_started",
+            )
+
+        assert requested_ids == []
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.monitoring_pr.value
+        assert workspace.task_policy["provider_recovery_state"]["action"] == "fallback"
+        assert len(operations) == 1
+        assert operations[0].type == OperationType.remonitor.value
+        assert operations[0].payload["pr_url"] == "https://github.com/example/repo/pull/169"
+        assert operations[0].payload["pr_number"] == 169
+        assert operations[0].payload["monitor_state"] == {
+            "monitor_started_at": operations[0].payload["monitor_state"][
+                "monitor_started_at"
+            ],
+            "monitor_iter_count": 4,
+            "monitor_threads_addressed_count": 1,
+            "monitor_last_commit_sha": "e" * 40,
+        }
+        assert len(events) == 1
+        assert events[0].payload["pr_url"] == "https://github.com/example/repo/pull/169"
+        assert events[0].payload["pr_number"] == 169
+
+    @pytest.mark.unit
     async def test_fresh_worker_records_recovery_operation_when_resuming_monitoring_pr(
         self,
         session_factory: async_sessionmaker[AsyncSession],
