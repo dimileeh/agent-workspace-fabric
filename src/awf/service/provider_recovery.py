@@ -288,7 +288,11 @@ async def create_provider_recovery_attempt_row(
             recovery_metadata,
             now=recovery_now,
         )
-    if has_existing_provider_recovery_event and monitor_in_place_recovery:
+    if (
+        has_existing_provider_recovery_event
+        and monitor_in_place_recovery
+        and decision.action != "terminal"
+    ):
         await session.flush()
         return None
     if source_not_before is not None or decision.action == "terminal":
@@ -316,7 +320,7 @@ async def create_provider_recovery_attempt_row(
                 ),
             },
         )
-    if has_existing_provider_recovery_event:
+    if has_existing_provider_recovery_event and decision.action != "terminal":
         await session.flush()
         return None
     if decision.action == "terminal":

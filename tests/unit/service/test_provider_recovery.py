@@ -1201,6 +1201,81 @@ async def test_monitoring_pr_duplicate_in_place_fallback_does_not_mutate_source(
 
 
 @pytest.mark.unit
+async def test_monitoring_pr_repeated_in_place_fingerprint_records_terminal_no_loop(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+    metadata = {
+        "reason_code": AGENT_IDLE_TIMEOUT,
+        "failure_type": "idle_timeout",
+        "retryable": True,
+        "provider": "google",
+        "model": "gemini-2.5-pro",
+        "failure_fingerprint": "idle-timeout:repeat-pr-169",
+        "recommended_action": "Retry PR monitor on another provider.",
+    }
+
+    async with factory() as session:
+        first_result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata=metadata,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        second_result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 5, tzinfo=UTC),
+            metadata=metadata,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        recovery_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_requested"
+        ]
+        terminal_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_terminal"
+        ]
+        cooldown_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+
+    assert first_result is not None
+    assert first_result != "terminal"
+    assert first_result.action == "fallback"
+    assert second_result == "terminal"
+    assert len(workspaces) == 1
+    assert len(recovery_events) == 1
+    assert cooldown_events == []
+    assert len(terminal_events) == 1
+    assert terminal_events[0].reason_code == "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
+    assert terminal_events[0].payload["provider_recovery"]["action"] == "terminal"
+    assert terminal_events[0].payload["provider_recovery"]["terminal_reason"] == (
+        "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
+    )
+    state = source.task_policy["provider_recovery_state"]
+    assert state["action"] == "terminal"
+    assert state["decision_reason_code"] == "REPEATED_PROVIDER_FAILURE_FINGERPRINT"
+    assert state["failure_fingerprints"] == ["idle-timeout:repeat-pr-169"]
+
+
+@pytest.mark.unit
 async def test_monitoring_pr_capacity_fallback_records_circuit_for_source_model(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
