@@ -205,7 +205,12 @@ def test_parity_matrix_rest_endpoints_exist_in_api_routes() -> None:
         rest_cell = row.get("Canonical REST surface", "").strip()
         if not rest_cell:
             continue
-        for method, path in _parse_rest_endpoints_from_cell(rest_cell):
+        parsed = _parse_rest_endpoints_from_cell(rest_cell)
+        looks_like_endpoints = bool(re.search(r"(GET|POST|PUT|DELETE|PATCH|WS|WebSocket)\s+/", _strip_backticks(rest_cell)))
+        assert not looks_like_endpoints or parsed, (
+            f"{row.get('Capability', '?')}: non-empty REST cell looks like it should list endpoints but none could be parsed: {rest_cell!r}"
+        )
+        for method, path in parsed:
             normalized = f"{method} {_normalize_path(path)}"
             if normalized not in known_normalized:
                 missing.append(f"{row.get('Capability', '?')}: {method} {path}")
