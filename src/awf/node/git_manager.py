@@ -320,7 +320,10 @@ class GitManager:
                 operation="worktree.add",
             )
 
-        await self._prepare_agent_writable_tree(mirror_path)
+        # The shared bare mirror is owned by the control plane, not by the
+        # agent container. Docker Desktop may reject chown on git object files
+        # inside a host-mounted bare repo, so only prepare the actual worktree
+        # the agent will edit.
         await self._prepare_agent_writable_tree(worktree_path)
 
         return WorktreeLayout(
