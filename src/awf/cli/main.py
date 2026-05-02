@@ -317,6 +317,8 @@ def init(
         bootstrap_only_flags.append("--timeout-seconds")
     if poll_interval_seconds != _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS:
         bootstrap_only_flags.append("--poll-interval-seconds")
+    if not write_env:
+        bootstrap_only_flags.append("--no-write-env")
     if bootstrap_only_flags:
         typer.echo(
             "error: bootstrap-only flag(s) "

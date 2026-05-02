@@ -659,6 +659,24 @@ def test_init_with_path_rejects_bootstrap_only_flags_with_clear_error(
 
 
 @pytest.mark.unit
+def test_init_with_path_rejects_no_write_env_flag(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _stub_local_prerequisites(monkeypatch)
+
+    result = _runner.invoke(
+        app,
+        ["init", str(tmp_path), "--no-write-env"],
+    )
+
+    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    assert result.exit_code == 2
+    assert "--no-write-env" in output
+    assert "without a project path" in output or "no path" in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.unit
 def test_readme_recommends_awf_init_for_local_bootstrap() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 
