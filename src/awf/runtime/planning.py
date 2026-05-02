@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
+from awf.common.redaction import redact_secrets
 
 if TYPE_CHECKING:
     from awf.adapters.base import AgentRunError
@@ -531,18 +532,22 @@ def _stall_output_excerpt(
     error: AgentRunError | None,
     record: ConformanceIterationRecord,
 ) -> str:
+    # Stall excerpts are persisted as durable failure details; raw agent
+    # stderr/stdout can contain provider tokens or URL credentials, so redact
+    # before truncation. Redact-then-truncate avoids splitting a token across
+    # the truncation boundary and leaving an exploitable fragment.
     if error is not None:
         result = getattr(error, "result", None)
         if result is not None:
             stderr = (getattr(result, "stderr", "") or "").strip()
             if stderr:
-                return _safe_conformance_text(stderr)
+                return _safe_conformance_text(redact_secrets(stderr))
             stdout = (getattr(result, "stdout", "") or "").strip()
             if stdout:
-                return _safe_conformance_text(stdout)
-        return _safe_conformance_text(str(error))
+                return _safe_conformance_text(redact_secrets(stdout))
+        return _safe_conformance_text(redact_secrets(str(error)))
     text = (record.stderr or "").strip() or (record.stdout or "").strip()
-    return _safe_conformance_text(text)
+    return _safe_conformance_text(redact_secrets(text))
 
 
 def build_conformance_retry_prompt(

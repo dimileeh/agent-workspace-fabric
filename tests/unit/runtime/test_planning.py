@@ -642,6 +642,51 @@ def test_classify_conformance_stall_returns_no_output_for_idle_timeout() -> None
 
 
 @pytest.mark.unit
+def test_classify_conformance_stall_redacts_secrets_in_last_output_excerpt() -> None:
+    # Stall evidence is persisted as durable failure details and surfaced into
+    # recovery prompts; raw agent stderr/stdout can include provider tokens or
+    # URL credentials. Verify the excerpt is scrubbed before persistence.
+    leaked_token = "ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    leaked_stderr = f"fatal: could not read Username for 'https://github.com/': {leaked_token}"
+    history = [
+        _iter_record(
+            iteration=0,
+            elapsed_seconds=30.0,
+            report_digest=None,
+            worktree_changed=False,
+            stderr=leaked_stderr,
+            error_reason_code="AGENT_IDLE_TIMEOUT",
+        ),
+    ]
+    error = AgentRunError(
+        agent=AgentRuntime.codex,
+        result=CommandResult(returncode=124, stdout="", stderr=leaked_stderr),
+        reason_code="AGENT_IDLE_TIMEOUT",
+    )
+
+    evidence = classify_conformance_stall(
+        history=history,
+        policy=_stall_policy(),
+        plan_path=Path("docs/awf-plans/ws_redact.md"),
+        report_path=Path("docs/awf-plans/ws_redact.conformance.json"),
+        latest_error=error,
+    )
+
+    assert evidence is not None
+    assert leaked_token not in evidence.last_output_excerpt
+    assert "<redacted>" in evidence.last_output_excerpt
+
+    payload = build_conformance_stall_failure_evidence(
+        stall=evidence,
+        head_sha=None,
+        base_sha=None,
+        commit_count=0,
+    )
+    assert leaked_token not in payload["last_output_excerpt"]
+    assert "<redacted>" in payload["last_output_excerpt"]
+
+
+@pytest.mark.unit
 def test_classify_conformance_stall_returns_over_duration_for_wall_timeout_with_active_output() -> (
     None
 ):
