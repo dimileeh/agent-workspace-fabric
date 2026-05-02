@@ -44,9 +44,6 @@ from awf.service.workspace_runtime_health import (
 )
 
 _CHECK_TIMEOUT_SECONDS = 5.0
-_NETWORK_POSTURE_OPEN_WARNING_ROLLOUT_AT = datetime(
-    2026, 5, 2, 11, 20, 36, tzinfo=UTC
-)
 
 CheckPayload = dict[str, object]
 DbProbe = Callable[[str], Awaitable[CheckPayload]]
@@ -111,7 +108,17 @@ async def collect_service_status(
     resolved_db_probe = db_probe or check_database
     resolved_run = run_subprocess or _run_subprocess
     resolved_socket_exists = socket_exists or Path.exists
-    resolved_workspace_lookup = workspace_id_lookup or _default_workspace_id_lookup
+    resolved_workspace_lookup: WorkspaceIdLookup
+    if workspace_id_lookup is None:
+        async def _settings_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
+            return await _default_workspace_id_lookup(
+                database_url,
+                legacy_open_default_cutoff=settings.network_posture_open_legacy_cutoff,
+            )
+
+        resolved_workspace_lookup = _settings_workspace_id_lookup
+    else:
+        resolved_workspace_lookup = workspace_id_lookup
 
     async def _await_workspace_view() -> WorkspaceIdView:
         return await resolved_workspace_lookup(settings.database_url)
@@ -502,7 +509,11 @@ def _workspace_id_from_project(project: str) -> str | None:
     return workspace_id_from_project(project)
 
 
-async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
+async def _default_workspace_id_lookup(
+    database_url: str,
+    *,
+    legacy_open_default_cutoff: datetime | None = None,
+) -> WorkspaceIdView:
     """Read live workspace ids from the control-plane DB.
 
     Failures (missing tables, unreachable host, auth errors, or even a
@@ -566,6 +577,7 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
                 network_posture=_status_network_posture_from_profile_snapshot(
                     resolved_profile,
                     created_at,
+                    legacy_open_default_cutoff=legacy_open_default_cutoff,
                 ),
             )
         )
@@ -584,24 +596,34 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
 def _status_network_posture_from_profile_snapshot(
     resolved_profile: object,
     created_at: object,
+    *,
+    legacy_open_default_cutoff: datetime | None = None,
 ) -> NetworkPosture | None:
     posture = network_posture_from_profile_snapshot(resolved_profile)
-    if posture == "open" and _is_legacy_open_default_workspace(created_at):
+    if posture == "open" and _is_legacy_open_default_workspace(
+        created_at,
+        legacy_open_default_cutoff=legacy_open_default_cutoff,
+    ):
         return None
     return posture
 
 
-def _is_legacy_open_default_workspace(created_at: object) -> bool:
-    # Before the explicit posture rollout, persisted profiles may contain
-    # ``open`` only because it was the old schema default. Treat those rows as
-    # unknown so status/doctor rollout does not warn on every active legacy row.
+def _is_legacy_open_default_workspace(
+    created_at: object,
+    *,
+    legacy_open_default_cutoff: datetime | None,
+) -> bool:
+    if legacy_open_default_cutoff is None:
+        return False
     if not isinstance(created_at, datetime):
         return True
-    if created_at.tzinfo is None:
-        created_at = created_at.replace(tzinfo=UTC)
-    else:
-        created_at = created_at.astimezone(UTC)
-    return created_at < _NETWORK_POSTURE_OPEN_WARNING_ROLLOUT_AT
+    return _utc_datetime(created_at) < _utc_datetime(legacy_open_default_cutoff)
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 async def _http_get(url: str, *, timeout: float) -> HttpResponse:

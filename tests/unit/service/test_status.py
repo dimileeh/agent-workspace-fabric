@@ -427,6 +427,44 @@ def test_default_workspace_lookup_extracts_network_posture_from_resolved_profile
 
 
 @pytest.mark.unit
+def test_default_workspace_lookup_keeps_open_when_legacy_cutoff_unset(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
+    engine = make_engine(database_url)
+
+    async def _setup() -> str:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/repo.git",
+                branch_base="development",
+                task_title="explicit open profile",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "explicit-open-profile",
+                    "security": {"egress": {"mode": "open"}},
+                },
+            )
+            workspace.status = WorkspaceStatus.running.value
+            workspace.created_at = datetime(2026, 5, 2, 11, 20, 35, tzinfo=UTC)
+            await session.commit()
+            return workspace.id
+
+    workspace_id = asyncio.run(_setup())
+    view = asyncio.run(_default_workspace_id_lookup(database_url))
+    asyncio.run(engine.dispose())
+
+    assert view.available is True
+    assert view.active_ids == frozenset({workspace_id})
+    assert view.snapshots[0].network_posture == "open"
+
+
+@pytest.mark.unit
 def test_default_workspace_lookup_treats_legacy_open_default_as_unknown(
     tmp_path: Path,
 ) -> None:
@@ -451,12 +489,17 @@ def test_default_workspace_lookup_treats_legacy_open_default_as_unknown(
                 },
             )
             workspace.status = WorkspaceStatus.running.value
-            workspace.created_at = datetime(2026, 5, 2, 11, 20, 35, tzinfo=UTC)
+            workspace.created_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
             await session.commit()
             return workspace.id
 
     workspace_id = asyncio.run(_setup())
-    view = asyncio.run(_default_workspace_id_lookup(database_url))
+    view = asyncio.run(
+        _default_workspace_id_lookup(
+            database_url,
+            legacy_open_default_cutoff=datetime(2026, 5, 2, 13, 0, tzinfo=UTC),
+        )
+    )
     asyncio.run(engine.dispose())
 
     assert view.available is True
