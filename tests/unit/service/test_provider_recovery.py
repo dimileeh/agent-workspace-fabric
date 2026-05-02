@@ -1534,7 +1534,7 @@ def test_has_existing_provider_recovery_event_edge_cases():
     assert _has_existing_provider_recovery_event(ws, {}) is False
 
 
-def test_monitoring_pr_recovery_guard_requires_pr_and_push_target() -> None:
+def test_monitoring_pr_recovery_guard_requires_open_pr() -> None:
     ws = Workspace(
         status=WorkspaceStatus.running.value,
         pr_url="https://github.com/example/repo/pull/1",
@@ -1561,7 +1561,11 @@ def test_monitoring_pr_recovery_guard_requires_pr_and_push_target() -> None:
     assert _is_recoverable_monitoring_pr_source(ws) is True
 
     ws.task_kind = "sync_feature_pr"
-    assert _is_recoverable_monitoring_pr_source(ws) is False
+    assert _is_recoverable_monitoring_pr_source(ws) is True
+
+    ws.task_kind = "future_monitor_kind"
+    ws.branch_name = None
+    assert _is_recoverable_monitoring_pr_source(ws) is True
 
 
 def test_provider_recovery_state_view_handles_event_payload_fallbacks() -> None:

@@ -687,11 +687,7 @@ async def _record_provider_circuit_breaker(
 def _is_recoverable_monitoring_pr_source(source: Workspace) -> bool:
     if source.status != WorkspaceStatus.monitoring_pr.value:
         return False
-    if not source.pr_url or source.pr_number is None:
-        return False
-    if source.remote_push_branch:
-        return True
-    return bool(source.branch_name and source.task_kind == "feature_branch_pr")
+    return bool(source.pr_url and source.pr_number is not None)
 
 
 async def _record_monitor_in_place_recovery(
