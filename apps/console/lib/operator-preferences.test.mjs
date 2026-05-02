@@ -31,6 +31,27 @@ test("operator preference storage key is versioned", () => {
   assert.equal(OPERATOR_PREFERENCES_STORAGE_KEY, "awf.operator.preferences.v1");
 });
 
+test("normalizeOperatorPreferences derives invalid field fallbacks from exported defaults", () => {
+  const originalDefaults = { ...DEFAULT_OPERATOR_PREFERENCES };
+
+  try {
+    DEFAULT_OPERATOR_PREFERENCES.theme = "dark";
+    DEFAULT_OPERATOR_PREFERENCES.contrast = "high";
+    DEFAULT_OPERATOR_PREFERENCES.fontSize = "large";
+
+    assert.deepEqual(
+      normalizeOperatorPreferences({
+        theme: "system",
+        contrast: "more",
+        fontSize: "huge",
+      }),
+      DEFAULT_OPERATOR_PREFERENCES,
+    );
+  } finally {
+    Object.assign(DEFAULT_OPERATOR_PREFERENCES, originalDefaults);
+  }
+});
+
 test("operator preferences round-trip through stable serialization", () => {
   const preferences = {
     theme: "dark",
@@ -72,8 +93,8 @@ test("normalizeOperatorPreferences preserves valid partial fields and defaults i
     }),
     {
       theme: "dark",
-      contrast: "normal",
-      fontSize: "standard",
+      contrast: DEFAULT_OPERATOR_PREFERENCES.contrast,
+      fontSize: DEFAULT_OPERATOR_PREFERENCES.fontSize,
     },
   );
 });

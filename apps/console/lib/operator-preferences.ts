@@ -28,10 +28,18 @@ export function normalizeOperatorPreferences(value: unknown): OperatorPreference
     return { ...DEFAULT_OPERATOR_PREFERENCES };
   }
 
+  const theme = value.theme;
+  const contrast = value.contrast;
+  const fontSize = value.fontSize;
+
   return {
-    theme: value.theme === "dark" || value.theme === "light" ? value.theme : "light",
-    contrast: value.contrast === "high" || value.contrast === "normal" ? value.contrast : "normal",
-    fontSize: value.fontSize === "large" || value.fontSize === "standard" ? value.fontSize : "standard",
+    theme: isOperatorTheme(theme) ? theme : DEFAULT_OPERATOR_PREFERENCES.theme,
+    contrast: isOperatorContrast(contrast)
+      ? contrast
+      : DEFAULT_OPERATOR_PREFERENCES.contrast,
+    fontSize: isOperatorFontSize(fontSize)
+      ? fontSize
+      : DEFAULT_OPERATOR_PREFERENCES.fontSize,
   };
 }
 
@@ -69,4 +77,16 @@ export function operatorPreferenceAttributes(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isOperatorTheme(value: unknown): value is OperatorTheme {
+  return value === "dark" || value === "light";
+}
+
+function isOperatorContrast(value: unknown): value is OperatorContrast {
+  return value === "high" || value === "normal";
+}
+
+function isOperatorFontSize(value: unknown): value is OperatorFontSize {
+  return value === "large" || value === "standard";
 }
