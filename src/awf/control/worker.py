@@ -46,6 +46,7 @@ from awf.service.provider_recovery import (
     provider_for_agent_model,
 )
 from awf.service.scheduler import (
+    scheduler_order_key,
     scheduler_score_from_workspace,
     score_summary_with_suppression,
 )
@@ -370,12 +371,12 @@ class ControlWorker:
                 )
                 return ids[:limit]
 
-            filtered: list[str] = []
+            eligible_workspaces_by_id: dict[str, Workspace] = {}
             base_exclude_ids = set(exclude_ids or set())
             candidate_limit = _scheduler_candidate_fetch_limit(limit)
             candidate_after: tuple[datetime, str] | None = None
             repo = WorkspaceRepository(session)
-            while len(filtered) < limit:
+            while True:
                 workspaces = await repo.list_schedulable_workspaces(
                     status=status,
                     limit=candidate_limit,
@@ -389,15 +390,21 @@ class ControlWorker:
                     session,
                     workspaces,
                 )
+                workspaces_by_id = {workspace.id: workspace for workspace in workspaces}
                 for workspace_id in eligible:
-                    if workspace_id not in filtered:
-                        filtered.append(workspace_id)
-                    if len(filtered) >= limit:
-                        break
+                    if workspace_id in eligible_workspaces_by_id:
+                        continue
+                    workspace = workspaces_by_id.get(workspace_id)
+                    if workspace is not None:
+                        eligible_workspaces_by_id[workspace_id] = workspace
                 if len(workspaces) < candidate_limit:
                     break
+            ordered_workspaces = _order_scheduler_workspaces(
+                list(eligible_workspaces_by_id.values())
+            )
+            ordered_ids = [workspace.id for workspace in ordered_workspaces[:limit]]
             await session.commit()
-            return filtered[:limit]
+            return ordered_ids
 
     async def _filter_provider_recovery_suppressed(
         self,
@@ -1393,6 +1400,18 @@ async def _record_scheduler_queue_decision(
         score_summary=score_summary,
         decided_at=decided_at,
     )
+
+
+def _order_scheduler_workspaces(workspaces: list[Workspace]) -> list[Workspace]:
+    now = datetime.now(UTC)
+    scored = sorted(
+        (
+            (scheduler_score_from_workspace(workspace, now=now), workspace)
+            for workspace in workspaces
+        ),
+        key=lambda item: scheduler_order_key(item[0]),
+    )
+    return [workspace for _score, workspace in scored]
 
 
 def _scheduler_candidate_fetch_limit(limit: int) -> int:
