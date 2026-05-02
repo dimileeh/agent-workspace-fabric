@@ -83,8 +83,8 @@ _MONITOR_RECOVERY_EXECUTION_CLAIM_PRESERVED_REASON_CODE = (
 _MONITOR_RECOVERY_NO_EXECUTION_CLAIM_REASON_CODE = (
     "NO_EXECUTION_CLAIM_DURING_MONITOR_RECOVERY"
 )
-_MONITOR_RECOVERY_MONITOR_CLAIM_PRESERVED_REASON_CODE = (
-    "ACTIVE_MONITOR_CLAIM_PRESERVED"
+_MONITOR_RECOVERY_MONITOR_CLAIM_ACQUIRED_REASON_CODE = (
+    "MONITOR_CLAIM_ACQUIRED_DURING_MONITOR_RECOVERY"
 )
 
 
@@ -1178,8 +1178,8 @@ def _monitor_recovery_claim_cleanup_payload(
             claim_cutoff=claim_cutoff,
         ),
         "monitor_claim": {
-            "action": "none",
-            "reason_code": _MONITOR_RECOVERY_MONITOR_CLAIM_PRESERVED_REASON_CODE,
+            "action": "acquired",
+            "reason_code": _MONITOR_RECOVERY_MONITOR_CLAIM_ACQUIRED_REASON_CODE,
             "claimed_by": monitor_claimed_by,
             "expires_at": _json_datetime(monitor_claim_expires_at),
         },

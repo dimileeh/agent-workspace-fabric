@@ -1337,7 +1337,7 @@ class TestRunOnceMonitorRecovery:
         }
 
     @pytest.mark.unit
-    async def test_restart_recovery_clears_stale_execution_claim_and_preserves_monitor_claim(
+    async def test_restart_recovery_clears_stale_execution_claim_and_records_monitor_claim_acquisition(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -1409,9 +1409,9 @@ class TestRunOnceMonitorRecovery:
             "previous_claimed_by": "dead-execution-worker",
             "previous_expires_at": stale_execution_expires_at.isoformat(),
         }
-        assert operation.payload["claim_cleanup"]["monitor_claim"]["action"] == "none"
+        assert operation.payload["claim_cleanup"]["monitor_claim"]["action"] == "acquired"
         assert operation.payload["claim_cleanup"]["monitor_claim"]["reason_code"] == (
-            "ACTIVE_MONITOR_CLAIM_PRESERVED"
+            "MONITOR_CLAIM_ACQUIRED_DURING_MONITOR_RECOVERY"
         )
         assert operation.payload["claim_cleanup"]["monitor_claim"]["claimed_by"] == (
             worker._worker_id
