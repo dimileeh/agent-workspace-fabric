@@ -329,31 +329,43 @@ class ControlWorker:
             return []
 
         async with self._session_factory() as session:
-            candidate_limit = (
-                _scheduler_candidate_fetch_limit(limit)
-                if status
-                in {
-                    WorkspaceStatus.requested,
-                    WorkspaceStatus.ready,
-                    WorkspaceStatus.monitoring_pr,
-                }
-                else limit
-            )
-            ids = await WorkspaceRepository(session).list_schedulable_ids(
-                status=status,
-                limit=candidate_limit,
-                exclude_ids=exclude_ids,
-            )
             if status not in {
                 WorkspaceStatus.requested,
                 WorkspaceStatus.ready,
                 WorkspaceStatus.monitoring_pr,
             }:
+                ids = await WorkspaceRepository(session).list_schedulable_ids(
+                    status=status,
+                    limit=limit,
+                    exclude_ids=exclude_ids,
+                )
                 return ids[:limit]
-            filtered = await self._filter_provider_recovery_suppressed(
-                session,
-                ids,
-            )
+
+            filtered: list[str] = []
+            seen_ids: set[str] = set()
+            base_exclude_ids = set(exclude_ids or set())
+            candidate_limit = _scheduler_candidate_fetch_limit(limit)
+            repo = WorkspaceRepository(session)
+            while len(filtered) < limit:
+                ids = await repo.list_schedulable_ids(
+                    status=status,
+                    limit=candidate_limit,
+                    exclude_ids=base_exclude_ids | seen_ids,
+                )
+                if not ids:
+                    break
+                seen_ids.update(ids)
+                eligible = await self._filter_provider_recovery_suppressed(
+                    session,
+                    ids,
+                )
+                for workspace_id in eligible:
+                    if workspace_id not in filtered:
+                        filtered.append(workspace_id)
+                    if len(filtered) >= limit:
+                        break
+                if len(ids) < candidate_limit:
+                    break
             await session.commit()
             return filtered[:limit]
 

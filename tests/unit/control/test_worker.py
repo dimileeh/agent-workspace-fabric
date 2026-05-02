@@ -25,10 +25,11 @@ from awf.control.worker import (
     _ActiveExecutionCandidate,
     _candidate_claim_is_stale,
     _claim_recheck_conditions,
+    _scheduler_candidate_fetch_limit,
     _stale_active_execution_failure_message,
 )
 from awf.db.base import Base
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
@@ -44,6 +45,7 @@ from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.controls import WorkspaceControlService
+from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
 
 
@@ -558,6 +560,64 @@ class TestRunOnceExecution:
         assert ordinary_id not in executor.calls
 
     @pytest.mark.unit
+    async def test_retry_bonus_does_not_outrank_materially_higher_priority_new_work(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        retry_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "infra-retry-ready",
+            task_class="refactor_task",
+            task_policy={
+                "scheduler": {
+                    "base_priority": 40,
+                    "parent_failure_reason": FailureReason.infrastructure_failure.value,
+                }
+            },
+            create_task_attempt=True,
+        )
+        high_priority_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "higher-priority-new-ready",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 50}},
+            create_task_attempt=True,
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [high_priority_id]
+        async with session_factory() as session:
+            retry_workspace = await WorkspaceRepository(session).get(retry_id)
+            assert retry_workspace is not None
+            retry_score = scheduler_score_from_workspace(retry_workspace)
+            retry_decisions = await QueueDecisionRepository(session).list_for_workspace(retry_id)
+            high_decisions = await QueueDecisionRepository(session).list_for_workspace(
+                high_priority_id
+            )
+
+        assert retry_score.retry_bonus == 3
+        assert retry_decisions == []
+        assert high_decisions[0].decision == "ordered"
+        assert high_decisions[0].score_summary["effective_score"] == 54
+
+    @pytest.mark.unit
     async def test_ordered_decision_is_recorded_when_ready_workspace_dispatches(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -648,6 +708,130 @@ class TestRunOnceExecution:
         assert deferred[0].decision == "deferred"
         assert deferred[0].reason_code == "PROVIDER_RECOVERY_NOT_BEFORE"
         assert deferred[0].score_summary["suppression"]["suppressed"] is True
+
+    @pytest.mark.unit
+    async def test_provider_cooldown_suppression_scans_past_fetch_buffer_to_fill_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        for index in range(_scheduler_candidate_fetch_limit(1)):
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"cooling-ready-{index}",
+                agent="gemini",
+                task_class="refactor_task",
+                task_policy={
+                    "agent_model": "gemini-2.5-pro",
+                    "scheduler": {"base_priority": 100},
+                    "provider_recovery_state": {
+                        "not_before": not_before.isoformat(),
+                        "action": "retry",
+                    },
+                },
+            )
+        allowed_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "allowed-after-cooldown-buffer",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [allowed_id]
+
+    @pytest.mark.unit
+    async def test_provider_model_circuit_defer_records_decision_and_fills_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        suppressed_ids: list[str] = []
+        for index in range(_scheduler_candidate_fetch_limit(1)):
+            suppressed_ids.append(
+                await _create_ready(
+                    session_factory,
+                    origin_repo,
+                    f"circuit-ready-{index}",
+                    agent="gemini",
+                    task_class="refactor_task",
+                    task_policy={
+                        "agent_model": "gemini-2.5-pro",
+                        "scheduler": {"base_priority": 100},
+                    },
+                    create_task_attempt=index == 0,
+                )
+            )
+        allowed_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "allowed-after-circuit-buffer",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+            create_task_attempt=True,
+        )
+        async with session_factory() as session:
+            await ProviderModelCircuitBreakerRepository(session).record_failure(
+                provider="google",
+                model="gemini-2.5-pro",
+                reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                failure_fingerprint="capacity:fingerprint",
+                workspace_id=suppressed_ids[0],
+                attempt_id=None,
+                now=datetime.now(UTC),
+                failure_threshold=1,
+                cooldown_seconds=600,
+            )
+            await session.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [allowed_id]
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(
+                suppressed_ids[0]
+            )
+
+        assert decisions[0].decision == "deferred"
+        assert decisions[0].reason_code == "PROVIDER_MODEL_CIRCUIT_OPEN"
+        assert decisions[0].score_summary["suppression"]["suppressed"] is True
+        assert decisions[0].score_summary["suppression"]["reason_code"] == (
+            "PROVIDER_MODEL_CIRCUIT_OPEN"
+        )
+        assert decisions[0].score_summary["suppression"]["provider"] == "google"
+        assert decisions[0].score_summary["suppression"]["model"] == "gemini-2.5-pro"
+        assert isinstance(decisions[0].score_summary["suppression"]["cooldown_until"], str)
 
     @pytest.mark.unit
     async def test_dispatches_requested_provisioning_then_ready_execution_work(
