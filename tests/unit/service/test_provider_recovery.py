@@ -1071,6 +1071,73 @@ async def test_monitoring_pr_fallback_recovery_reuses_existing_pr_workspace(
 
 
 @pytest.mark.unit
+async def test_monitoring_pr_duplicate_in_place_fallback_does_not_mutate_source(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+    metadata = {
+        "reason_code": AGENT_IDLE_TIMEOUT,
+        "failure_type": "idle_timeout",
+        "retryable": True,
+        "provider": "google",
+        "model": "gemini-2.5-pro",
+        "failure_fingerprint": "idle-timeout:duplicate-pr-169",
+        "recommended_action": "Retry PR monitor on another provider.",
+    }
+
+    async with factory() as session:
+        repo = WorkspaceRepository(session)
+        source = await repo.get(source_id)
+        assert source is not None
+        await repo.add_event(
+            source,
+            event_type="workspace.provider_recovery_requested",
+            reason_code="PROVIDER_FALLBACK_SELECTED",
+            payload={
+                "recovery_scope": "monitor_in_place",
+                "provider_recovery": {
+                    "action": "fallback",
+                    "failure_fingerprint": metadata["failure_fingerprint"],
+                },
+            },
+        )
+        await session.commit()
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata=metadata,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        recovery_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_requested"
+        ]
+        cooldown_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+
+    assert result is None
+    assert source.agent == "gemini"
+    assert source.task_policy["agent_model"] == "gemini-2.5-pro"
+    assert "provider_recovery_state" not in source.task_policy
+    assert len(recovery_events) == 1
+    assert cooldown_events == []
+
+
+@pytest.mark.unit
 async def test_monitoring_pr_capacity_fallback_records_circuit_for_source_model(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:

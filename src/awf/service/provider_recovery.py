@@ -288,6 +288,9 @@ async def create_provider_recovery_attempt_row(
             recovery_metadata,
             now=recovery_now,
         )
+    if has_existing_provider_recovery_event and monitor_in_place_recovery:
+        await session.flush()
+        return None
     if source_not_before is not None or decision.action == "terminal":
         source.task_policy = source_policy
     elif monitor_in_place_recovery and decision.action in {"retry", "fallback"}:
