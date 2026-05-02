@@ -2592,24 +2592,24 @@ class WorkspaceRepository:
         exclude_ids: set[str] | None = None,
         offset: int = 0,
     ) -> builtins.list[Workspace]:
-        """Return ordered candidate workspaces for one worker poll."""
+        """Return globally ordered candidate workspaces for one worker poll."""
         if limit <= 0:
             return []
 
         candidates = await self._list_schedulable_candidates(
             status=status,
-            limit=limit,
+            limit=None,
             exclude_ids=exclude_ids,
-            offset=offset,
         )
+        ordered = self._sort_schedulable_workspaces(candidates, limit=None)
 
-        return self._sort_schedulable_workspaces(candidates, limit)
+        return ordered[offset : offset + limit]
 
     async def _list_schedulable_candidates(
         self,
         *,
         status: WorkspaceStatus,
-        limit: int,
+        limit: int | None,
         exclude_ids: set[str] | None = None,
         offset: int = 0,
     ) -> builtins.list[Workspace]:
@@ -2627,7 +2627,7 @@ class WorkspaceRepository:
     @staticmethod
     def _sort_schedulable_workspaces(
         candidates: builtins.list[Workspace],
-        limit: int,
+        limit: int | None,
     ) -> builtins.list[Workspace]:
         now = datetime.now(UTC)
         scored = sorted(
@@ -2637,7 +2637,8 @@ class WorkspaceRepository:
             ),
             key=lambda item: scheduler_order_key(item[0]),
         )
-        return [workspace for _score, workspace in scored[:limit]]
+        ordered = [workspace for _score, workspace in scored]
+        return ordered if limit is None else ordered[:limit]
 
     async def transition(
         self,
@@ -3163,7 +3164,7 @@ def _claims_non_docs_path(owned_paths: list[str] | tuple[str, ...]) -> bool:
 def _schedulable_workspace_ids_stmt(
     *,
     status: WorkspaceStatus,
-    limit: int,
+    limit: int | None,
     exclude_ids: set[str] | None = None,
     offset: int = 0,
     skip_locked: bool,
@@ -3179,7 +3180,9 @@ def _schedulable_workspace_ids_stmt(
         )
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
-    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc()).limit(limit)
+    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
     if offset > 0:
         stmt = stmt.offset(offset)
     if skip_locked:

@@ -635,6 +635,48 @@ class TestRunOnceExecution:
         assert low_id not in executor.calls
 
     @pytest.mark.unit
+    async def test_ready_execution_scores_beyond_fetch_window(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        low_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"low-priority-ready-{index}",
+                task_class="docs_task",
+                task_policy={"scheduler": {"base_priority": 0}},
+            )
+            for index in range(_scheduler_candidate_fetch_limit(1) + 1)
+        ]
+        urgent_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "urgent-ready-after-fetch-window",
+            task_class="migration_task",
+            task_policy={"scheduler": {"base_priority": 100, "human_boost": 5}},
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [urgent_id]
+        assert not set(low_ids).intersection(executor.calls)
+
+    @pytest.mark.unit
     async def test_human_boosted_ready_workspace_wins_equal_priority_dispatch(
         self,
         session_factory: async_sessionmaker[AsyncSession],
