@@ -51,13 +51,19 @@ class _IsoToTimestamp(expression.FunctionElement[Any]):  # noqa: N801
 @compiles(_IsoToTimestamp, "postgresql")
 def _pg_iso_to_timestamp(element: expression.FunctionElement[Any], compiler: Any, **kw: Any) -> str:
     arg = compiler.process(list(element.clauses)[0], **kw)
-    return f"CAST({arg} AS TIMESTAMP WITH TIME ZONE)"
+    return (
+        f"CASE WHEN {arg} ~ '^\\d{{4}}-\\d{{2}}-\\d{{2}}T\\d{{2}}:\\d{{2}}:\\d{{2}}'"
+        f" THEN CAST({arg} AS TIMESTAMP WITH TIME ZONE) ELSE NULL END"
+    )
 
 
 @compiles(_IsoToTimestamp, "sqlite")
 def _sqlite_iso_to_timestamp(element: expression.FunctionElement[Any], compiler: Any, **kw: Any) -> str:
     arg = compiler.process(list(element.clauses)[0], **kw)
-    return f"datetime({arg})"
+    return (
+        f"CASE WHEN {arg} LIKE '____-__-__T__:__:__%'"
+        f" THEN datetime({arg}) ELSE NULL END"
+    )
 
 
 DEFAULT_SUMMARY_WINDOW_HOURS = 24

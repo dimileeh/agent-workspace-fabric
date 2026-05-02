@@ -845,6 +845,51 @@ async def test_provider_recovery_cooldown_uses_timestamp_not_string_comparison(
 
 
 @pytest.mark.unit
+async def test_resource_saturation_malformed_not_before_does_not_crash_query(
+    session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.service.metrics import summarize_resource_saturation
+    from awf.service.provider_recovery import PROVIDER_RECOVERY_STATE_KEY
+
+    settings = Settings(_env_file=None, work_dir="/tmp/awf-work")
+    now = datetime(2026, 5, 1, 12, 0, tzinfo=UTC)
+
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "not-a-date",
+            },
+        },
+    )
+    await create_workspace(
+        session_factory,
+        status=WorkspaceStatus.running,
+        updated_at=now,
+        task_policy={
+            PROVIDER_RECOVERY_STATE_KEY: {
+                "action": "retry",
+                "not_before": "2026-05-01T11:00:00Z",
+            },
+        },
+    )
+
+    summary = await summarize_resource_saturation(
+        session_factory,
+        settings=settings,
+        disk_check=_disk_check(),
+        now=now,
+    )
+
+    prs = summary.provider_recovery_state_summary
+    assert prs.pending_retry == 1
+    assert prs.in_cooldown == 0
+
+
+@pytest.mark.unit
 async def test_resource_saturation_terminal_uses_decision_reason_code_over_source_reason_code(
     session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
