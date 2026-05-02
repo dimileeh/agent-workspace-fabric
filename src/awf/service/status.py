@@ -8,6 +8,7 @@ import os
 import subprocess
 from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -32,6 +33,7 @@ from awf.service.orphans import (
     workspace_id_from_project,
 )
 from awf.service.profile_metadata import (
+    NetworkPosture,
     network_posture_from_profile_snapshot,
 )
 from awf.service.provider_readiness import HttpGet as ProviderHttpGet
@@ -42,6 +44,9 @@ from awf.service.workspace_runtime_health import (
 )
 
 _CHECK_TIMEOUT_SECONDS = 5.0
+_NETWORK_POSTURE_OPEN_WARNING_ROLLOUT_AT = datetime(
+    2026, 5, 2, 11, 20, 36, tzinfo=UTC
+)
 
 CheckPayload = dict[str, object]
 DbProbe = Callable[[str], Awaitable[CheckPayload]]
@@ -514,6 +519,7 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
         Workspace.compose_file_path,
         Workspace.pr_url,
         Workspace.resolved_profile,
+        Workspace.created_at,
     ).where(Workspace.status.in_(KNOWN_WORKSPACE_STATUSES))
     engine = None
     try:
@@ -541,6 +547,7 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
         compose_file_path,
         pr_url,
         resolved_profile,
+        created_at,
     ) in rows:
         ws_id_str = str(ws_id)
         status_str = str(status)
@@ -556,7 +563,10 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
                     str(compose_file_path) if compose_file_path is not None else None
                 ),
                 pr_url=str(pr_url) if pr_url is not None else None,
-                network_posture=network_posture_from_profile_snapshot(resolved_profile),
+                network_posture=_status_network_posture_from_profile_snapshot(
+                    resolved_profile,
+                    created_at,
+                ),
             )
         )
         if status_str in ACTIVE_WORKSPACE_STATUSES:
@@ -569,6 +579,29 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
         available=True,
         snapshots=tuple(snapshots),
     )
+
+
+def _status_network_posture_from_profile_snapshot(
+    resolved_profile: object,
+    created_at: object,
+) -> NetworkPosture | None:
+    posture = network_posture_from_profile_snapshot(resolved_profile)
+    if posture == "open" and _is_legacy_open_default_workspace(created_at):
+        return None
+    return posture
+
+
+def _is_legacy_open_default_workspace(created_at: object) -> bool:
+    # Before the explicit posture rollout, persisted profiles may contain
+    # ``open`` only because it was the old schema default. Treat those rows as
+    # unknown so status/doctor rollout does not warn on every active legacy row.
+    if not isinstance(created_at, datetime):
+        return True
+    if created_at.tzinfo is None:
+        created_at = created_at.replace(tzinfo=UTC)
+    else:
+        created_at = created_at.astimezone(UTC)
+    return created_at < _NETWORK_POSTURE_OPEN_WARNING_ROLLOUT_AT
 
 
 async def _http_get(url: str, *, timeout: float) -> HttpResponse:

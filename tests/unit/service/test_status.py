@@ -413,6 +413,7 @@ def test_default_workspace_lookup_extracts_network_posture_from_resolved_profile
                 },
             )
             workspace.status = WorkspaceStatus.running.value
+            workspace.created_at = datetime(2026, 5, 2, 11, 20, 37, tzinfo=UTC)
             await session.commit()
             return workspace.id
 
@@ -423,6 +424,44 @@ def test_default_workspace_lookup_extracts_network_posture_from_resolved_profile
     assert view.available is True
     assert view.active_ids == frozenset({workspace_id})
     assert view.snapshots[0].network_posture == "open"
+
+
+@pytest.mark.unit
+def test_default_workspace_lookup_treats_legacy_open_default_as_unknown(
+    tmp_path: Path,
+) -> None:
+    database_url = f"sqlite+aiosqlite:///{tmp_path / 'awf.db'}"
+    engine = make_engine(database_url)
+
+    async def _setup() -> str:
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+        factory = make_session_factory(engine)
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).create(
+                repo_url="git@github.com:example/repo.git",
+                branch_base="development",
+                task_title="legacy open default",
+                task_prompt="p",
+                agent="codex",
+                test_commands=[],
+                resolved_profile={
+                    "name": "legacy-open-default",
+                    "security": {"egress": {"mode": "open"}},
+                },
+            )
+            workspace.status = WorkspaceStatus.running.value
+            workspace.created_at = datetime(2026, 5, 2, 11, 20, 35, tzinfo=UTC)
+            await session.commit()
+            return workspace.id
+
+    workspace_id = asyncio.run(_setup())
+    view = asyncio.run(_default_workspace_id_lookup(database_url))
+    asyncio.run(engine.dispose())
+
+    assert view.available is True
+    assert view.active_ids == frozenset({workspace_id})
+    assert view.snapshots[0].network_posture is None
 
 
 @pytest.mark.unit
@@ -1494,11 +1533,11 @@ def test_status_workspace_lookup_ignores_unknown_status_rows(
     disposed = False
 
     class _Rows:
-        def all(self) -> list[tuple[str, str, object, object, object, object, object]]:
+        def all(self) -> list[tuple[str, str, object, object, object, object, object, object]]:
             return [
-                ("ws_active", "running", None, None, None, None, None),
-                ("ws_done", "completed", None, None, None, None, None),
-                ("ws_future", "future_status", None, None, None, None, None),
+                ("ws_active", "running", None, None, None, None, None, None),
+                ("ws_done", "completed", None, None, None, None, None, None),
+                ("ws_future", "future_status", None, None, None, None, None, None),
             ]
 
     class _Connection:
