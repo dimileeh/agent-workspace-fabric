@@ -17,6 +17,7 @@ def _parse_markdown_table(text: str) -> list[dict[str, str]]:
         if not stripped.startswith("|"):
             if in_table:
                 in_table = False
+                headers = []
             continue
         cells = [c.strip() for c in stripped.split("|")]
         cells = [c for c in cells if c != ""]
