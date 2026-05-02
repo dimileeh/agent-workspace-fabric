@@ -651,7 +651,7 @@ async def test_provider_recovery_stale_terminal_callback_is_ignored(
             ).scalars()
         )
 
-    assert result is None
+    assert result == "stale"
     assert source.status == final_status.value
     assert "provider_recovery_state" not in source.task_policy
     assert len(workspaces) == 1
@@ -705,7 +705,7 @@ async def test_provider_recovery_failed_without_provider_metadata_is_ignored(
             ).scalars()
         )
 
-    assert result is None
+    assert result == "stale"
     assert source.status == WorkspaceStatus.failed.value
     assert "provider_recovery_state" not in source.task_policy
     assert len(workspaces) == 1

@@ -205,7 +205,7 @@ async def create_provider_recovery_attempt_row(
     *,
     now: datetime | None = None,
     metadata: Mapping[str, Any] | None = None,
-) -> ProviderRecoveryAttemptResult | Literal["terminal"] | None:
+) -> ProviderRecoveryAttemptResult | Literal["terminal", "stale"] | None:
     """Create a requested retry/fallback workspace for a retryable provider failure."""
 
     recovery_now = now or datetime.now(UTC)
@@ -223,7 +223,7 @@ async def create_provider_recovery_attempt_row(
             reason_code=PROVIDER_RECOVERY_STALE_SOURCE,
         )
         await session.flush()
-        return None
+        return "stale"
     recovery_metadata = (
         dict(metadata)
         if metadata is not None

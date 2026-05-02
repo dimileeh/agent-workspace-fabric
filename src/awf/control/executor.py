@@ -2978,7 +2978,7 @@ class WorkspaceExecutor:
     async def _prepare_provider_recovery(self, workspace_id: str) -> None:
         async with self._session_factory() as session:
             result = await create_provider_recovery_attempt_row(session, workspace_id)
-            if result is None or result == "terminal":
+            if result is None or result == "terminal" or result == "stale":
                 await session.commit()
                 return
             await session.commit()
