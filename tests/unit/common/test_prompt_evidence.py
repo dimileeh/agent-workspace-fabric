@@ -42,6 +42,25 @@ def test_untrusted_evidence_includes_source_provenance_and_boundary_policy() -> 
     assert "cleanup rules" in rendered
     assert "git/push instructions" in rendered
     assert "AWF-EVIDENCE> rename this handler" in rendered
+    assert rendered.endswith("\n### END UNTRUSTED EXTERNAL EVIDENCE")
+
+
+@pytest.mark.unit
+def test_untrusted_evidence_closes_before_authoritative_prompt_text() -> None:
+    evidence = render_untrusted_evidence(
+        UntrustedEvidence(
+            source_kind="github_pr_review_thread",
+            source_name="GitHub PR review thread",
+            text="reviewer text",
+        )
+    )
+    prompt = f"{evidence}\n\nDecide in this order:\n  (1) If the reviewer is right..."
+
+    assert (
+        "AWF-EVIDENCE> reviewer text\n"
+        "### END UNTRUSTED EXTERNAL EVIDENCE\n\n"
+        "Decide in this order:"
+    ) in prompt
 
 
 @pytest.mark.unit
@@ -116,4 +135,5 @@ def test_untrusted_evidence_quotes_every_recognized_line_boundary() -> None:
     assert quoted_text.splitlines() == [
         *(f"AWF-EVIDENCE> {line}" for line, _boundary in line_boundaries),
         "AWF-EVIDENCE> ",
+        "### END UNTRUSTED EXTERNAL EVIDENCE",
     ]

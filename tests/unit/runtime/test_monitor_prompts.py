@@ -96,6 +96,10 @@ class TestAddressThread:
         for phrase in _ADVERSARIAL_REVIEW_LINES:
             _assert_only_quoted(prompt, phrase)
         assert "Decide in this order:" in prompt
+        assert (
+            "### END UNTRUSTED EXTERNAL EVIDENCE\n\n"
+            "Decide in this order:"
+        ) in prompt
         assert "AWF-EVIDENCE> Decide in this order:" not in prompt
         assert "Do NOT push" in prompt
 
@@ -164,6 +168,10 @@ class TestAddressReviewComment:
         for phrase in _ADVERSARIAL_REVIEW_LINES:
             _assert_only_quoted(prompt, phrase)
         assert "Use the same decision tree" in prompt
+        assert (
+            "### END UNTRUSTED EXTERNAL EVIDENCE\n\n"
+            "Use the same decision tree"
+        ) in prompt
         assert "AWF-EVIDENCE> Use the same decision tree" not in prompt
         assert "Do NOT push" in prompt
 
