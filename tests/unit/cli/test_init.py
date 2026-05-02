@@ -711,6 +711,29 @@ def test_init_with_path_rejects_format_json_flag(
 
 
 @pytest.mark.unit
+def test_init_with_path_rejects_explicit_default_bootstrap_flags(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Explicit-but-default bootstrap flags must be rejected, not silently ignored."""
+
+    _stub_local_prerequisites(monkeypatch)
+
+    cases = [
+        (["--timeout-seconds", "180"], "--timeout-seconds"),
+        (["--poll-interval-seconds", "2"], "--poll-interval-seconds"),
+        (["--write-env"], "--write-env"),
+        (["--format", "pretty"], "--format"),
+    ]
+    for extra, expected_flag in cases:
+        result = _runner.invoke(app, ["init", str(tmp_path), *extra])
+
+        output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+        assert result.exit_code == 2, f"expected exit 2 for {extra}: {output}"
+        assert expected_flag in output, f"expected {expected_flag} in error for {extra}: {output}"
+        assert "Traceback" not in output
+
+
+@pytest.mark.unit
 def test_init_without_path_rejects_include_smoke_request_flag(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

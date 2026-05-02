@@ -23,8 +23,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+import click
 import httpx
 import typer
+from click.core import ParameterSource
 
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import WorkspaceGCComposeTeardownResult
@@ -315,18 +317,23 @@ def init(
         )
         return
 
+    ctx = click.get_current_context()
+
+    def _explicit(name: str) -> bool:
+        return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+
     bootstrap_only_flags: list[str] = []
-    if skip_agent_runtime_build:
+    if _explicit("skip_agent_runtime_build"):
         bootstrap_only_flags.append("--skip-agent-runtime-build")
-    if provider:
+    if _explicit("provider"):
         bootstrap_only_flags.append("--provider")
-    if timeout_seconds != _DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS:
+    if _explicit("timeout_seconds"):
         bootstrap_only_flags.append("--timeout-seconds")
-    if poll_interval_seconds != _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS:
+    if _explicit("poll_interval_seconds"):
         bootstrap_only_flags.append("--poll-interval-seconds")
-    if not write_env:
-        bootstrap_only_flags.append("--no-write-env")
-    if fmt != OutputFormat.pretty:
+    if _explicit("write_env"):
+        bootstrap_only_flags.append("--write-env" if write_env else "--no-write-env")
+    if _explicit("fmt"):
         bootstrap_only_flags.append("--format")
     if bootstrap_only_flags:
         typer.echo(
