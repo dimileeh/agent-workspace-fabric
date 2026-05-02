@@ -664,6 +664,7 @@ def _recovery_task_policy(
         "target_agent": decision.target_agent,
         "target_provider": decision.target_provider,
         "target_model": decision.target_model,
+        "recommended_action": _metadata_str(metadata, "recommended_action"),
     }
     state_not_before = decision.not_before if not_before is None else not_before
     if state_not_before is not None:
@@ -1028,6 +1029,6 @@ def _merge_recovery_views(
         fallback_target=policy_view.fallback_target if policy_view.fallback_target is not None else event_view.fallback_target,
         source_workspace_id=policy_view.source_workspace_id if policy_view.source_workspace_id is not None else event_view.source_workspace_id,
         source_attempt_id=policy_view.source_attempt_id if policy_view.source_attempt_id is not None else event_view.source_attempt_id,
-        recommended_action=policy_view.recommended_action if policy_view.recommended_action is not None else event_view.recommended_action,
+        recommended_action=event_view.recommended_action if event_view.recommended_action is not None else policy_view.recommended_action,
         terminal=policy_view.terminal if policy_view.terminal is not None else event_view.terminal,
     )

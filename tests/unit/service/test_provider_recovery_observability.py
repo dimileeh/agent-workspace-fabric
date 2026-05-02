@@ -728,3 +728,110 @@ def test_provider_recovery_state_reason_code_falls_back_to_source_reason_code() 
     view = provider_recovery_state_for_workspace(workspace)
     assert view is not None
     assert view.reason_code == PROVIDER_RETRY_DELAYED_REASON
+
+
+def test_merge_view_prefers_event_recommended_action_over_generic_default() -> None:
+    now = datetime.now(UTC)
+    event_payload: dict[str, Any] = {
+        "source_workspace_id": "ws-source-001",
+        "provider_recovery": {
+            "action": "retry",
+            "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+            "recommended_action": "Refresh credentials and retry.",
+            "source_provider": "openai",
+            "source_model": "gpt-5",
+            "retry_attempt_number": 1,
+            "fallback_attempt_number": 0,
+            "target_agent": "codex",
+            "target_provider": "openai",
+            "target_model": "gpt-5",
+        },
+    }
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        payload=event_payload,
+        occurred_at=now,
+        old_state="running",
+        new_state="failed",
+        id="evt-merge-001",
+    )
+    state_data: dict[str, Any] = {
+        "action": "retry",
+        "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+        "source_provider": "openai",
+        "source_model": "gpt-5",
+        "retry_attempt_number": 1,
+        "fallback_attempt_number": 0,
+        "target_agent": "codex",
+        "target_provider": "openai",
+        "target_model": "gpt-5",
+        "source_workspace_id": "ws-source-001",
+        "source_attempt_id": "att-001",
+    }
+    workspace = SimpleNamespace(
+        id="ws-merge-001",
+        status="failed",
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: state_data},
+        failure_reason="agent_failure",
+        failure_message="Provider credentials expired",
+        agent="codex",
+        events=[event],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.recommended_action == "Refresh credentials and retry."
+
+
+def test_merge_view_prefers_event_recommended_action_when_policy_has_specific() -> None:
+    now = datetime.now(UTC)
+    event_payload: dict[str, Any] = {
+        "source_workspace_id": "ws-source-002",
+        "provider_recovery": {
+            "action": "fallback",
+            "decision_reason_code": PROVIDER_FALLBACK_SELECTED_REASON,
+            "recommended_action": "Switch to backup provider immediately.",
+            "source_provider": "google",
+            "source_model": "gemini-2.5-pro",
+            "retry_attempt_number": 0,
+            "fallback_attempt_number": 1,
+            "target_agent": "codex",
+            "target_provider": "openai",
+            "target_model": "gpt-5.3-codex",
+        },
+    }
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_REQUESTED_EVENT,
+        reason_code=PROVIDER_FALLBACK_SELECTED_REASON,
+        payload=event_payload,
+        occurred_at=now,
+        old_state="running",
+        new_state="failed",
+        id="evt-merge-002",
+    )
+    state_data: dict[str, Any] = {
+        "action": "fallback",
+        "decision_reason_code": PROVIDER_FALLBACK_SELECTED_REASON,
+        "recommended_action": "Switch to backup provider immediately.",
+        "source_provider": "google",
+        "source_model": "gemini-2.5-pro",
+        "retry_attempt_number": 0,
+        "fallback_attempt_number": 1,
+        "target_agent": "codex",
+        "target_provider": "openai",
+        "target_model": "gpt-5.3-codex",
+        "source_workspace_id": "ws-source-002",
+        "source_attempt_id": "att-002",
+    }
+    workspace = SimpleNamespace(
+        id="ws-merge-002",
+        status="failed",
+        task_policy={PROVIDER_RECOVERY_STATE_KEY: state_data},
+        failure_reason="agent_failure",
+        failure_message="Provider rate limited",
+        agent="codex",
+        events=[event],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.recommended_action == "Switch to backup provider immediately."
