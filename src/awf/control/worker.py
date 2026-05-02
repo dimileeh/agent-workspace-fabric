@@ -728,14 +728,18 @@ class ControlWorker:
             await self._record_recoverable_runtime_stranding(candidate, snapshot, finding)
             return
         if candidate.compose_project_name and snapshot.stack_state == "running":
-            await self._record_stale_active_execution_detected(candidate, snapshot)
+            if not await self._record_stale_active_execution_detected(
+                candidate,
+                snapshot,
+            ):
+                await self._fail_stale_active_execution(candidate, snapshot)
             return
 
     async def _record_stale_active_execution_detected(
         self,
         candidate: _ActiveExecutionCandidate,
         snapshot: RuntimeSnapshot,
-    ) -> None:
+    ) -> bool:
         payload = {
             "compose_project_name": candidate.compose_project_name,
             "workspace_status": candidate.status.value,
@@ -746,11 +750,11 @@ class ControlWorker:
             repo = WorkspaceRepository(session)
             ws = await repo.get(candidate.workspace_id)
             if ws is None or ws.status != candidate.status.value:
-                return
+                return False
             if not _execution_claim_is_stale(ws, datetime.now(UTC)):
-                return
+                return False
             if await self._has_stale_active_execution_event(session, candidate.workspace_id):
-                return
+                return False
 
             await repo.add_event(
                 ws,
@@ -767,6 +771,7 @@ class ControlWorker:
             compose_project_name=candidate.compose_project_name,
             runtime=payload["runtime"],
         )
+        return True
 
     async def _has_stale_active_execution_event(
         self,

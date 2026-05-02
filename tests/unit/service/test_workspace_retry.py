@@ -9,10 +9,11 @@ from sqlalchemy import event, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import WorkspaceCreateV2Request
+from awf.common.config import Settings
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, FailureReason, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ResourceReservationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
@@ -319,6 +320,49 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
         (first.id, "workspace.retry_requested", first.id),
         (retried.id, "workspace.retry_created", first.id),
     }
+
+
+@pytest.mark.unit
+async def test_retry_recomputes_resource_reservation_from_current_defaults(
+    factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        "awf.service.workspaces.get_settings",
+        lambda: Settings(
+            workspace_steady_cpu=3.0,
+            workspace_steady_memory_gb=10.0,
+            workspace_peak_cpu=6.0,
+            workspace_peak_memory_gb=16.0,
+        ),
+    )
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request())
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        source_reservation = (
+            await ResourceReservationRepository(session).list_for_workspace(first.id)
+        )[0]
+        source_reservation.steady_cpu = 1.0
+        source_reservation.steady_memory_gb = 4.0
+        source_reservation.peak_cpu = 1.5
+        source_reservation.peak_memory_gb = 7.0
+        await session.commit()
+
+    retry = await service.retry_workspace(first.id)
+
+    async with factory() as session:
+        retried_reservation = (
+            await ResourceReservationRepository(session).list_for_workspace(
+                retry.new_workspace_id
+            )
+        )[0]
+
+    assert retried_reservation.steady_cpu == 3.0
+    assert retried_reservation.steady_memory_gb == 10.0
+    assert retried_reservation.peak_cpu == 6.0
+    assert retried_reservation.peak_memory_gb == 16.0
 
 
 @pytest.mark.unit

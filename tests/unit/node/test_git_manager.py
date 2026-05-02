@@ -179,7 +179,7 @@ class TestAddWorktree:
         assert exc.value.reason_code == "GIT_BASE_BRANCH_MISSING"
 
     @pytest.mark.unit
-    async def test_prepares_only_worktree_for_agent_user(
+    async def test_prepares_linked_worktree_git_paths_for_agent_user(
         self, origin_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         chowned: list[tuple[Path, int, int]] = []
@@ -203,7 +203,15 @@ class TestAddWorktree:
         )
 
         assert (layout.worktree_path, 1000, 1000) in chowned
-        assert (layout.mirror_path, 1000, 1000) not in chowned
+        assert (layout.mirror_path, 1000, 1000) in chowned
+        assert (layout.mirror_path / "objects", 1000, 1000) in chowned
+        assert (layout.mirror_path / "refs", 1000, 1000) in chowned
+        assert (layout.mirror_path / "worktrees", 1000, 1000) in chowned
+        assert (
+            layout.mirror_path / "worktrees" / "ws_agent_owner",
+            1000,
+            1000,
+        ) in chowned
         assert (layout.worktree_path / "README.md", 1000, 1000) in chowned
 
 

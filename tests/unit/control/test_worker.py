@@ -3626,7 +3626,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert not any(event.reason_code == "STRANDED_WORKSPACE" for event in events)
 
     @pytest.mark.unit
-    async def test_stale_pushing_with_running_stack_is_preserved_and_evented(
+    async def test_stale_running_stack_is_evented_then_failed_on_next_scan(
         self,
         session_factory: async_sessionmaker[AsyncSession],
         origin_repo: Path,
@@ -3668,7 +3668,6 @@ class TestRunOnceStaleActiveExecutionRecovery:
         )
 
         assert await worker.run_once() == 0
-        assert await worker.run_once() == 0
 
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
@@ -3701,6 +3700,18 @@ class TestRunOnceStaleActiveExecutionRecovery:
                     ],
                 },
             }
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.execution_claimed_by is None
+            assert ws.execution_claim_expires_at is None
+            assert ws.failure_reason == "infrastructure_failure"
+            assert ws.failure_message is not None
+            assert "active execution was lost" in ws.failure_message
         assert inspector.calls == ["awf_pushing_running", "awf_pushing_running"]
 
     @pytest.mark.unit
@@ -3749,6 +3760,10 @@ class TestRunOnceStaleActiveExecutionRecovery:
         assert await worker.run_once() == 0
         assert await worker.run_once() == 0
         assert inspector.calls == ["awf_throttled_running"]
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).get(workspace_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.pushing.value
 
         current_time = 1_060.0
 
@@ -3757,7 +3772,7 @@ class TestRunOnceStaleActiveExecutionRecovery:
         async with session_factory() as s:
             ws = await WorkspaceRepository(s).get(workspace_id)
             assert ws is not None
-            assert ws.status == WorkspaceStatus.pushing.value
+            assert ws.status == WorkspaceStatus.failed.value
 
     @pytest.mark.unit
     async def test_current_in_memory_execution_task_is_not_touched(

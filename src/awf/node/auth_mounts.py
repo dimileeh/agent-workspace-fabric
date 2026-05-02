@@ -287,7 +287,7 @@ def _prepare_isolated_claude_auth(
     if _CLAUDE_DIR_TARGET not in suppressed_targets and source_dir.is_dir():
         target_root.mkdir(parents=True, exist_ok=True)
         if not target_dir.exists():
-            shutil.copytree(source_dir, target_dir)
+            shutil.copytree(source_dir, target_dir, ignore_dangling_symlinks=True)
         mounts.append(
             AuthMount(
                 source=str(target_dir),

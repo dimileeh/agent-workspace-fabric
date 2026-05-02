@@ -89,7 +89,7 @@ RUN install -m 0755 -d /etc/apt/keyrings \
     && docker compose version
 
 # ── Stage 3: GitHub CLI ───────────────────────────────────────────────────
-ARG GH_VERSION=2.91.0
+ARG GH_VERSION=2.92.0
 RUN mkdir -p -m 755 /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
       -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \

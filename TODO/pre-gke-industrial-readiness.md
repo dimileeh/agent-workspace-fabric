@@ -1,6 +1,6 @@
 # AWF Pre-GKE Industrial Readiness Checklist
 
-Last updated: 2026-05-02
+Last updated: 2026-05-03
 
 This checklist is the standing plan for moving AWF from a strong local
 agent-workspace fabric into a robust, open-source-ready local Core that is
@@ -75,11 +75,26 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Security, Secrets, And Egress Policy | Prompt-injection boundary controls for external evidence | `ws_738700a49275436b9b96ec7e` | [#179](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/179) | monitoring_pr | Codex `gpt-5.5`; retry of no-work failed `ws_e3ca2c9f7f8d4f0181890173` after local mirror-chown fix, rebuild, and GC. |
-| P1 MCP And Project Onboarding Client Parity | One-command `awf init` local bootstrap | `ws_0da5b57348cb49d198db9ee2` | [#180](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/180) | monitoring_pr | Claude Code `claude-opus-4-7`; retry of no-work failed `ws_c377ab4f6b6b452196ac7097` after local mirror-chown fix, rebuild, and GC. |
-| P1 MCP And Project Onboarding Client Parity | API / CLI / MCP parity implementation driver | `ws_f4f5d0934e5f45c1ba0d7998` | pending | running | OpenCode `ollama/glm-5.1:cloud`; retry of no-work failed `ws_c6ad9ca557d441e881329388` after local mirror-chown fix, rebuild, and GC. |
-| P1 Operator Console Completion | Agent and exact model workspace filters | `ws_0e5f80c0f2be464db625c766` | [#181](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/181) | monitoring_pr | Gemini `gemini-3.1-pro-preview`; retry of no-work failed `ws_a0f41e0ed1154727b9a35f16` after local mirror-chown fix, rebuild, and GC. |
-| P1 Security, Secrets, And Egress Policy | Restricted egress allowlist templates | `ws_acf536de3fe3434699bee650` | pending | running | OpenCode `ollama/kimi-k2.6:cloud`; retry of no-work failed `ws_b0db737f56e64894a53ad640` after local mirror-chown fix, rebuild, and GC. |
+| P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_3eaa9350209143a799b9323b` | pending | running | OpenCode `ollama/glm-5.1:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
+| P1 Security, Secrets, And Egress Policy | Supply-chain guardrails for package installs and remote scripts | `ws_aa2a61f5148d4bfa81433715` | pending | running | OpenCode `ollama/kimi-k2.6:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
+| P1 MCP And Project Onboarding Client Parity | Define the primary install path for local Core | `ws_b79c214e57cd456aa8fe6d85` | pending | running | Codex `gpt-5.5`; selected 2026-05-03; xhigh effort. |
+| P1 MCP And Project Onboarding Client Parity | Smoke workspace command after `awf init` | `ws_e4f8833c9a0245f29c667293` | pending | running | OpenCode `ollama/deepseek-v4-pro:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
+| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_04a9d8f625294b518130246c` | pending | running | OpenCode `ollama/glm-5.1:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
+| P1 MCP And Project Onboarding Client Parity | MCP operator action tools | `ws_727392c096a64ae8be923081` | pending | running | OpenCode `ollama/kimi-k2.6:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
+| P1 MCP And Project Onboarding Client Parity | CLI command coverage aligned with REST and MCP | `ws_9b8091806b944a17aa8c035f` | pending | running | OpenCode `ollama/deepseek-v4-pro:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
+| P1 MCP And Project Onboarding Client Parity | REST / CLI / MCP alignment contract tests | `ws_a87b4e5dfb854125916b17e6` | pending | running | OpenCode `ollama/glm-5.1:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
+| P1 MCP And Project Onboarding Client Parity | Parity matrix docs/status consistency test | `ws_e35797a52aef483bbe8afc2f` | pending | running | OpenCode `ollama/kimi-k2.6:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
+| P1 MCP And Project Onboarding Client Parity | Copy-paste onboarding prompts for supported agents | `ws_2719a116bfd44d7d9229e26b` | pending | running | Codex `gpt-5.3-codex-spark`; retry of `ws_27115b2c9bfd4a8caeb0de4d` after git ownership repair; old failed workspace destroyed and DB row removed. |
+| P1 Developer Experience And Public Core Surface | Top-level Start Here quickstart | `ws_4315d5da269348cd96caca6c` | pending | running | Codex `gpt-5.5`; selected 2026-05-03; xhigh effort. |
+| P1 Developer Experience And Public Core Surface | Split README into landing and focused docs | `ws_22a6d8d6da1045e989ade541` | pending | running | Codex `gpt-5.3-codex-spark`; selected 2026-05-03; xhigh effort. |
+| P1 Developer Experience And Public Core Surface | Executable first-run DX smoke command | `ws_067afdee2917436fbe929614` | pending | running | Claude Code `claude-opus-4-7`; selected 2026-05-03; maximum effort; retried after injecting `CLAUDE_CODE_OAUTH_TOKEN` into AWF worker. |
+| P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_76484f3efdf0450e99de097b` | pending | running | Gemini `gemini-3.1-pro-preview`; selected 2026-05-03; maximum effort. |
+| P1 Developer Experience And Public Core Surface | SDK stance for Core release | `ws_56dddeb2ffdd4ed5bbfc9301` | pending | running | Gemini `gemini-3.1-pro-preview`; selected 2026-05-03; maximum effort. |
+| P1 Developer Experience And Public Core Surface | Searchable reason-code and error-code catalog | `ws_2570c27db97645b6a9a856f0` | pending | running | OpenCode `ollama/deepseek-v4-pro:cloud`; selected 2026-05-03; retry after local Claude auth-copy fix. |
+| P1 Developer Experience And Public Core Surface | First-time CLI help text | `ws_ff5e71ac962f491981b9f467` | pending | running | Codex `gpt-5.5`; selected 2026-05-03; xhigh effort. |
+| P1 Developer Experience And Public Core Surface | First-run troubleshooting guide | `ws_3f6878d0cd514e7fa5b555ff` | pending | running | Claude Code `claude-opus-4-7`; selected 2026-05-03; maximum effort; retried after injecting `CLAUDE_CODE_OAUTH_TOKEN` into AWF worker. |
+| P1 Developer Experience And Public Core Surface | Docs search and readability checks | `ws_87da12edd4f346b0b050dd79` | pending | running | Gemini `gemini-3.1-pro-preview`; selected 2026-05-03; maximum effort. |
+| P1 Operator Console Completion | Live workspace activity signals | `ws_fd8a47fba9854ca3946dc905` | pending | running | Claude Code `claude-opus-4-7`; selected 2026-05-03; maximum effort; retried after injecting `CLAUDE_CODE_OAUTH_TOKEN` into AWF worker. |
 
 ### Reschedule Required Slices
 
@@ -90,11 +105,17 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
+| _None_ | _None_ | _None_ | _None_ | _None_ | Current reschedule-required slice was retried as `ws_2719a116bfd44d7d9229e26b`. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Security, Secrets, And Egress Policy | Restricted egress allowlist templates | `ws_acf536de3fe3434699bee650` | [#183](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/183) | merged | OpenCode `ollama/kimi-k2.6:cloud`; landed as `0f65407` and reconciled from stale active ledger on 2026-05-03. |
+| P1 MCP And Project Onboarding Client Parity | API / CLI / MCP parity implementation driver | `ws_f4f5d0934e5f45c1ba0d7998` | [#182](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/182) | merged | OpenCode `ollama/glm-5.1:cloud`; landed as `2d23a5a` and reconciled from stale active ledger on 2026-05-03. |
+| P1 Operator Console Completion | Agent and exact model workspace filters | `ws_0e5f80c0f2be464db625c766` | [#181](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/181) | merged | Gemini `gemini-3.1-pro-preview`; landed as `8a89d54` and reconciled from stale active ledger on 2026-05-03. |
+| P1 MCP And Project Onboarding Client Parity | One-command `awf init` local bootstrap | `ws_0da5b57348cb49d198db9ee2` | [#180](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/180) | merged | Claude Code `claude-opus-4-7`; landed as `8f40b39` and reconciled from stale active ledger on 2026-05-03. |
+| P1 Security, Secrets, And Egress Policy | Prompt-injection boundary controls for external evidence | `ws_738700a49275436b9b96ec7e` | [#179](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/179) | merged | Codex `gpt-5.5`; landed as `65d71f8` and reconciled from stale active ledger on 2026-05-03. |
 | P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness priority and decision records | `ws_fcee67cfbc274297b5b692df` | [#178](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/178) | merged | Codex `gpt-5.5`; recovered from the earlier conformance-stall failure, passed validation/coverage, handled comments, waited non-check reviewer settle, and merged 2026-05-02. |
 | P1 Security, Secrets, And Egress Policy | Explicit workspace network postures | `ws_6c58298db1c14c8cb6a6f906` | [#177](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/177) | merged | Codex `gpt-5.5`; merged 2026-05-02; adds explicit workspace network posture support and operator surfacing. |
 | P1 Control-Plane Restart Recovery Hardening | Monitoring PR restart claim recovery | `ws_50038cfe37f64e3ebb11bdae` | [#176](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/176) | merged | Codex `gpt-5.5`; merged 2026-05-02; hardens restart recovery claims for persisted `monitoring_pr` workspaces. |
@@ -337,7 +358,7 @@ reschedule its corresponding slice.
   trusted local dogfood work such as AWF self-development, but it must be
   declared intentionally and surfaced as unrestricted internet access in API,
   MCP, console, `awf profile preview`, and `awf doctor`.
-- [ ] Add reusable restricted egress allowlist templates for common local
+- [x] Add reusable restricted egress allowlist templates for common local
   engineering needs: GitHub/git remotes, configured model provider APIs,
   package registries such as PyPI/npm/uv indexes, OS package mirrors when
   declared, and documentation domains. New project onboarding should recommend
@@ -347,7 +368,7 @@ reschedule its corresponding slice.
   timestamp, and reason code for policy-controlled network attempts; expose
   summary counts in service status, workspace detail, MCP, metrics, and console
   security panels.
-- [ ] Add prompt-injection boundary controls for untrusted external content:
+- [x] Add prompt-injection boundary controls for untrusted external content:
   GitHub comments, PR review text, issues, webpages, package READMEs, and CI
   logs must be passed to agents as quoted evidence with source provenance, not
   as authority over AWF/system/task policy. Add regression tests proving
@@ -489,6 +510,21 @@ coding agent in any project to use AWF for a feature.
   `awf service readiness --format json`, aggregating service readiness, doctor
   diagnostics, provider readiness, cleanup/orphan posture, failure analysis, and
   in-repo demo smoke evidence.
+- [ ] Add launch-time LLM provider readiness preflight for workspace create and
+  retry. Acceptance: AWF checks the selected agent/model provider before
+  provisioning, reports exact provider/model/readiness/auth-source status
+  through REST, CLI, MCP, console, and workspace events, blocks launch or
+  requires an explicit override when required auth/model readiness is missing,
+  and uses a real non-secret provider probe where file/env presence alone can be
+  stale or non-portable, especially Claude Code OAuth and Gemini auth.
+- [ ] Research and decide the local control-plane container UID/GID strategy.
+  Compare keeping API/worker as root with explicit post-provision ownership
+  repair versus running local control-plane containers as the host UID/GID.
+  Acceptance: document Docker socket, SSH/auth mounts, bind-mounted AWF state,
+  linked worktree metadata, Linux/macOS behavior, cleanup permissions, and
+  migration path for existing root-owned state; choose the default local setup
+  and add regression coverage proving workspace containers can run `git status`,
+  `git add`, and `git commit` in `/workspace`.
 - [x] Add PRD SLO thresholds to the Core release scorecard: workspace creation
   success, cleanup success, stuck-state rate, and actionable failure reason
   coverage must meet the local release bar or be explicitly allowlisted with a
@@ -517,12 +553,12 @@ coding agent in any project to use AWF for a feature.
   artifact/image validation for wheel/sdist, CLI entrypoints, control-plane
   image, and agent-runtime image.
 - [ ] Define the primary install path: package-manager install such as `uv tool install aira-awf`/`uv pip install aira-awf`, with git clone as the contributor path.
-- [ ] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
+- [x] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
 - [x] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
 - [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
 - [ ] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
 - [x] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
-- [ ] Convert the parity matrix into an implementation driver: every surface marked
+- [x] Convert the parity matrix into an implementation driver: every surface marked
   missing or partial must map to a concrete P1 implementation issue/slice, with
   REST endpoint, CLI command, MCP tool name, schema/error-code contract, and
   security boundary recorded. The matrix should not be considered complete if it
@@ -608,7 +644,7 @@ without reading the whole repo.
 ## P1: Operator Console Completion
 
 - [x] Show exact agent model and thinking/effort settings for every workspace.
-- [ ] Add console filters for all supported agents, including OpenCode, and an
+- [x] Add console filters for all supported agents, including OpenCode, and an
   exact model filter so operators can view workspaces by provider/model while
   defaulting to all workspaces.
 - [x] Show lifecycle stage start time, end time, and duration.

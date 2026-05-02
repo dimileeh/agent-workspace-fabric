@@ -15,6 +15,7 @@ def test_agent_runtime_installs_github_cli_from_official_apt_repository() -> Non
 
     assert "cli.github.com/packages" in dockerfile
     assert "githubcli-archive-keyring.gpg" in dockerfile
+    assert "ARG GH_VERSION=2.92.0" in dockerfile
     assert "gh=${GH_VERSION}" in dockerfile
     assert "gh --version" in dockerfile
 

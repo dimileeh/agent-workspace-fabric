@@ -79,6 +79,28 @@ def test_service_auth_mounts_include_existing_host_credentials(tmp_path: Path) -
 
 
 @pytest.mark.unit
+def test_service_auth_mounts_skip_dangling_claude_skill_links(tmp_path: Path) -> None:
+    host_home = tmp_path / "host-home"
+    host_claude = host_home / ".claude"
+    skill_dir = host_claude / "skills" / "stale-skill"
+    skill_dir.mkdir(parents=True)
+    (host_claude / "settings.json").write_text('{"theme": "dark"}\n')
+    (skill_dir / "SKILL.md").symlink_to(host_home / "removed" / "SKILL.md")
+    work_dir = tmp_path / "work"
+
+    mounts = resolve_service_auth_mounts(
+        host_home=host_home,
+        work_dir=work_dir,
+        workspace_id="ws_auth",
+        host_env={},
+    )
+
+    claude_home = Path({m.target: m for m in mounts}["/home/agent/.claude"].source)
+    assert (claude_home / "settings.json").read_text() == '{"theme": "dark"}\n'
+    assert not (claude_home / "skills" / "stale-skill" / "SKILL.md").exists()
+
+
+@pytest.mark.unit
 def test_service_auth_mounts_copy_codex_into_workspace_isolated_home(tmp_path: Path) -> None:
     host_home = tmp_path / "host-home"
     host_codex = host_home / ".codex"

@@ -712,6 +712,7 @@ async def retry_workspace_row(
     workspace_id: str,
 ) -> WorkspaceRetryResult:
     """Create a fresh requested workspace cloned from a failed/cancelled attempt."""
+    resolved_settings = get_settings()
     repo = WorkspaceRepository(session)
     source = await repo.get_for_update(workspace_id)
     if source is None:
@@ -806,19 +807,30 @@ async def retry_workspace_row(
     retry_resource_summary: dict[str, Any] = {}
     if latest_source_reservation:
         source_reservation = latest_source_reservation[0]
+        retry_reservation = ResourceReservationPlan(
+            node_id=resolved_settings.worker_node_id or source_reservation.node_id,
+            steady_cpu=resolved_settings.workspace_steady_cpu,
+            steady_memory_gb=resolved_settings.workspace_steady_memory_gb,
+            peak_cpu=resolved_settings.workspace_peak_cpu,
+            peak_memory_gb=resolved_settings.workspace_peak_memory_gb,
+            disk_mb=source_reservation.disk_mb,
+            dind_slots=source_reservation.dind_slots,
+            dind_mode="dind" if source_reservation.dind_slots else "none",
+            phase=source_reservation.phase,
+        )
         await ResourceReservationRepository(session).create(
             workspace_id=retried.id,
             attempt_id=attempt.id,
-            node_id=source_reservation.node_id,
-            steady_cpu=source_reservation.steady_cpu,
-            steady_memory_gb=source_reservation.steady_memory_gb,
-            peak_cpu=source_reservation.peak_cpu,
-            peak_memory_gb=source_reservation.peak_memory_gb,
-            disk_mb=source_reservation.disk_mb,
-            dind_slots=source_reservation.dind_slots,
-            phase=source_reservation.phase,
+            node_id=retry_reservation.node_id,
+            steady_cpu=retry_reservation.steady_cpu,
+            steady_memory_gb=retry_reservation.steady_memory_gb,
+            peak_cpu=retry_reservation.peak_cpu,
+            peak_memory_gb=retry_reservation.peak_memory_gb,
+            disk_mb=retry_reservation.disk_mb,
+            dind_slots=retry_reservation.dind_slots,
+            phase=retry_reservation.phase,
         )
-        retry_resource_summary = _resource_reservation_row_summary(source_reservation)
+        retry_resource_summary = retry_reservation.summary(settings=resolved_settings)
     retry_score = scheduler_score_from_workspace(retried, now=retried.created_at)
     await QueueDecisionRepository(session).create(
         workspace_id=retried.id,

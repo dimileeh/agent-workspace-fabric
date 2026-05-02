@@ -76,6 +76,12 @@ class WorktreeLayout:
     branch_name: str
 
 
+@dataclass(frozen=True)
+class _ChownTarget:
+    path: Path
+    recursive: bool
+
+
 class GitManager:
     """Manages bare mirrors and per-workspace worktrees on the local filesystem."""
 
@@ -320,11 +326,10 @@ class GitManager:
                 operation="worktree.add",
             )
 
-        # The shared bare mirror is owned by the control plane, not by the
-        # agent container. Docker Desktop may reject chown on git object files
-        # inside a host-mounted bare repo, so only prepare the actual worktree
-        # the agent will edit.
-        await self._prepare_agent_writable_tree(worktree_path)
+        await self._prepare_agent_writable_worktree(
+            layout_mirror=mirror_path,
+            worktree_path=worktree_path,
+        )
 
         return WorktreeLayout(
             mirror_path=mirror_path,
@@ -420,15 +425,24 @@ class GitManager:
             )
         return GitResult(returncode=proc.returncode, stdout=stdout, stderr=stderr)
 
-    async def _prepare_agent_writable_tree(self, path: Path) -> None:
-        """Make a root-created checkout writable by the agent-runtime user."""
+    async def _prepare_agent_writable_worktree(
+        self,
+        *,
+        layout_mirror: Path,
+        worktree_path: Path,
+    ) -> None:
+        """Make a root-created linked worktree usable by the agent-runtime user."""
         if self._worktree_owner_uid is None or self._worktree_owner_gid is None:
             return
         if os.geteuid() != 0:
             return
+        targets = _agent_writable_git_targets(
+            layout_mirror=layout_mirror,
+            worktree_path=worktree_path,
+        )
         await asyncio.to_thread(
-            _chown_tree,
-            path,
+            _chown_targets,
+            targets,
             self._worktree_owner_uid,
             self._worktree_owner_gid,
         )
@@ -447,6 +461,57 @@ def _slugify_repo(repo_url: str) -> str:
     if tail.endswith(".git"):
         tail = tail[:-4]
     return _SLUG_RE.sub("-", tail) or "repo"
+
+
+def _agent_writable_git_targets(
+    *,
+    layout_mirror: Path,
+    worktree_path: Path,
+) -> tuple[_ChownTarget, ...]:
+    targets = [_ChownTarget(worktree_path, recursive=True)]
+    linked_git_dir = _linked_worktree_git_dir(worktree_path)
+    if linked_git_dir is not None:
+        targets.append(_ChownTarget(linked_git_dir, recursive=True))
+    targets.append(_ChownTarget(layout_mirror, recursive=False))
+    for child in ("objects", "refs", "logs"):
+        candidate = layout_mirror / child
+        if candidate.exists():
+            targets.append(_ChownTarget(candidate, recursive=True))
+    worktrees = layout_mirror / "worktrees"
+    if worktrees.exists():
+        targets.append(_ChownTarget(worktrees, recursive=False))
+    return tuple(targets)
+
+
+def _linked_worktree_git_dir(worktree_path: Path) -> Path | None:
+    git_file = worktree_path / ".git"
+    if not git_file.is_file():
+        return None
+    try:
+        content = git_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    prefix = "gitdir: "
+    if not content.startswith(prefix):
+        return None
+    git_dir = Path(content.removeprefix(prefix).strip())
+    if not git_dir.is_absolute():
+        git_dir = (worktree_path / git_dir).resolve()
+    return git_dir
+
+
+def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> None:
+    seen: set[tuple[Path, bool]] = set()
+    for target in targets:
+        resolved = target.path.resolve()
+        key = (resolved, target.recursive)
+        if key in seen or not target.path.exists():
+            continue
+        seen.add(key)
+        if target.recursive:
+            _chown_tree(target.path, uid, gid)
+        else:
+            os.chown(target.path, uid, gid)
 
 
 def _chown_tree(path: Path, uid: int, gid: int) -> None:
