@@ -322,6 +322,19 @@ def _normalize_monitor_login(value: str) -> str:
     return re.sub(r"[^a-z0-9]+", "-", login).strip("-")
 
 
+class ProfileConformanceStallPolicy(BaseModel):
+    """Thresholds and recovery action for the conformance stall detector."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    no_output_seconds: int = Field(default=600, gt=0, le=86400)
+    over_duration_seconds: int = Field(default=1800, gt=0, le=86400)
+    repeated_output_threshold: int = Field(default=3, gt=1, le=20)
+    recovery_action: Literal["retry_conformance", "proceed_to_validation", "fail"] = (
+        "retry_conformance"
+    )
+
+
 class ProfilePlanning(BaseModel):
     """Plan → execute → compare policy supplied by the workspace profile."""
 
@@ -336,6 +349,9 @@ class ProfilePlanning(BaseModel):
     max_iterations: int = Field(default=3, ge=0, le=5)
     enforce_plan_only_changes: bool = True
     fail_on_unexplained_deviation: bool = True
+    conformance_stall: ProfileConformanceStallPolicy = Field(
+        default_factory=ProfileConformanceStallPolicy
+    )
 
     @model_validator(mode="after")
     def _validate_paths(self) -> ProfilePlanning:

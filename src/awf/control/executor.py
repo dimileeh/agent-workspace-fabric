@@ -15,8 +15,10 @@ triage. Explicit ``cleanup(workspace_id)`` is a separate operation.
 
 from __future__ import annotations
 
+import hashlib
 import inspect
 import re
+import time
 from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -81,14 +83,20 @@ from awf.runtime.alembic_validation import (
 from awf.runtime.logs import LogStore
 from awf.runtime.planning import (
     AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+    AGENT_STALLED_IN_CONFORMANCE,
     PLAN_CONFORMANCE_UNSATISFIED,
+    ConformanceIterationRecord,
+    ConformanceStallEvidence,
+    ConformanceStallPolicy,
     PlanConformanceReport,
     build_agent_task_prompt,
     build_conformance_failure_evidence,
     build_conformance_prompt,
+    build_conformance_stall_failure_evidence,
     build_execution_prompt,
     build_planning_prompt,
     changed_paths_from_porcelain,
+    classify_conformance_stall,
     parse_conformance_report,
     render_workspace_path,
 )
@@ -2311,6 +2319,33 @@ class WorkspaceExecutor:
         gaps: tuple[str, ...] = ()
         last_report: PlanConformanceReport | None = None
         last_iteration = 0
+        stall_policy = ConformanceStallPolicy(
+            no_output_seconds=planning.conformance_stall.no_output_seconds,
+            over_duration_seconds=planning.conformance_stall.over_duration_seconds,
+            repeated_output_threshold=(
+                planning.conformance_stall.repeated_output_threshold
+            ),
+        )
+        iteration_history: list[ConformanceIterationRecord] = []
+        # Post-planning HEAD. Serves two purposes:
+        #
+        # 1. Implementation baseline for stall commit metrics. Pre-planning
+        #    HEAD (``baseline_sha``) would inflate ``implementation_commit_count``
+        #    if the agent committed the plan artifact during planning — the
+        #    scope check accepts ``committed_paths`` and the agent is not
+        #    blocked from committing the one allowed file.
+        #
+        # 2. Seeds the iteration progress digest. Combining the HEAD commit
+        #    SHA with hashed file bytes lets re-edits to the same dirty file
+        #    *and* commits made during an iteration both register as
+        #    progress; without the HEAD signal an agent that commits each
+        #    iteration leaves a clean working tree and produces identical
+        #    empty digests, which would falsely trip
+        #    ``classify_conformance_stall``'s repeated_output detector.
+        implementation_baseline_sha = await self._git_rev_parse_head(worktree_path)
+        iteration_start_digest = self._digest_dirty_content(
+            worktree_path, dirty_paths, head_sha=implementation_baseline_sha
+        )
         for iteration in range(planning.max_iterations + 1):
             last_iteration = iteration
             await adapter.run(
@@ -2327,18 +2362,44 @@ class WorkspaceExecutor:
                 workspace_id=workspace.id,
             )
             before_compare = await self._changed_paths(worktree_path)
-            compare_result = await adapter.run(
-                compose_project=compose_project,
-                compose_file=compose_file,
-                prompt=build_conformance_prompt(
-                    task_prompt=workspace.task_prompt,
-                    plan_path=plan_path,
-                    report_path=report_path,
-                    iteration=iteration,
-                ),
-                model=model,
-                workspace_id=workspace.id,
+            # Snapshot any pre-existing report digest so the timeout branch
+            # can distinguish a report this compare call produced from a
+            # stale leftover (e.g., a satisfied JSON written by a prior
+            # interrupted run on this workspace, or by an out-of-scope
+            # earlier-phase write). Without this guard, a satisfied JSON
+            # already on disk would short-circuit the loop on
+            # AGENT_IDLE_TIMEOUT/AGENT_TIMEOUT with no evidence the current
+            # compare call produced it.
+            before_report_text = _read_text_if_present(worktree_path / report_path)
+            before_report_digest = (
+                _digest_text(before_report_text) if before_report_text else None
             )
+            iteration_started_at = time.monotonic()
+            compare_error: AgentRunError | None = None
+            compare_result = None
+            try:
+                compare_result = await adapter.run(
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    prompt=build_conformance_prompt(
+                        task_prompt=workspace.task_prompt,
+                        plan_path=plan_path,
+                        report_path=report_path,
+                        iteration=iteration,
+                    ),
+                    model=model,
+                    workspace_id=workspace.id,
+                )
+            except AgentRunError as exc:
+                if exc.reason_code not in {"AGENT_IDLE_TIMEOUT", "AGENT_TIMEOUT"}:
+                    raise
+                compare_error = exc
+
+            elapsed_seconds = time.monotonic() - iteration_started_at
+            # Compute after_compare on both success and timeout paths so the
+            # scope check runs uniformly. Otherwise an idle/timeout that still
+            # leaves a satisfied report could write files outside report_path
+            # and slip past the success short-circuit below.
             after_compare = await self._changed_paths(worktree_path)
             if planning.fail_on_unexplained_deviation:
                 extra = sorted(after_compare - before_compare - {report_path})
@@ -2347,15 +2408,77 @@ class WorkspaceExecutor:
                         scope_phase="conformance",
                         required_paths=(report_path,),
                         offending_paths=extra,
-                        summary=f"conformance phase changed files outside `{report_path}`",
+                        summary=(
+                            f"conformance phase changed files outside `{report_path}`"
+                        ),
                     )
-
-            report_text = (
-                _read_text_if_present(worktree_path / report_path) or compare_result.stdout
+            if compare_error is None:
+                stdout = compare_result.stdout if compare_result is not None else ""
+                stderr = compare_result.stderr if compare_result is not None else ""
+                report_text = (
+                    _read_text_if_present(worktree_path / report_path)
+                    or stdout
+                )
+                report = parse_conformance_report(report_text)
+                last_report = report
+                report_digest = _digest_text(report_text) if report_text else None
+            else:
+                stdout = compare_error.result.stdout
+                stderr = compare_error.result.stderr
+                # Even when the conformance call idles or times out, the agent
+                # may have already written a valid (potentially satisfied)
+                # report. Honor the on-disk report only when its digest
+                # changed during this call so a stale satisfied JSON cannot
+                # short-circuit the loop. Fall back to stdout — which is
+                # always produced by this call — when the file is stale or
+                # absent. A truly fresh write will produce a digest
+                # different from the pre-call snapshot; otherwise the
+                # iteration is treated as no_output by stall classification.
+                current_report_text = _read_text_if_present(
+                    worktree_path / report_path
+                )
+                if (
+                    current_report_text is not None
+                    and _digest_text(current_report_text) != before_report_digest
+                ):
+                    report_text = current_report_text
+                elif stdout:
+                    report_text = stdout
+                else:
+                    report_text = None
+                if report_text:
+                    report = parse_conformance_report(report_text)
+                    last_report = report
+                    report_digest = _digest_text(report_text)
+                else:
+                    report = None
+                    report_digest = None
+            after_head = await self._git_rev_parse_head(worktree_path)
+            after_digest = self._digest_dirty_content(
+                worktree_path, after_compare, head_sha=after_head
             )
-            report = parse_conformance_report(report_text)
-            last_report = report
-            if report.satisfied:
+            worktree_changed = iteration_start_digest != after_digest
+            iteration_start_digest = after_digest
+
+            iteration_history.append(
+                ConformanceIterationRecord(
+                    iteration=iteration,
+                    elapsed_seconds=elapsed_seconds,
+                    report_digest=report_digest,
+                    worktree_changed=worktree_changed,
+                    stdout=stdout,
+                    stderr=stderr,
+                    error_reason_code=(
+                        compare_error.reason_code if compare_error is not None else None
+                    ),
+                )
+            )
+
+            # Honour conformance success before stall classification so a
+            # slow-but-satisfied iteration is not misread as over_duration,
+            # and so a run that wrote a satisfied report before idling /
+            # timing out is not misread as no_output.
+            if report is not None and report.satisfied:
                 _log.info(
                     "executor.planning_conformance_satisfied",
                     workspace_id=workspace.id,
@@ -2363,6 +2486,34 @@ class WorkspaceExecutor:
                     summary=report.summary,
                 )
                 return None
+
+            stall = classify_conformance_stall(
+                history=iteration_history,
+                policy=stall_policy,
+                plan_path=plan_path,
+                report_path=report_path,
+                latest_error=compare_error,
+            )
+            if stall is not None:
+                return await self._build_conformance_stall_failure(
+                    workspace=workspace,
+                    worktree_path=worktree_path,
+                    baseline_sha=implementation_baseline_sha,
+                    last_report=last_report,
+                    stall=stall,
+                    iterations_used=last_iteration + 1,
+                    max_iterations=planning.max_iterations,
+                    plan_path=plan_path,
+                    report_path=report_path,
+                    recovery_action=planning.conformance_stall.recovery_action,
+                )
+
+            if compare_error is not None:
+                # Not classified as a stall, but the conformance call failed —
+                # bubble up so the outer agent_failure handler captures it.
+                raise compare_error
+
+            assert report is not None
             gaps = report.gaps or (report.summary,)
             _log.info(
                 "executor.planning_conformance_needs_iteration",
@@ -2394,6 +2545,124 @@ class WorkspaceExecutor:
             },
         )
 
+    async def _build_conformance_stall_failure(
+        self,
+        *,
+        workspace: Workspace,
+        worktree_path: Path,
+        baseline_sha: str | None,
+        last_report: PlanConformanceReport | None,
+        stall: ConformanceStallEvidence,
+        iterations_used: int,
+        max_iterations: int,
+        plan_path: Path,
+        report_path: Path,
+        recovery_action: str | None = None,
+    ) -> _PlanningRunFailure:
+        head_sha = await self._git_rev_parse_head(worktree_path)
+        commit_count = 0
+        changed_paths: list[str] = []
+        if baseline_sha:
+            commit_count = await self._git_commit_count_since(worktree_path, baseline_sha)
+            try:
+                changed = await self._committed_paths_since(worktree_path, baseline_sha)
+            except RuntimeError:
+                _log.exception(
+                    "executor.planning_conformance_stalled_diff_failed",
+                    workspace_id=workspace.id,
+                    baseline_sha=baseline_sha,
+                )
+            else:
+                changed_paths = sorted(path.as_posix() for path in changed)
+        stall_evidence_payload = build_conformance_stall_failure_evidence(
+            stall=stall,
+            head_sha=head_sha,
+            base_sha=baseline_sha,
+            commit_count=commit_count,
+            changed_paths=changed_paths,
+            recovery_action=recovery_action,
+        )
+        details: dict[str, Any] = {"conformance_stall": stall_evidence_payload}
+        if last_report is not None:
+            details["conformance"] = build_conformance_failure_evidence(
+                report=last_report,
+                iterations_used=iterations_used,
+                max_iterations=max_iterations,
+                plan_path=plan_path,
+                report_path=report_path,
+            )
+        message = (
+            f"plan conformance stalled in iteration {stall.iteration_index} "
+            f"({stall.kind.value}); preserving worktree for recovery"
+        )
+        _log.info(
+            "executor.planning_conformance_stalled",
+            workspace_id=workspace.id,
+            iteration=stall.iteration_index,
+            kind=stall.kind.value,
+            elapsed_seconds=stall.elapsed_seconds,
+            no_output_seconds=stall.no_output_seconds,
+            repeated_output_count=stall.repeated_output_count,
+            implementation_commit_count=commit_count,
+        )
+        try:
+            async with self._session_factory() as session:
+                repo = WorkspaceRepository(session)
+                persisted = await repo.get(workspace.id)
+                if persisted is not None:
+                    await repo.add_event(
+                        persisted,
+                        event_type="workspace.planning_conformance_stalled",
+                        reason_code=AGENT_STALLED_IN_CONFORMANCE,
+                        payload=stall_evidence_payload,
+                    )
+                    await session.commit()
+        except Exception:
+            _log.exception(
+                "executor.planning_conformance_stalled_record_failed",
+                workspace_id=workspace.id,
+            )
+        return _PlanningRunFailure(
+            message=message,
+            reason_code=AGENT_STALLED_IN_CONFORMANCE,
+            details=details,
+        )
+
+    async def _git_rev_parse_head(self, worktree_path: Path) -> str | None:
+        result = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-parse",
+                "HEAD",
+            ]
+        )
+        if not result.ok:
+            return None
+        head = result.stdout.strip()
+        return head or None
+
+    async def _git_commit_count_since(self, worktree_path: Path, since: str) -> int:
+        result = await self._runner.run(
+            [
+                "git",
+                *git_safe_directory_config_args(worktree_path),
+                "-C",
+                str(worktree_path),
+                "rev-list",
+                "--count",
+                f"{since}..HEAD",
+            ]
+        )
+        if not result.ok:
+            return 0
+        try:
+            return int(result.stdout.strip() or "0")
+        except ValueError:
+            return 0
+
     async def _changed_paths(self, worktree_path: Path) -> set[Path]:
         result = await self._runner.run(
             [
@@ -2411,6 +2680,45 @@ class WorkspaceExecutor:
                 f"git status failed while checking workspace changes: {result.stderr}"
             )
         return changed_paths_from_porcelain(result.stdout)
+
+    def _digest_dirty_content(
+        self,
+        worktree_path: Path,
+        paths: set[Path],
+        *,
+        head_sha: str | None = None,
+    ) -> str:
+        """Progress fingerprint combining HEAD SHA and dirty content bytes.
+
+        Path-set equality alone treats iterative re-edits of the same file as
+        no progress; hashing per-file bytes lets repeat edits register as
+        work. Folding ``head_sha`` in additionally lets commits register as
+        progress — an agent that commits each iteration leaves a clean
+        working tree, so the dirty portion would otherwise digest identically
+        and falsely trip ``classify_conformance_stall``'s repeated_output
+        detector. Missing files contribute a deterministic marker so the
+        digest stays stable across iterations whose worktree exists only in
+        mocked git output.
+        """
+        hasher = hashlib.sha256()
+        if head_sha is not None:
+            hasher.update(head_sha.encode("utf-8"))
+            hasher.update(b"\0")
+        # Stream file bytes in fixed-size chunks rather than read_bytes() so a
+        # large generated artifact in the dirty set does not balloon peak
+        # memory on every conformance iteration.
+        chunk_size = 65536
+        for path in sorted(paths, key=lambda p: p.as_posix()):
+            hasher.update(path.as_posix().encode("utf-8"))
+            hasher.update(b"\0")
+            try:
+                with (worktree_path / path).open("rb") as fh:
+                    while chunk := fh.read(chunk_size):
+                        hasher.update(chunk)
+            except OSError:
+                hasher.update(b"<missing>")
+            hasher.update(b"\0")
+        return hasher.hexdigest()
 
     async def _committed_paths_since(self, worktree_path: Path, since: str) -> set[Path]:
         result = await self._runner.run(
@@ -3696,6 +4004,10 @@ def _read_text_if_present(path: Path) -> str | None:
     except OSError:
         return None
     return None
+
+
+def _digest_text(text: str) -> str:
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def _validation_run_command_records(
