@@ -21,14 +21,17 @@ import pytest_mock
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from awf.common.commands import FakeCommandRunner
+from awf.adapters.base import AgentRunError
+from awf.adapters.provider_failures import AGENT_IDLE_TIMEOUT
+from awf.common.commands import CommandResult, FakeCommandRunner
 from awf.common.github_client import RepoRef
 from awf.db.base import Base
-from awf.db.enums import OperationStatus, TaskClass, WorkspaceStatus
-from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON, Operation
+from awf.db.enums import AgentRuntime, OperationStatus, TaskClass, WorkspaceStatus
+from awf.db.models import ADVISORY_PLAN_ARTIFACT_OVERLAP_REASON, Operation, Workspace
 from awf.db.repositories import (
     MergeCandidateRepository,
     OperationRepository,
+    ProviderModelCircuitBreakerRepository,
     StaleReasonCreate,
     StaleReasonRepository,
     TaskAttemptRepository,
@@ -47,9 +50,11 @@ from awf.runtime.pr_monitor import (
     MonitorState,
     NotifyHuman,
     PRStatus,
+    ReportCiFailure,
     ReviewComment,
     ReviewThread,
     ShortCircuitCompleted,
+    SyncBase,
     WaitForCI,
 )
 from awf.runtime.pr_monitor_runner import (
@@ -183,7 +188,7 @@ async def _configure_provider_monitor_workspace(
 async def _provider_recovery_snapshot(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
-) -> tuple[dict[str, object], str, list[Operation]]:
+) -> tuple[dict[str, object], list[dict[str, object]], list[Operation], list[str]]:
     async with factory() as session:
         workspace = await WorkspaceRepository(session).get(workspace_id)
         assert workspace is not None
@@ -192,13 +197,22 @@ async def _provider_recovery_snapshot(
             for event in workspace.events
             if event.event_type == "workspace.provider_recovery_requested"
         ]
-        assert len(source_events) == 1
-        assert source_events[0].payload is not None
-        fallback_id = str(source_events[0].payload["new_workspace_id"])
-        fallback = await WorkspaceRepository(session).get(fallback_id)
-        assert fallback is not None
         operations = list((await session.execute(select(Operation))).scalars())
-        return dict(workspace.task_policy), fallback.id, operations
+        requested_ids = list(
+            (
+                await session.execute(
+                    select(Workspace.id).where(
+                        Workspace.status == WorkspaceStatus.requested.value
+                    )
+                )
+            ).scalars()
+        )
+        return (
+            dict(workspace.task_policy),
+            [dict(event.payload or {}) for event in source_events],
+            operations,
+            requested_ids,
+        )
 
 
 async def _mark_refactor_task(
@@ -955,7 +969,7 @@ async def test_short_circuit_completed_records_completed_monitor_state_operation
 
 
 @pytest.mark.unit
-async def test_review_comment_provider_failure_records_fallback_and_suppresses_next_loop_without_event(
+async def test_review_comment_provider_failure_records_in_place_fallback_for_monitor(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
 ) -> None:
@@ -967,8 +981,16 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
     )
     adapter = FakeAdapter()
     adapter.queue(
-        returncode=1,
-        stderr="Gemini MODEL_CAPACITY_EXHAUSTED: provider is temporarily overloaded",
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor agent idled while addressing PR feedback",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+        )
     )
     runner = make_runner(
         factory=factory,
@@ -979,7 +1001,7 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
         initial_review_grace_period_seconds=75,
     )
 
-    with pytest.raises(ProviderRecoveryFallbackError):
+    with pytest.raises(ProviderRecoveryRetryError):
         await runner._address_review_comment(
             workspace_id=workspace_id,
             repo=RepoRef(owner="dimileeh", name="aira-web"),
@@ -989,7 +1011,8 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
             compose_file=tmp_path / "compose.yml",
         )
 
-    source_policy, fallback_id, operations = await _provider_recovery_snapshot(
+    suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+    source_policy, recovery_events, operations, requested_ids = await _provider_recovery_snapshot(
         factory,
         workspace_id,
     )
@@ -997,33 +1020,33 @@ async def test_review_comment_provider_failure_records_fallback_and_suppresses_n
     retry_operations = [operation for operation in operations if operation.type == "retry"]
 
     assert len(adapter.calls) == 1
+    assert suppressed is False
     assert isinstance(state, dict)
     assert state["action"] == "fallback"
     assert state["target_agent"] == "codex"
     assert state["target_model"] == "gpt-5.3-codex"
-    assert "not_before" in state
-    assert retry_operations
-    assert retry_operations[0].workspace_id == fallback_id
-    assert retry_operations[0].payload["provider_recovery"]["action"] == "fallback"
+    assert "not_before" not in state
+    assert retry_operations == []
+    assert requested_ids == []
+    assert len(recovery_events) == 1
+    assert "new_workspace_id" not in recovery_events[0]
+    assert recovery_events[0]["recovery_scope"] == "monitor_in_place"
+    assert recovery_events[0]["provider_recovery"]["action"] == "fallback"
 
     async with factory() as session:
         source = await WorkspaceRepository(session).get(workspace_id)
-        fallback = await WorkspaceRepository(session).get(fallback_id)
         assert source is not None
-        assert fallback is not None
         cooldown_events = [
             event
             for event in source.events
             if event.event_type == "workspace.provider_recovery_cooldown"
         ]
     assert source.status == WorkspaceStatus.monitoring_pr.value
-    assert fallback.status == WorkspaceStatus.requested.value
-    assert fallback.auto_merge is False
-    assert fallback.initial_review_grace_period_seconds == 75
-    assert fallback.task_policy["pr_monitor"] == {"review_grace_seconds": 75}
-    assert len(cooldown_events) == 1
-    assert cooldown_events[0].reason_code == "PROVIDER_FALLBACK_SELECTED"
-    assert "source" not in cooldown_events[0].payload
+    assert source.agent == "codex"
+    assert source.auto_merge is False
+    assert source.initial_review_grace_period_seconds == 75
+    assert source.task_policy["pr_monitor"] == {"review_grace_seconds": 75}
+    assert cooldown_events == []
 
 
 @pytest.mark.unit
@@ -1057,7 +1080,7 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
         worktrees_root=tmp_path / "worktrees",
     )
 
-    with pytest.raises(ProviderRecoveryFallbackError):
+    with pytest.raises(ProviderRecoveryRetryError):
         await runner._run_ci_fix(
             repo=RepoRef(owner="dimileeh", name="aira-web"),
             pr_number=42,
@@ -1069,20 +1092,23 @@ async def test_ci_fix_usage_limit_failure_records_recovery_and_source_cooldown(
         )
     suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
 
-    source_policy, fallback_id, operations = await _provider_recovery_snapshot(
+    source_policy, recovery_events, operations, requested_ids = await _provider_recovery_snapshot(
         factory,
         workspace_id,
     )
     state = source_policy["provider_recovery_state"]
-    retry_operation = next(operation for operation in operations if operation.type == "retry")
 
-    assert suppressed is True
+    assert suppressed is False
     assert isinstance(state, dict)
+    assert state["action"] == "fallback"
     assert state["target_agent"] == "gemini"
     assert state["target_provider"] == "google"
     assert state["target_model"] == "gemini-2.5-pro"
-    assert retry_operation.workspace_id == fallback_id
-    assert retry_operation.payload["provider_recovery"]["failure_type"] == "usage_limit"
+    assert "not_before" not in state
+    assert requested_ids == []
+    assert [operation for operation in operations if operation.type == "retry"] == []
+    assert len(recovery_events) == 1
+    assert recovery_events[0]["provider_recovery"]["failure_type"] == "usage_limit"
 
 
 @pytest.mark.unit
@@ -1123,20 +1149,363 @@ async def test_sync_base_provider_failure_records_recovery_and_source_cooldown(
         )
     suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
 
-    source_policy, fallback_id, operations = await _provider_recovery_snapshot(
+    source_policy, recovery_events, operations, requested_ids = await _provider_recovery_snapshot(
         factory,
         workspace_id,
     )
     state = source_policy["provider_recovery_state"]
-    retry_operation = next(operation for operation in operations if operation.type == "retry")
 
     assert suppressed is True
     assert isinstance(state, dict)
+    assert state["action"] == "retry"
     assert state["source_workspace_id"] == workspace_id
     assert state["source_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
     assert "not_before" in state
-    assert retry_operation.workspace_id == fallback_id
-    assert retry_operation.payload["provider_recovery"]["retry_after_seconds"] == 120
+    assert requested_ids == []
+    assert [operation for operation in operations if operation.type == "retry"] == []
+    assert len(recovery_events) == 1
+    assert recovery_events[0]["provider_recovery"]["retry_after_seconds"] == 120
+
+
+@pytest.mark.unit
+async def test_provider_circuit_breaker_suppresses_monitor_cli_and_records_event(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        agent="codex",
+        model="gpt-5.3-codex",
+    )
+    async with factory() as session:
+        await ProviderModelCircuitBreakerRepository(session).record_failure(
+            provider="openai",
+            model="gpt-5.3-codex",
+            reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+            failure_fingerprint="capacity:openai:gpt-5.3-codex",
+            workspace_id=workspace_id,
+            attempt_id=None,
+            now=datetime.now(UTC),
+            failure_threshold=1,
+            cooldown_seconds=900,
+        )
+        await session.commit()
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    suppressed = await runner._provider_recovery_suppresses_cli(workspace_id)
+
+    async with factory() as session:
+        workspace = await WorkspaceRepository(session).get(workspace_id)
+        assert workspace is not None
+        events = [
+            event
+            for event in workspace.events
+            if event.event_type == "workspace.provider_recovery_cooldown"
+        ]
+
+    assert suppressed is True
+    assert len(events) == 1
+    assert events[0].reason_code == "PROVIDER_MODEL_CIRCUIT_OPEN"
+    assert events[0].payload["provider"] == "openai"
+    assert events[0].payload["model"] == "gpt-5.3-codex"
+    assert events[0].payload["source"] == "pr_monitor"
+    assert events[0].payload["failure_count"] == 1
+    assert events[0].payload["last_reason_code"] == "AGENT_PROVIDER_CAPACITY_EXHAUSTED"
+
+
+@pytest.mark.unit
+async def test_provider_agent_error_still_raises_full_fallback_for_non_monitor_recovery(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        max_same_provider_retries=0,
+    )
+    mocker.patch(
+        "awf.runtime.pr_monitor_runner.create_provider_recovery_attempt_row",
+        return_value=SimpleNamespace(action="fallback", in_place=False),
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    exc = AgentRunError(
+        agent=AgentRuntime.claude_code,
+        result=CommandResult(
+            returncode=1,
+            stdout="",
+            stderr="Gemini MODEL_CAPACITY_EXHAUSTED",
+        ),
+        details={"provider": "google", "model": "gemini-2.5-pro"},
+    )
+
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await runner._handle_provider_agent_run_error(workspace_id, exc)
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error_cls", "outcome", "reason_code"),
+    [
+        (ProviderRecoveryRetryError, "provider_retry", "PROVIDER_OUTAGE"),
+        (ProviderRecoveryFallbackError, "provider_fallback", "PROVIDER_FALLBACK"),
+    ],
+)
+async def test_sync_base_provider_recovery_exceptions_finish_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    error_cls: type[Exception],
+    outcome: str,
+    reason_code: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _raise_provider_error(**_kwargs: object) -> object:
+        raise error_cls()
+
+    mocker.patch.object(runner, "_run_sync_base", _raise_provider_error)
+
+    with pytest.raises(error_cls):
+        await runner._execute(
+            action=SyncBase(),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_green_status(),
+            state=MonitorState(started_at=0.0),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    operation = operations[0]
+    assert operation.type == "sync_base"
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result == {
+        "status": "failed",
+        "outcome": outcome,
+        "reason_code": reason_code,
+        "pushed": False,
+    }
+    assert operation.error_code == reason_code
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error_cls", "outcome", "reason_code"),
+    [
+        (ProviderRecoveryRetryError, "provider_retry", "PROVIDER_OUTAGE"),
+        (ProviderRecoveryFallbackError, "provider_fallback", "PROVIDER_FALLBACK"),
+    ],
+)
+async def test_ci_repair_provider_recovery_exceptions_finish_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    error_cls: type[Exception],
+    outcome: str,
+    reason_code: str,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _raise_provider_error(**_kwargs: object) -> object:
+        raise error_cls()
+
+    mocker.patch.object(runner, "_run_ci_fix", _raise_provider_error)
+    failures = (CheckFailure(name="tests", conclusion="FAILURE", log_excerpt="boom"),)
+
+    with pytest.raises(error_cls):
+        await runner._execute(
+            action=ReportCiFailure(failures=failures),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_with_ci_failures(_green_status(), failures),
+            state=MonitorState(started_at=0.0),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    async with factory() as session:
+        operations = await OperationRepository(session).list_all(workspace_id=workspace_id)
+    operation = operations[0]
+    assert operation.type == "ci_repair"
+    assert operation.status == OperationStatus.failed.value
+    assert operation.result == {
+        "status": "failed",
+        "outcome": outcome,
+        "reason_code": reason_code,
+        "failure_count": 1,
+        "pushed": False,
+    }
+    assert operation.error_code == reason_code
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error_cls", "terminates"),
+    [
+        (ProviderRecoveryRetryError, False),
+        (ProviderRecoveryFallbackError, True),
+    ],
+)
+async def test_run_handles_provider_recovery_exceptions_without_crashing(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    error_cls: type[Exception],
+    terminates: bool,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    workspace_id = "ws_provider_recovery_run"
+    state = MonitorState(started_at=0.0)
+    workspace = SimpleNamespace(
+        status=WorkspaceStatus.monitoring_pr.value,
+        monitor_started_at=datetime.now(UTC),
+        repo_url="git@github.com:dimileeh/aira-web.git",
+        pr_number=42,
+        branch_base="development",
+        remote_push_branch="awf/ws_provider_recovery_run",
+        task_kind="feature_branch_pr",
+        branch_name="awf/ws_provider_recovery_run",
+    )
+
+    async def _raise_provider_error(**_kwargs: object) -> bool:
+        raise error_cls()
+
+    mocker.patch.object(runner, "_open_monitor_log", mocker.AsyncMock(return_value=None))
+    write_log = mocker.patch.object(runner, "_write_monitor_log", mocker.AsyncMock())
+    mocker.patch.object(runner, "_load_workspace", mocker.AsyncMock(return_value=workspace))
+    mocker.patch.object(runner, "_load_state", return_value=state)
+    mocker.patch.object(
+        runner,
+        "_fetch_status_for_decision",
+        mocker.AsyncMock(return_value=_green_status()),
+    )
+    mocker.patch.object(runner, "_execute", _raise_provider_error)
+    persist_state = mocker.patch.object(runner, "_persist_state", mocker.AsyncMock())
+    terminate_failed = mocker.patch.object(
+        runner,
+        "_terminate_failed",
+        mocker.AsyncMock(),
+    )
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    persist_state.assert_awaited_once_with(workspace_id, state)
+    logged_events = [call.args[1]["event"] for call in write_log.await_args_list]
+    if terminates:
+        assert "monitor.provider_fallback" in logged_events
+        terminate_failed.assert_awaited_once_with(
+            workspace_id,
+            message="monitor: provider recovery fallback triggered",
+            reason_code="PROVIDER_FALLBACK",
+        )
+    else:
+        assert "monitor.provider_retry" in logged_events
+        terminate_failed.assert_not_awaited()
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("error_cls", "terminates"),
+    [
+        (ProviderRecoveryRetryError, False),
+        (ProviderRecoveryFallbackError, True),
+    ],
+)
+async def test_run_handles_provider_recovery_before_state_is_loaded(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    mocker: pytest_mock.MockerFixture,
+    error_cls: type[Exception],
+    terminates: bool,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    workspace_id = "ws_provider_recovery_early"
+    mocker.patch.object(runner, "_open_monitor_log", mocker.AsyncMock(return_value=None))
+    write_log = mocker.patch.object(runner, "_write_monitor_log", mocker.AsyncMock())
+    mocker.patch.object(runner, "_load_workspace", mocker.AsyncMock(side_effect=error_cls()))
+    persist_state = mocker.patch.object(runner, "_persist_state", mocker.AsyncMock())
+    terminate_failed = mocker.patch.object(
+        runner,
+        "_terminate_failed",
+        mocker.AsyncMock(),
+    )
+
+    await runner.run(
+        workspace_id=workspace_id,
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    persist_state.assert_not_awaited()
+    logged_events = [call.args[1]["event"] for call in write_log.await_args_list]
+    if terminates:
+        assert "monitor.provider_fallback" in logged_events
+        terminate_failed.assert_awaited_once_with(
+            workspace_id,
+            message="monitor: provider recovery fallback triggered",
+            reason_code="PROVIDER_FALLBACK",
+        )
+    else:
+        assert "monitor.provider_retry" in logged_events
+        terminate_failed.assert_not_awaited()
 
 
 class TestParseVerdict:
@@ -1919,6 +2288,82 @@ async def test_review_comment_provider_failure_records_retry_and_ignores_comment
 
     assert "C_provider" not in state.threads_addressed_ids
 
+
+@pytest.mark.unit
+async def test_comment_repair_idle_timeout_uses_in_place_monitor_fallback(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    await _configure_provider_monitor_workspace(
+        factory,
+        workspace_id,
+        max_same_provider_retries=0,
+    )
+
+    adapter = FakeAdapter()
+    adapter.queue(
+        exc=AgentRunError(
+            agent=AgentRuntime.claude_code,
+            result=CommandResult(
+                returncode=1,
+                stdout="",
+                stderr="monitor idle timeout while addressing comments",
+            ),
+            reason_code=AGENT_IDLE_TIMEOUT,
+            details={"provider": "google", "model": "gemini-2.5-pro"},
+        )
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=adapter,
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    comment = ReviewComment(
+        comment_id="C_idle_timeout",
+        body_excerpt="please fix",
+        author="review-bot",
+    )
+    state = MonitorState(started_at=0.0)
+
+    with pytest.raises(ProviderRecoveryRetryError):
+        await runner._execute(
+            action=AddressComments(threads=(), review_comments=(comment,)),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_status(reviews=(comment,)),
+            state=state,
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    source_policy, recovery_events, operations, requested_ids = await _provider_recovery_snapshot(
+        factory,
+        workspace_id,
+    )
+    comment_ops = [operation for operation in operations if operation.type == "comment_repair"]
+
+    assert "C_idle_timeout" not in state.threads_addressed_ids
+    assert requested_ids == []
+    assert source_policy["provider_recovery_state"]["action"] == "fallback"
+    assert source_policy["provider_recovery_state"]["target_agent"] == "codex"
+    assert len(recovery_events) == 1
+    assert "new_workspace_id" not in recovery_events[0]
+    assert recovery_events[0]["provider_recovery"]["decision_reason_code"] == (
+        "PROVIDER_FALLBACK_SELECTED"
+    )
+    assert len(comment_ops) == 1
+    assert comment_ops[0].status == OperationStatus.failed.value
+    assert comment_ops[0].result["outcome"] == "provider_retry"
+
+
 @pytest.mark.unit
 async def test_review_comment_deterministic_failure_is_marked_addressed(
     factory: async_sessionmaker[AsyncSession],
@@ -1969,4 +2414,3 @@ async def test_review_comment_deterministic_failure_is_marked_addressed(
     assert terminal is False
     assert "C_deterministic" in state.threads_addressed_ids
     assert state.threads_addressed_ids["C_deterministic"] == "agent_failed"
-
