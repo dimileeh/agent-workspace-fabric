@@ -50,33 +50,37 @@ def _strip_backticks(s: str) -> str:
 def _extract_rest_paths_from_source() -> dict[str, str]:
     paths: dict[str, str] = {}
     routes_dir = SRC_ROOT / "api" / "routes"
+    router_decl_pattern = re.compile(
+        r"(?P<var>\w+)\s*=\s*APIRouter\([^)]*prefix\s*=\s*\"(?P<prefix>[^\"]+)\"",
+    )
+    router_decl_no_prefix = re.compile(
+        r"(?P<var>\w+)\s*=\s*APIRouter\((?![^)]*prefix\s*=)",
+    )
     route_pattern = re.compile(
-        r"@router\.(get|post|put|delete|patch|websocket)\s*\(\s*[\n\r]*['\"]([^'\"]*?)['\"]",
+        r"@(?P<router>\w+)\.(get|post|put|delete|patch|websocket)\s*\(\s*[\n\r]*['\"]([^'\"]*?)['\"]",
         re.MULTILINE,
     )
     for route_file in routes_dir.glob("*.py"):
         if route_file.name.startswith("_"):
             continue
         content = route_file.read_text(encoding="utf-8")
-        prefix_match = re.search(
-            r'APIRouter\([^)]*prefix\s*=\s*"([^"]+)"',
-            content,
-        )
-        prefix = prefix_match.group(1) if prefix_match else ""
+        router_prefixes: dict[str, str] = {}
+        for m in router_decl_pattern.finditer(content):
+            router_prefixes[m.group("var")] = m.group("prefix")
+        for m in router_decl_no_prefix.finditer(content):
+            if m.group("var") not in router_prefixes:
+                router_prefixes[m.group("var")] = ""
         for m in route_pattern.finditer(content):
-            method = m.group(1).upper()
-            path_suffix = m.group(2)
+            router_var = m.group("router")
+            if router_var not in router_prefixes:
+                continue
+            prefix = router_prefixes[router_var]
+            method = m.group(2).upper()
+            if method == "WEBSOCKET":
+                method = "WS"
+            path_suffix = m.group(3)
             full_path = prefix + path_suffix
             paths[f"{method} {full_path}"] = full_path
-    paths["GET /v1/workspaces"] = "/v1/workspaces"
-    paths["POST /v1/workspaces"] = "/v1/workspaces"
-    paths["GET /v1/workspaces/{workspace_id}"] = "/v1/workspaces/{workspace_id}"
-    paths["POST /v2/workspaces"] = "/v2/workspaces"
-    paths["GET /v1/merge-queue"] = "/v1/merge-queue"
-    paths["GET /v1/tasks"] = "/v1/tasks"
-    paths["GET /v1/events"] = "/v1/events"
-    paths["DELETE /v1/workspaces/{workspace_id}"] = "/v1/workspaces/{workspace_id}"
-    paths["WS /v1/workspaces/{workspace_id}/ws"] = "/v1/workspaces/{workspace_id}/ws"
     return paths
 
 
