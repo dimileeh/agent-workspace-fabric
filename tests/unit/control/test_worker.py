@@ -558,6 +558,41 @@ class TestRunOnce:
 
         assert decisions == []
 
+    @pytest.mark.unit
+    async def test_requested_ordered_decision_failure_prevents_provision_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "record-before-provision",
+            create_task_attempt=True,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        async def _fail_record_ordered_decisions(
+            workspace_ids: list[str],
+            *,
+            reason_code: str,
+        ) -> None:
+            assert workspace_ids == [requested_id]
+            assert reason_code == "ORDERED_REQUESTED_PROVISIONING"
+            raise RuntimeError("ordered decision commit failed")
+
+        worker._record_ordered_decisions = _fail_record_ordered_decisions  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="ordered decision commit failed"):
+            await worker.run_once()
+
+        assert provisioner.calls == []
+
 
 class TestRunOnceExecution:
     @pytest.mark.unit
@@ -732,6 +767,50 @@ class TestRunOnceExecution:
         assert decisions[0].decision == "ordered"
         assert decisions[0].reason_code == "ORDERED_READY_EXECUTION"
         assert decisions[0].score_summary["base_priority"] == 33
+
+    @pytest.mark.unit
+    async def test_ready_ordered_decision_failure_prevents_execution_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "record-before-execute",
+            create_task_attempt=True,
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        async def _fail_record_ordered_decisions(
+            workspace_ids: list[str],
+            *,
+            reason_code: str,
+        ) -> None:
+            if not workspace_ids:
+                return
+            assert workspace_ids == [ready_id]
+            assert reason_code == "ORDERED_READY_EXECUTION"
+            raise RuntimeError("ordered decision commit failed")
+
+        worker._record_ordered_decisions = _fail_record_ordered_decisions  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="ordered decision commit failed"):
+            await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
 
     @pytest.mark.unit
     async def test_ordered_decisions_avoid_per_workspace_attempt_and_decision_reads(
@@ -1806,6 +1885,45 @@ class TestRunOnceMonitorRecovery:
 
         assert executor.calls == []
         assert executor.resume_calls == [monitor_id]
+
+    @pytest.mark.unit
+    async def test_monitor_ordered_decision_failure_prevents_resume_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "record-before-monitor-resume",
+            create_task_attempt=True,
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        async def _fail_record_ordered_decisions(
+            workspace_ids: list[str],
+            *,
+            reason_code: str,
+        ) -> None:
+            assert workspace_ids == [monitor_id]
+            assert reason_code == "ORDERED_MONITOR_RESUME"
+            raise RuntimeError("ordered decision commit failed")
+
+        worker._record_ordered_decisions = _fail_record_ordered_decisions  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="ordered decision commit failed"):
+            await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
+        assert executor.resume_calls == []
 
     @pytest.mark.unit
     async def test_monitoring_pr_provider_recovery_cooldown_suppresses_resume_without_event(

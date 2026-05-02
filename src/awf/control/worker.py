@@ -211,6 +211,10 @@ class ControlWorker:
         if requested_ids:
             requested_ids = await self._claim_requested_ids(requested_ids)
         if requested_ids:
+            await self._record_ordered_decisions(
+                requested_ids,
+                reason_code=ORDERED_REQUESTED_PROVISIONING_REASON,
+            )
             provision_tasks = [
                 asyncio.create_task(
                     self._safely_provision_claimed(ws_id),
@@ -218,13 +222,7 @@ class ControlWorker:
                 )
                 for ws_id in requested_ids
             ]
-            try:
-                await self._record_ordered_decisions(
-                    requested_ids,
-                    reason_code=ORDERED_REQUESTED_PROVISIONING_REASON,
-                )
-            finally:
-                await asyncio.gather(*provision_tasks, return_exceptions=False)
+            await asyncio.gather(*provision_tasks, return_exceptions=False)
             dispatched_ids.update(requested_ids)
 
         if self._executor is not None:
@@ -244,13 +242,17 @@ class ControlWorker:
                     monitoring_ids,
                     limit=execution_slots,
                 )
-                monitor_dispatched = self._dispatch_monitor_resumes(
+                monitor_dispatch_ids = self._dispatchable_execution_ids(
                     monitoring_ids,
                     limit=execution_slots,
                 )
                 await self._record_ordered_decisions(
-                    [ws_id for ws_id in monitoring_ids if ws_id in monitor_dispatched],
+                    monitor_dispatch_ids,
                     reason_code=ORDERED_MONITOR_RESUME_REASON,
+                )
+                monitor_dispatched = self._dispatch_monitor_resumes(
+                    monitor_dispatch_ids,
+                    limit=execution_slots,
                 )
                 dispatched_ids.update(monitor_dispatched)
 
@@ -265,13 +267,17 @@ class ControlWorker:
                     expected=WorkspaceStatus.ready,
                     action="execute",
                 )
-                ready_dispatched = self._dispatch_ready_executions(
+                ready_dispatch_ids = self._dispatchable_execution_ids(
                     ready_ids,
                     limit=execution_slots,
                 )
                 await self._record_ordered_decisions(
-                    [ws_id for ws_id in ready_ids if ws_id in ready_dispatched],
+                    ready_dispatch_ids,
                     reason_code=ORDERED_READY_EXECUTION_REASON,
+                )
+                ready_dispatched = self._dispatch_ready_executions(
+                    ready_dispatch_ids,
+                    limit=execution_slots,
                 )
                 dispatched_ids.update(ready_dispatched)
 
@@ -908,6 +914,16 @@ class ControlWorker:
 
     def _available_execution_slots(self) -> int:
         return max(0, self._config.max_concurrent_executions - len(self._execution_tasks))
+
+    def _dispatchable_execution_ids(self, workspace_ids: list[str], *, limit: int) -> list[str]:
+        dispatchable: list[str] = []
+        for workspace_id in workspace_ids:
+            if len(dispatchable) >= limit:
+                break
+            if workspace_id in self._execution_tasks:
+                continue
+            dispatchable.append(workspace_id)
+        return dispatchable
 
     def _dispatch_ready_executions(self, workspace_ids: list[str], *, limit: int) -> set[str]:
         dispatched: set[str] = set()
