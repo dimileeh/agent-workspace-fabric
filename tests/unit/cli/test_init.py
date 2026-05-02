@@ -467,6 +467,22 @@ def test_init_without_path_no_write_env_flag_skips_seeding(
 
 
 @pytest.mark.unit
+def test_init_without_path_warns_when_env_example_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+    _stub_bootstrap_mode(monkeypatch)
+
+    result = _runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, result.output
+    assert not (tmp_path / ".env").exists()
+    assert "no .env.example found" in result.output
+    assert "AWF repository root" in result.output
+
+
+@pytest.mark.unit
 def test_init_without_path_runs_docker_availability_check_first(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

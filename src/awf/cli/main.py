@@ -599,6 +599,12 @@ def _run_init_service_bootstrap(
                 typer.echo("  wrote .env from .env.example")
         else:
             env_action = "no_example"
+            if pretty:
+                typer.echo(
+                    "  no .env.example found in current directory; skipped .env "
+                    "creation (run `awf init` from the AWF repository root if "
+                    "you expected one)"
+                )
 
     options = ServiceBootstrapOptions(
         timeout_seconds=timeout_seconds,
