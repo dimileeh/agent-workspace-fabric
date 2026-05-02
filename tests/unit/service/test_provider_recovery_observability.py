@@ -434,6 +434,81 @@ def test_recovery_payload_includes_provider_recovery_state() -> None:
     assert summary.provider_recovery.reason_code == PROVIDER_RETRY_DELAYED_REASON
 
 
+def test_recovery_payload_provider_recovery_includes_all_state_view_fields() -> None:
+    from awf.service.workspace_observability import (
+        WorkspaceRecoverySummary,
+    )
+
+    now = datetime.now(UTC)
+    not_before = now + timedelta(minutes=5)
+    workspace = _workspace_with_provider_recovery_state(
+        action="retry",
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        source_provider="openai",
+        source_model="gpt-4",
+        retry_attempt_number=2,
+        fallback_attempt_number=0,
+        source_workspace_id="ws-source-042",
+        source_attempt_id="att-042",
+        not_before=not_before.isoformat(),
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    summary = WorkspaceRecoverySummary(
+        from_state="running",
+        to_state="failed",
+        reason_code="agent_failure",
+        action="retry",
+        recovery_mode=None,
+        started_at=now,
+        current_operation=None,
+        summary="Reverted running -> failed for agent_failure.",
+        payload=None,
+        provider_recovery=view,
+    )
+
+    pr = summary.provider_recovery
+    assert pr is not None
+    serialized = {
+        "action": pr.action,
+        "reason_code": pr.reason_code,
+        "source_provider": pr.source_provider,
+        "source_model": pr.source_model,
+        "retry_attempt_number": pr.retry_attempt_number,
+        "fallback_attempt_number": pr.fallback_attempt_number,
+        "fallback_target": (
+            {
+                "agent": pr.fallback_target.agent,
+                "provider": pr.fallback_target.provider,
+                "model": pr.fallback_target.model,
+            }
+            if pr.fallback_target is not None
+            else None
+        ),
+        "cooldown_until": (
+            pr.cooldown_until.isoformat()
+            if pr.cooldown_until is not None
+            else None
+        ),
+        "next_eligible_at": (
+            pr.next_eligible_at.isoformat()
+            if pr.next_eligible_at is not None
+            else None
+        ),
+        "source_workspace_id": pr.source_workspace_id,
+        "source_attempt_id": pr.source_attempt_id,
+        "recommended_action": pr.recommended_action,
+        "terminal": pr.terminal,
+    }
+    assert serialized["source_provider"] == "openai"
+    assert serialized["source_model"] == "gpt-4"
+    assert serialized["retry_attempt_number"] == 2
+    assert serialized["fallback_attempt_number"] == 0
+    assert serialized["source_workspace_id"] == "ws-source-042"
+    assert serialized["source_attempt_id"] == "att-042"
+    assert serialized["terminal"] is False
+
+
 def test_validate_recovery_action_accepts_known_actions() -> None:
     assert _validate_recovery_action("retry") == "retry"
     assert _validate_recovery_action("fallback") == "fallback"

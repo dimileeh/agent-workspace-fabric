@@ -627,6 +627,10 @@ def recovery_payload(
             {
                 "action": summary.provider_recovery.action,
                 "reason_code": summary.provider_recovery.reason_code,
+                "source_provider": summary.provider_recovery.source_provider,
+                "source_model": summary.provider_recovery.source_model,
+                "retry_attempt_number": summary.provider_recovery.retry_attempt_number,
+                "fallback_attempt_number": summary.provider_recovery.fallback_attempt_number,
                 "fallback_target": (
                     {
                         "agent": summary.provider_recovery.fallback_target.agent,
@@ -646,7 +650,10 @@ def recovery_payload(
                     if summary.provider_recovery.next_eligible_at is not None
                     else None
                 ),
+                "source_workspace_id": summary.provider_recovery.source_workspace_id,
+                "source_attempt_id": summary.provider_recovery.source_attempt_id,
                 "recommended_action": summary.provider_recovery.recommended_action,
+                "terminal": summary.provider_recovery.terminal,
             }
             if summary.provider_recovery is not None
             else None
