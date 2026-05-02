@@ -59,17 +59,26 @@ def _extract_cli_commands() -> set[str]:
 
 def _extract_error_codes() -> set[str]:
     codes: set[str] = set()
-    controls_content = (SRC_ROOT / "service" / "controls.py").read_text(encoding="utf-8")
-    for m in re.finditer(r'error_code[^=]*=\s*"?([A-Z_]{3,})"?', controls_content):
-        code = m.group(1)
-        if code.isupper() and "_" in code:
-            codes.add(code)
-    for route_file in (SRC_ROOT / "api" / "routes").glob("*.py"):
-        content = route_file.read_text(encoding="utf-8")
-        for m in re.finditer(r'"error_code":\s*"([A-Z_]+)"', content):
-            codes.add(m.group(1))
-        for m in re.finditer(r'error_code="([A-Z_]+)"', content):
-            codes.add(m.group(1))
+    source_dirs = [
+        SRC_ROOT / "service",
+        SRC_ROOT / "api" / "routes",
+        SRC_ROOT / "runtime",
+        SRC_ROOT / "control",
+        SRC_ROOT / "mcp",
+    ]
+    for source_dir in source_dirs:
+        if not source_dir.is_dir():
+            continue
+        for py_file in source_dir.glob("*.py"):
+            content = py_file.read_text(encoding="utf-8")
+            for m in re.finditer(r'error_code[^=]*=\s*"?([A-Z_]{3,})"?', content):
+                code = m.group(1)
+                if code.isupper() and "_" in code:
+                    codes.add(code)
+            for m in re.finditer(r'"error_code":\s*"([A-Z_]+)"', content):
+                codes.add(m.group(1))
+            for m in re.finditer(r'error_code="([A-Z_]+)"', content):
+                codes.add(m.group(1))
     return codes
 
 
@@ -249,7 +258,7 @@ def test_parity_matrix_error_codes_mentioned_exist_in_controls() -> None:
         if code in {"N/A"}:
             continue
         assert code in error_codes, (
-            f"Error code '{code}' in parity matrix not found in controls.py"
+            f"Error code '{code}' in parity matrix not found in source modules"
         )
 
 
