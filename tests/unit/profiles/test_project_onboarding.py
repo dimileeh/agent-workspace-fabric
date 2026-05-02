@@ -9,7 +9,13 @@ import pytest
 import yaml
 
 import awf.profiles.onboarding as onboarding_module
-from awf.profiles.models import DockerMode, EgressMode, ProfileEgress, ProfileSecurity, WorkspaceProfile
+from awf.profiles.models import (
+    DockerMode,
+    EgressMode,
+    ProfileEgress,
+    ProfileSecurity,
+    WorkspaceProfile,
+)
 from awf.profiles.onboarding import (
     PreviewDiagnostics,
     ProjectInspection,
