@@ -14,13 +14,20 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from awf.common.coordination import MAX_COORDINATION_WARNING_OVERLAPS
+from awf.common.redaction import redact_secrets
+
+if TYPE_CHECKING:
+    from awf.adapters.base import AgentRunError
 
 PLAN_CONFORMANCE_UNSATISFIED = "PLAN_CONFORMANCE_UNSATISFIED"
 PLAN_CONFORMANCE_REPORTED = "PLAN_CONFORMANCE_REPORTED"
 AGENT_PLAN_PHASE_SCOPE_VIOLATION = "AGENT_PLAN_PHASE_SCOPE_VIOLATION"
+AGENT_STALLED_IN_CONFORMANCE = "AGENT_STALLED_IN_CONFORMANCE"
+AGENT_IDLE_TIMEOUT_REASON_CODE = "AGENT_IDLE_TIMEOUT"
+AGENT_TIMEOUT_REASON_CODE = "AGENT_TIMEOUT"
 MAX_CONFORMANCE_GAPS = 20
 MAX_CONFORMANCE_TEXT_CHARS = 1000
 
@@ -44,6 +51,51 @@ class PlanConformanceReport:
     @property
     def satisfied(self) -> bool:
         return self.status == PlanConformanceStatus.satisfied
+
+
+class ConformanceStallKind(StrEnum):
+    """Why the conformance loop is judged to be stalled."""
+
+    no_output = "no_output"
+    repeated_output = "repeated_output"
+    over_duration = "over_duration"
+
+
+@dataclass(frozen=True)
+class ConformanceStallPolicy:
+    """Thresholds that decide whether conformance progress has stalled."""
+
+    no_output_seconds: int = 600
+    over_duration_seconds: int = 1800
+    repeated_output_threshold: int = 3
+
+
+@dataclass(frozen=True)
+class ConformanceIterationRecord:
+    """Per-iteration evidence consumed by ``classify_conformance_stall``."""
+
+    iteration: int
+    elapsed_seconds: float
+    report_digest: str | None
+    worktree_changed: bool
+    stdout: str = ""
+    stderr: str = ""
+    error_reason_code: str | None = None
+
+
+@dataclass(frozen=True)
+class ConformanceStallEvidence:
+    """Structured evidence for a detected conformance stall."""
+
+    kind: ConformanceStallKind
+    iteration_index: int
+    elapsed_seconds: float
+    no_output_seconds: float
+    repeated_output_count: int
+    last_report_digest: str | None
+    plan_path: str
+    report_path: str
+    last_output_excerpt: str = ""
 
 
 def render_workspace_path(template: str, *, workspace_id: str) -> Path:
@@ -269,6 +321,239 @@ def build_conformance_failure_evidence(
         "plan_path": plan_path.as_posix(),
         "report_path": report_path.as_posix(),
     }
+
+
+def classify_conformance_stall(
+    *,
+    history: Sequence[ConformanceIterationRecord],
+    policy: ConformanceStallPolicy,
+    plan_path: Path,
+    report_path: Path,
+    latest_error: AgentRunError | None,
+) -> ConformanceStallEvidence | None:
+    """Decide whether the conformance loop has stalled.
+
+    Returns ``None`` for the deterministic ``needs_iteration`` case so the
+    existing ``PLAN_CONFORMANCE_UNSATISFIED`` path keeps owning real plan
+    gaps. Returns structured evidence only when an explicit stall signal is
+    present: an idle timeout (no_output), a wall-clock timeout (over_duration),
+    repeated identical reports without any worktree change, or a cumulative
+    loop duration above the policy.
+    """
+
+    if not history:
+        return None
+
+    last = history[-1]
+    cumulative_seconds = sum(record.elapsed_seconds for record in history)
+    plan_path_text = plan_path.as_posix()
+    report_path_text = report_path.as_posix()
+
+    error_reason_code = (
+        latest_error.reason_code if latest_error is not None else last.error_reason_code
+    )
+    if error_reason_code == AGENT_IDLE_TIMEOUT_REASON_CODE:
+        # AGENT_IDLE_TIMEOUT is an explicit signal raised by the adapter when
+        # AWF_AGENT_IDLE_TIMEOUT_SECONDS elapses without output. That operator-
+        # configured timeout is the gate for this branch, not policy.no_output_seconds
+        # (which gates the empty-streak detector below). Gating both on the same
+        # threshold would swallow legitimate idle-timeout signals whenever the
+        # adapter's idle timeout is lower than the loop policy.
+        excerpt = _stall_output_excerpt(latest_error, last)
+        return ConformanceStallEvidence(
+            kind=ConformanceStallKind.no_output,
+            iteration_index=last.iteration,
+            elapsed_seconds=cumulative_seconds,
+            no_output_seconds=last.elapsed_seconds,
+            repeated_output_count=0,
+            last_report_digest=last.report_digest,
+            plan_path=plan_path_text,
+            report_path=report_path_text,
+            last_output_excerpt=excerpt,
+        )
+
+    if error_reason_code == AGENT_TIMEOUT_REASON_CODE:
+        excerpt = _stall_output_excerpt(latest_error, last)
+        return ConformanceStallEvidence(
+            kind=ConformanceStallKind.over_duration,
+            iteration_index=last.iteration,
+            elapsed_seconds=cumulative_seconds,
+            no_output_seconds=0.0,
+            repeated_output_count=0,
+            last_report_digest=last.report_digest,
+            plan_path=plan_path_text,
+            report_path=report_path_text,
+            last_output_excerpt=excerpt,
+        )
+
+    empty_streak_seconds = 0.0
+    empty_streak_iterations = 0
+    # The executor reads the report file from disk each iteration, so a
+    # report left behind by an earlier iteration keeps yielding the same
+    # non-None digest even when the current iteration produced no output.
+    # Treat the digest as fresh progress only when it differs from the
+    # immediately-prior iteration's digest. At iteration 0 there is no
+    # prior record to compare against, and a preserved worktree (e.g.,
+    # retry of a salvaged workspace) can leave a stale report on disk
+    # before the loop even starts; fall back to ``worktree_changed`` so
+    # the digest only counts as fresh when iteration 0 actually moved
+    # the worktree.
+    for index in range(len(history) - 1, -1, -1):
+        record = history[index]
+        prior = history[index - 1] if index > 0 else None
+        fresh_report_digest = record.report_digest is not None and (
+            (prior is None and record.worktree_changed)
+            or (prior is not None and prior.report_digest != record.report_digest)
+        )
+        if record.stdout.strip() or record.stderr.strip() or fresh_report_digest:
+            break
+        empty_streak_seconds += record.elapsed_seconds
+        empty_streak_iterations += 1
+    if empty_streak_iterations > 0 and empty_streak_seconds >= policy.no_output_seconds:
+        return ConformanceStallEvidence(
+            kind=ConformanceStallKind.no_output,
+            iteration_index=last.iteration,
+            elapsed_seconds=cumulative_seconds,
+            no_output_seconds=empty_streak_seconds,
+            repeated_output_count=0,
+            last_report_digest=last.report_digest,
+            plan_path=plan_path_text,
+            report_path=report_path_text,
+            last_output_excerpt=_stall_output_excerpt(latest_error, last),
+        )
+
+    threshold = max(2, policy.repeated_output_threshold)
+    if last.report_digest is not None and len(history) >= threshold:
+        recent = history[-threshold:]
+        same_digest = all(record.report_digest == last.report_digest for record in recent)
+        no_progress = all(not record.worktree_changed for record in recent)
+        if same_digest and no_progress:
+            return ConformanceStallEvidence(
+                kind=ConformanceStallKind.repeated_output,
+                iteration_index=last.iteration,
+                elapsed_seconds=cumulative_seconds,
+                no_output_seconds=0.0,
+                repeated_output_count=threshold,
+                last_report_digest=last.report_digest,
+                plan_path=plan_path_text,
+                report_path=report_path_text,
+                last_output_excerpt=_stall_output_excerpt(None, last),
+            )
+
+    if cumulative_seconds > policy.over_duration_seconds:
+        return ConformanceStallEvidence(
+            kind=ConformanceStallKind.over_duration,
+            iteration_index=last.iteration,
+            elapsed_seconds=cumulative_seconds,
+            no_output_seconds=0.0,
+            repeated_output_count=0,
+            last_report_digest=last.report_digest,
+            plan_path=plan_path_text,
+            report_path=report_path_text,
+            last_output_excerpt=_stall_output_excerpt(None, last),
+        )
+
+    return None
+
+
+def build_conformance_stall_failure_evidence(
+    *,
+    stall: ConformanceStallEvidence,
+    head_sha: str | None,
+    base_sha: str | None,
+    commit_count: int,
+    changed_paths: Sequence[str] = (),
+    recovery_action: str | None = None,
+) -> dict[str, Any]:
+    """Return bounded structured evidence for a detected conformance stall."""
+
+    salvage_paths = [
+        _safe_conformance_text(path)
+        for path in list(changed_paths)[:MAX_CONFORMANCE_GAPS]
+        if _safe_conformance_text(path)
+    ]
+    payload: dict[str, Any] = {
+        "reason_code": AGENT_STALLED_IN_CONFORMANCE,
+        "kind": stall.kind.value,
+        "iteration_index": stall.iteration_index,
+        "elapsed_seconds": stall.elapsed_seconds,
+        "no_output_seconds": stall.no_output_seconds,
+        "repeated_output_count": stall.repeated_output_count,
+        "last_report_digest": stall.last_report_digest,
+        "plan_path": stall.plan_path,
+        "report_path": stall.report_path,
+        "last_output_excerpt": _safe_conformance_text(stall.last_output_excerpt),
+        "salvage_hint": {
+            "plan_path": stall.plan_path,
+            "report_path": stall.report_path,
+            "implementation_commit_count": max(0, commit_count),
+            "head_sha": head_sha,
+            "base_sha": base_sha,
+            "changed_paths": salvage_paths,
+        },
+    }
+    if recovery_action is not None:
+        payload["recovery_action"] = recovery_action
+    return payload
+
+
+def build_conformance_stall_recovery_prompt(
+    *,
+    task_prompt: str,
+    stall_evidence: Mapping[str, Any],
+    prior_gaps: Sequence[str] = (),
+) -> str:
+    """Resume an agent with conformance-only instructions after a stall."""
+
+    plan_path = _safe_conformance_text(stall_evidence.get("plan_path"))
+    report_path = _safe_conformance_text(stall_evidence.get("report_path"))
+    plan_line = (
+        f"`{plan_path}`" if plan_path else "the existing plan artifact"
+    )
+    report_line = (
+        f"`{report_path}`" if report_path else "the existing conformance report path"
+    )
+    gap_lines = (
+        "\n".join(f"- {gap}" for gap in prior_gaps if gap)
+        or "- No prior gaps were captured."
+    )
+    return (
+        "## Retry after conformance stall\n\n"
+        "The prior workspace stalled while generating the plan-conformance JSON. "
+        "Implementation commits already exist on the feature branch; only re-run the "
+        "compare phase against the saved plan and write the JSON report.\n\n"
+        f"Read the existing plan at {plan_line} and use it as the source of truth. "
+        f"Write the JSON conformance report to {report_line} and also print the same "
+        "JSON object as your final response.\n\n"
+        "Do not modify implementation files. Only re-run the compare phase against "
+        "the existing plan, and write the JSON to the existing report path.\n\n"
+        "The object must have this shape:\n\n"
+        '```json\n{"status":"satisfied|needs_iteration","summary":"...","gaps":["..."]}\n```\n\n'
+        f"### Prior gaps (advisory)\n{gap_lines}\n\n"
+        f"### Original task\n{task_prompt}\n"
+    )
+
+
+def _stall_output_excerpt(
+    error: AgentRunError | None,
+    record: ConformanceIterationRecord,
+) -> str:
+    # Stall excerpts are persisted as durable failure details; raw agent
+    # stderr/stdout can contain provider tokens or URL credentials, so redact
+    # before truncation. Redact-then-truncate avoids splitting a token across
+    # the truncation boundary and leaving an exploitable fragment.
+    if error is not None:
+        result = getattr(error, "result", None)
+        if result is not None:
+            stderr = (getattr(result, "stderr", "") or "").strip()
+            if stderr:
+                return _safe_conformance_text(redact_secrets(stderr))
+            stdout = (getattr(result, "stdout", "") or "").strip()
+            if stdout:
+                return _safe_conformance_text(redact_secrets(stdout))
+        return _safe_conformance_text(redact_secrets(str(error)))
+    text = (record.stderr or "").strip() or (record.stdout or "").strip()
+    return _safe_conformance_text(redact_secrets(text))
 
 
 def build_conformance_retry_prompt(
