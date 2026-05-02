@@ -18,7 +18,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
-from sqlalchemy import and_, func, or_, select, text, update
+from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
@@ -2644,9 +2644,31 @@ class WorkspaceRepository:
         owner_id: str,
         lease_expires_at: datetime,
         now: datetime | None = None,
+        clear_stale_execution_claim_cutoff: datetime | None = None,
     ) -> bool:
         """Claim a monitor-recovery workspace unless another lease is active."""
         cutoff = now or datetime.now(UTC)
+        values: dict[str, Any] = {
+            "monitor_claimed_by": owner_id,
+            "monitor_claim_expires_at": lease_expires_at,
+            "updated_at": Workspace.updated_at,
+        }
+        if clear_stale_execution_claim_cutoff is not None:
+            stale_execution_claim = or_(
+                Workspace.execution_claimed_by.is_(None),
+                Workspace.execution_claim_expires_at.is_(None),
+                Workspace.execution_claim_expires_at <= clear_stale_execution_claim_cutoff,
+            )
+            values.update(
+                execution_claimed_by=case(
+                    (stale_execution_claim, None),
+                    else_=Workspace.execution_claimed_by,
+                ),
+                execution_claim_expires_at=case(
+                    (stale_execution_claim, None),
+                    else_=Workspace.execution_claim_expires_at,
+                ),
+            )
         result = await self._session.execute(
             update(Workspace)
             .where(
@@ -2658,11 +2680,7 @@ class WorkspaceRepository:
                     Workspace.monitor_claimed_by == owner_id,
                 ),
             )
-            .values(
-                monitor_claimed_by=owner_id,
-                monitor_claim_expires_at=lease_expires_at,
-                updated_at=Workspace.updated_at,
-            )
+            .values(**values)
             .returning(Workspace.id)
             .execution_options(synchronize_session=False)
         )
