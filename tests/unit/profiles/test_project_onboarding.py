@@ -705,3 +705,39 @@ def test_onboarding_open_profile_can_carry_open_explanation(tmp_path: Path) -> N
     dumped = profile.model_dump(mode="json", by_alias=True, exclude_none=True)
     assert dumped["security"]["egress"]["mode"] == "open"
     assert dumped["security"]["egress"]["open_explanation"] == "Intentionally open for local dogfood."
+
+
+@pytest.mark.unit
+def test_onboarding_offline_profile_is_not_mutated_by_egress_guard(tmp_path: Path) -> None:
+    offline_profile = WorkspaceProfile(
+        name="offline",
+        source="test",
+        security=ProfileSecurity(
+            egress=ProfileEgress(mode=EgressMode.offline),
+        ),
+    )
+    from awf.profiles.onboarding import _ensure_restricted_egress
+
+    result = _ensure_restricted_egress(offline_profile)
+    assert result.security.egress.mode == EgressMode.offline
+    assert result.security.egress.allowlist_templates == []
+
+
+@pytest.mark.unit
+def test_onboarding_open_profile_is_not_mutated_by_egress_guard(tmp_path: Path) -> None:
+    open_profile = WorkspaceProfile(
+        name="open",
+        source="test",
+        security=ProfileSecurity(
+            egress=ProfileEgress(
+                mode=EgressMode.open,
+                open_explanation="Intentionally open for local dogfood.",
+            ),
+        ),
+    )
+    from awf.profiles.onboarding import _ensure_restricted_egress
+
+    result = _ensure_restricted_egress(open_profile)
+    assert result.security.egress.mode == EgressMode.open
+    assert result.security.egress.open_explanation == "Intentionally open for local dogfood."
+    assert result.security.egress.allowlist_templates == []

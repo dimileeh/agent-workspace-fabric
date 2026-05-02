@@ -390,7 +390,11 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
     else:
         raise ValueError(f"unsupported onboarding template: {template}")
 
-    if profile.security.egress.mode != EgressMode.open:
+    return _ensure_restricted_egress(profile)
+
+
+def _ensure_restricted_egress(profile: WorkspaceProfile) -> WorkspaceProfile:
+    if profile.security.egress.mode == EgressMode.restricted:
         profile = profile.model_copy(
             deep=True,
             update={
