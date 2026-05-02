@@ -22,13 +22,13 @@ AGENT_RUNTIME_DOCKERFILE = Path("docker/agent-runtime.Dockerfile")
 
 class CompletedProcessLike(Protocol):
     @property
-    def returncode(self) -> int: ...
+    def returncode(self) -> int: ...  # pragma: no cover
 
     @property
-    def stdout(self) -> str | None: ...
+    def stdout(self) -> str | None: ...  # pragma: no cover
 
     @property
-    def stderr(self) -> str | None: ...
+    def stderr(self) -> str | None: ...  # pragma: no cover
 
 
 class SubprocessRun(Protocol):
@@ -39,7 +39,7 @@ class SubprocessRun(Protocol):
         check: bool,
         capture_output: bool,
         text: Literal[True],
-    ) -> CompletedProcessLike: ...
+    ) -> CompletedProcessLike: ...  # pragma: no cover
 
 
 class StatusCollector(Protocol):
@@ -49,7 +49,7 @@ class StatusCollector(Protocol):
         *,
         strict_providers: Iterable[str] | None = None,
         provider_environ: Mapping[str, str] | None = None,
-    ) -> Awaitable[dict[str, object]]: ...
+    ) -> Awaitable[dict[str, object]]: ...  # pragma: no cover
 
 
 Sleep = Callable[[float], Awaitable[None]]

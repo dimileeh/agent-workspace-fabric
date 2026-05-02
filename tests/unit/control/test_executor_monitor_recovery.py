@@ -1478,6 +1478,7 @@ async def test_rebase_only_recovery_skips_rebase_when_target_already_merged(
     [
         WorkspaceStatus.cancelled,
         WorkspaceStatus.destroyed,
+        WorkspaceStatus.destroying,
         WorkspaceStatus.completed,
         WorkspaceStatus.failed,
     ],
@@ -1555,6 +1556,7 @@ async def test_stale_callback_terminal_status_blocks_recovery(
     [
         WorkspaceStatus.cancelled,
         WorkspaceStatus.destroyed,
+        WorkspaceStatus.destroying,
         WorkspaceStatus.completed,
         WorkspaceStatus.failed,
     ],
