@@ -81,6 +81,7 @@ from awf.db.models import (
     WorkspaceSecretLease,
 )
 from awf.runtime.merge_eligibility import DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
+from awf.service.scheduler import scheduler_order_key, scheduler_score_from_workspace
 
 ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.requested.value,
@@ -157,6 +158,23 @@ class WorkspaceEventCreate:
 class _IssuedSecretLease:
     lease: WorkspaceSecretLease
     issue_event_required: bool
+
+
+@dataclass(frozen=True)
+class QueueDecisionCreate:
+    workspace_id: str
+    task_id: str
+    attempt_id: str
+    decision: str
+    reason_code: str
+    class_priority: int
+    computed_priority: int
+    age_boost: int
+    retry_bonus: int
+    resource_summary: dict[str, Any]
+    overlap_risk_summary: dict[str, Any]
+    score_summary: dict[str, Any] | None = None
+    decided_at: datetime | None = None
 
 
 def validation_command_set_hash(commands: list[dict[str, Any]]) -> str:
@@ -734,26 +752,92 @@ class QueueDecisionRepository:
         retry_bonus: int,
         resource_summary: dict[str, Any],
         overlap_risk_summary: dict[str, Any],
+        score_summary: dict[str, Any] | None = None,
         decided_at: datetime | None = None,
     ) -> QueueDecision:
-        row = QueueDecision(
-            id=new_queue_decision_id(),
-            workspace_id=workspace_id,
-            task_id=task_id,
-            attempt_id=attempt_id,
-            decision=decision,
-            reason_code=reason_code,
-            class_priority=class_priority,
-            computed_priority=computed_priority,
-            age_boost=age_boost,
-            retry_bonus=retry_bonus,
-            resource_summary=dict(resource_summary),
-            overlap_risk_summary=dict(overlap_risk_summary),
-            decided_at=decided_at or datetime.now(UTC),
+        rows = await self.create_many(
+            [
+                QueueDecisionCreate(
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    decision=decision,
+                    reason_code=reason_code,
+                    class_priority=class_priority,
+                    computed_priority=computed_priority,
+                    age_boost=age_boost,
+                    retry_bonus=retry_bonus,
+                    resource_summary=resource_summary,
+                    overlap_risk_summary=overlap_risk_summary,
+                    score_summary=score_summary,
+                    decided_at=decided_at,
+                )
+            ]
         )
-        self._session.add(row)
+        return rows[0]
+
+    async def create_many(
+        self,
+        records: Iterable[QueueDecisionCreate],
+    ) -> builtins.list[QueueDecision]:
+        rows = [
+            QueueDecision(
+                id=new_queue_decision_id(),
+                workspace_id=record.workspace_id,
+                task_id=record.task_id,
+                attempt_id=record.attempt_id,
+                decision=record.decision,
+                reason_code=record.reason_code,
+                class_priority=record.class_priority,
+                computed_priority=record.computed_priority,
+                age_boost=record.age_boost,
+                retry_bonus=record.retry_bonus,
+                resource_summary=dict(record.resource_summary),
+                overlap_risk_summary=dict(record.overlap_risk_summary),
+                score_summary=dict(record.score_summary or {}),
+                decided_at=record.decided_at or datetime.now(UTC),
+            )
+            for record in records
+        ]
+        if not rows:
+            return []
+        self._session.add_all(rows)
         await self._session.flush()
-        return row
+        return rows
+
+    async def latest_by_workspace_ids(
+        self,
+        workspace_ids: Iterable[str],
+    ) -> dict[str, QueueDecision]:
+        unique_workspace_ids = tuple(dict.fromkeys(workspace_ids))
+        if not unique_workspace_ids:
+            return {}
+
+        ranked_decisions = (
+            select(
+                QueueDecision.id.label("queue_decision_id"),
+                func.row_number()
+                .over(
+                    partition_by=QueueDecision.workspace_id,
+                    order_by=(
+                        QueueDecision.decided_at.desc(),
+                        QueueDecision.id.desc(),
+                    ),
+                )
+                .label("decision_rank"),
+            )
+            .where(QueueDecision.workspace_id.in_(unique_workspace_ids))
+            .subquery()
+        )
+        stmt = (
+            select(QueueDecision)
+            .join(ranked_decisions, QueueDecision.id == ranked_decisions.c.queue_decision_id)
+            .where(ranked_decisions.c.decision_rank == 1)
+        )
+        return {
+            decision.workspace_id: decision
+            for decision in (await self._session.execute(stmt)).scalars()
+        }
 
     async def list_for_workspace(
         self,
@@ -2476,6 +2560,7 @@ class WorkspaceRepository:
         status: WorkspaceStatus,
         limit: int,
         exclude_ids: set[str] | None = None,
+        after: tuple[datetime, str] | None = None,
     ) -> builtins.list[str]:
         """Return candidate workspace IDs for one worker poll.
 
@@ -2488,15 +2573,72 @@ class WorkspaceRepository:
         if limit <= 0:
             return []
 
+        candidates = await self._list_schedulable_candidates(
+            status=status,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            after=after,
+        )
+        return [
+            workspace.id
+            for workspace in self._sort_schedulable_workspaces(candidates, limit)
+        ]
+
+    async def list_schedulable_workspaces(
+        self,
+        *,
+        status: WorkspaceStatus,
+        limit: int,
+        exclude_ids: set[str] | None = None,
+        after: tuple[datetime, str] | None = None,
+    ) -> builtins.list[Workspace]:
+        """Return ordered candidate workspaces for one worker poll."""
+        if limit <= 0:
+            return []
+
+        candidates = await self._list_schedulable_candidates(
+            status=status,
+            limit=limit,
+            exclude_ids=exclude_ids,
+            after=after,
+        )
+
+        return self._sort_schedulable_workspaces(candidates, limit)
+
+    async def _list_schedulable_candidates(
+        self,
+        *,
+        status: WorkspaceStatus,
+        limit: int | None,
+        exclude_ids: set[str] | None = None,
+        after: tuple[datetime, str] | None = None,
+    ) -> builtins.list[Workspace]:
         stmt = _schedulable_workspace_ids_stmt(
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
+            after=after,
             skip_locked=self._dialect_name == "postgresql",
             claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
         )
         result = await self._session.execute(stmt)
         return list(result.scalars().all())
+
+    @staticmethod
+    def _sort_schedulable_workspaces(
+        candidates: builtins.list[Workspace],
+        limit: int | None,
+    ) -> builtins.list[Workspace]:
+        now = datetime.now(UTC)
+        scored = sorted(
+            (
+                (scheduler_score_from_workspace(workspace, now=now), workspace)
+                for workspace in candidates
+            ),
+            key=lambda item: scheduler_order_key(item[0]),
+        )
+        ordered = [workspace for _score, workspace in scored]
+        return ordered if limit is None else ordered[:limit]
 
     async def transition(
         self,
@@ -3022,12 +3164,13 @@ def _claims_non_docs_path(owned_paths: list[str] | tuple[str, ...]) -> bool:
 def _schedulable_workspace_ids_stmt(
     *,
     status: WorkspaceStatus,
-    limit: int,
+    limit: int | None,
     exclude_ids: set[str] | None = None,
+    after: tuple[datetime, str] | None = None,
     skip_locked: bool,
     claim_cutoff: datetime | None = None,
-) -> Select[tuple[str]]:
-    stmt = select(Workspace.id).where(Workspace.status == status.value)
+) -> Select[tuple[Workspace]]:
+    stmt = select(Workspace).where(Workspace.status == status.value)
     if status == WorkspaceStatus.monitoring_pr and claim_cutoff is not None:
         stmt = stmt.where(
             or_(
@@ -3037,7 +3180,20 @@ def _schedulable_workspace_ids_stmt(
         )
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
-    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc()).limit(limit)
+    if after is not None:
+        after_created_at, after_id = after
+        stmt = stmt.where(
+            or_(
+                Workspace.created_at > after_created_at,
+                and_(
+                    Workspace.created_at == after_created_at,
+                    Workspace.id > after_id,
+                ),
+            )
+        )
+    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc())
+    if limit is not None:
+        stmt = stmt.limit(limit)
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt

@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 import sys
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     SecretLeaseIssue,
@@ -76,21 +76,21 @@ async def _create_policy_workspace(
 
 
 class _FakeScalarResult:
-    def __init__(self, values: list[str]) -> None:
+    def __init__(self, values: list[object]) -> None:
         self._values = values
 
     def scalars(self) -> _FakeScalarResult:
         return self
 
-    def all(self) -> list[str]:
+    def all(self) -> list[object]:
         return self._values
 
-    def scalar_one_or_none(self) -> str | None:
+    def scalar_one_or_none(self) -> object | None:
         return self._values[0] if self._values else None
 
 
 class _RecordingSchedulerSession:
-    def __init__(self, dialect_name: str, values: list[str] | None = None) -> None:
+    def __init__(self, dialect_name: str, values: list[object] | None = None) -> None:
         del dialect_name
         self.info: dict[str, object] = {}
         self.values = list(values or [])
@@ -104,6 +104,28 @@ class _RecordingSchedulerSession:
         del parameters
         self.executed.append(statement)
         return _FakeScalarResult(self.values)
+
+
+def _recorded_workspace_row(
+    workspace_id: str,
+    *,
+    status: WorkspaceStatus = WorkspaceStatus.requested,
+) -> Workspace:
+    queued_at = datetime(2026, 1, 1, tzinfo=UTC)
+    return Workspace(
+        id=workspace_id,
+        status=status.value,
+        repo_url="git@github.com:example/app.git",
+        branch_base="development",
+        task_title="scheduler row",
+        task_prompt="p",
+        agent=AgentRuntime.codex.value,
+        test_commands=[],
+        created_at=queued_at,
+        updated_at=queued_at,
+        owned_paths=[],
+        task_policy={},
+    )
 
 
 class TestCreate:
@@ -882,6 +904,103 @@ class TestListWorkspaces:
 
 class TestOwnedPathOverlapLookup:
     @pytest.mark.unit
+    async def test_scheduler_orders_by_class_priority_then_score_then_age(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        now = datetime.now(UTC)
+        docs = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="docs",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        old_refactor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="old refactor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 45}},
+        )
+        young_refactor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="young refactor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 55}},
+        )
+        migration = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="migration",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.migration_task.value,
+            task_policy={"scheduler": {"base_priority": 0}},
+        )
+        old_refactor.created_at = now - timedelta(hours=6)
+        young_refactor.created_at = now
+        docs.created_at = now - timedelta(days=1)
+        migration.created_at = now
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=4,
+        )
+
+        assert listed == [migration.id, old_refactor.id, young_refactor.id, docs.id]
+
+    @pytest.mark.unit
+    async def test_scheduler_keeps_owned_path_overlap_advisory_only(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        existing = await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["src/awf/api/schemas.py"],
+        )
+        requested = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="overlap",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            owned_paths=["src/awf/api/schemas.py"],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 80}},
+        )
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=10,
+        )
+
+        assert existing.id in listed
+        assert requested.id in listed
+        assert await repo.find_active_owned_path_overlaps(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/awf/api/schemas.py"],
+        )
+
+    @pytest.mark.unit
     @pytest.mark.parametrize(
         "status",
         [
@@ -894,7 +1013,10 @@ class TestOwnedPathOverlapLookup:
         self,
         status: WorkspaceStatus,
     ) -> None:
-        session = _RecordingSchedulerSession("postgresql", values=["ws_claimed"])
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_claimed", status=status)],
+        )
         repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
 
         listed = await repo.list_schedulable_ids(
@@ -913,12 +1035,76 @@ class TestOwnedPathOverlapLookup:
         )
         assert "FOR UPDATE" in sql
         assert "SKIP LOCKED" in sql
+        assert "LIMIT 1" in sql
         assert f"workspaces.status = '{status.value}'" in sql
         assert "workspaces.id NOT IN ('ws_active')" in sql
 
     @pytest.mark.unit
+    async def test_postgres_scheduler_workspace_rows_apply_candidate_limit(self) -> None:
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[
+                _recorded_workspace_row("ws_first", status=WorkspaceStatus.ready),
+                _recorded_workspace_row("ws_second", status=WorkspaceStatus.ready),
+            ],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.ready,
+            limit=2,
+            exclude_ids={"ws_active"},
+        )
+
+        assert [workspace.id for workspace in listed] == ["ws_first", "ws_second"]
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" in sql
+        assert "SKIP LOCKED" in sql
+        assert "LIMIT 2" in sql
+        assert "workspaces.id NOT IN ('ws_active')" in sql
+
+    @pytest.mark.unit
+    async def test_postgres_scheduler_cursor_uses_keyset_without_offset(self) -> None:
+        cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.ready,
+            limit=1,
+            after=(cursor_created_at, "ws_cursor"),
+        )
+
+        assert [workspace.id for workspace in listed] == ["ws_after"]
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" in sql
+        assert "SKIP LOCKED" in sql
+        assert "OFFSET" not in sql
+        assert "workspaces.created_at >" in sql
+        assert "workspaces.created_at =" in sql
+        assert "workspaces.id > 'ws_cursor'" in sql
+
+    @pytest.mark.unit
     async def test_sqlite_scheduler_lists_use_portable_select(self) -> None:
-        session = _RecordingSchedulerSession("sqlite", values=["ws_claimed"])
+        session = _RecordingSchedulerSession(
+            "sqlite",
+            values=[_recorded_workspace_row("ws_claimed")],
+        )
         repo = WorkspaceRepository(session, dialect_name="sqlite")  # type: ignore[arg-type]
 
         listed = await repo.list_schedulable_ids(
@@ -974,7 +1160,10 @@ class TestOwnedPathOverlapLookup:
 
     @pytest.mark.unit
     async def test_session_info_dialect_drives_scheduler_locking(self) -> None:
-        session = _RecordingSchedulerSession("postgresql", values=["ws_claimed"])
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_claimed")],
+        )
         session.info[SESSION_DIALECT_NAME_KEY] = "postgresql"
         repo = WorkspaceRepository(session)  # type: ignore[arg-type]
 

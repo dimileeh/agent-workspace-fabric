@@ -1105,6 +1105,10 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert decision["computed_priority"] == 37
         assert decision["age_boost"] == 0
         assert decision["retry_bonus"] == 0
+        assert decision["score_summary"]["base_priority"] == 25
+        assert decision["score_summary"]["class_bias"] == 12
+        assert decision["score_summary"]["effective_score"] == 37
+        assert decision["score_summary"]["human_boost"] == 0
         assert decision["resource_summary"]["peak_cpu"] == 8.0
         assert decision["resource_summary"]["disk_mb"] == 4096
         assert decision["resource_summary"]["dind_slots"] == 1

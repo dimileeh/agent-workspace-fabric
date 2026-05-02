@@ -16,7 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import event, update
+from sqlalchemy import event, select, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.control.worker import (
@@ -25,14 +25,18 @@ from awf.control.worker import (
     _ActiveExecutionCandidate,
     _candidate_claim_is_stale,
     _claim_recheck_conditions,
+    _scheduler_candidate_fetch_limit,
     _stale_active_execution_failure_message,
 )
 from awf.db.base import Base
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
+    QueueDecisionRepository,
+    TaskAttemptRepository,
+    TaskRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
@@ -41,6 +45,7 @@ from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
 from awf.runtime.inspection import RuntimeService, RuntimeSnapshot
 from awf.service.controls import WorkspaceControlService
+from awf.service.scheduler import scheduler_score_from_workspace
 from awf.service.workspace_runtime_health import WorkspaceRuntimeFinding
 
 
@@ -89,10 +94,15 @@ def worker(session_factory: async_sessionmaker[AsyncSession], tmp_path: Path) ->
 
 
 async def _create_requested(
-    session_factory: async_sessionmaker[AsyncSession], origin: Path, title: str
+    session_factory: async_sessionmaker[AsyncSession],
+    origin: Path,
+    title: str,
+    *,
+    create_task_attempt: bool = False,
 ) -> str:
     async with session_factory() as s:
-        ws = await WorkspaceRepository(s).create(
+        repo = WorkspaceRepository(s)
+        ws = await repo.create(
             repo_url=str(origin),
             branch_base="development",
             task_title=title,
@@ -100,6 +110,18 @@ async def _create_requested(
             agent="codex",
             test_commands=[],
         )
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
         await s.commit()
         return ws.id
 
@@ -111,6 +133,8 @@ async def _create_ready(
     *,
     agent: str = "codex",
     task_policy: dict[str, object] | None = None,
+    task_class: str | None = None,
+    create_task_attempt: bool = False,
 ) -> str:
     async with session_factory() as s:
         repo = WorkspaceRepository(s)
@@ -122,7 +146,20 @@ async def _create_ready(
             agent=agent,
             test_commands=[],
             task_policy=task_policy,
+            task_class=task_class,
         )
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = f"awf/{ws.id}"
         ws.base_commit = "a" * 40
@@ -140,6 +177,8 @@ async def _create_monitoring_pr(
     *,
     agent: str = "codex",
     task_policy: dict[str, object] | None = None,
+    task_class: str | None = None,
+    create_task_attempt: bool = False,
     pr_number: int = 123,
     with_pr_url: bool = True,
     monitor_iter_count: int = 0,
@@ -157,7 +196,20 @@ async def _create_monitoring_pr(
             agent=agent,
             test_commands=[],
             task_policy=task_policy,
+            task_class=task_class,
         )
+        if create_task_attempt:
+            task = await TaskRepository(s).create_or_get(
+                repo_url=ws.repo_url,
+                base_branch=ws.branch_base,
+                title=ws.task_title,
+                prompt=ws.task_prompt,
+                external_id=None,
+                idempotency_key=None,
+                task_class=ws.task_class,
+                owned_paths=list(ws.owned_paths),
+            )
+            await TaskAttemptRepository(s).create_for_workspace(task=task, workspace=ws)
         await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="SEED")
         ws.branch_name = f"awf/{ws.id}"
         ws.remote_push_branch = ws.branch_name
@@ -300,12 +352,18 @@ class _TransitioningProvisioner:
         self.calls: list[str] = []
 
     async def provision(self, workspace_id: str) -> None:
+        await self.provision_claimed(workspace_id)
+
+    async def provision_claimed(self, workspace_id: str) -> None:
         self.calls.append(workspace_id)
         async with self._session_factory() as s:
             repo = WorkspaceRepository(s)
             ws = await repo.get(workspace_id)
             assert ws is not None
-            await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            if ws.status == WorkspaceStatus.requested.value:
+                await repo.transition(ws, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            elif ws.status != WorkspaceStatus.provisioning.value:
+                return
             ws.branch_name = f"awf/{workspace_id}"
             ws.base_commit = "b" * 40
             ws.compose_project_name = f"awf_{workspace_id}"
@@ -444,8 +502,798 @@ class TestRunOnce:
             )
             assert count == 5
 
+    @pytest.mark.unit
+    async def test_requested_race_skip_does_not_record_ordered_decision(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "race-requested-ordering",
+            create_task_attempt=True,
+        )
+
+        class _UnexpectedProvisioner:
+            async def provision(self, workspace_id: str) -> None:
+                raise AssertionError(f"unexpected provision call for {workspace_id}")
+
+            async def provision_claimed(self, workspace_id: str) -> None:
+                raise AssertionError(f"unexpected provision call for {workspace_id}")
+
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_UnexpectedProvisioner(),  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        async def _race_after_filter(
+            workspace_ids: list[str],
+            *,
+            expected: WorkspaceStatus,
+            action: str,
+        ) -> list[str]:
+            assert workspace_ids == [requested_id]
+            assert expected == WorkspaceStatus.requested
+            assert action == "provision"
+            async with session_factory() as session:
+                repo = WorkspaceRepository(session)
+                ws = await repo.transition_if_current(
+                    requested_id,
+                    from_status=WorkspaceStatus.requested,
+                    to=WorkspaceStatus.provisioning,
+                    reason_code="OTHER_WORKER_CLAIMED",
+                )
+                assert ws is not None
+                await session.commit()
+            return [requested_id]
+
+        worker._filter_current_status = _race_after_filter  # type: ignore[method-assign]
+
+        assert await worker.run_once() == 0
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(requested_id)
+
+        assert decisions == []
+
+    @pytest.mark.unit
+    async def test_requested_ordered_decision_failure_prevents_provision_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        requested_id = await _create_requested(
+            session_factory,
+            origin_repo,
+            "record-before-provision",
+            create_task_attempt=True,
+        )
+        provisioner = _TransitioningProvisioner(session_factory)
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=provisioner,  # type: ignore[arg-type]
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_provisions=1),
+        )
+
+        async def _fail_record_ordered_decisions(
+            workspace_ids: list[str],
+            *,
+            reason_code: str,
+        ) -> None:
+            assert workspace_ids == [requested_id]
+            assert reason_code == "ORDERED_REQUESTED_PROVISIONING"
+            raise RuntimeError("ordered decision commit failed")
+
+        worker._record_ordered_decisions = _fail_record_ordered_decisions  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="ordered decision commit failed"):
+            await worker.run_once()
+
+        assert provisioner.calls == []
+
 
 class TestRunOnceExecution:
+    @pytest.mark.unit
+    async def test_ready_execution_dispatches_highest_scored_workspace_first(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        low_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "low-priority-ready",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 10}},
+        )
+        high_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "high-priority-ready",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 80}},
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [high_id]
+        assert low_id not in executor.calls
+
+    @pytest.mark.unit
+    async def test_ready_execution_scores_beyond_fetch_window(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        low_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"low-priority-ready-{index}",
+                task_class="docs_task",
+                task_policy={"scheduler": {"base_priority": 0}},
+            )
+            for index in range(_scheduler_candidate_fetch_limit(1) + 1)
+        ]
+        urgent_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "urgent-ready-after-fetch-window",
+            task_class="migration_task",
+            task_policy={"scheduler": {"base_priority": 100, "human_boost": 5}},
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [urgent_id]
+        assert not set(low_ids).intersection(executor.calls)
+
+    @pytest.mark.unit
+    async def test_human_boosted_ready_workspace_wins_equal_priority_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ordinary_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "ordinary-ready",
+            task_class="test_task",
+            task_policy={"scheduler": {"base_priority": 40}},
+        )
+        boosted_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "boosted-ready",
+            task_class="test_task",
+            task_policy={"scheduler": {"base_priority": 40, "human_boost": 5}},
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [boosted_id]
+        assert ordinary_id not in executor.calls
+
+    @pytest.mark.unit
+    async def test_retry_bonus_does_not_outrank_materially_higher_priority_new_work(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        retry_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "infra-retry-ready",
+            task_class="refactor_task",
+            task_policy={
+                "scheduler": {
+                    "base_priority": 40,
+                    "parent_failure_reason": FailureReason.infrastructure_failure.value,
+                }
+            },
+            create_task_attempt=True,
+        )
+        high_priority_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "higher-priority-new-ready",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 50}},
+            create_task_attempt=True,
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [high_priority_id]
+        async with session_factory() as session:
+            retry_workspace = await WorkspaceRepository(session).get(retry_id)
+            assert retry_workspace is not None
+            retry_score = scheduler_score_from_workspace(retry_workspace)
+            retry_decisions = await QueueDecisionRepository(session).list_for_workspace(retry_id)
+            high_decisions = await QueueDecisionRepository(session).list_for_workspace(
+                high_priority_id
+            )
+
+        assert retry_score.retry_bonus == 3
+        assert retry_decisions == []
+        assert high_decisions[0].decision == "ordered"
+        assert high_decisions[0].score_summary["effective_score"] == 54
+
+    @pytest.mark.unit
+    async def test_ordered_decision_is_recorded_when_ready_workspace_dispatches(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "record-ordered-ready",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 33}},
+            create_task_attempt=True,
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(ready_id)
+
+        assert decisions[0].decision == "ordered"
+        assert decisions[0].reason_code == "ORDERED_READY_EXECUTION"
+        assert decisions[0].score_summary["base_priority"] == 33
+
+    @pytest.mark.unit
+    async def test_ready_ordered_decision_failure_prevents_execution_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "record-before-execute",
+            create_task_attempt=True,
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        async def _fail_record_ordered_decisions(
+            workspace_ids: list[str],
+            *,
+            reason_code: str,
+        ) -> None:
+            if not workspace_ids:
+                return
+            assert workspace_ids == [ready_id]
+            assert reason_code == "ORDERED_READY_EXECUTION"
+            raise RuntimeError("ordered decision commit failed")
+
+        worker._record_ordered_decisions = _fail_record_ordered_decisions  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="ordered decision commit failed"):
+            await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
+
+    @pytest.mark.unit
+    async def test_ordered_decisions_avoid_per_workspace_attempt_and_decision_reads(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"record-ordered-ready-{index}",
+                task_class="refactor_task",
+                task_policy={"scheduler": {"base_priority": 10 + index}},
+                create_task_attempt=True,
+            )
+            for index in range(2)
+        ]
+        task_attempt_point_selects: list[str] = []
+        queue_decision_point_selects: list[str] = []
+
+        def _capture_ordered_decision_selects(
+            _conn: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.upper()
+            if not normalized.lstrip().startswith("SELECT"):
+                return
+            if (
+                "FROM TASK_ATTEMPTS" in normalized
+                and "WHERE TASK_ATTEMPTS.WORKSPACE_ID = " in normalized
+            ):
+                task_attempt_point_selects.append(statement)
+            if (
+                "FROM QUEUE_DECISIONS" in normalized
+                and "WHERE QUEUE_DECISIONS.WORKSPACE_ID = " in normalized
+            ):
+                queue_decision_point_selects.append(statement)
+
+        engine = session_factory.kw["bind"]
+        event.listen(
+            engine.sync_engine,
+            "before_cursor_execute",
+            _capture_ordered_decision_selects,
+        )
+        try:
+            executor = _RecordingExecutor()
+            worker = ControlWorker(
+                session_factory=session_factory,
+                provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+                executor=executor,
+                runtime_inspector=_HealthyRuntimeInspector(),
+                config=WorkerConfig(
+                    poll_interval_seconds=0.01,
+                    max_concurrent_provisions=0,
+                    max_concurrent_executions=2,
+                ),
+            )
+
+            async def _skip_runtime_recovery_scan() -> None:
+                return None
+
+            worker._maybe_recover_stale_active_executions = (  # type: ignore[method-assign]
+                _skip_runtime_recovery_scan
+            )
+
+            assert await worker.run_once() == 2
+            await worker.wait_for_execution_tasks()
+        finally:
+            event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                _capture_ordered_decision_selects,
+            )
+
+        assert set(executor.calls) == set(ready_ids)
+        assert task_attempt_point_selects == []
+        assert queue_decision_point_selects == []
+
+    @pytest.mark.unit
+    async def test_provider_cooldown_defer_does_not_consume_ready_execution_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        cooling_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "cooling-ready",
+            agent="gemini",
+            task_class="refactor_task",
+            task_policy={
+                "agent_model": "gemini-2.5-pro",
+                "scheduler": {"base_priority": 100},
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                },
+            },
+            create_task_attempt=True,
+        )
+        allowed_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "allowed-ready",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 10}},
+            create_task_attempt=True,
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [allowed_id]
+        async with session_factory() as session:
+            deferred = await QueueDecisionRepository(session).list_for_workspace(cooling_id)
+
+        assert deferred[0].decision == "deferred"
+        assert deferred[0].reason_code == "PROVIDER_RECOVERY_NOT_BEFORE"
+        assert deferred[0].score_summary["suppression"]["suppressed"] is True
+
+    @pytest.mark.unit
+    async def test_provider_cooldown_suppression_scans_past_fetch_buffer_to_fill_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        for index in range(_scheduler_candidate_fetch_limit(1)):
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"cooling-ready-{index}",
+                agent="gemini",
+                task_class="refactor_task",
+                task_policy={
+                    "agent_model": "gemini-2.5-pro",
+                    "scheduler": {"base_priority": 100},
+                    "provider_recovery_state": {
+                        "not_before": not_before.isoformat(),
+                        "action": "retry",
+                    },
+                },
+            )
+        allowed_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "allowed-after-cooldown-buffer",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [allowed_id]
+
+    @pytest.mark.unit
+    async def test_provider_recovery_filter_reuses_schedulable_workspace_rows(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        await _create_ready(
+            session_factory,
+            origin_repo,
+            "cooling-ready",
+            agent="gemini",
+            task_class="refactor_task",
+            task_policy={
+                "agent_model": "gemini-2.5-pro",
+                "scheduler": {"base_priority": 100},
+                "provider_recovery_state": {
+                    "not_before": not_before.isoformat(),
+                    "action": "retry",
+                },
+            },
+        )
+        allowed_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "allowed-ready",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        workspace_selects: list[str] = []
+
+        def _capture_workspace_select(
+            _conn: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.upper()
+            if (
+                normalized.lstrip().startswith("SELECT")
+                and "FROM WORKSPACES" in normalized
+            ):
+                workspace_selects.append(statement)
+
+        engine = session_factory.kw["bind"]
+        event.listen(engine.sync_engine, "before_cursor_execute", _capture_workspace_select)
+        try:
+            worker = ControlWorker(
+                session_factory=session_factory,
+                provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+                executor=_RecordingExecutor(),
+                runtime_inspector=_HealthyRuntimeInspector(),
+                config=WorkerConfig(
+                    poll_interval_seconds=0.01,
+                    max_concurrent_provisions=0,
+                    max_concurrent_executions=1,
+                ),
+            )
+
+            assert await worker._list_ready(limit=1) == [allowed_id]
+        finally:
+            event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                _capture_workspace_select,
+            )
+
+        assert len(workspace_selects) == 1
+
+    @pytest.mark.unit
+    async def test_provider_cooldown_refill_uses_cursor_without_growing_exclusions(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        suppressed_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"cooling-ready-{index}",
+                agent="gemini",
+                task_class="refactor_task",
+                task_policy={
+                    "agent_model": "gemini-2.5-pro",
+                    "scheduler": {"base_priority": 100},
+                    "provider_recovery_state": {
+                        "not_before": not_before.isoformat(),
+                        "action": "retry",
+                    },
+                },
+            )
+            for index in range(_scheduler_candidate_fetch_limit(1))
+        ]
+        allowed_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "allowed-after-cooldown-buffer",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        ordered_ids = [*suppressed_ids, allowed_id]
+        base_exclude_ids = {"active-workspace"}
+        created_at_by_id: dict[str, datetime] = {}
+        base_created_at = datetime(2026, 1, 1)
+        async with session_factory() as session:
+            for index, workspace_id in enumerate(ordered_ids):
+                created_at = base_created_at + timedelta(seconds=index)
+                created_at_by_id[workspace_id] = created_at
+                await session.execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace_id)
+                    .values(created_at=created_at, updated_at=created_at)
+                )
+            await session.commit()
+        queries: list[tuple[tuple[datetime, str] | None, set[str]]] = []
+
+        async def _list_schedulable_workspaces(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+            after: tuple[datetime, str] | None = None,
+        ) -> list[Workspace]:
+            assert status == WorkspaceStatus.ready
+            excluded = set(exclude_ids or set())
+            queries.append((after, excluded))
+            visible = [
+                workspace_id for workspace_id in ordered_ids if workspace_id not in excluded
+            ]
+            if after is not None:
+                visible = [
+                    workspace_id
+                    for workspace_id in visible
+                    if (created_at_by_id[workspace_id], workspace_id) > after
+                ]
+            visible = visible[:limit]
+            if not visible:
+                return []
+            result = await self._session.execute(
+                select(Workspace).where(Workspace.id.in_(visible))
+            )
+            rows = {workspace.id: workspace for workspace in result.scalars()}
+            return [rows[workspace_id] for workspace_id in visible]
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
+            raising=False,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker._list_ready(limit=1, exclude_ids=base_exclude_ids) == [allowed_id]
+        assert queries == [
+            (None, base_exclude_ids),
+            (
+                (
+                    created_at_by_id[suppressed_ids[-1]],
+                    suppressed_ids[-1],
+                ),
+                base_exclude_ids,
+            ),
+        ]
+
+    @pytest.mark.unit
+    async def test_provider_model_circuit_defer_records_decision_and_fills_limit(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        suppressed_ids: list[str] = []
+        for index in range(_scheduler_candidate_fetch_limit(1)):
+            suppressed_ids.append(
+                await _create_ready(
+                    session_factory,
+                    origin_repo,
+                    f"circuit-ready-{index}",
+                    agent="gemini",
+                    task_class="refactor_task",
+                    task_policy={
+                        "agent_model": "gemini-2.5-pro",
+                        "scheduler": {"base_priority": 100},
+                    },
+                    create_task_attempt=index == 0,
+                )
+            )
+        allowed_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "allowed-after-circuit-buffer",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+            create_task_attempt=True,
+        )
+        async with session_factory() as session:
+            await ProviderModelCircuitBreakerRepository(session).record_failure(
+                provider="google",
+                model="gemini-2.5-pro",
+                reason_code="AGENT_PROVIDER_CAPACITY_EXHAUSTED",
+                failure_fingerprint="capacity:fingerprint",
+                workspace_id=suppressed_ids[0],
+                attempt_id=None,
+                now=datetime.now(UTC),
+                failure_threshold=1,
+                cooldown_seconds=600,
+            )
+            await session.commit()
+
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker.run_once() == 1
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == [allowed_id]
+        async with session_factory() as session:
+            decisions = await QueueDecisionRepository(session).list_for_workspace(
+                suppressed_ids[0]
+            )
+
+        assert decisions[0].decision == "deferred"
+        assert decisions[0].reason_code == "PROVIDER_MODEL_CIRCUIT_OPEN"
+        assert decisions[0].score_summary["suppression"]["suppressed"] is True
+        assert decisions[0].score_summary["suppression"]["reason_code"] == (
+            "PROVIDER_MODEL_CIRCUIT_OPEN"
+        )
+        assert decisions[0].score_summary["suppression"]["provider"] == "google"
+        assert decisions[0].score_summary["suppression"]["model"] == "gemini-2.5-pro"
+        assert isinstance(decisions[0].score_summary["suppression"]["cooldown_until"], str)
+
     @pytest.mark.unit
     async def test_dispatches_requested_provisioning_then_ready_execution_work(
         self,
@@ -760,21 +1608,22 @@ class TestRunOnceExecution:
     ) -> None:
         queries: list[tuple[WorkspaceStatus, int, set[str]]] = []
 
-        async def _list_schedulable_ids(
+        async def _list_schedulable_workspaces(
             self: WorkspaceRepository,
             *,
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
-        ) -> list[str]:
-            del self
+            after: tuple[datetime, str] | None = None,
+        ) -> list[Workspace]:
+            del self, after
             queries.append((status, limit, set(exclude_ids or set())))
             return []
 
         monkeypatch.setattr(
             WorkspaceRepository,
-            "list_schedulable_ids",
-            _list_schedulable_ids,
+            "list_schedulable_workspaces",
+            _list_schedulable_workspaces,
             raising=False,
         )
 
@@ -791,9 +1640,9 @@ class TestRunOnceExecution:
 
         assert await worker.run_once() == 0
         assert queries == [
-            (WorkspaceStatus.requested, 2, set()),
-            (WorkspaceStatus.monitoring_pr, 4, set()),
-            (WorkspaceStatus.ready, 4, set()),
+            (WorkspaceStatus.requested, 8, set()),
+            (WorkspaceStatus.monitoring_pr, 16, set()),
+            (WorkspaceStatus.ready, 16, set()),
         ]
 
     @pytest.mark.unit
@@ -952,18 +1801,9 @@ class TestRunOnceExecution:
 
         class _ClaimingProvisioner:
             async def provision(self, workspace_id: str) -> None:
-                async with session_factory() as s:
-                    repo = WorkspaceRepository(s)
-                    ws = await repo.transition_if_current(
-                        workspace_id,
-                        from_status=WorkspaceStatus.requested,
-                        to=WorkspaceStatus.provisioning,
-                        reason_code="TEST_CLAIM",
-                    )
-                    if ws is None:
-                        return
-                    await s.commit()
+                await self.provision_claimed(workspace_id)
 
+            async def provision_claimed(self, workspace_id: str) -> None:
                 calls.append(workspace_id)
                 started.set()
                 await release.wait()
@@ -1111,6 +1951,45 @@ class TestRunOnceMonitorRecovery:
 
         assert executor.calls == []
         assert executor.resume_calls == [monitor_id]
+
+    @pytest.mark.unit
+    async def test_monitor_ordered_decision_failure_prevents_resume_dispatch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        monitor_id = await _create_monitoring_pr(
+            session_factory,
+            origin_repo,
+            "record-before-monitor-resume",
+            create_task_attempt=True,
+        )
+        executor = _RecordingExecutor()
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=executor,
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(poll_interval_seconds=0.01, max_concurrent_executions=1),
+        )
+
+        async def _fail_record_ordered_decisions(
+            workspace_ids: list[str],
+            *,
+            reason_code: str,
+        ) -> None:
+            assert workspace_ids == [monitor_id]
+            assert reason_code == "ORDERED_MONITOR_RESUME"
+            raise RuntimeError("ordered decision commit failed")
+
+        worker._record_ordered_decisions = _fail_record_ordered_decisions  # type: ignore[method-assign]
+
+        with pytest.raises(RuntimeError, match="ordered decision commit failed"):
+            await worker.run_once()
+        await worker.wait_for_execution_tasks()
+
+        assert executor.calls == []
+        assert executor.resume_calls == []
 
     @pytest.mark.unit
     async def test_monitoring_pr_provider_recovery_cooldown_suppresses_resume_without_event(
@@ -3321,6 +4200,26 @@ class TestRunOnceStaleActiveExecutionRecovery:
             assert ws is not None
             assert ws.status == status.value
         assert inspector.calls == []
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize(
+    ("limit", "expected"),
+    [
+        (0, 0),
+        (1, 4),
+        (5, 20),
+        (6, 22),
+        (64, 80),
+        (234, 250),
+        (251, 251),
+    ],
+)
+def test_scheduler_candidate_fetch_limit_documents_overfetch_edges(
+    limit: int,
+    expected: int,
+) -> None:
+    assert _scheduler_candidate_fetch_limit(limit) == expected
 
 
 @pytest.mark.unit
