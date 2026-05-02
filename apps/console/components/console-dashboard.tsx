@@ -402,7 +402,7 @@ export function ConsoleDashboard() {
     setSelectedId((current) =>
       current && result.data.items.some((item) => item.workspace_id === current)
         ? current
-        : result.data.items[0]?.workspace_id ?? null,
+        : null,
     );
   }, [overviewPath]);
 
@@ -824,6 +824,8 @@ export function ConsoleDashboard() {
   useEffect(() => {
     if (selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
       setSelectedId(filteredOverview[0]?.workspace_id ?? null);
+    } else if (!selectedId && filteredOverview.length > 0) {
+      setSelectedId(filteredOverview[0].workspace_id);
     }
   }, [filteredOverview, selectedId]);
 
