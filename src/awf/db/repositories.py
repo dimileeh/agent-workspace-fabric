@@ -16,7 +16,7 @@ import json
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from sqlalchemy import and_, case, func, or_, select, text, update
 from sqlalchemy.dialects.postgresql import JSONB
@@ -81,6 +81,7 @@ from awf.db.models import (
     WorkspaceSecretLease,
 )
 from awf.runtime.merge_eligibility import DOCS_TASK_SCOPE_VIOLATION_STALE_REASON
+from awf.service.scheduler import scheduler_order_key, scheduler_score_from_workspace
 
 ACTIVE_OWNED_PATH_OVERLAP_STATUSES: Final[tuple[str, ...]] = (
     WorkspaceStatus.requested.value,
@@ -734,6 +735,7 @@ class QueueDecisionRepository:
         retry_bonus: int,
         resource_summary: dict[str, Any],
         overlap_risk_summary: dict[str, Any],
+        score_summary: dict[str, Any] | None = None,
         decided_at: datetime | None = None,
     ) -> QueueDecision:
         row = QueueDecision(
@@ -749,6 +751,7 @@ class QueueDecisionRepository:
             retry_bonus=retry_bonus,
             resource_summary=dict(resource_summary),
             overlap_risk_summary=dict(overlap_risk_summary),
+            score_summary=dict(score_summary or {}),
             decided_at=decided_at or datetime.now(UTC),
         )
         self._session.add(row)
@@ -2496,7 +2499,19 @@ class WorkspaceRepository:
             claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
         )
         result = await self._session.execute(stmt)
-        return list(result.scalars().all())
+        candidates = list(result.scalars().all())
+        if not candidates or isinstance(candidates[0], str):
+            return cast("builtins.list[str]", candidates[:limit])
+
+        now = datetime.now(UTC)
+        scored = sorted(
+            (
+                (scheduler_score_from_workspace(workspace, now=now), workspace.id)
+                for workspace in candidates
+            ),
+            key=lambda item: scheduler_order_key(item[0]),
+        )
+        return [workspace_id for _score, workspace_id in scored[:limit]]
 
     async def transition(
         self,
@@ -3026,8 +3041,8 @@ def _schedulable_workspace_ids_stmt(
     exclude_ids: set[str] | None = None,
     skip_locked: bool,
     claim_cutoff: datetime | None = None,
-) -> Select[tuple[str]]:
-    stmt = select(Workspace.id).where(Workspace.status == status.value)
+) -> Select[tuple[Workspace]]:
+    stmt = select(Workspace).where(Workspace.status == status.value)
     if status == WorkspaceStatus.monitoring_pr and claim_cutoff is not None:
         stmt = stmt.where(
             or_(
@@ -3037,7 +3052,8 @@ def _schedulable_workspace_ids_stmt(
         )
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
-    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc()).limit(limit)
+    del limit
+    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc())
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt

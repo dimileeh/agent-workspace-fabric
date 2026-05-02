@@ -182,6 +182,7 @@ class WorkspaceV2Task(BaseModel):
     external_id: Annotated[str | None, Field(default=None, max_length=128)]
     task_class: TaskClass | None = None
     priority: int = Field(default=0, ge=0, le=100)
+    human_boost: int = Field(default=0, ge=0, le=5)
     owned_paths: list[OwnedPath] = Field(default_factory=list, max_length=128)
     out_of_scope_changes: OutOfScopeChangePolicy | None = None
     auto_merge: bool = True
@@ -245,6 +246,7 @@ class QueueDecisionSummaryResponse(BaseModel):
     retry_bonus: int
     resource_summary: dict[str, Any]
     overlap_risk_summary: dict[str, Any]
+    score_summary: dict[str, Any] = Field(default_factory=dict)
     decided_at: datetime
 
 

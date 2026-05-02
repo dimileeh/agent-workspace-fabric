@@ -13,7 +13,7 @@ import sqlite3
 import subprocess
 import sys
 from collections.abc import AsyncIterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -24,7 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.control.state_machine import InvalidWorkspaceTransitionError
 from awf.db.base import Base
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
-from awf.db.enums import AgentRuntime, WorkspaceStatus
+from awf.db.enums import AgentRuntime, TaskClass, WorkspaceStatus
 from awf.db.models import ValidationRun, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     SecretLeaseIssue,
@@ -881,6 +881,103 @@ class TestListWorkspaces:
 
 
 class TestOwnedPathOverlapLookup:
+    @pytest.mark.unit
+    async def test_scheduler_orders_by_class_priority_then_score_then_age(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        now = datetime.now(UTC)
+        docs = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="docs",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.docs_task.value,
+            task_policy={"scheduler": {"base_priority": 100}},
+        )
+        old_refactor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="old refactor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 45}},
+        )
+        young_refactor = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="young refactor",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 55}},
+        )
+        migration = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="migration",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            task_class=TaskClass.migration_task.value,
+            task_policy={"scheduler": {"base_priority": 0}},
+        )
+        old_refactor.created_at = now - timedelta(hours=6)
+        young_refactor.created_at = now
+        docs.created_at = now - timedelta(days=1)
+        migration.created_at = now
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=4,
+        )
+
+        assert listed == [migration.id, old_refactor.id, young_refactor.id, docs.id]
+
+    @pytest.mark.unit
+    async def test_scheduler_keeps_owned_path_overlap_advisory_only(
+        self,
+        session: AsyncSession,
+    ) -> None:
+        repo = WorkspaceRepository(session)
+        existing = await _create_policy_workspace(
+            session,
+            repo,
+            owned_paths=["src/awf/api/schemas.py"],
+        )
+        requested = await repo.create(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            task_title="overlap",
+            task_prompt="p",
+            agent=AgentRuntime.codex.value,
+            test_commands=[],
+            owned_paths=["src/awf/api/schemas.py"],
+            task_class=TaskClass.refactor_task.value,
+            task_policy={"scheduler": {"base_priority": 80}},
+        )
+        await session.commit()
+
+        listed = await repo.list_schedulable_ids(
+            status=WorkspaceStatus.requested,
+            limit=10,
+        )
+
+        assert existing.id in listed
+        assert requested.id in listed
+        assert await repo.find_active_owned_path_overlaps(
+            repo_url="git@github.com:example/app.git",
+            branch_base="development",
+            owned_paths=["src/awf/api/schemas.py"],
+        )
+
     @pytest.mark.unit
     @pytest.mark.parametrize(
         "status",

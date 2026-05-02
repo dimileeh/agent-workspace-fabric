@@ -590,6 +590,9 @@ class QueueDecision(Base):
     overlap_risk_summary: Mapped[dict[str, Any]] = mapped_column(
         JSON, nullable=False, default=dict, server_default=text("'{}'")
     )
+    score_summary: Mapped[dict[str, Any]] = mapped_column(
+        JSON, nullable=False, default=dict, server_default=text("'{}'")
+    )
     decided_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_now, nullable=False
     )
@@ -1122,6 +1125,7 @@ def _queue_decision_summary(decision: QueueDecision) -> dict[str, Any]:
         "retry_bonus": decision.retry_bonus,
         "resource_summary": decision.resource_summary,
         "overlap_risk_summary": decision.overlap_risk_summary,
+        "score_summary": decision.score_summary,
         "decided_at": decision.decided_at,
     }
 

@@ -79,6 +79,15 @@ async def test_queue_decision_repository_creates_and_lists_decisions(
         computed_priority=57,
         age_boost=2,
         retry_bonus=3,
+        score_summary={
+            "base_priority": 37,
+            "class_bias": 15,
+            "age_boost": 2,
+            "retry_bonus": 3,
+            "human_boost": 0,
+            "effective_score": 57,
+            "queued_at": "2026-04-26T12:00:00+00:00",
+        },
         resource_summary={
             "node_id": "local",
             "steady_cpu": 3.0,
@@ -108,6 +117,8 @@ async def test_queue_decision_repository_creates_and_lists_decisions(
     assert rows[0].computed_priority == 57
     assert rows[0].age_boost == 2
     assert rows[0].retry_bonus == 3
+    assert rows[0].score_summary["effective_score"] == 57
+    assert rows[0].score_summary["human_boost"] == 0
     assert rows[0].resource_summary["peak_cpu"] == 6.0
     assert rows[0].overlap_risk_summary["workspace_ids"] == ["ws_existing"]
     assert rows[0].decided_at == decided_at

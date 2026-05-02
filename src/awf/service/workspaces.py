@@ -84,6 +84,16 @@ from awf.service.resource_capacity import (
     WorkspaceResourceDefaults,
     resource_capacity_summary,
 )
+from awf.service.scheduler import (
+    SCHEDULER_POLICY_KEY,
+    scheduler_policy_snapshot,
+    scheduler_retry_policy_context,
+    scheduler_score_from_workspace,
+    task_class_bias,
+)
+from awf.service.scheduler import (
+    task_class_priority as scheduler_task_class_priority,
+)
 from awf.service.secret_leases import workspace_secret_lease_response
 from awf.service.validation_observability import (
     latest_merge_candidate,
@@ -138,22 +148,6 @@ class _WorkspaceResponseSource:
             return getattr(self.workspace, name)
 
 
-TASK_CLASS_PRIORITIES = {
-    "migration_task": 5,
-    "dependency_task": 4,
-    "build_config_task": 3,
-    "refactor_task": 2,
-    "test_task": 1,
-    "docs_task": 0,
-}
-TASK_CLASS_BIASES = {
-    "migration_task": 15,
-    "dependency_task": 12,
-    "build_config_task": 10,
-    "refactor_task": 4,
-    "test_task": 2,
-    "docs_task": 0,
-}
 _log = get_logger(__name__)
 _PROFILE_APP_ENDPOINTS_ADAPTER = TypeAdapter(list[ProfileAppEndpoint])
 
@@ -692,23 +686,20 @@ async def create_workspace_v2_row(
         dind_slots=reservation_plan.dind_slots,
         phase=reservation_plan.phase,
     )
+    scheduler_score = scheduler_score_from_workspace(ws, now=ws.created_at)
     await QueueDecisionRepository(session).create(
         workspace_id=ws.id,
         task_id=task.id,
         attempt_id=attempt.id,
         decision=QUEUE_DECISION_ADMITTED,
         reason_code=QUEUE_DECISION_ADMITTED_LOCAL_REASON,
-        class_priority=task_class_priority(ws.task_class),
-        computed_priority=computed_priority(
-            base_priority=payload.task.priority,
-            task_class=ws.task_class,
-            age_boost=0,
-            retry_bonus=0,
-        ),
-        age_boost=0,
-        retry_bonus=0,
+        class_priority=scheduler_score.class_priority,
+        computed_priority=scheduler_score.effective_score,
+        age_boost=scheduler_score.age_boost,
+        retry_bonus=scheduler_score.retry_bonus,
         resource_summary=resource_summary,
         overlap_risk_summary=overlap_risk_summary(overlaps),
+        score_summary=scheduler_score.score_summary,
     )
     await _record_owned_path_overlap_risk(repo, ws, overlaps)
     await session.flush()
@@ -800,6 +791,48 @@ async def retry_workspace_row(
         parent_attempt_id=source_attempt.id if source_attempt is not None else None,
         redispatch_from_attempt_id=source_attempt.id if source_attempt is not None else None,
     )
+    retry_policy = dict(retried.task_policy or {})
+    retry_scheduler_value = retry_policy.get(SCHEDULER_POLICY_KEY)
+    retry_scheduler_policy = (
+        dict(retry_scheduler_value) if isinstance(retry_scheduler_value, Mapping) else {}
+    )
+    retry_scheduler_policy["retry_attempt_number"] = max(0, attempt.attempt_number - 1)
+    retry_policy[SCHEDULER_POLICY_KEY] = retry_scheduler_policy
+    retried.task_policy = retry_policy
+    latest_source_reservation = (
+        await ResourceReservationRepository(session).list_for_workspace(source.id, limit=1)
+    )
+    retry_resource_summary: dict[str, Any] = {}
+    if latest_source_reservation:
+        source_reservation = latest_source_reservation[0]
+        await ResourceReservationRepository(session).create(
+            workspace_id=retried.id,
+            attempt_id=attempt.id,
+            node_id=source_reservation.node_id,
+            steady_cpu=source_reservation.steady_cpu,
+            steady_memory_gb=source_reservation.steady_memory_gb,
+            peak_cpu=source_reservation.peak_cpu,
+            peak_memory_gb=source_reservation.peak_memory_gb,
+            disk_mb=source_reservation.disk_mb,
+            dind_slots=source_reservation.dind_slots,
+            phase=source_reservation.phase,
+        )
+        retry_resource_summary = _resource_reservation_row_summary(source_reservation)
+    retry_score = scheduler_score_from_workspace(retried, now=retried.created_at)
+    await QueueDecisionRepository(session).create(
+        workspace_id=retried.id,
+        task_id=task.id,
+        attempt_id=attempt.id,
+        decision=QUEUE_DECISION_ADMITTED,
+        reason_code=QUEUE_DECISION_ADMITTED_LOCAL_REASON,
+        class_priority=retry_score.class_priority,
+        computed_priority=retry_score.effective_score,
+        age_boost=retry_score.age_boost,
+        retry_bonus=retry_score.retry_bonus,
+        resource_summary=retry_resource_summary,
+        overlap_risk_summary=overlap_risk_summary(overlaps),
+        score_summary=retry_score.score_summary,
+    )
 
     operation_repo = OperationRepository(session)
     operation_payload: dict[str, Any] = {"source_workspace_id": source.id}
@@ -879,7 +912,11 @@ def _retry_task_policy(
     planning_scope_context: _PlanningScopeRetryContext | None,
 ) -> dict[str, Any]:
     policy = task_policy_with_coordination_warnings(
-        deepcopy(source.task_policy),
+        scheduler_retry_policy_context(
+            deepcopy(source.task_policy),
+            source_workspace_id=source.id,
+            parent_failure_reason=source.failure_reason,
+        ),
         coordination_warnings,
     )
     if (
@@ -1481,7 +1518,7 @@ def overlap_risk_summary(overlaps: list[OwnedPathOverlap]) -> dict[str, Any]:
 
 
 def task_class_priority(task_class: str | None) -> int:
-    return TASK_CLASS_PRIORITIES.get(task_class or "", 0)
+    return scheduler_task_class_priority(task_class)
 
 
 def computed_priority(
@@ -1491,12 +1528,7 @@ def computed_priority(
     age_boost: int,
     retry_bonus: int,
 ) -> int:
-    return (
-        base_priority
-        + TASK_CLASS_BIASES.get(task_class or "", 0)
-        + age_boost
-        + retry_bonus
-    )
+    return base_priority + task_class_bias(task_class) + age_boost + retry_bonus
 
 
 def resource_reservation_plan(
@@ -1579,6 +1611,19 @@ def _dind_mode_from_profile_snapshot(profile: Mapping[str, Any] | None) -> str:
     if isinstance(docker, Mapping) and docker.get("mode") == "dind":
         return "dind"
     return "none"
+
+
+def _resource_reservation_row_summary(reservation: Any) -> dict[str, Any]:
+    return {
+        "node_id": reservation.node_id,
+        "steady_cpu": reservation.steady_cpu,
+        "steady_memory_gb": reservation.steady_memory_gb,
+        "peak_cpu": reservation.peak_cpu,
+        "peak_memory_gb": reservation.peak_memory_gb,
+        "disk_mb": reservation.disk_mb,
+        "dind_slots": reservation.dind_slots,
+        "phase": reservation.phase,
+    }
 
 
 def _parse_memory_gb(value: str | None) -> float | None:
@@ -1693,6 +1738,11 @@ def v2_profile_snapshots(
 
 def v2_task_policy_snapshot(payload: WorkspaceCreateV2Request) -> dict[str, Any]:
     policy: dict[str, Any] = {}
+    if payload.task.priority != 0 or payload.task.human_boost != 0:
+        policy["scheduler"] = scheduler_policy_snapshot(
+            base_priority=payload.task.priority,
+            human_boost=payload.task.human_boost,
+        )
     if payload.task.model is not None:
         policy["agent_model"] = payload.task.model
     if payload.task.out_of_scope_changes is not None:

@@ -34,6 +34,8 @@ from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import (
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
+    QueueDecisionRepository,
+    TaskAttemptRepository,
     WorkspaceRepository,
 )
 from awf.node.provisioner import Provisioner
@@ -41,6 +43,10 @@ from awf.runtime.inspection import RuntimeInspector, RuntimeSnapshot
 from awf.service.provider_recovery import (
     provider_cooldown_not_before,
     provider_for_agent_model,
+)
+from awf.service.scheduler import (
+    scheduler_score_from_workspace,
+    score_summary_with_suppression,
 )
 from awf.service.secret_leases import SecretLeaseService
 from awf.service.workspace_runtime_health import (
@@ -86,6 +92,13 @@ _MONITOR_RECOVERY_NO_EXECUTION_CLAIM_REASON_CODE = (
 _MONITOR_RECOVERY_MONITOR_CLAIM_ACQUIRED_REASON_CODE = (
     "MONITOR_CLAIM_ACQUIRED_DURING_MONITOR_RECOVERY"
 )
+QUEUE_DECISION_ORDERED = "ordered"
+QUEUE_DECISION_DEFERRED = "deferred"
+ORDERED_REQUESTED_PROVISIONING_REASON = "ORDERED_REQUESTED_PROVISIONING"
+ORDERED_READY_EXECUTION_REASON = "ORDERED_READY_EXECUTION"
+ORDERED_MONITOR_RESUME_REASON = "ORDERED_MONITOR_RESUME"
+PROVIDER_RECOVERY_NOT_BEFORE_REASON = "PROVIDER_RECOVERY_NOT_BEFORE"
+PROVIDER_MODEL_CIRCUIT_OPEN_REASON = "PROVIDER_MODEL_CIRCUIT_OPEN"
 
 
 @dataclass(frozen=True)
@@ -181,6 +194,10 @@ class ControlWorker:
             action="provision",
         )
         if requested_ids:
+            await self._record_ordered_decisions(
+                requested_ids,
+                reason_code=ORDERED_REQUESTED_PROVISIONING_REASON,
+            )
             await asyncio.gather(
                 *(self._safely_provision(ws_id) for ws_id in requested_ids),
                 return_exceptions=False,
@@ -204,9 +221,15 @@ class ControlWorker:
                     monitoring_ids,
                     limit=execution_slots,
                 )
-                dispatched_ids.update(
-                    self._dispatch_monitor_resumes(monitoring_ids, limit=execution_slots)
+                monitor_dispatched = self._dispatch_monitor_resumes(
+                    monitoring_ids,
+                    limit=execution_slots,
                 )
+                await self._record_ordered_decisions(
+                    [ws_id for ws_id in monitoring_ids if ws_id in monitor_dispatched],
+                    reason_code=ORDERED_MONITOR_RESUME_REASON,
+                )
+                dispatched_ids.update(monitor_dispatched)
 
             execution_slots = self._available_execution_slots()
             if execution_slots > 0:
@@ -219,9 +242,15 @@ class ControlWorker:
                     expected=WorkspaceStatus.ready,
                     action="execute",
                 )
-                dispatched_ids.update(
-                    self._dispatch_ready_executions(ready_ids, limit=execution_slots)
+                ready_dispatched = self._dispatch_ready_executions(
+                    ready_ids,
+                    limit=execution_slots,
                 )
+                await self._record_ordered_decisions(
+                    [ws_id for ws_id in ready_ids if ws_id in ready_dispatched],
+                    reason_code=ORDERED_READY_EXECUTION_REASON,
+                )
+                dispatched_ids.update(ready_dispatched)
 
         return len(dispatched_ids)
 
@@ -300,9 +329,19 @@ class ControlWorker:
             return []
 
         async with self._session_factory() as session:
+            candidate_limit = (
+                _scheduler_candidate_fetch_limit(limit)
+                if status
+                in {
+                    WorkspaceStatus.requested,
+                    WorkspaceStatus.ready,
+                    WorkspaceStatus.monitoring_pr,
+                }
+                else limit
+            )
             ids = await WorkspaceRepository(session).list_schedulable_ids(
                 status=status,
-                limit=limit,
+                limit=candidate_limit,
                 exclude_ids=exclude_ids,
             )
             if status not in {
@@ -310,13 +349,13 @@ class ControlWorker:
                 WorkspaceStatus.ready,
                 WorkspaceStatus.monitoring_pr,
             }:
-                return ids
+                return ids[:limit]
             filtered = await self._filter_provider_recovery_suppressed(
                 session,
                 ids,
             )
             await session.commit()
-            return filtered
+            return filtered[:limit]
 
     async def _filter_provider_recovery_suppressed(
         self,
@@ -337,6 +376,14 @@ class ControlWorker:
                 continue
             not_before = provider_cooldown_not_before(workspace.task_policy)
             if not_before is not None and not_before > now:
+                await _record_scheduler_queue_decision(
+                    session,
+                    workspace,
+                    decision=QUEUE_DECISION_DEFERRED,
+                    reason_code=PROVIDER_RECOVERY_NOT_BEFORE_REASON,
+                    decided_at=now,
+                    suppression_detail={"not_before": not_before.isoformat()},
+                )
                 continue
             model = agent_model_from_task_policy(workspace.task_policy)
             provider = provider_for_agent_model(workspace.agent, model)
@@ -352,7 +399,55 @@ class ControlWorker:
         for workspace_id, pair in circuit_candidates.items():
             if pair not in open_breakers:
                 allowed.add(workspace_id)
+                continue
+            workspace = rows.get(workspace_id)
+            if workspace is None:
+                continue
+            breaker = open_breakers[pair]
+            await _record_scheduler_queue_decision(
+                session,
+                workspace,
+                decision=QUEUE_DECISION_DEFERRED,
+                reason_code=PROVIDER_MODEL_CIRCUIT_OPEN_REASON,
+                decided_at=now,
+                suppression_detail={
+                    "provider": breaker.provider,
+                    "model": breaker.model,
+                    "cooldown_until": _json_datetime(breaker.cooldown_until),
+                },
+            )
         return [workspace_id for workspace_id in workspace_ids if workspace_id in allowed]
+
+    async def _record_ordered_decisions(
+        self,
+        workspace_ids: list[str],
+        *,
+        reason_code: str,
+    ) -> None:
+        if not workspace_ids:
+            return
+        decided_at = datetime.now(UTC)
+        async with self._session_factory() as session:
+            rows = {
+                workspace.id: workspace
+                for workspace in (
+                    await session.execute(
+                        select(Workspace).where(Workspace.id.in_(workspace_ids))
+                    )
+                ).scalars()
+            }
+            for workspace_id in workspace_ids:
+                workspace = rows.get(workspace_id)
+                if workspace is None:
+                    continue
+                await _record_scheduler_queue_decision(
+                    session,
+                    workspace,
+                    decision=QUEUE_DECISION_ORDERED,
+                    reason_code=reason_code,
+                    decided_at=decided_at,
+                )
+            await session.commit()
 
     async def _filter_current_status(
         self,
@@ -1113,6 +1208,52 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
         Workspace.monitor_claim_expires_at.is_(None),
         Workspace.monitor_claim_expires_at <= claim_cutoff,
     )
+
+
+async def _record_scheduler_queue_decision(
+    session: AsyncSession,
+    workspace: Workspace,
+    *,
+    decision: str,
+    reason_code: str,
+    decided_at: datetime,
+    suppression_detail: dict[str, Any] | None = None,
+) -> None:
+    attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace.id)
+    if attempt is None:
+        return
+
+    queue_repo = QueueDecisionRepository(session)
+    latest = (await queue_repo.list_for_workspace(workspace.id, limit=1))
+    score = scheduler_score_from_workspace(workspace, now=decided_at)
+    score_summary = (
+        score_summary_with_suppression(
+            score,
+            reason_code=reason_code,
+            detail=suppression_detail,
+        )
+        if suppression_detail is not None
+        else score.score_summary
+    )
+    await queue_repo.create(
+        workspace_id=workspace.id,
+        task_id=attempt.task_id,
+        attempt_id=attempt.id,
+        decision=decision,
+        reason_code=reason_code,
+        class_priority=score.class_priority,
+        computed_priority=score.effective_score,
+        age_boost=score.age_boost,
+        retry_bonus=score.retry_bonus,
+        resource_summary=dict(latest[0].resource_summary) if latest else {},
+        overlap_risk_summary=dict(latest[0].overlap_risk_summary) if latest else {},
+        score_summary=score_summary,
+        decided_at=decided_at,
+    )
+
+
+def _scheduler_candidate_fetch_limit(limit: int) -> int:
+    return max(limit, min(250, limit + 16, limit * 4 if limit > 0 else 0))
 
 
 def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:

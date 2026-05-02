@@ -148,6 +148,18 @@ async def test_create_v2_writes_admitted_decision_and_local_reservation(
     assert decisions[0].computed_priority == 37
     assert decisions[0].age_boost == 0
     assert decisions[0].retry_bonus == 0
+    assert decisions[0].score_summary["base_priority"] == 25
+    assert decisions[0].score_summary["class_bias"] == 12
+    assert decisions[0].score_summary["age_boost"] == 0
+    assert decisions[0].score_summary["retry_bonus"] == 0
+    assert decisions[0].score_summary["human_boost"] == 0
+    assert decisions[0].score_summary["effective_score"] == 37
+    assert decisions[0].score_summary["ordering_tuple"] == {
+        "class_priority": 4,
+        "effective_score": 37,
+        "queued_at": decisions[0].score_summary["queued_at"],
+        "workspace_id": created.id,
+    }
     assert decisions[0].resource_summary == {
         "node_id": "local",
         "steady_cpu": 4.0,
