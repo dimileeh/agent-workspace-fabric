@@ -1,0 +1,29 @@
+{
+  "status": "satisfied",
+  "summary": "The committed implementation matches the saved plan functionally and the requested validation phase passed after commit d4440e1. It adds a shared untrusted evidence renderer, applies it to PR review thread/comment and CI log repair prompts, preserves the PR monitor decision/footer policy, and adds adversarial helper, prompt, and runner tests.",
+  "validated_commit": "d4440e1",
+  "validated_at_utc": "2026-05-02T16:26:19Z",
+  "evidence": [
+    {
+      "command": "uv run --python 3.12 --extra dev pytest tests/unit/common/test_prompt_evidence.py tests/unit/runtime/test_monitor_prompts.py -q",
+      "exit_code": 0,
+      "output": "22 passed in 0.49s"
+    },
+    {
+      "command": "uv run --python 3.12 --extra dev pytest tests/unit/runtime/test_pr_monitor_runner.py -q",
+      "exit_code": 0,
+      "output": "55 passed in 7.63s"
+    },
+    {
+      "command": "uv run --python 3.12 --extra dev ruff check src/awf/common/prompt_evidence.py src/awf/runtime/monitor_prompts.py tests/unit/common/test_prompt_evidence.py tests/unit/runtime/test_monitor_prompts.py tests/unit/runtime/test_pr_monitor_runner.py",
+      "exit_code": 0,
+      "output": "All checks passed!"
+    },
+    {
+      "command": "uv run --python 3.12 --extra dev mypy src/awf",
+      "exit_code": 0,
+      "output": "Success: no issues found in 136 source files"
+    }
+  ],
+  "gaps": []
+}
