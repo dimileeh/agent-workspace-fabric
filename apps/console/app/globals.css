@@ -194,8 +194,7 @@ code,
 }
 
 [data-awf-theme="dark"] .border-slate-100,
-[data-awf-theme="dark"] .border-slate-200,
-[data-awf-theme="dark"] .border-slate-300 {
+[data-awf-theme="dark"] .border-slate-200 {
   border-color: var(--border) !important;
 }
 
