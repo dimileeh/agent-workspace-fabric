@@ -51,6 +51,7 @@ class _IsoToTimestamp(expression.FunctionElement[Any]):  # noqa: N801
 _ISO8601_TS_PG = (
     r'^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])'
     r'T([01]\d|2[0-3]):[0-5]\d:[0-5]\d'
+    r'(\.\d+)?'
     r'([+-]([01]\d|2[0-3]):?[0-5]\d|Z)?$'
 )
 
