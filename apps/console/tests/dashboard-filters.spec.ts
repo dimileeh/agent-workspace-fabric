@@ -11,11 +11,11 @@ test("dashboard filters for agents and exact models", async ({ page }) => {
   await waitForConsoleReady(page);
 
   // Expand filters
-  const expandButton = page.locator('button[aria-expanded="false"]').filter({ hasText: "Filters" });
-  if (await expandButton.isVisible()) {
+  const expandButton = page.getByRole("button", { name: "Filters" });
+  await expect(expandButton).toBeVisible();
+  if (await expandButton.getAttribute("aria-expanded") === "false") {
     await expandButton.click();
   }
-
   // Find agent dropdown and select opencode
   const agentSelect = page.getByLabel("Agent");
   await agentSelect.selectOption("opencode");
