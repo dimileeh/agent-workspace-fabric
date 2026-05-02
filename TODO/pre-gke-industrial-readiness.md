@@ -56,10 +56,10 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Security, Secrets, And Egress Policy | Prompt-injection boundary controls for external evidence | `ws_738700a49275436b9b96ec7e` | pending | running | Codex `gpt-5.5`; retry of no-work failed `ws_e3ca2c9f7f8d4f0181890173` after local mirror-chown fix, rebuild, and GC. |
-| P1 MCP And Project Onboarding Client Parity | One-command `awf init` local bootstrap | `ws_0da5b57348cb49d198db9ee2` | pending | running | Claude Code `claude-opus-4-7`; retry of no-work failed `ws_c377ab4f6b6b452196ac7097` after local mirror-chown fix, rebuild, and GC. |
+| P1 Security, Secrets, And Egress Policy | Prompt-injection boundary controls for external evidence | `ws_738700a49275436b9b96ec7e` | [#179](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/179) | monitoring_pr | Codex `gpt-5.5`; retry of no-work failed `ws_e3ca2c9f7f8d4f0181890173` after local mirror-chown fix, rebuild, and GC. |
+| P1 MCP And Project Onboarding Client Parity | One-command `awf init` local bootstrap | `ws_0da5b57348cb49d198db9ee2` | [#180](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/180) | monitoring_pr | Claude Code `claude-opus-4-7`; retry of no-work failed `ws_c377ab4f6b6b452196ac7097` after local mirror-chown fix, rebuild, and GC. |
 | P1 MCP And Project Onboarding Client Parity | API / CLI / MCP parity implementation driver | `ws_f4f5d0934e5f45c1ba0d7998` | pending | running | OpenCode `ollama/glm-5.1:cloud`; retry of no-work failed `ws_c6ad9ca557d441e881329388` after local mirror-chown fix, rebuild, and GC. |
-| P1 Operator Console Completion | Agent and exact model workspace filters | `ws_0e5f80c0f2be464db625c766` | pending | running | Gemini `gemini-3.1-pro-preview`; retry of no-work failed `ws_a0f41e0ed1154727b9a35f16` after local mirror-chown fix, rebuild, and GC. |
+| P1 Operator Console Completion | Agent and exact model workspace filters | `ws_0e5f80c0f2be464db625c766` | [#181](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/181) | monitoring_pr | Gemini `gemini-3.1-pro-preview`; retry of no-work failed `ws_a0f41e0ed1154727b9a35f16` after local mirror-chown fix, rebuild, and GC. |
 | P1 Security, Secrets, And Egress Policy | Restricted egress allowlist templates | `ws_acf536de3fe3434699bee650` | pending | running | OpenCode `ollama/kimi-k2.6:cloud`; retry of no-work failed `ws_b0db737f56e64894a53ad640` after local mirror-chown fix, rebuild, and GC. |
 
 ### Reschedule Required Slices
