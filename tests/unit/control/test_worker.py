@@ -1111,7 +1111,7 @@ class TestRunOnceExecution:
         assert len(workspace_selects) == 1
 
     @pytest.mark.unit
-    async def test_provider_cooldown_refill_keeps_exclusions_bounded(
+    async def test_provider_cooldown_refill_uses_cursor_without_growing_exclusions(
         self,
         monkeypatch: pytest.MonkeyPatch,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1145,7 +1145,19 @@ class TestRunOnceExecution:
         )
         ordered_ids = [*suppressed_ids, allowed_id]
         base_exclude_ids = {"active-workspace"}
-        queries: list[tuple[int, set[str]]] = []
+        created_at_by_id: dict[str, datetime] = {}
+        base_created_at = datetime(2026, 1, 1)
+        async with session_factory() as session:
+            for index, workspace_id in enumerate(ordered_ids):
+                created_at = base_created_at + timedelta(seconds=index)
+                created_at_by_id[workspace_id] = created_at
+                await session.execute(
+                    update(Workspace)
+                    .where(Workspace.id == workspace_id)
+                    .values(created_at=created_at, updated_at=created_at)
+                )
+            await session.commit()
+        queries: list[tuple[tuple[datetime, str] | None, set[str]]] = []
 
         async def _list_schedulable_workspaces(
             self: WorkspaceRepository,
@@ -1153,15 +1165,21 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
-            offset: int = 0,
+            after: tuple[datetime, str] | None = None,
         ) -> list[Workspace]:
             assert status == WorkspaceStatus.ready
             excluded = set(exclude_ids or set())
-            queries.append((offset, excluded))
+            queries.append((after, excluded))
             visible = [
                 workspace_id for workspace_id in ordered_ids if workspace_id not in excluded
             ]
-            visible = visible[offset : offset + limit]
+            if after is not None:
+                visible = [
+                    workspace_id
+                    for workspace_id in visible
+                    if (created_at_by_id[workspace_id], workspace_id) > after
+                ]
+            visible = visible[:limit]
             if not visible:
                 return []
             result = await self._session.execute(
@@ -1190,8 +1208,14 @@ class TestRunOnceExecution:
 
         assert await worker._list_ready(limit=1, exclude_ids=base_exclude_ids) == [allowed_id]
         assert queries == [
-            (0, base_exclude_ids),
-            (_scheduler_candidate_fetch_limit(1), base_exclude_ids),
+            (None, base_exclude_ids),
+            (
+                (
+                    created_at_by_id[suppressed_ids[-1]],
+                    suppressed_ids[-1],
+                ),
+                base_exclude_ids,
+            ),
         ]
 
     @pytest.mark.unit
@@ -1590,9 +1614,9 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
-            offset: int = 0,
+            after: tuple[datetime, str] | None = None,
         ) -> list[Workspace]:
-            del self, offset
+            del self, after
             queries.append((status, limit, set(exclude_ids or set())))
             return []
 

@@ -1070,6 +1070,36 @@ class TestOwnedPathOverlapLookup:
         assert "workspaces.id NOT IN ('ws_active')" in sql
 
     @pytest.mark.unit
+    async def test_postgres_scheduler_cursor_uses_keyset_without_offset(self) -> None:
+        cursor_created_at = datetime(2026, 1, 1, tzinfo=UTC)
+        session = _RecordingSchedulerSession(
+            "postgresql",
+            values=[_recorded_workspace_row("ws_after", status=WorkspaceStatus.ready)],
+        )
+        repo = WorkspaceRepository(session, dialect_name="postgresql")  # type: ignore[arg-type]
+
+        listed = await repo.list_schedulable_workspaces(
+            status=WorkspaceStatus.ready,
+            limit=1,
+            after=(cursor_created_at, "ws_cursor"),
+        )
+
+        assert [workspace.id for workspace in listed] == ["ws_after"]
+        assert len(session.executed) == 1
+        sql = str(
+            session.executed[0].compile(  # type: ignore[attr-defined]
+                dialect=postgresql.dialect(),
+                compile_kwargs={"literal_binds": True},
+            )
+        )
+        assert "FOR UPDATE" in sql
+        assert "SKIP LOCKED" in sql
+        assert "OFFSET" not in sql
+        assert "workspaces.created_at >" in sql
+        assert "workspaces.created_at =" in sql
+        assert "workspaces.id > 'ws_cursor'" in sql
+
+    @pytest.mark.unit
     async def test_sqlite_scheduler_lists_use_portable_select(self) -> None:
         session = _RecordingSchedulerSession(
             "sqlite",

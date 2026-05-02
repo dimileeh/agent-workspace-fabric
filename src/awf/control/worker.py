@@ -373,18 +373,18 @@ class ControlWorker:
             filtered: list[str] = []
             base_exclude_ids = set(exclude_ids or set())
             candidate_limit = _scheduler_candidate_fetch_limit(limit)
-            candidate_offset = 0
+            candidate_after: tuple[datetime, str] | None = None
             repo = WorkspaceRepository(session)
             while len(filtered) < limit:
                 workspaces = await repo.list_schedulable_workspaces(
                     status=status,
                     limit=candidate_limit,
                     exclude_ids=base_exclude_ids,
-                    offset=candidate_offset,
+                    after=candidate_after,
                 )
                 if not workspaces:
                     break
-                candidate_offset += len(workspaces)
+                candidate_after = _scheduler_candidate_cursor(workspaces)
                 eligible = await self._filter_provider_recovery_suppressed(
                     session,
                     workspaces,
@@ -1413,6 +1413,13 @@ def _scheduler_candidate_fetch_limit(limit: int) -> int:
         proportional_fetch_limit,
     )
     return max(limit, widened_fetch_limit)
+
+
+def _scheduler_candidate_cursor(workspaces: list[Workspace]) -> tuple[datetime, str] | None:
+    if not workspaces:
+        return None
+    latest = max(workspaces, key=lambda workspace: (workspace.created_at, workspace.id))
+    return latest.created_at, latest.id
 
 
 def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:

@@ -2560,7 +2560,7 @@ class WorkspaceRepository:
         status: WorkspaceStatus,
         limit: int,
         exclude_ids: set[str] | None = None,
-        offset: int = 0,
+        after: tuple[datetime, str] | None = None,
     ) -> builtins.list[str]:
         """Return candidate workspace IDs for one worker poll.
 
@@ -2577,7 +2577,7 @@ class WorkspaceRepository:
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
-            offset=offset,
+            after=after,
         )
         return [
             workspace.id
@@ -2590,7 +2590,7 @@ class WorkspaceRepository:
         status: WorkspaceStatus,
         limit: int,
         exclude_ids: set[str] | None = None,
-        offset: int = 0,
+        after: tuple[datetime, str] | None = None,
     ) -> builtins.list[Workspace]:
         """Return ordered candidate workspaces for one worker poll."""
         if limit <= 0:
@@ -2600,7 +2600,7 @@ class WorkspaceRepository:
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
-            offset=offset,
+            after=after,
         )
 
         return self._sort_schedulable_workspaces(candidates, limit)
@@ -2611,13 +2611,13 @@ class WorkspaceRepository:
         status: WorkspaceStatus,
         limit: int | None,
         exclude_ids: set[str] | None = None,
-        offset: int = 0,
+        after: tuple[datetime, str] | None = None,
     ) -> builtins.list[Workspace]:
         stmt = _schedulable_workspace_ids_stmt(
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
-            offset=offset,
+            after=after,
             skip_locked=self._dialect_name == "postgresql",
             claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
         )
@@ -3166,7 +3166,7 @@ def _schedulable_workspace_ids_stmt(
     status: WorkspaceStatus,
     limit: int | None,
     exclude_ids: set[str] | None = None,
-    offset: int = 0,
+    after: tuple[datetime, str] | None = None,
     skip_locked: bool,
     claim_cutoff: datetime | None = None,
 ) -> Select[tuple[Workspace]]:
@@ -3180,11 +3180,20 @@ def _schedulable_workspace_ids_stmt(
         )
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
+    if after is not None:
+        after_created_at, after_id = after
+        stmt = stmt.where(
+            or_(
+                Workspace.created_at > after_created_at,
+                and_(
+                    Workspace.created_at == after_created_at,
+                    Workspace.id > after_id,
+                ),
+            )
+        )
     stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc())
     if limit is not None:
         stmt = stmt.limit(limit)
-    if offset > 0:
-        stmt = stmt.offset(offset)
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt
