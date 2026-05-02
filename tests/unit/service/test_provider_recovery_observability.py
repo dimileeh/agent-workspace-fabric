@@ -730,8 +730,9 @@ def test_provider_recovery_state_reason_code_falls_back_to_source_reason_code() 
     assert view.reason_code == PROVIDER_RETRY_DELAYED_REASON
 
 
-def test_merge_view_prefers_event_recommended_action_over_generic_default() -> None:
+def test_merge_view_prefers_event_recommended_action_when_policy_lacks_one() -> None:
     now = datetime.now(UTC)
+    not_before = now + timedelta(seconds=300)
     event_payload: dict[str, Any] = {
         "source_workspace_id": "ws-source-001",
         "provider_recovery": {
@@ -745,6 +746,7 @@ def test_merge_view_prefers_event_recommended_action_over_generic_default() -> N
             "target_agent": "codex",
             "target_provider": "openai",
             "target_model": "gpt-5",
+            "not_before": not_before.isoformat(),
         },
     }
     event = SimpleNamespace(
@@ -757,12 +759,12 @@ def test_merge_view_prefers_event_recommended_action_over_generic_default() -> N
         id="evt-merge-001",
     )
     state_data: dict[str, Any] = {
-        "action": "retry",
-        "decision_reason_code": PROVIDER_RETRY_DELAYED_REASON,
+        "action": "terminal",
+        "decision_reason_code": PROVIDER_FALLBACK_SELECTED_REASON,
         "source_provider": "openai",
         "source_model": "gpt-5",
-        "retry_attempt_number": 1,
-        "fallback_attempt_number": 0,
+        "retry_attempt_number": 3,
+        "fallback_attempt_number": 2,
         "target_agent": "codex",
         "target_provider": "openai",
         "target_model": "gpt-5",
@@ -780,10 +782,10 @@ def test_merge_view_prefers_event_recommended_action_over_generic_default() -> N
     )
     view = provider_recovery_state_for_workspace(workspace)
     assert view is not None
-    assert view.recommended_action == "Refresh credentials and retry."
+    assert view.recommended_action == "No further recovery possible; inspect failure details."
 
 
-def test_merge_view_prefers_event_recommended_action_when_policy_has_specific() -> None:
+def test_merge_view_prefers_policy_recommended_action_over_event() -> None:
     now = datetime.now(UTC)
     event_payload: dict[str, Any] = {
         "source_workspace_id": "ws-source-002",
@@ -812,7 +814,7 @@ def test_merge_view_prefers_event_recommended_action_when_policy_has_specific() 
     state_data: dict[str, Any] = {
         "action": "fallback",
         "decision_reason_code": PROVIDER_FALLBACK_SELECTED_REASON,
-        "recommended_action": "Switch to backup provider immediately.",
+        "recommended_action": "Retry with exponential backoff.",
         "source_provider": "google",
         "source_model": "gemini-2.5-pro",
         "retry_attempt_number": 0,
@@ -834,4 +836,4 @@ def test_merge_view_prefers_event_recommended_action_when_policy_has_specific() 
     )
     view = provider_recovery_state_for_workspace(workspace)
     assert view is not None
-    assert view.recommended_action == "Switch to backup provider immediately."
+    assert view.recommended_action == "Retry with exponential backoff."
