@@ -9,6 +9,7 @@ from awf.api.schemas import (
     MergeQueueItemResponse,
     ProviderRecoveryStateResponse,
     WorkspaceFailureDetailsResponse,
+    WorkspaceRecoverySummaryResponse,
     WorkspaceResponse,
 )
 from awf.service.provider_recovery import (
@@ -254,3 +255,48 @@ def test_workspace_response_accepts_provider_recovery_state() -> None:
 
     ws_none = ws.model_copy(update={"provider_recovery_state": None})
     assert ws_none.provider_recovery_state is None
+
+
+def test_recovery_summary_response_preserves_provider_recovery() -> None:
+    now = datetime.now(UTC)
+    provider_recovery_data = {
+        "action": "fallback",
+        "reason_code": "PROVIDER_FALLBACK_SELECTED",
+        "fallback_target": {
+            "agent": "codex",
+            "provider": "openai",
+            "model": "gpt-5.3-codex",
+        },
+        "cooldown_until": None,
+        "next_eligible_at": (now + timedelta(seconds=300)).isoformat(),
+        "recommended_action": "Dispatch an approved fallback model.",
+    }
+    response = WorkspaceRecoverySummaryResponse(
+        from_state="running",
+        to_state="failed",
+        reason_code="agent_failure",
+        action="retry",
+        recovery_mode=None,
+        started_at=now,
+        current_operation=None,
+        summary="Reverted running -> failed.",
+        payload=None,
+        provider_recovery=provider_recovery_data,
+    )
+    assert response.provider_recovery is not None
+    assert response.provider_recovery["action"] == "fallback"
+    assert response.provider_recovery["reason_code"] == "PROVIDER_FALLBACK_SELECTED"
+
+    response_none = WorkspaceRecoverySummaryResponse(
+        from_state="running",
+        to_state="failed",
+        reason_code="agent_failure",
+        action="retry",
+        recovery_mode=None,
+        started_at=now,
+        current_operation=None,
+        summary="Reverted running -> failed.",
+        payload=None,
+        provider_recovery=None,
+    )
+    assert response_none.provider_recovery is None

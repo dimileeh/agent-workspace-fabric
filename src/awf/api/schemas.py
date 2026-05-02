@@ -329,6 +329,7 @@ class WorkspaceRecoverySummaryResponse(BaseModel):
     current_operation: WorkspaceRecoveryCurrentOperationResponse | None = None
     summary: str
     payload: dict[str, Any] | None = None
+    provider_recovery: dict[str, Any] | None = None
 
 
 class ValidationRunSummaryResponse(BaseModel):
