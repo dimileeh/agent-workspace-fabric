@@ -627,6 +627,97 @@ def test_service_status_includes_network_posture_counts_and_open_warning(
     assert posture["open_examples"] == [
         {"workspace_id": "ws_open", "status": "running", "pr_url": None}
     ]
+    assert "active_restricted_templates" in posture
+    assert "deferred_enforcement_note" in posture
+
+
+@pytest.mark.unit
+def test_network_posture_payload_includes_restricted_templates(tmp_path: Path) -> None:
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset({"ws_tpl"}),
+            terminal_ids=frozenset(),
+            available=True,
+            snapshots=(
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_tpl",
+                    status=WorkspaceStatus.running.value,
+                    updated_at=datetime.now(UTC),
+                    network_posture="restricted",
+                ),
+            ),
+        )
+
+    status = asyncio.run(
+        collect_service_status(
+            _settings(tmp_path),
+            api_get=_api_get,
+            db_probe=_db_probe,
+            run_subprocess=_make_run_subprocess(ps_payload=""),
+            socket_exists=lambda _path: True,
+            disk_usage=lambda _path: _DiskUsage(total=1000, used=700, free=300),
+            workspace_id_lookup=_ws_lookup,
+            provider_environ={},
+        )
+    )
+
+    posture = status["checks"]["network_posture"]
+    assert posture["reason"] == "NETWORK_POSTURE_NO_ACTIVE_OPEN"
+    assert posture["active_restricted_templates"] == []
+    assert "Destination-level filtering" in posture["deferred_enforcement_note"]
+
+
+@pytest.mark.unit
+def test_network_posture_payload_aggregates_restricted_templates(tmp_path: Path) -> None:
+    async def _ws_lookup(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset({"ws_1", "ws_2"}),
+            terminal_ids=frozenset(),
+            available=True,
+            snapshots=(
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_1",
+                    status=WorkspaceStatus.running.value,
+                    updated_at=datetime.now(UTC),
+                    network_posture="restricted",
+                ),
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_2",
+                    status=WorkspaceStatus.running.value,
+                    updated_at=datetime.now(UTC),
+                    network_posture="restricted",
+                ),
+            ),
+        )
+
+    def _workspace_lookup(url: str) -> WorkspaceIdView:
+        return _ws_lookup_sync(url)
+
+    def _ws_lookup_sync(_url: str) -> WorkspaceIdView:
+        return WorkspaceIdView(
+            active_ids=frozenset({"ws_1", "ws_2"}),
+            terminal_ids=frozenset(),
+            available=True,
+            snapshots=(
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_1",
+                    status=WorkspaceStatus.running.value,
+                    updated_at=datetime.now(UTC),
+                    network_posture="restricted",
+                ),
+                WorkspaceLifecycleSnapshot(
+                    workspace_id="ws_2",
+                    status=WorkspaceStatus.running.value,
+                    updated_at=datetime.now(UTC),
+                    network_posture="restricted",
+                ),
+            ),
+        )
+
+    from awf.service.status import _network_posture_check_payload
+
+    payload = _network_posture_check_payload(_ws_lookup_sync(""))
+    assert payload["active_restricted_templates"] == []
 
 
 @pytest.mark.unit

@@ -249,21 +249,55 @@ def test_doctor_warns_when_active_open_network_posture_is_visible(
 
 
 @pytest.mark.unit
+def test_doctor_network_posture_metadata_surfaces_templates(tmp_path: Path) -> None:
+    from awf.service.doctor import collect_doctor_report
+
+    status = _green_status()
+    checks = status["checks"]
+    assert isinstance(checks, dict)
+    checks["network_posture"] = {
+        "ok": True,
+        "status": "ok",
+        "reason": "NETWORK_POSTURE_NO_ACTIVE_OPEN",
+        "active_counts_by_posture": {
+            "restricted": 2,
+            "offline": 0,
+            "open": 0,
+            "unknown": 0,
+        },
+        "active_restricted_templates": ["github", "model_providers"],
+        "deferred_enforcement_note": "Destination-level filtering is deferred.",
+        "open_examples": [],
+    }
+
+    async def _collector(_settings: ServiceSettings, **_kwargs: object) -> dict[str, object]:
+        return status
+
+    report = asyncio.run(
+        collect_doctor_report(
+            _settings(tmp_path),
+            status_collector=_collector,
+            run_subprocess=_worker_running,
+            socket_connector=_connect_ok,
+            environ={},
+        )
+    )
+    diagnostic = _diagnostics_by_id(report)["network_posture"]
+
+    assert diagnostic["status"] == "ok"
+    assert diagnostic["reason"] == "NETWORK_POSTURE_NO_ACTIVE_OPEN"
+    assert diagnostic["metadata"]["active_restricted_templates"] == ["github", "model_providers"]
+    assert "deferred" in str(diagnostic["metadata"]["deferred_enforcement_note"])
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize(
     ("provider_name", "expected_reason", "expected_message"),
     [
         ("codex", "CODEX_AUTH_OK", "Codex auth is usable for agent workspaces."),
-        (
-            "claude_code",
-            "CLAUDE_CODE_AUTH_OK",
-            "Claude Code auth is usable for agent workspaces.",
-        ),
+        ("claude_code", "CLAUDE_CODE_AUTH_OK", "Claude Code auth is usable for agent workspaces."),
         ("gemini", "GEMINI_AUTH_OK", "Gemini auth is usable for agent workspaces."),
-        (
-            "opencode",
-            "OPENCODE_AUTH_OK",
-            "OpenCode/Ollama auth is usable for agent workspaces.",
-        ),
+        ("opencode", "OPENCODE_AUTH_OK", "OpenCode/Ollama auth is usable for agent workspaces."),
     ],
 )
 def test_doctor_maps_provider_ok_fallback_reasons_to_operator_output(

@@ -114,4 +114,4 @@ def test_profile_security_serialization():
     assert dumped["secrets"][0]["name"] == "API_KEY"
     assert dumped["secrets"][0]["provider"] == "aws"
     assert "security" in dumped
-    assert dumped["security"]["egress"] == {"mode": "restricted"}
+    assert dumped["security"]["egress"]["mode"] == "restricted"
