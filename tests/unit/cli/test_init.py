@@ -695,6 +695,27 @@ def test_init_with_path_rejects_format_json_flag(
 
 
 @pytest.mark.unit
+def test_init_without_path_rejects_include_smoke_request_flag(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def _fail_to_resolve_service_settings() -> object:
+        raise AssertionError("should not enter bootstrap mode")
+
+    monkeypatch.setattr(
+        "awf.service.config.resolve_service_settings",
+        _fail_to_resolve_service_settings,
+    )
+
+    result = _runner.invoke(app, ["init", "--include-smoke-request"])
+
+    output = f"{result.stdout}{getattr(result, 'stderr', '')}"
+    assert result.exit_code == 2
+    assert "--include-smoke-request" in output
+    assert "project path" in output
+    assert "Traceback" not in output
+
+
+@pytest.mark.unit
 def test_readme_recommends_awf_init_for_local_bootstrap() -> None:
     readme = Path("README.md").read_text(encoding="utf-8")
 

@@ -298,6 +298,13 @@ def init(
 ) -> None:
     """Bootstrap AWF on this machine, or run local onboarding checks for a project path."""
     if path is None:
+        if include_smoke_request:
+            typer.echo(
+                "error: onboarding-only flag --include-smoke-request requires a "
+                "project path; pass `awf init <path> --include-smoke-request`.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
         _run_init_service_bootstrap(
             write_env=write_env,
             timeout_seconds=timeout_seconds,
