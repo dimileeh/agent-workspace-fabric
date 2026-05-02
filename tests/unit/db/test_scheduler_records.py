@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime
 from awf.db.repositories import (
+    QueueDecisionCreate,
     QueueDecisionRepository,
     ResourceReservationRepository,
     TaskAttemptRepository,
@@ -122,6 +123,74 @@ async def test_queue_decision_repository_creates_and_lists_decisions(
     assert rows[0].resource_summary["peak_cpu"] == 6.0
     assert rows[0].overlap_risk_summary["workspace_ids"] == ["ws_existing"]
     assert rows[0].decided_at == decided_at
+
+
+@pytest.mark.unit
+async def test_queue_decision_repository_batches_create_and_latest_lookup(
+    session: AsyncSession,
+) -> None:
+    first_workspace_id, first_task_id, first_attempt_id = await _attempt(session)
+    second_workspace_id, second_task_id, second_attempt_id = await _attempt(session)
+    repo = QueueDecisionRepository(session)
+
+    rows = await repo.create_many(
+        [
+            QueueDecisionCreate(
+                workspace_id=first_workspace_id,
+                task_id=first_task_id,
+                attempt_id=first_attempt_id,
+                decision="deferred",
+                reason_code="PROVIDER_RECOVERY_NOT_BEFORE",
+                class_priority=5,
+                computed_priority=30,
+                age_boost=0,
+                retry_bonus=0,
+                resource_summary={"node_id": "old"},
+                overlap_risk_summary={},
+                score_summary={"effective_score": 30},
+                decided_at=datetime(2026, 4, 26, 12, 0, tzinfo=UTC),
+            ),
+            QueueDecisionCreate(
+                workspace_id=first_workspace_id,
+                task_id=first_task_id,
+                attempt_id=first_attempt_id,
+                decision="ordered",
+                reason_code="ORDERED_READY_EXECUTION",
+                class_priority=5,
+                computed_priority=40,
+                age_boost=1,
+                retry_bonus=0,
+                resource_summary={"node_id": "new"},
+                overlap_risk_summary={"overlap_count": 0},
+                score_summary={"effective_score": 40},
+                decided_at=datetime(2026, 4, 26, 12, 5, tzinfo=UTC),
+            ),
+            QueueDecisionCreate(
+                workspace_id=second_workspace_id,
+                task_id=second_task_id,
+                attempt_id=second_attempt_id,
+                decision="ordered",
+                reason_code="ORDERED_READY_EXECUTION",
+                class_priority=5,
+                computed_priority=35,
+                age_boost=0,
+                retry_bonus=0,
+                resource_summary={"node_id": "second"},
+                overlap_risk_summary={},
+                score_summary={"effective_score": 35},
+                decided_at=datetime(2026, 4, 26, 12, 3, tzinfo=UTC),
+            ),
+        ]
+    )
+    await session.commit()
+
+    latest = await repo.latest_by_workspace_ids(
+        [first_workspace_id, second_workspace_id, first_workspace_id]
+    )
+
+    assert latest[first_workspace_id].id == rows[1].id
+    assert latest[first_workspace_id].resource_summary["node_id"] == "new"
+    assert latest[second_workspace_id].id == rows[2].id
 
 
 @pytest.mark.unit

@@ -160,6 +160,23 @@ class _IssuedSecretLease:
     issue_event_required: bool
 
 
+@dataclass(frozen=True)
+class QueueDecisionCreate:
+    workspace_id: str
+    task_id: str
+    attempt_id: str
+    decision: str
+    reason_code: str
+    class_priority: int
+    computed_priority: int
+    age_boost: int
+    retry_bonus: int
+    resource_summary: dict[str, Any]
+    overlap_risk_summary: dict[str, Any]
+    score_summary: dict[str, Any] | None = None
+    decided_at: datetime | None = None
+
+
 def validation_command_set_hash(commands: list[dict[str, Any]]) -> str:
     """Stable hash for the configured command metadata in a validation run."""
 
@@ -738,25 +755,89 @@ class QueueDecisionRepository:
         score_summary: dict[str, Any] | None = None,
         decided_at: datetime | None = None,
     ) -> QueueDecision:
-        row = QueueDecision(
-            id=new_queue_decision_id(),
-            workspace_id=workspace_id,
-            task_id=task_id,
-            attempt_id=attempt_id,
-            decision=decision,
-            reason_code=reason_code,
-            class_priority=class_priority,
-            computed_priority=computed_priority,
-            age_boost=age_boost,
-            retry_bonus=retry_bonus,
-            resource_summary=dict(resource_summary),
-            overlap_risk_summary=dict(overlap_risk_summary),
-            score_summary=dict(score_summary or {}),
-            decided_at=decided_at or datetime.now(UTC),
+        rows = await self.create_many(
+            [
+                QueueDecisionCreate(
+                    workspace_id=workspace_id,
+                    task_id=task_id,
+                    attempt_id=attempt_id,
+                    decision=decision,
+                    reason_code=reason_code,
+                    class_priority=class_priority,
+                    computed_priority=computed_priority,
+                    age_boost=age_boost,
+                    retry_bonus=retry_bonus,
+                    resource_summary=resource_summary,
+                    overlap_risk_summary=overlap_risk_summary,
+                    score_summary=score_summary,
+                    decided_at=decided_at,
+                )
+            ]
         )
-        self._session.add(row)
+        return rows[0]
+
+    async def create_many(
+        self,
+        records: Iterable[QueueDecisionCreate],
+    ) -> builtins.list[QueueDecision]:
+        rows = [
+            QueueDecision(
+                id=new_queue_decision_id(),
+                workspace_id=record.workspace_id,
+                task_id=record.task_id,
+                attempt_id=record.attempt_id,
+                decision=record.decision,
+                reason_code=record.reason_code,
+                class_priority=record.class_priority,
+                computed_priority=record.computed_priority,
+                age_boost=record.age_boost,
+                retry_bonus=record.retry_bonus,
+                resource_summary=dict(record.resource_summary),
+                overlap_risk_summary=dict(record.overlap_risk_summary),
+                score_summary=dict(record.score_summary or {}),
+                decided_at=record.decided_at or datetime.now(UTC),
+            )
+            for record in records
+        ]
+        if not rows:
+            return []
+        self._session.add_all(rows)
         await self._session.flush()
-        return row
+        return rows
+
+    async def latest_by_workspace_ids(
+        self,
+        workspace_ids: Iterable[str],
+    ) -> dict[str, QueueDecision]:
+        unique_workspace_ids = tuple(dict.fromkeys(workspace_ids))
+        if not unique_workspace_ids:
+            return {}
+
+        ranked_decisions = (
+            select(
+                QueueDecision.id.label("queue_decision_id"),
+                func.row_number()
+                .over(
+                    partition_by=QueueDecision.workspace_id,
+                    order_by=(
+                        QueueDecision.decided_at.desc(),
+                        QueueDecision.id.desc(),
+                    ),
+                )
+                .label("decision_rank"),
+            )
+            .where(QueueDecision.workspace_id.in_(unique_workspace_ids))
+            .subquery()
+        )
+        stmt = (
+            select(QueueDecision)
+            .join(ranked_decisions, QueueDecision.id == ranked_decisions.c.queue_decision_id)
+            .where(ranked_decisions.c.decision_rank == 1)
+        )
+        return {
+            decision.workspace_id: decision
+            for decision in (await self._session.execute(stmt)).scalars()
+        }
 
     async def list_for_workspace(
         self,

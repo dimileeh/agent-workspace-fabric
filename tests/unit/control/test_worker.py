@@ -734,6 +734,88 @@ class TestRunOnceExecution:
         assert decisions[0].score_summary["base_priority"] == 33
 
     @pytest.mark.unit
+    async def test_ordered_decisions_avoid_per_workspace_attempt_and_decision_reads(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        ready_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"record-ordered-ready-{index}",
+                task_class="refactor_task",
+                task_policy={"scheduler": {"base_priority": 10 + index}},
+                create_task_attempt=True,
+            )
+            for index in range(2)
+        ]
+        task_attempt_point_selects: list[str] = []
+        queue_decision_point_selects: list[str] = []
+
+        def _capture_ordered_decision_selects(
+            _conn: object,
+            _cursor: object,
+            statement: str,
+            _parameters: object,
+            _context: object,
+            _executemany: bool,
+        ) -> None:
+            normalized = statement.upper()
+            if not normalized.lstrip().startswith("SELECT"):
+                return
+            if (
+                "FROM TASK_ATTEMPTS" in normalized
+                and "WHERE TASK_ATTEMPTS.WORKSPACE_ID = " in normalized
+            ):
+                task_attempt_point_selects.append(statement)
+            if (
+                "FROM QUEUE_DECISIONS" in normalized
+                and "WHERE QUEUE_DECISIONS.WORKSPACE_ID = " in normalized
+            ):
+                queue_decision_point_selects.append(statement)
+
+        engine = session_factory.kw["bind"]
+        event.listen(
+            engine.sync_engine,
+            "before_cursor_execute",
+            _capture_ordered_decision_selects,
+        )
+        try:
+            executor = _RecordingExecutor()
+            worker = ControlWorker(
+                session_factory=session_factory,
+                provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+                executor=executor,
+                runtime_inspector=_HealthyRuntimeInspector(),
+                config=WorkerConfig(
+                    poll_interval_seconds=0.01,
+                    max_concurrent_provisions=0,
+                    max_concurrent_executions=2,
+                ),
+            )
+
+            async def _skip_runtime_recovery_scan() -> None:
+                return None
+
+            worker._maybe_recover_stale_active_executions = (  # type: ignore[method-assign]
+                _skip_runtime_recovery_scan
+            )
+
+            assert await worker.run_once() == 2
+            await worker.wait_for_execution_tasks()
+        finally:
+            event.remove(
+                engine.sync_engine,
+                "before_cursor_execute",
+                _capture_ordered_decision_selects,
+            )
+
+        assert set(executor.calls) == set(ready_ids)
+        assert task_attempt_point_selects == []
+        assert queue_decision_point_selects == []
+
+    @pytest.mark.unit
     async def test_provider_cooldown_defer_does_not_consume_ready_execution_limit(
         self,
         session_factory: async_sessionmaker[AsyncSession],

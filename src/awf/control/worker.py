@@ -30,10 +30,11 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.common.logging import get_logger
 from awf.common.workspace_policy import agent_model_from_task_policy
 from awf.db.enums import FailureReason, OperationStatus, OperationType, WorkspaceStatus
-from awf.db.models import Workspace, WorkspaceEvent
+from awf.db.models import QueueDecision, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     OperationRepository,
     ProviderModelCircuitBreakerRepository,
+    QueueDecisionCreate,
     QueueDecisionRepository,
     TaskAttemptRepository,
     WorkspaceRepository,
@@ -121,6 +122,20 @@ class _ActiveExecutionCandidate:
     compose_file_path: str | None = None
     pr_url: str | None = None
     task_policy: dict[str, Any] | None = None
+
+
+@dataclass(frozen=True)
+class _OrderedDecisionCandidate:
+    workspace_id: str
+    task_class: str | None
+    task_policy: dict[str, Any] | None
+    created_at: datetime
+    task_id: str
+    attempt_id: str
+
+    @property
+    def id(self) -> str:
+        return self.workspace_id
 
 
 class WorkspaceExecutorProtocol(Protocol):
@@ -455,25 +470,55 @@ class ControlWorker:
             return
         decided_at = datetime.now(UTC)
         async with self._session_factory() as session:
-            rows = {
-                workspace.id: workspace
-                for workspace in (
-                    await session.execute(
-                        select(Workspace).where(Workspace.id.in_(workspace_ids))
-                    )
-                ).scalars()
+            stmt = (
+                select(
+                    Workspace.id,
+                    Workspace.task_class,
+                    Workspace.task_policy,
+                    Workspace.created_at,
+                    TaskAttempt.task_id,
+                    TaskAttempt.id,
+                )
+                .join(
+                    TaskAttempt,
+                    TaskAttempt.workspace_id == Workspace.id,
+                )
+                .where(Workspace.id.in_(workspace_ids))
+            )
+            rows = (await session.execute(stmt)).all()
+            candidates_by_id = {
+                row[0]: _OrderedDecisionCandidate(
+                    workspace_id=row[0],
+                    task_class=row[1],
+                    task_policy=row[2],
+                    created_at=row[3],
+                    task_id=row[4],
+                    attempt_id=row[5],
+                )
+                for row in rows
             }
-            for workspace_id in workspace_ids:
-                workspace = rows.get(workspace_id)
-                if workspace is None:
-                    continue
-                await _record_scheduler_queue_decision(
-                    session,
-                    workspace,
-                    decision=QUEUE_DECISION_ORDERED,
+            candidates = [
+                candidates_by_id[workspace_id]
+                for workspace_id in workspace_ids
+                if workspace_id in candidates_by_id
+            ]
+            if not candidates:
+                return
+
+            queue_repo = QueueDecisionRepository(session)
+            latest_by_workspace_id = await queue_repo.latest_by_workspace_ids(
+                candidate.workspace_id for candidate in candidates
+            )
+            decision_rows = [
+                _ordered_queue_decision_create(
+                    candidate,
+                    latest=latest_by_workspace_id.get(candidate.workspace_id),
                     reason_code=reason_code,
                     decided_at=decided_at,
                 )
+                for candidate in candidates
+            ]
+            await queue_repo.create_many(decision_rows)
             await session.commit()
 
     async def _filter_current_status(
@@ -1264,6 +1309,31 @@ def _stale_monitor_claim_filter(claim_cutoff: datetime) -> Any:
         Workspace.monitor_claimed_by.is_(None),
         Workspace.monitor_claim_expires_at.is_(None),
         Workspace.monitor_claim_expires_at <= claim_cutoff,
+    )
+
+
+def _ordered_queue_decision_create(
+    candidate: _OrderedDecisionCandidate,
+    *,
+    latest: QueueDecision | None,
+    reason_code: str,
+    decided_at: datetime,
+) -> QueueDecisionCreate:
+    score = scheduler_score_from_workspace(candidate, now=decided_at)
+    return QueueDecisionCreate(
+        workspace_id=candidate.workspace_id,
+        task_id=candidate.task_id,
+        attempt_id=candidate.attempt_id,
+        decision=QUEUE_DECISION_ORDERED,
+        reason_code=reason_code,
+        class_priority=score.class_priority,
+        computed_priority=score.effective_score,
+        age_boost=score.age_boost,
+        retry_bonus=score.retry_bonus,
+        resource_summary=dict(latest.resource_summary) if latest else {},
+        overlap_risk_summary=dict(latest.overlap_risk_summary) if latest else {},
+        score_summary=score.score_summary,
+        decided_at=decided_at,
     )
 
 
