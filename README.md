@@ -1142,6 +1142,34 @@ docker info
 docker compose version
 ```
 
+### Recommended Local Bootstrap
+
+Once AWF is installed, the fastest path to a working local control plane is
+`awf init`. With no arguments it bootstraps AWF on this machine: it checks
+Docker, ensures the host state directory under
+`${AWF_HOST_WORK_DIR:-${HOME}/.awf/service}` exists, copies `.env.example` to
+`.env` when `.env` is missing (use `--no-write-env` to skip), and starts or
+validates the local Postgres + migrate + API + worker stack via
+`awf service bootstrap`.
+
+```bash
+awf init
+awf service status --format pretty
+```
+
+After it reports success, export `AWF_GITHUB_TOKEN` so the worker can create
+PRs and use `awf init <path>` to inspect a project repository (see
+[Project Onboarding](docs/PROJECT_ONBOARDING.md) for the project-mode
+walkthrough). The two `awf init` shapes are explicit:
+
+- `awf init` — bootstrap AWF on this machine (Docker, state dir, `.env`,
+  service stack).
+- `awf init <path>` — run local onboarding readiness checks for a project
+  checkout.
+
+Subsequent sections describe the contributor/development setup; a fresh
+machine only needs the steps above plus a coding-agent credential.
+
 ### Clone and Install
 
 ```bash

@@ -23,8 +23,10 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
+import click
 import httpx
 import typer
+from click.core import ParameterSource
 
 from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.service.gc import WorkspaceGCComposeTeardownResult
@@ -237,16 +239,122 @@ def _handle_response(
 # ── Commands ─────────────────────────────────────────────────────────────
 
 
+_DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS = 180.0
+_DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = 2.0
+
+
 @app.command("init")
 def init(
-    path: Path = typer.Argument(..., help="Path to a checked-out repository."),
+    path: Path | None = typer.Argument(
+        None,
+        help=(
+            "Path to a checked-out repository. Omit to bootstrap the local "
+            "AWF service stack on this machine."
+        ),
+    ),
     include_smoke_request: bool = typer.Option(
         False,
         "--include-smoke-request",
         help="Include a smoke-workspace request payload (does not submit).",
     ),
+    write_env: bool = typer.Option(
+        True,
+        "--write-env/--no-write-env",
+        help=(
+            "When bootstrapping the local service, copy `.env.example` to "
+            "`.env` if `.env` is missing. Has no effect in project-onboarding "
+            "mode."
+        ),
+    ),
+    timeout_seconds: float = typer.Option(
+        _DEFAULT_INIT_BOOTSTRAP_TIMEOUT_SECONDS,
+        "--timeout-seconds",
+        min=0.0,
+        help="Local service bootstrap: maximum time to wait for readiness.",
+    ),
+    poll_interval_seconds: float = typer.Option(
+        _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS,
+        "--poll-interval-seconds",
+        min=0.01,
+        help="Local service bootstrap: seconds between readiness polls.",
+    ),
+    skip_agent_runtime_build: bool = typer.Option(
+        False,
+        "--skip-agent-runtime-build",
+        help="Local service bootstrap: skip building the agent runtime image.",
+    ),
+    provider: list[str] = typer.Option(
+        [],
+        "--provider",
+        help=(
+            "Repeatable provider strictness check passed through to local "
+            "service bootstrap: github, codex, claude_code, gemini, opencode, "
+            "or docker."
+        ),
+    ),
+    fmt: OutputFormat = typer.Option(
+        OutputFormat.pretty,
+        "--format",
+        help="Output format. JSON unlocks scripting; pretty is the default.",
+    ),
 ) -> None:
-    """Run local onboarding checks and print clear next steps for first setup."""
+    """Bootstrap AWF on this machine, or run local onboarding checks for a project path."""
+    if path is None:
+        if include_smoke_request:
+            typer.echo(
+                "error: onboarding-only flag --include-smoke-request requires a "
+                "project path; pass `awf init <path> --include-smoke-request`.",
+                err=True,
+            )
+            raise typer.Exit(code=2)
+        _run_init_service_bootstrap(
+            write_env=write_env,
+            timeout_seconds=timeout_seconds,
+            poll_interval_seconds=poll_interval_seconds,
+            skip_agent_runtime_build=skip_agent_runtime_build,
+            providers=provider,
+            fmt=fmt,
+        )
+        return
+
+    ctx = click.get_current_context()
+
+    def _explicit(name: str) -> bool:
+        return ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
+
+    bootstrap_only_flags: list[str] = []
+    if _explicit("skip_agent_runtime_build"):
+        bootstrap_only_flags.append("--skip-agent-runtime-build")
+    if _explicit("provider"):
+        bootstrap_only_flags.append("--provider")
+    if _explicit("timeout_seconds"):
+        bootstrap_only_flags.append("--timeout-seconds")
+    if _explicit("poll_interval_seconds"):
+        bootstrap_only_flags.append("--poll-interval-seconds")
+    if _explicit("write_env"):
+        bootstrap_only_flags.append("--write-env" if write_env else "--no-write-env")
+    if _explicit("fmt"):
+        bootstrap_only_flags.append("--format")
+    if bootstrap_only_flags:
+        typer.echo(
+            "error: bootstrap-only flag(s) "
+            f"{', '.join(bootstrap_only_flags)} require running `awf init` "
+            "without a project path.",
+            err=True,
+        )
+        raise typer.Exit(code=2)
+
+    _run_init_project_onboarding(
+        path,
+        include_smoke_request=include_smoke_request,
+    )
+
+
+def _run_init_project_onboarding(
+    path: Path,
+    *,
+    include_smoke_request: bool,
+) -> None:
     from awf.profiles.onboarding import preview_project_onboarding
     from awf.service.config import ServiceSettings, resolve_service_settings
     from awf.service.doctor import collect_doctor_report, render_doctor_pretty
@@ -366,6 +474,181 @@ def init(
             "creating or retrying workspaces."
         )
         raise typer.Exit(code=1)
+
+
+def _resolve_state_directory(env: Mapping[str, str]) -> Path:
+    """Resolve the AWF host state directory matching the Compose default."""
+    raw = env.get("AWF_HOST_WORK_DIR") or ""
+    if raw:
+        return Path(raw).expanduser().resolve()
+    home = env.get("HOME", "~")
+    return (Path(home) / ".awf" / "service").expanduser().resolve()
+
+
+def _docker_diagnostic_from_report(report: object) -> object | None:
+    from typing import cast
+
+    diagnostics = getattr(report, "diagnostics", ())
+    for diagnostic in diagnostics:
+        if getattr(diagnostic, "id", None) == "docker":
+            return cast(object, diagnostic)
+    return None
+
+
+def _run_init_service_bootstrap(
+    *,
+    write_env: bool,
+    timeout_seconds: float,
+    poll_interval_seconds: float,
+    skip_agent_runtime_build: bool,
+    providers: list[str],
+    fmt: OutputFormat,
+) -> None:
+    from awf.service.bootstrap import (
+        ServiceBootstrapError,
+        ServiceBootstrapOptions,
+        run_service_bootstrap,
+    )
+    from awf.service.config import resolve_service_settings
+    from awf.service.doctor import collect_doctor_report
+    from awf.service.provider_readiness import (
+        ProviderReadinessError,
+        validate_provider_names,
+    )
+
+    try:
+        strict_providers = validate_provider_names(providers)
+    except ProviderReadinessError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    pretty = fmt == OutputFormat.pretty
+
+    try:
+        settings = resolve_service_settings()
+
+        if pretty:
+            typer.echo("AWF init: local service bootstrap")
+
+        docker_report = asyncio.run(
+            collect_doctor_report(
+                settings,
+                strict_providers=frozenset(),
+                provider_environ=os.environ,
+                environ=os.environ,
+            )
+        )
+        docker_diag = _docker_diagnostic_from_report(docker_report)
+        docker_status = getattr(docker_diag, "status", None)
+        docker_unknown = docker_diag is None or docker_status is None
+        if docker_unknown or docker_status == "fail":
+            if docker_unknown:
+                message = "Docker availability could not be determined from the doctor report."
+                action = "Run `awf doctor` to investigate the local environment."
+                reason = "DOCKER_DIAGNOSTIC_MISSING"
+            else:
+                message = getattr(docker_diag, "message", "Docker is not available.")
+                action = getattr(docker_diag, "action", "")
+                reason = getattr(docker_diag, "reason", "DOCKER_DAEMON_UNREACHABLE")
+            if pretty:
+                typer.echo(f"  docker: {message}")
+                if action:
+                    typer.echo(f"  action: {action}")
+                typer.echo("")
+                typer.echo("Docker is not available; cannot bootstrap local service.")
+            else:
+                _emit(
+                    {
+                        "status": "failed",
+                        "reason_code": reason,
+                        "message": message,
+                        "action": action,
+                    },
+                    fmt,
+                )
+            raise typer.Exit(code=1)
+
+        state_dir = _resolve_state_directory(os.environ)
+        created = not state_dir.exists()
+        state_dir.mkdir(parents=True, exist_ok=True)
+    except typer.Exit:
+        raise
+    except Exception as exc:
+        if pretty:
+            typer.echo(f"error: could not collect local checks: {exc}", err=True)
+        else:
+            _emit(
+                {
+                    "status": "failed",
+                    "reason_code": "BOOTSTRAP_LOCAL_CHECKS_FAILED",
+                    "message": str(exc),
+                },
+                fmt,
+            )
+        raise typer.Exit(code=1) from exc
+
+    if pretty:
+        typer.echo(f"  state directory: {state_dir}")
+        typer.echo(f"  created: {'true' if created else 'false'}")
+
+    env_action = "skipped"
+    if write_env:
+        env_file = Path(".env")
+        env_example = Path(".env.example")
+        if env_file.exists():
+            env_action = "kept_existing"
+            if pretty:
+                typer.echo("  kept existing .env")
+        elif env_example.exists():
+            env_file.write_bytes(env_example.read_bytes())
+            env_action = "wrote_from_example"
+            if pretty:
+                typer.echo("  wrote .env from .env.example")
+        else:
+            env_action = "no_example"
+            if pretty:
+                typer.echo(
+                    "  no .env.example found in current directory; skipped .env "
+                    "creation (run `awf init` from the AWF repository root if "
+                    "you expected one)"
+                )
+
+    options = ServiceBootstrapOptions(
+        timeout_seconds=timeout_seconds,
+        poll_interval_seconds=poll_interval_seconds,
+        skip_agent_runtime_build=skip_agent_runtime_build,
+        strict_providers=frozenset(strict_providers),
+    )
+    try:
+        result = asyncio.run(
+            run_service_bootstrap(settings, options=options),
+        )
+    except KeyboardInterrupt:
+        raise typer.Exit(code=130) from None
+    except ServiceBootstrapError as exc:
+        _emit(exc.to_dict(), fmt)
+        raise typer.Exit(code=1) from None
+
+    if pretty:
+        typer.echo("  bootstrap status: ok")
+        typer.echo("")
+        typer.echo("Next steps:")
+        typer.echo(
+            "  - export AWF_GITHUB_TOKEN=\"$(gh auth token)\" so the worker can "
+            "create PRs."
+        )
+        typer.echo(
+            "  - Run `awf service status --format pretty` to verify readiness."
+        )
+        typer.echo(
+            "  - Run `awf init <path>` to onboard a project repository."
+        )
+    else:
+        payload = result.to_dict()
+        payload["state_directory"] = str(state_dir)
+        payload["state_directory_created"] = created
+        payload["env_action"] = env_action
+        _emit(payload, fmt)
 
 
 @app.command()
