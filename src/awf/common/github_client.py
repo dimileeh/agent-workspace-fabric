@@ -784,6 +784,12 @@ def _is_non_actionable_bot_review_body(body: str) -> bool:
     lower = " ".join(body.lower().split())
     if _is_non_actionable_review_skip_comment(body):
         return True
+    if (
+        "codex review" in lower
+        and "here are some automated review suggestions for this pull request" in lower
+        and "about codex in github" in lower
+    ):
+        return True
     if "no feedback" in lower or "no actionable feedback" in lower:
         return True
     if lower.startswith("## code review") and ("this pull request" in lower or "this pr" in lower):

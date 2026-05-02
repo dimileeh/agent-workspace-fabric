@@ -1187,6 +1187,88 @@ class TestHappyPath:
             assert stall_events == []
 
     @pytest.mark.unit
+    async def test_planning_profile_continues_after_slow_productive_needs_iteration(
+        self,
+        executor: WorkspaceExecutor,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.control import executor as executor_module
+        from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
+
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 1,
+                    "conformance_stall": {
+                        "no_output_seconds": 600,
+                        "over_duration_seconds": 10,
+                        "repeated_output_threshold": 3,
+                    },
+                },
+                "phases": {"validate": ["pytest -q"]},
+            },
+        )
+
+        clock = [0.0]
+
+        def _fake_monotonic() -> float:
+            clock[0] += 30.0
+            return clock[0]
+
+        monkeypatch.setattr(executor_module.time, "monotonic", _fake_monotonic)
+
+        fake.queue_result(returncode=0, stdout="")  # before planning
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD baseline
+        fake.queue_result(returncode=0, stdout="plan written")  # planning
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n")
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD pre-loop
+        fake.queue_result(returncode=0, stdout="implemented")  # initial execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(
+            returncode=0,
+            stdout='{"status":"needs_iteration","summary":"gap-1","gaps":["add tests"]}',
+        )
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/x.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 0 post
+        fake.queue_result(returncode=0, stdout="fixed gap")  # iteration execute
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/y.py\n")
+        fake.queue_result(
+            returncode=0,
+            stdout='{"status":"satisfied","summary":"done","gaps":[]}',
+        )
+        fake.queue_result(returncode=0, stdout=f"?? docs/awf-plans/{ws_id}.md\n M src/y.py\n")
+        fake.queue_result(returncode=0, stdout="sha1\n")  # rev-parse HEAD iter 1 post
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="src/x.py\nsrc/y.py\n")
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="1\n")
+        fake.queue_result(returncode=0)
+        _queue_validation_head(fake)
+        fake.queue_result(returncode=0, stdout="tests ok")
+        _queue_pre_push_diagnostics(fake)
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=0, stdout="https://github.com/a/b/pull/1")
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.completed.value
+            assert [
+                event
+                for event in ws.events
+                if event.reason_code == AGENT_STALLED_IN_CONFORMANCE
+            ] == []
+
+    @pytest.mark.unit
     async def test_planning_profile_records_stall_when_report_digest_repeats_without_progress(
         self,
         fake: FakeCommandRunner,

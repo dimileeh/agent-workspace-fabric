@@ -87,6 +87,7 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
     ConformanceIterationRecord,
     ConformanceStallEvidence,
+    ConformanceStallKind,
     ConformanceStallPolicy,
     PlanConformanceReport,
     build_agent_task_prompt,
@@ -2422,6 +2423,10 @@ class WorkspaceExecutor:
                 report = parse_conformance_report(report_text)
                 last_report = report
                 report_digest = _digest_text(report_text) if report_text else None
+                fresh_report_written = (
+                    report_digest is not None
+                    and report_digest != before_report_digest
+                )
             else:
                 stdout = compare_error.result.stdout
                 stderr = compare_error.result.stderr
@@ -2450,9 +2455,14 @@ class WorkspaceExecutor:
                     report = parse_conformance_report(report_text)
                     last_report = report
                     report_digest = _digest_text(report_text)
+                    fresh_report_written = (
+                        report_digest is not None
+                        and report_digest != before_report_digest
+                    )
                 else:
                     report = None
                     report_digest = None
+                    fresh_report_written = False
             after_head = await self._git_rev_parse_head(worktree_path)
             after_digest = self._digest_dirty_content(
                 worktree_path, after_compare, head_sha=after_head
@@ -2494,7 +2504,15 @@ class WorkspaceExecutor:
                 report_path=report_path,
                 latest_error=compare_error,
             )
-            if stall is not None:
+            if (
+                stall is not None
+                and not (
+                    stall.kind == ConformanceStallKind.over_duration
+                    and compare_error is None
+                    and report is not None
+                    and fresh_report_written
+                )
+            ):
                 return await self._build_conformance_stall_failure(
                     workspace=workspace,
                     worktree_path=worktree_path,

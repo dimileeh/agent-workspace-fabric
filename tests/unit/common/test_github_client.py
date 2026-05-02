@@ -519,6 +519,68 @@ class TestFetchPrStatus:
         assert status.unresolved_review_comments == ()
 
     @pytest.mark.unit
+    async def test_ignores_codex_review_envelope_when_inline_thread_is_actionable(
+        self,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(
+            returncode=0,
+            stdout=_sample_pr_payload(
+                threads=[
+                    {
+                        "id": "PRRT_kwDOSJAM6s5_H5DV",
+                        "isResolved": False,
+                        "isOutdated": False,
+                        "path": "src/awf/db/repositories.py",
+                        "line": 3187,
+                        "comments": {
+                            "nodes": [
+                                {
+                                    "bodyText": (
+                                        "Remove OFFSET from SKIP LOCKED scheduler queries"
+                                    ),
+                                    "author": {"login": "chatgpt-codex-connector[bot]"},
+                                }
+                            ]
+                        },
+                    }
+                ],
+                reviews=[
+                    {
+                        "databaseId": 4215124378,
+                        "body": (
+                            "\n### 💡 Codex Review\n\n"
+                            "Here are some automated review suggestions for this pull request.\n\n"
+                            "**Reviewed commit:** `062c9ceab4`\n\n"
+                            "<details> <summary>ℹ️ About Codex in GitHub</summary>\n"
+                            "<br/>\n\n"
+                            "Codex has been enabled to automatically review pull requests "
+                            "in this repo. Reviews are triggered when you\n"
+                            "- Open a pull request for review\n"
+                            "- Mark a draft as ready\n"
+                            "- Comment \"@codex review\".\n\n"
+                            "If Codex has suggestions, it will comment; otherwise it will "
+                            "react with 👍.\n"
+                            "</details>"
+                        ),
+                        "state": "COMMENTED",
+                        "author": {"login": "chatgpt-codex-connector[bot]"},
+                    }
+                ],
+            ),
+        )
+        client = GitHubClient(fake)
+
+        status = await client.fetch_pr_status(
+            repo=RepoRef(owner="o", name="r"), pr_number=1, base_behind_count=0
+        )
+
+        assert [t.thread_id for t in status.unresolved_inline_threads] == [
+            "PRRT_kwDOSJAM6s5_H5DV"
+        ]
+        assert status.unresolved_review_comments == ()
+
+    @pytest.mark.unit
     async def test_keeps_actionable_bot_review_body(self) -> None:
         fake = FakeCommandRunner()
         fake.queue_result(

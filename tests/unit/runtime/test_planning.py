@@ -181,6 +181,32 @@ def test_prompts_reference_plan_and_report_paths() -> None:
 
 
 @pytest.mark.unit
+def test_conformance_prompt_is_evidence_only_and_does_not_rerun_validation() -> None:
+    prompt = build_conformance_prompt(
+        task_prompt="Add metrics",
+        plan_path=Path("docs/awf-plans/ws_123.md"),
+        report_path=Path("docs/awf-plans/ws_123.conformance.json"),
+        iteration=0,
+    )
+
+    assert "Do not run validation commands" in prompt
+    assert "Use existing validation evidence" in prompt
+    assert "missing, stale, or insufficient" in prompt
+    for command in (
+        "pytest",
+        "ruff",
+        "mypy",
+        "coverage",
+        "npm",
+        "lint",
+        "build",
+        "git add",
+        "git commit",
+    ):
+        assert command in prompt
+
+
+@pytest.mark.unit
 def test_planning_prompt_is_plan_artifact_only_and_stops_before_implementation() -> None:
     plan = Path("docs/awf-plans/ws_scope_prompt.md")
 
@@ -1222,6 +1248,10 @@ def test_build_conformance_stall_recovery_prompt_steers_agent_to_only_redo_compa
     assert "docs/awf-plans/ws_old.md" in prompt
     assert "docs/awf-plans/ws_old.conformance.json" in prompt
     assert "Do not modify implementation files" in prompt
+    assert "Do not run validation commands" in prompt
+    assert "Use existing validation evidence" in prompt
+    for command in ("pytest", "ruff", "mypy", "coverage", "npm", "git commit"):
+        assert command in prompt
     assert "- Add regression test" in prompt
     assert "- Wire retry endpoint" in prompt
     assert '{"status":"satisfied|needs_iteration","summary":"...","gaps":["..."]}' in prompt
