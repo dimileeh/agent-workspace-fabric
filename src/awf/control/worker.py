@@ -74,6 +74,18 @@ _MONITOR_RECOVERY_REASON_CODE = "MONITOR_RECOVERY_AFTER_RESTART"
 _MONITOR_RECOVERY_EVENT_TYPE = "workspace.monitor_recovery_started"
 _MONITOR_RECOVERY_SOURCE = "worker_restart"
 _MONITOR_RECOVERY_OWNER = "control_worker"
+_MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE = (
+    "STALE_EXECUTION_CLAIM_CLEARED_DURING_MONITOR_RECOVERY"
+)
+_MONITOR_RECOVERY_EXECUTION_CLAIM_PRESERVED_REASON_CODE = (
+    "UNEXPIRED_EXECUTION_CLAIM_PRESERVED_DURING_MONITOR_RECOVERY"
+)
+_MONITOR_RECOVERY_NO_EXECUTION_CLAIM_REASON_CODE = (
+    "NO_EXECUTION_CLAIM_DURING_MONITOR_RECOVERY"
+)
+_MONITOR_RECOVERY_MONITOR_CLAIM_ACQUIRED_REASON_CODE = (
+    "MONITOR_CLAIM_ACQUIRED_DURING_MONITOR_RECOVERY"
+)
 
 
 @dataclass(frozen=True)
@@ -865,17 +877,40 @@ class ControlWorker:
                 return False
             previous_claim = _workspace_claim_snapshot(ws)
             runtime_stranding_reason = _latest_runtime_stranding_reason(ws.events)
+            execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
+                ws,
+                claim_cutoff=now,
+            )
             claimed = await repo.claim_monitoring_pr(
                 workspace_id,
                 owner_id=self._worker_id,
                 lease_expires_at=lease_expires_at,
                 now=now,
+                clear_stale_execution_claim_cutoff=now,
             )
             if claimed:
+                await session.refresh(ws)
+                if (
+                    ws.execution_claimed_by is not None
+                    or ws.execution_claim_expires_at is not None
+                    or execution_claim_cleanup["action"] == "preserved_unexpired"
+                ):
+                    execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
+                        ws,
+                        claim_cutoff=now,
+                    )
+                claim_cleanup = _monitor_recovery_claim_cleanup_payload(
+                    ws,
+                    claim_cutoff=now,
+                    monitor_claimed_by=self._worker_id,
+                    monitor_claim_expires_at=lease_expires_at,
+                    execution_claim_cleanup=execution_claim_cleanup,
+                )
                 operation_payload = _monitor_recovery_payload(
                     ws,
                     worker_id=self._worker_id,
                     previous_claim=previous_claim,
+                    claim_cleanup=claim_cleanup,
                     runtime_stranding_reason=runtime_stranding_reason,
                 )
                 operation = await OperationRepository(session).create(
@@ -1143,6 +1178,60 @@ def _workspace_claim_snapshot(workspace: Workspace) -> dict[str, str | None]:
     }
 
 
+def _monitor_recovery_claim_cleanup_payload(
+    workspace: Workspace,
+    *,
+    claim_cutoff: datetime,
+    monitor_claimed_by: str,
+    monitor_claim_expires_at: datetime,
+    execution_claim_cleanup: dict[str, str | None] | None = None,
+) -> dict[str, dict[str, str | None]]:
+    if execution_claim_cleanup is None:
+        execution_claim_cleanup = _monitor_recovery_execution_claim_cleanup_payload(
+            workspace,
+            claim_cutoff=claim_cutoff,
+        )
+    return {
+        "execution_claim": execution_claim_cleanup,
+        "monitor_claim": {
+            "action": "acquired",
+            "reason_code": _MONITOR_RECOVERY_MONITOR_CLAIM_ACQUIRED_REASON_CODE,
+            "claimed_by": monitor_claimed_by,
+            "expires_at": _json_datetime(monitor_claim_expires_at),
+        },
+    }
+
+
+def _monitor_recovery_execution_claim_cleanup_payload(
+    workspace: Workspace,
+    *,
+    claim_cutoff: datetime,
+) -> dict[str, str | None]:
+    previous_claimed_by = workspace.execution_claimed_by
+    previous_expires_at = _json_datetime(workspace.execution_claim_expires_at)
+    payload = {
+        "action": "none",
+        "reason_code": _MONITOR_RECOVERY_NO_EXECUTION_CLAIM_REASON_CODE,
+        "previous_claimed_by": previous_claimed_by,
+        "previous_expires_at": previous_expires_at,
+    }
+    if previous_claimed_by is None:
+        return payload
+
+    if _execution_claim_is_stale(workspace, claim_cutoff):
+        return {
+            **payload,
+            "action": "cleared_stale",
+            "reason_code": _MONITOR_RECOVERY_EXECUTION_CLAIM_CLEARED_REASON_CODE,
+        }
+
+    return {
+        **payload,
+        "action": "preserved_unexpired",
+        "reason_code": _MONITOR_RECOVERY_EXECUTION_CLAIM_PRESERVED_REASON_CODE,
+    }
+
+
 def _latest_runtime_stranding_reason(events: list[WorkspaceEvent]) -> str | None:
     for event in reversed(events):
         if event.event_type == RUNTIME_STRANDED_EVENT_TYPE:
@@ -1155,6 +1244,7 @@ def _monitor_recovery_payload(
     *,
     worker_id: str,
     previous_claim: dict[str, str | None],
+    claim_cleanup: dict[str, dict[str, str | None]],
     runtime_stranding_reason: str | None,
 ) -> dict[str, Any]:
     return {
@@ -1170,6 +1260,7 @@ def _monitor_recovery_payload(
         "pr_number": workspace.pr_number,
         "worker_id": worker_id,
         "previous_claim": previous_claim,
+        "claim_cleanup": claim_cleanup,
         "runtime_stranding_reason": runtime_stranding_reason,
         "monitor_state": {
             "monitor_started_at": _json_datetime(workspace.monitor_started_at),
