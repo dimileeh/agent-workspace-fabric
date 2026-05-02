@@ -63,6 +63,11 @@ awf profile init . --include-smoke-request
 The command is local filesystem work. It does not call the AWF API, create a
 workspace, start Docker, push branches, or open a PR.
 
+Generated onboarding profiles use `security.egress.mode: restricted` by
+default. Keep that default for new projects unless the repository needs
+explicitly trusted local dogfood behavior. Choosing `open` is allowed, but it is
+intentional unrestricted internet access and should be visible in review.
+
 ## Templates
 
 `awf profile init` currently drafts these small templates:

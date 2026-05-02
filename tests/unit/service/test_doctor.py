@@ -71,6 +71,18 @@ def _green_status() -> dict[str, object]:
                 "orphan_count": 0,
                 "examples": [],
             },
+            "network_posture": {
+                "ok": True,
+                "status": "ok",
+                "reason": "NETWORK_POSTURE_NO_ACTIVE_OPEN",
+                "active_counts_by_posture": {
+                    "restricted": 1,
+                    "offline": 0,
+                    "open": 0,
+                    "unknown": 0,
+                },
+                "open_examples": [],
+            },
         },
         "agent_readiness": {
             "status": "ok",
@@ -178,6 +190,7 @@ def test_doctor_green_report_covers_operator_diagnostics(tmp_path: Path) -> None
         "disk",
         "workspace_containers",
         "orphan_resources",
+        "network_posture",
         "local_config",
     } <= set(diagnostics)
     assert diagnostics["docker"]["source"] == "checks.docker"
@@ -188,6 +201,51 @@ def test_doctor_green_report_covers_operator_diagnostics(tmp_path: Path) -> None
     assert diagnostics["port.db"]["message"] == "localhost:5433 is accepting connections."
     assert "AWF doctor: ok" in render_doctor_pretty(report)
     assert "[ok] Docker:" in render_doctor_pretty(report)
+
+
+@pytest.mark.unit
+def test_doctor_warns_when_active_open_network_posture_is_visible(
+    tmp_path: Path,
+) -> None:
+    from awf.service.doctor import collect_doctor_report, render_doctor_pretty
+
+    status = _green_status()
+    checks = status["checks"]
+    assert isinstance(checks, dict)
+    checks["network_posture"] = {
+        "ok": True,
+        "status": "warn",
+        "reason": "NETWORK_POSTURE_OPEN_ACTIVE",
+        "active_counts_by_posture": {
+            "restricted": 0,
+            "offline": 0,
+            "open": 1,
+            "unknown": 0,
+        },
+        "open_examples": [
+            {"workspace_id": "ws_open", "status": "running", "pr_url": None}
+        ],
+    }
+
+    async def _collector(_settings: ServiceSettings, **_kwargs: object) -> dict[str, object]:
+        return status
+
+    report = asyncio.run(
+        collect_doctor_report(
+            _settings(tmp_path),
+            status_collector=_collector,
+            run_subprocess=_worker_running,
+            socket_connector=_connect_ok,
+            environ={},
+        )
+    )
+    diagnostic = _diagnostics_by_id(report)["network_posture"]
+
+    assert report.status == "warn"
+    assert diagnostic["status"] == "warn"
+    assert diagnostic["reason"] == "NETWORK_POSTURE_OPEN_ACTIVE"
+    assert "unrestricted internet access" in diagnostic["message"]
+    assert "[warn] Network Posture:" in render_doctor_pretty(report)
 
 
 @pytest.mark.unit

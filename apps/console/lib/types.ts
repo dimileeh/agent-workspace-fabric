@@ -15,6 +15,7 @@ export type WorkspaceStatus =
 export type AgentRuntime = "codex" | "claude_code" | "gemini" | "opencode";
 
 export type AgentIdentitySource = "task_policy" | "default" | "unavailable";
+export type NetworkPosture = "offline" | "restricted" | "open";
 
 export type WorkspaceLifecycleStageStatus =
   | "pending"
@@ -140,6 +141,7 @@ export interface WorkspaceOverview {
   agent_effort: string | null;
   agent_model_source: AgentIdentitySource;
   agent_effort_source: AgentIdentitySource;
+  network_posture: NetworkPosture | null;
   lifecycle: WorkspaceLifecycleStage[];
   llm_usage: LlmUsageSummary;
   recovery?: WorkspaceRecoverySummary | null;
@@ -378,8 +380,7 @@ export interface ProfileSecret {
 }
 
 export interface ProfileEgress {
-  mode: "open" | "allowlist" | "offline" | "mirrored" | "unavailable";
-  allowlist: string[];
+  mode: NetworkPosture | "unavailable";
 }
 
 export interface HostHomeAuthMountPolicy {
@@ -422,6 +423,7 @@ export interface Workspace {
   profile_ref: string | null;
   requested_profile: Record<string, unknown> | null;
   resolved_profile: Record<string, unknown> | null;
+  network_posture: NetworkPosture | null;
   test_commands: string[];
   requires_database: boolean;
   node_id: string | null;

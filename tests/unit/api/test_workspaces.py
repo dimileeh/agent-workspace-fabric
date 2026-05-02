@@ -928,6 +928,37 @@ class TestCreateWorkspaceV2PolicyMetadata:
         assert "secret/data/api-token" not in rendered_profiles
 
     @pytest.mark.unit
+    async def test_detail_and_overview_expose_network_posture_from_resolved_profile(
+        self,
+        client: AsyncClient,
+    ) -> None:
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "workspace": {
+                "profile_ref": "inline",
+                "profile": {
+                    "name": "open-local-dogfood",
+                    "security": {"egress": {"mode": "open"}},
+                },
+            },
+        }
+
+        create = await client.post("/v2/workspaces", json=payload)
+        assert create.status_code == 202
+
+        ws_id = create.json()["workspace_id"]
+        detail = await client.get(f"/v1/workspaces/{ws_id}")
+        overview = await client.get("/v1/workspaces/overview")
+
+        assert detail.status_code == 200
+        assert overview.status_code == 200
+        assert detail.json()["network_posture"] == "open"
+        overview_item = next(
+            item for item in overview.json()["items"] if item["workspace_id"] == ws_id
+        )
+        assert overview_item["network_posture"] == "open"
+
+    @pytest.mark.unit
     async def test_persists_agent_model_override_in_task_policy(
         self,
         client: AsyncClient,

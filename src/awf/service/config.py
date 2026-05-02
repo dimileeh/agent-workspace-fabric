@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
+from datetime import datetime
 
 from sqlalchemy.engine import make_url
 
@@ -49,6 +50,7 @@ class ServiceSettings:
         DEFAULT_WORKSPACE_CLEANUP_SCAN_INTERVAL_SECONDS
     )
     workspace_cleanup_batch_limit: int = DEFAULT_WORKSPACE_CLEANUP_BATCH_LIMIT
+    network_posture_open_legacy_cutoff: datetime | None = None
     local_capacity_cpu_cores: float | None = None
     local_capacity_memory_gb: float | None = None
     local_capacity_dind_slots: int | None = None
@@ -103,6 +105,7 @@ def resolve_service_settings(
         workspace_cleanup_enabled=settings.workspace_cleanup_enabled,
         workspace_cleanup_scan_interval_seconds=settings.workspace_cleanup_scan_interval_seconds,
         workspace_cleanup_batch_limit=settings.workspace_cleanup_batch_limit,
+        network_posture_open_legacy_cutoff=settings.network_posture_open_legacy_cutoff,
         local_capacity_cpu_cores=settings.local_capacity_cpu_cores,
         local_capacity_memory_gb=settings.local_capacity_memory_gb,
         local_capacity_dind_slots=settings.local_capacity_dind_slots,
@@ -114,6 +117,10 @@ def service_config_payload(settings: ServiceSettings) -> dict[str, object]:
 
     payload: dict[str, object] = asdict(settings)
     payload["database_url"] = _redact_database_url(settings.database_url)
+    if settings.network_posture_open_legacy_cutoff is not None:
+        payload["network_posture_open_legacy_cutoff"] = (
+            settings.network_posture_open_legacy_cutoff.isoformat()
+        )
     for key in ("api_token", "github_token"):
         if payload.get(key):
             payload[key] = "<redacted>"

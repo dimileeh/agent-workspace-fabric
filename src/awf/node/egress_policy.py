@@ -1,9 +1,8 @@
 """Local Docker egress policy decisions.
 
-This module intentionally only models the local Docker Compose backend. It
-fails closed for profile modes that require destination filtering because
-Compose networks cannot enforce generic domain allowlists without a proxy,
-firewall, or backend-specific policy controller.
+This module intentionally only models the local Docker Compose backend. It can
+represent open public networking and internal-only workspace networking; finer
+destination filtering is deferred to a future proxy/firewall backend.
 """
 
 from __future__ import annotations
@@ -46,19 +45,20 @@ class LocalEgressPolicyError(Exception):
 def local_egress_plan(egress: ProfileEgress) -> LocalEgressPlan:
     """Return local Compose settings for a profile egress declaration.
 
-    Supported local decisions are limited to open networking and internal-only
-    workspace networking. Destination allowlisting is rejected before Compose
-    resources are created because the local backend cannot enforce it
-    generically.
+    ``restricted`` is conservative in the local backend: it uses the same
+    internal-only network posture as ``offline`` while destination-level
+    controls are deferred.
     """
-    details = _policy_details(egress)
     if egress.mode == EgressMode.open:
         return LocalEgressPlan(
             mode=egress.mode,
             network_internal=False,
             host_gateway_enabled=True,
-            reason_code="LOCAL_EGRESS_OPEN",
-            details=details,
+            reason_code="LOCAL_EGRESS_OPEN_UNRESTRICTED",
+            details={
+                "network_posture": egress.mode.value,
+                "internet_access": "unrestricted",
+            },
         )
     if egress.mode == EgressMode.offline:
         return LocalEgressPlan(
@@ -66,46 +66,26 @@ def local_egress_plan(egress: ProfileEgress) -> LocalEgressPlan:
             network_internal=True,
             host_gateway_enabled=False,
             reason_code="LOCAL_EGRESS_OFFLINE_NETWORK",
-            details=details,
+            details={
+                "network_posture": egress.mode.value,
+                "internet_access": "disabled",
+            },
         )
-    if egress.mode == EgressMode.mirrored:
-        if egress.allowlist:
-            raise LocalEgressPolicyError(
-                reason_code="LOCAL_EGRESS_MIRRORED_ALLOWLIST_UNSUPPORTED",
-                mode=egress.mode,
-                message=(
-                    "local Docker mirrored egress with external destinations requires "
-                    "a future proxy or firewall backend"
-                ),
-                details=details,
-            )
+    if egress.mode == EgressMode.restricted:
         return LocalEgressPlan(
             mode=egress.mode,
             network_internal=True,
             host_gateway_enabled=False,
-            reason_code="LOCAL_EGRESS_MIRRORED_OFFLINE_NETWORK",
-            details=details,
-        )
-    if egress.mode == EgressMode.allowlist:
-        raise LocalEgressPolicyError(
-            reason_code="LOCAL_EGRESS_ALLOWLIST_UNSUPPORTED",
-            mode=egress.mode,
-            message=(
-                "local Docker allowlist egress requires a future proxy or firewall backend"
-            ),
-            details=details,
+            reason_code="LOCAL_EGRESS_RESTRICTED_LOCAL_ONLY",
+            details={
+                "network_posture": egress.mode.value,
+                "internet_access": "internal_only",
+                "destination_filtering": "deferred",
+            },
         )
     raise LocalEgressPolicyError(  # pragma: no cover - enum validation prevents this.
         reason_code="LOCAL_EGRESS_MODE_UNSUPPORTED",
         mode=egress.mode,
         message=f"local Docker backend does not support egress mode {egress.mode.value}",
-        details=details,
+        details={"network_posture": egress.mode.value},
     )
-
-
-def _policy_details(egress: ProfileEgress) -> dict[str, object]:
-    allowlist = egress.allowlist or []
-    return {
-        "mode": egress.mode.value,
-        "allowlist_count": len(allowlist),
-    }

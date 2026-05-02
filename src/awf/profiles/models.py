@@ -482,9 +482,8 @@ class ProfileSecret(BaseModel):
 
 class EgressMode(StrEnum):
     open = "open"
-    allowlist = "allowlist"
+    restricted = "restricted"
     offline = "offline"
-    mirrored = "mirrored"
 
 
 class ProfileEgress(BaseModel):
@@ -492,20 +491,7 @@ class ProfileEgress(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    mode: EgressMode = EgressMode.open
-    allowlist: list[str] = Field(default_factory=list)
-
-    @model_validator(mode="after")
-    def _validate_egress(self) -> ProfileEgress:
-        if self.mode not in (EgressMode.allowlist, EgressMode.mirrored) and self.allowlist:
-            raise ValueError(f"allowlist cannot be populated when egress mode is {self.mode}")
-        if self.mode == EgressMode.allowlist and not self.allowlist:
-            raise ValueError("allowlist must be populated when egress mode is allowlist")
-        if self.mode in (EgressMode.allowlist, EgressMode.mirrored):
-            for item in self.allowlist:
-                if not item or item.startswith("*") or "/" in item:
-                    raise ValueError(f"invalid allowlist entry: '{item}'")
-        return self
+    mode: EgressMode = EgressMode.restricted
 
 
 class ProfileLintSeverity(StrEnum):
@@ -628,6 +614,7 @@ class ProfileResolution(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     profile: WorkspaceProfile
+    network_posture: Literal["offline", "restricted", "open"]
     reason: str
     candidates_considered: list[str] = Field(default_factory=list)
     lint_findings: list[ProfileLintFinding] = Field(default_factory=list)

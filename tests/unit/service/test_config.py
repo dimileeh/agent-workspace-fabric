@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -130,6 +131,31 @@ def test_workspace_cleanup_policy_flows_from_environment(
     assert settings.workspace_cleanup_enabled is False
     assert settings.workspace_cleanup_scan_interval_seconds == 300
     assert settings.workspace_cleanup_batch_limit == 7
+
+
+@pytest.mark.unit
+def test_network_posture_legacy_cutoff_is_unset_by_default_and_in_payload() -> None:
+    settings = resolve_service_settings(Settings(_env_file=None), environ={})
+    payload = service_config_payload(settings)
+
+    assert settings.network_posture_open_legacy_cutoff is None
+    assert payload["network_posture_open_legacy_cutoff"] is None
+
+
+@pytest.mark.unit
+def test_network_posture_legacy_cutoff_flows_from_environment(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("AWF_NETWORK_POSTURE_OPEN_LEGACY_CUTOFF", "2026-05-02T13:00:00Z")
+
+    settings = resolve_service_settings(Settings(_env_file=None), environ=os.environ)
+    payload = service_config_payload(settings)
+
+    assert settings.network_posture_open_legacy_cutoff == datetime(
+        2026, 5, 2, 13, 0, tzinfo=UTC
+    )
+    assert payload["network_posture_open_legacy_cutoff"] == "2026-05-02T13:00:00+00:00"
+    json.dumps(payload)
 
 
 @pytest.mark.unit

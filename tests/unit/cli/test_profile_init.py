@@ -24,6 +24,7 @@ def test_profile_init_preview_prints_profile_and_diagnostics(tmp_path: Path) -> 
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["draft"]["profile"]["name"] == "python"
+    assert payload["draft"]["profile"]["security"]["egress"]["mode"] == "restricted"
     assert "yaml" in payload["draft"]
     assert "missing_validation_commands" in payload["diagnostics"]
     assert not (tmp_path / ".awf" / "workspace.yml").exists()
@@ -41,7 +42,9 @@ def test_profile_init_write_creates_awf_workspace_yml(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["written_path"] == str(profile_path)
     raw = yaml.safe_load(profile_path.read_text(encoding="utf-8"))
-    assert WorkspaceProfile.model_validate(raw["awf"]).name == "python"
+    profile = WorkspaceProfile.model_validate(raw["awf"])
+    assert profile.name == "python"
+    assert profile.security.egress.mode == "restricted"
 
 
 @pytest.mark.unit
@@ -72,4 +75,8 @@ def test_profile_init_includes_optional_smoke_request(tmp_path: Path) -> None:
     payload = json.loads(result.stdout)
     assert payload["smoke_request"]["repo"]["url"].startswith("file://")
     assert payload["smoke_request"]["workspace"]["profile"]["name"] == "generic"
+    assert (
+        payload["smoke_request"]["workspace"]["profile"]["security"]["egress"]["mode"]
+        == "restricted"
+    )
     assert payload["smoke_request"]["task"]["auto_merge"] is False

@@ -138,8 +138,7 @@ def _identity_profile(**overrides: object) -> WorkspaceProfile:
         },
         "security": {
             "egress": {
-                "mode": "allowlist",
-                "allowlist": ["github.com", "pypi.org"],
+                "mode": "restricted",
             }
         },
         "secrets": [
@@ -462,6 +461,8 @@ def test_environment_identity_inputs_sanitize_environment_and_secret_values() ->
             ),
         }
     ]
+    assert inputs["security"]["network_posture"] == "restricted"
+    assert "allowlist" not in inputs["security"]
     runtime_env = inputs["runtime"]["environment"]
     assert runtime_env == [
         {

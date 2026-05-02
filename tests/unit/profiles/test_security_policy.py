@@ -6,51 +6,45 @@ from awf.profiles.models import WorkspaceProfile
 
 
 @pytest.mark.unit
-def test_valid_egress_open():
-    profile = WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "open"}}})
-    assert profile.security.egress.mode == "open"
+@pytest.mark.parametrize("mode", ["restricted", "offline", "open"])
+def test_valid_network_postures(mode: str):
+    profile = WorkspaceProfile.model_validate(
+        {"name": "test", "security": {"egress": {"mode": mode}}}
+    )
+
+    assert profile.security.egress.mode == mode
+
 
 @pytest.mark.unit
-def test_valid_egress_offline():
-    profile = WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "offline"}}})
-    assert profile.security.egress.mode == "offline"
+def test_minimal_profile_defaults_to_restricted_network_posture():
+    profile = WorkspaceProfile.model_validate({"name": "test"})
+
+    assert profile.security.egress.mode == "restricted"
+
 
 @pytest.mark.unit
-def test_valid_egress_mirrored():
-    profile = WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "mirrored"}}})
-    assert profile.security.egress.mode == "mirrored"
-
-@pytest.mark.unit
-def test_valid_egress_allowlist():
-    profile = WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "allowlist", "allowlist": ["api.github.com"]}}})
-    assert profile.security.egress.mode == "allowlist"
-    assert profile.security.egress.allowlist == ["api.github.com"]
-
-@pytest.mark.unit
-def test_inconsistent_egress_allowlist_missing():
-    with pytest.raises(ValidationError, match="allowlist must be populated"):
-        WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "allowlist"}}})
-
-@pytest.mark.unit
-def test_inconsistent_egress_allowlist_when_open():
-    with pytest.raises(ValidationError, match="allowlist cannot be populated"):
-        WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "open", "allowlist": ["api.github.com"]}}})
-
-@pytest.mark.unit
-def test_inconsistent_egress_allowlist_when_offline():
-    with pytest.raises(ValidationError, match="allowlist cannot be populated"):
-        WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "offline", "allowlist": ["api.github.com"]}}})
-
-@pytest.mark.unit
-def test_invalid_allowlist_entries():
+@pytest.mark.parametrize("mode", ["allowlist", "mirrored", "bogus"])
+def test_invalid_and_legacy_network_postures_are_rejected(mode: str):
     with pytest.raises(ValidationError):
-        WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "allowlist", "allowlist": ["*"]}}})
+        WorkspaceProfile.model_validate(
+            {"name": "test", "security": {"egress": {"mode": mode}}}
+        )
+
 
 @pytest.mark.unit
-def test_valid_egress_mirrored_with_allowlist():
-    profile = WorkspaceProfile.model_validate({"name": "test", "security": {"egress": {"mode": "mirrored", "allowlist": ["api.github.com"]}}})
-    assert profile.security.egress.mode == "mirrored"
-    assert profile.security.egress.allowlist == ["api.github.com"]
+def test_allowlist_metadata_is_not_accepted_as_enforced_posture():
+    with pytest.raises(ValidationError):
+        WorkspaceProfile.model_validate(
+            {
+                "name": "test",
+                "security": {
+                    "egress": {
+                        "mode": "restricted",
+                        "allowlist": ["api.github.com"],
+                    }
+                },
+            }
+        )
 
 @pytest.mark.unit
 def test_broad_secret_targets():
@@ -110,8 +104,7 @@ def test_profile_security_serialization():
         ],
         "security": {
             "egress": {
-                "mode": "allowlist",
-                "allowlist": ["api.github.com", "crates.io"],
+                "mode": "restricted",
             }
         },
     })
@@ -121,5 +114,4 @@ def test_profile_security_serialization():
     assert dumped["secrets"][0]["name"] == "API_KEY"
     assert dumped["secrets"][0]["provider"] == "aws"
     assert "security" in dumped
-    assert dumped["security"]["egress"]["mode"] == "allowlist"
-    assert dumped["security"]["egress"]["allowlist"] == ["api.github.com", "crates.io"]
+    assert dumped["security"]["egress"] == {"mode": "restricted"}

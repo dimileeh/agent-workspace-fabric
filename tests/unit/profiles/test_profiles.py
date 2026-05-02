@@ -53,6 +53,31 @@ def test_profile_schema_accepts_minimal_valid_profile() -> None:
 
 
 @pytest.mark.unit
+def test_profile_resolution_model_dump_exposes_network_posture() -> None:
+    resolution = resolve_workspace_profile(
+        worktree_path=None,
+        inline_profile={
+            "name": "offline-preview",
+            "security": {"egress": {"mode": "offline"}},
+        },
+    )
+
+    dumped = resolution.model_dump(mode="json")
+    assert dumped["network_posture"] == "offline"
+    assert dumped["profile"]["security"]["egress"]["mode"] == "offline"
+
+
+@pytest.mark.unit
+def test_awf_self_profile_explicitly_resolves_open_network_posture() -> None:
+    repo_root = Path(__file__).resolve().parents[3]
+
+    resolution = resolve_workspace_profile(worktree_path=repo_root, profile_ref="auto")
+
+    assert resolution.profile.name == "awf-self"
+    assert resolution.network_posture == "open"
+
+
+@pytest.mark.unit
 def test_validation_error_message_falls_back_when_pydantic_has_no_errors() -> None:
     class EmptyValidationError:
         def errors(self, *, include_input: bool = True) -> list[dict[str, object]]:

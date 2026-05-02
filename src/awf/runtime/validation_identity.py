@@ -99,10 +99,7 @@ def environment_identity_inputs(profile: WorkspaceProfile) -> dict[str, Any]:
             "retry_budget": profile.validation.retry_budget,
         },
         "security": {
-            "egress": {
-                "mode": str(profile.security.egress.mode),
-                "allowlist": sorted(profile.security.egress.allowlist),
-            }
+            "network_posture": profile.security.egress.mode.value,
         },
         "secrets": [_secret_identity(secret) for secret in _sorted_secrets(profile.secrets)],
         "ports": [

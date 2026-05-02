@@ -23,6 +23,42 @@ from awf.profiles.onboarding import (
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    "template",
+    ["generic", "python", "node-nextjs", "docker-compose"],
+)
+def test_onboarding_templates_default_to_restricted_network_posture(
+    tmp_path: Path,
+    template: str,
+) -> None:
+    inspection = ProjectInspection(
+        path=tmp_path,
+        detected_template=template,
+        confidence="medium",
+        signals=(),
+        compose_file="docker-compose.yml",
+    )
+
+    profile = _profile_for_template(inspection, template)
+    dumped = profile.model_dump(mode="json", by_alias=True, exclude_none=True)
+
+    assert profile.security.egress.mode == "restricted"
+    assert dumped["security"]["egress"]["mode"] == "restricted"
+
+
+@pytest.mark.unit
+def test_onboarding_smoke_request_inlines_restricted_network_posture(tmp_path: Path) -> None:
+    preview = preview_project_onboarding(tmp_path, include_smoke_request=True)
+
+    assert preview.smoke_request is not None
+    workspace = preview.smoke_request["workspace"]
+    assert isinstance(workspace, dict)
+    profile = workspace["profile"]
+    assert isinstance(profile, dict)
+    assert profile["security"]["egress"]["mode"] == "restricted"
+
+
+@pytest.mark.unit
 def test_detects_generic_template_for_unknown_repo(tmp_path: Path) -> None:
     inspection = inspect_project(tmp_path)
     preview = preview_project_onboarding(tmp_path)

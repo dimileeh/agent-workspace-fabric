@@ -10,6 +10,7 @@ rather than mutating a global object.
 
 from __future__ import annotations
 
+from datetime import datetime
 from functools import lru_cache
 from typing import Any, Literal
 
@@ -117,6 +118,13 @@ class Settings(BaseSettings):
         gt=0,
         description="Maximum cleanup candidates to select in one retention cleanup batch.",
     )
+    network_posture_open_legacy_cutoff: datetime | None = Field(
+        default=None,
+        description=(
+            "Optional deployment-specific cutoff for treating persisted open "
+            "network posture values as unknown legacy defaults."
+        ),
+    )
     host_home: str = Field(
         default="~",
         description=(
@@ -195,6 +203,13 @@ class Settings(BaseSettings):
     )
     @classmethod
     def _empty_local_capacity_values_are_unset(cls, value: Any) -> Any:
+        if isinstance(value, str) and value.strip() == "":
+            return None
+        return value
+
+    @field_validator("network_posture_open_legacy_cutoff", mode="before")
+    @classmethod
+    def _empty_network_posture_open_legacy_cutoff_is_unset(cls, value: Any) -> Any:
         if isinstance(value, str) and value.strip() == "":
             return None
         return value
