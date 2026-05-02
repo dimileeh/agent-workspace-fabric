@@ -704,12 +704,14 @@ def test_network_posture_payload_aggregates_restricted_templates(tmp_path: Path)
                     status=WorkspaceStatus.running.value,
                     updated_at=datetime.now(UTC),
                     network_posture="restricted",
+                    allowlist_templates=("tpl_a", "tpl_b"),
                 ),
                 WorkspaceLifecycleSnapshot(
                     workspace_id="ws_2",
                     status=WorkspaceStatus.running.value,
                     updated_at=datetime.now(UTC),
                     network_posture="restricted",
+                    allowlist_templates=("tpl_b", "tpl_c"),
                 ),
             ),
         )
@@ -717,7 +719,7 @@ def test_network_posture_payload_aggregates_restricted_templates(tmp_path: Path)
     from awf.service.status import _network_posture_check_payload
 
     payload = _network_posture_check_payload(_ws_lookup_sync(""))
-    assert payload["active_restricted_templates"] == []
+    assert payload["active_restricted_templates"] == ["tpl_a", "tpl_b", "tpl_c"]
 
 
 @pytest.mark.unit
