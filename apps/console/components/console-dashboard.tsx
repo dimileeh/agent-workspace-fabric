@@ -320,19 +320,6 @@ export function ConsoleDashboard() {
   const [modelFilter, setModelFilter] = useState<string>("all");
   const [repoFilter, setRepoFilter] = useState("");
 
-  const availableModels = useMemo(() => {
-    return Array.from(new Set(overview.map((w) => w.agent_model).filter((m): m is string => Boolean(m)))).sort();
-  }, [overview]);
-
-  useEffect(() => {
-    setModelFilter("all");
-  }, [agentFilter, statusFilter, repoFilter]);
-
-  useEffect(() => {
-    if (modelFilter !== "all" && !availableModels.includes(modelFilter)) {
-      setModelFilter("all");
-    }
-  }, [availableModels, modelFilter]);
   const [searchText, setSearchText] = useState("");
   const [sortKey, setSortKey] = useState<WorkspaceSortKey>("updated_at");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -355,6 +342,20 @@ export function ConsoleDashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+
+  const availableModels = useMemo(() => {
+    return Array.from(new Set(overview.map((w) => w.agent_model).filter((m): m is string => Boolean(m)))).sort();
+  }, [overview]);
+
+  useEffect(() => {
+    setModelFilter("all");
+  }, [agentFilter, statusFilter, repoFilter]);
+
+  useEffect(() => {
+    if (modelFilter !== "all" && !availableModels.includes(modelFilter)) {
+      setModelFilter("all");
+    }
+  }, [availableModels, modelFilter]);
 
   useEffect(() => {
     setOperatorPreferences(readStoredOperatorPreferences());
