@@ -19,7 +19,7 @@ from awf.api.schemas import WorkspaceCreateV2Request
 from awf.db.base import Base
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
-from awf.db.repositories import WorkspaceRepository
+from awf.db.repositories import ProviderModelCircuitBreakerRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.profiles.models import ProfileMonitor, WorkspaceProfile
 from awf.service import provider_recovery as provider_recovery_mod
@@ -1068,6 +1068,50 @@ async def test_monitoring_pr_fallback_recovery_reuses_existing_pr_workspace(
         "PROVIDER_FALLBACK_SELECTED"
     )
     assert cooldown_events == []
+
+
+@pytest.mark.unit
+async def test_monitoring_pr_capacity_fallback_records_circuit_for_source_model(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata={
+                "reason_code": AGENT_PROVIDER_CAPACITY_EXHAUSTED,
+                "failure_type": "capacity",
+                "retryable": True,
+                "provider": "google",
+                "failure_fingerprint": "capacity:pr-169:no-model",
+                "recommended_action": "Retry PR monitor on another provider.",
+            },
+        )
+        assert result is not None
+        assert result != "terminal"
+        await session.commit()
+
+    async with factory() as session:
+        breaker_repo = ProviderModelCircuitBreakerRepository(session)
+        source_breaker = await breaker_repo.get(
+            provider="google",
+            model="gemini-2.5-pro",
+        )
+        fallback_breaker = await breaker_repo.get(
+            provider="google",
+            model="gpt-5.3-codex",
+        )
+
+    assert result.action == "fallback"
+    assert source_breaker is not None
+    assert source_breaker.failure_count == 1
+    assert fallback_breaker is None
 
 
 @pytest.mark.unit
