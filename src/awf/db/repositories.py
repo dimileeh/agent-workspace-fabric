@@ -3052,8 +3052,7 @@ def _schedulable_workspace_ids_stmt(
         )
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
-    del limit
-    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc())
+    stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc()).limit(limit)
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt

@@ -1010,6 +1010,7 @@ class TestOwnedPathOverlapLookup:
         )
         assert "FOR UPDATE" in sql
         assert "SKIP LOCKED" in sql
+        assert "LIMIT 1" in sql
         assert f"workspaces.status = '{status.value}'" in sql
         assert "workspaces.id NOT IN ('ws_active')" in sql
 
