@@ -240,10 +240,11 @@ class TestFixCiPrompt:
         assert "gh run list" in prompt
 
     @pytest.mark.unit
-    def test_marks_missing_log_as_not_available(self) -> None:
+    def test_marks_missing_log_as_not_available_without_quoting_it_as_evidence(self) -> None:
         failures = (CheckFailure(name="a", conclusion="FAILURE", log_excerpt=""),)
         prompt = fix_ci_prompt(pr_number=1, repo_slug="a/b", failures=failures)
         assert "(no log available)" in prompt
+        assert "AWF-EVIDENCE> (no log available)" not in prompt
 
     @pytest.mark.unit
     def test_ci_log_adversarial_text_is_quoted_evidence_not_policy(self) -> None:

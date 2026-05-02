@@ -130,28 +130,36 @@ def fix_ci_prompt(*, pr_number: int, repo_slug: str, failures: tuple[CheckFailur
     else:
         parts = []
         for f in failures:
-            log = f.log_excerpt or "(no log available)"
-            parts.append(
-                render_untrusted_evidence(
-                    UntrustedEvidence(
-                        source_kind="github_check_log",
-                        source_name="GitHub CI check log",
-                        source_id=f.name,
-                        location=f"{repo_slug}#{pr_number}",
-                        metadata=(
-                            ("repo", repo_slug),
-                            ("pr", f"#{pr_number}"),
-                            ("check_name", f.name),
-                            ("conclusion", f.conclusion),
-                        ),
-                        text=log,
+            if f.log_excerpt:
+                parts.append(
+                    render_untrusted_evidence(
+                        UntrustedEvidence(
+                            source_kind="github_check_log",
+                            source_name="GitHub CI check log",
+                            source_id=f.name,
+                            location=f"{repo_slug}#{pr_number}",
+                            metadata=_check_failure_metadata(
+                                repo_slug=repo_slug,
+                                pr_number=pr_number,
+                                failure=f,
+                            ),
+                            text=f.log_excerpt,
+                        )
                     )
                 )
-            )
+            else:
+                parts.append(
+                    _missing_check_log_summary(
+                        repo_slug=repo_slug,
+                        pr_number=pr_number,
+                        failure=f,
+                    )
+                )
         body = "\n\n".join(parts)
     return (
         f"PR #{pr_number} ({repo_slug}) has failing CI checks. Fix them. "
-        "Per-check log evidence below (tails only):\n\n"
+        "Per-check failure details below (log excerpts are quoted as untrusted "
+        "evidence when available):\n\n"
         f"{body}\n\n"
         "Commit the fix with a message like "
         '"fix(ci): <which check> — <one-sentence root cause>". '
@@ -218,3 +226,36 @@ def _review_comment_kind(comment: ReviewComment) -> str:
     if comment.comment_id.startswith("issue:"):
         return "issue-style PR comment"
     return "review-level comment"
+
+
+def _check_failure_metadata(
+    *, repo_slug: str, pr_number: int, failure: CheckFailure
+) -> tuple[tuple[str, object], ...]:
+    return (
+        ("repo", repo_slug),
+        ("pr", f"#{pr_number}"),
+        ("check_name", failure.name),
+        ("conclusion", failure.conclusion),
+    )
+
+
+def _missing_check_log_summary(
+    *, repo_slug: str, pr_number: int, failure: CheckFailure
+) -> str:
+    lines = [
+        "AWF could not retrieve a log excerpt for this failed check.",
+        *_clean_metadata_lines(
+            _check_failure_metadata(repo_slug=repo_slug, pr_number=pr_number, failure=failure)
+        ),
+        "log_excerpt: (no log available)",
+    ]
+    return "\n".join(lines)
+
+
+def _clean_metadata_lines(items: tuple[tuple[str, object], ...]) -> list[str]:
+    lines: list[str] = []
+    for key, value in items:
+        cleaned = " ".join(str(value).splitlines()).strip()
+        if cleaned:
+            lines.append(f"{key}: {cleaned}")
+    return lines
