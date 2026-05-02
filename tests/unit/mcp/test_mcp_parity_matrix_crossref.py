@@ -247,9 +247,13 @@ def test_parity_matrix_cli_commands_or_absent() -> None:
         cleaned = _strip_backticks(cli_cell)
         for part in re.split(r",\s*", cleaned):
             part = part.strip()
-            if not part or not part.startswith("awf "):
+            if not part:
                 continue
-            if part not in cli_commands:
+            if not part.startswith("awf "):
+                missing.append(f"{row.get('Capability', '?')}: {part} (malformed CLI entry)")
+                continue
+            base_cmd = part.split(" --")[0]
+            if base_cmd not in cli_commands:
                 missing.append(f"{row.get('Capability', '?')}: {part}")
     assert not missing, (
         "CLI commands in parity matrix not found in CLI app:\n"
