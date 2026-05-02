@@ -317,7 +317,9 @@ export function ConsoleDashboard() {
   const [logSortDirection, setLogSortDirection] = useState<SortDirection>("desc");
   const [statusFilter, setStatusFilter] = useState<string>("all");
   const [agentFilter, setAgentFilter] = useState<string>("all");
+  const [modelFilter, setModelFilter] = useState<string>("all");
   const [repoFilter, setRepoFilter] = useState("");
+
   const [searchText, setSearchText] = useState("");
   const [sortKey, setSortKey] = useState<WorkspaceSortKey>("updated_at");
   const [sortDirection, setSortDirection] = useState<SortDirection>("desc");
@@ -340,6 +342,10 @@ export function ConsoleDashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [isPending, startTransition] = useTransition();
+
+  const availableModels = useMemo(() => {
+    return Array.from(new Set(overview.map((w) => w.agent_model).filter((m): m is string => Boolean(m)))).sort();
+  }, [overview]);
 
   useEffect(() => {
     setOperatorPreferences(readStoredOperatorPreferences());
@@ -396,7 +402,7 @@ export function ConsoleDashboard() {
     setSelectedId((current) =>
       current && result.data.items.some((item) => item.workspace_id === current)
         ? current
-        : result.data.items[0]?.workspace_id ?? null,
+        : null,
     );
   }, [overviewPath]);
 
@@ -788,28 +794,40 @@ export function ConsoleDashboard() {
 
   const filteredOverview = useMemo(() => {
     const needle = searchText.trim().toLowerCase();
-    const filtered = needle
-      ? overview.filter((item) =>
-          [
-            item.workspace_id,
-            item.task_id,
-            item.title,
-            item.repo_url,
-            item.base_branch,
-            item.agent,
-            item.agent_model ?? "",
-            item.agent_effort ?? "",
-            item.status,
-            item.recovery?.reason_code ?? "",
-            item.recovery?.recovery_mode ?? "",
-          ]
-            .join(" ")
-            .toLowerCase()
-            .includes(needle),
-        )
-      : overview;
+    let filtered = overview;
+    if (modelFilter !== "all") {
+      filtered = filtered.filter((item) => item.agent_model === modelFilter);
+    }
+    if (needle) {
+      filtered = filtered.filter((item) =>
+        [
+          item.workspace_id,
+          item.task_id,
+          item.title,
+          item.repo_url,
+          item.base_branch,
+          item.agent,
+          item.agent_model ?? "",
+          item.agent_effort ?? "",
+          item.status,
+          item.recovery?.reason_code ?? "",
+          item.recovery?.recovery_mode ?? "",
+        ]
+          .join(" ")
+          .toLowerCase()
+          .includes(needle),
+      );
+    }
     return [...filtered].sort((left, right) => compareWorkspaceDates(left, right, sortKey, sortDirection));
-  }, [overview, searchText, sortDirection, sortKey]);
+  }, [overview, searchText, modelFilter, sortDirection, sortKey]);
+
+  useEffect(() => {
+    if (selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
+      setSelectedId(filteredOverview[0]?.workspace_id ?? null);
+    } else if (!selectedId && filteredOverview.length > 0) {
+      setSelectedId(filteredOverview[0].workspace_id);
+    }
+  }, [filteredOverview, selectedId]);
 
   const selectedOverview = overview.find((item) => item.workspace_id === selectedId) ?? null;
   const selectedMergeQueueItem = useMemo(
@@ -925,12 +943,15 @@ export function ConsoleDashboard() {
           <WorkspaceFilters
             statusFilter={statusFilter}
             agentFilter={agentFilter}
+            modelFilter={modelFilter}
+            availableModels={availableModels}
             repoFilter={repoFilter}
             searchText={searchText}
             sortKey={sortKey}
             sortDirection={sortDirection}
             onStatusFilter={setStatusFilter}
             onAgentFilter={setAgentFilter}
+            onModelFilter={setModelFilter}
             onRepoFilter={setRepoFilter}
             onSearchText={setSearchText}
             onSortKey={setSortKey}
@@ -1217,12 +1238,15 @@ function StatePill({
 function WorkspaceFilters({
   statusFilter,
   agentFilter,
+  modelFilter,
+  availableModels,
   repoFilter,
   searchText,
   sortKey,
   sortDirection,
   onStatusFilter,
   onAgentFilter,
+  onModelFilter,
   onRepoFilter,
   onSearchText,
   onSortKey,
@@ -1232,12 +1256,15 @@ function WorkspaceFilters({
 }: {
   statusFilter: string;
   agentFilter: string;
+  modelFilter: string;
+  availableModels: string[];
   repoFilter: string;
   searchText: string;
   sortKey: WorkspaceSortKey;
   sortDirection: SortDirection;
   onStatusFilter: (value: string) => void;
   onAgentFilter: (value: string) => void;
+  onModelFilter: (value: string) => void;
   onRepoFilter: (value: string) => void;
   onSearchText: (value: string) => void;
   onSortKey: (value: WorkspaceSortKey) => void;
@@ -1247,6 +1274,7 @@ function WorkspaceFilters({
 }) {
   const activeFilters = workspaceFilterSummary({
     agentFilter,
+    modelFilter,
     repoFilter,
     searchText,
     sortDirection,
@@ -1286,7 +1314,7 @@ function WorkspaceFilters({
             className="h-9 w-full rounded-md border border-slate-300 bg-white pr-3 pl-8 text-sm"
           />
         </label>
-        <div className="grid grid-cols-2 gap-2">
+        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
           <Select
             label="Status"
             value={statusFilter}
@@ -1297,7 +1325,13 @@ function WorkspaceFilters({
             label="Agent"
             value={agentFilter}
             onChange={onAgentFilter}
-            options={["all", "codex", "claude_code", "gemini"]}
+            options={["all", "codex", "claude_code", "gemini", "opencode"]}
+          />
+          <Select
+            label="Model"
+            value={modelFilter}
+            onChange={onModelFilter}
+            options={Array.from(new Set(["all", modelFilter, ...availableModels]))}
           />
         </div>
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
@@ -4042,6 +4076,7 @@ function mergeEvent(events: WorkspaceEvent[], event: WorkspaceEvent): WorkspaceE
 
 function workspaceFilterSummary({
   agentFilter,
+  modelFilter,
   repoFilter,
   searchText,
   sortDirection,
@@ -4049,6 +4084,7 @@ function workspaceFilterSummary({
   statusFilter,
 }: {
   agentFilter: string;
+  modelFilter: string;
   repoFilter: string;
   searchText: string;
   sortDirection: SortDirection;
@@ -4060,7 +4096,10 @@ function workspaceFilterSummary({
     parts.push(`status ${statusFilter}`);
   }
   if (agentFilter !== "all") {
-    parts.push(agentFilter);
+    parts.push(`agent ${agentFilter}`);
+  }
+  if (modelFilter !== "all") {
+    parts.push(`model ${modelFilter}`);
   }
   if (searchText.trim()) {
     parts.push(`search "${searchText.trim()}"`);
