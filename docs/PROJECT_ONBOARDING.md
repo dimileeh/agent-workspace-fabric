@@ -7,12 +7,21 @@ the draft and decide when to submit a real workspace request.
 
 ## First-run operator command
 
-Run `awf init <path>` for the first onboarding pass. It runs local readiness
-checks (without calling AWF API), prints plain-language next steps, and points to
-profile-edit and smoke-workspace workflows.
+`awf init` has two shapes:
+
+- `awf init` (no path) — the AWF-on-this-machine local service bootstrap. It
+  checks Docker, ensures the host state directory, optionally seeds `.env`
+  from `.env.example`, and starts or validates the local Postgres + migrate
+  + API + worker stack. Use this once per machine before running any
+  workspace-related commands.
+- `awf init <path>` — the project-onboarding readiness pass described on
+  this page. It inspects a checked-out repository, runs local readiness
+  checks (without calling the AWF API), and prints plain-language next
+  steps that point to profile-edit and smoke-workspace workflows.
 
 ```bash
-awf init .
+awf init                          # one-time local service bootstrap
+awf init .                        # project-onboarding readiness for ./.
 awf init . --include-smoke-request
 ```
 
