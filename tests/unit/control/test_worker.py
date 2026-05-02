@@ -4019,6 +4019,26 @@ class TestRunOnceStaleActiveExecutionRecovery:
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize(
+    ("limit", "expected"),
+    [
+        (0, 0),
+        (1, 4),
+        (5, 20),
+        (6, 22),
+        (64, 80),
+        (234, 250),
+        (251, 251),
+    ],
+)
+def test_scheduler_candidate_fetch_limit_documents_overfetch_edges(
+    limit: int,
+    expected: int,
+) -> None:
+    assert _scheduler_candidate_fetch_limit(limit) == expected
+
+
+@pytest.mark.unit
 def test_stale_execution_helper_defaults_for_non_runtime_statuses() -> None:
     now = datetime(2026, 4, 27, 23, 0, tzinfo=UTC)
     workspace = SimpleNamespace(

@@ -1380,7 +1380,23 @@ async def _record_scheduler_queue_decision(
 
 
 def _scheduler_candidate_fetch_limit(limit: int) -> int:
-    return max(limit, min(250, limit + 16, limit * 4 if limit > 0 else 0))
+    """Return the candidate batch size for eligibility refill scans.
+
+    Small slot counts get a proportional batch so a single suppressed workspace
+    does not force repeated single-row fetches. Typical scheduler limits get a
+    fixed 16-row cushion, with widened batches capped at 250 while still
+    honoring larger requested limits.
+    """
+    if limit <= 0:
+        return 0
+    proportional_fetch_limit = limit * 4
+    fixed_cushion_fetch_limit = limit + 16
+    widened_fetch_limit = min(
+        250,
+        fixed_cushion_fetch_limit,
+        proportional_fetch_limit,
+    )
+    return max(limit, widened_fetch_limit)
 
 
 def _claim_recheck_conditions(status: WorkspaceStatus) -> tuple[Any, ...]:
