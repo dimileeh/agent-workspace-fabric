@@ -1071,6 +1071,69 @@ async def test_monitoring_pr_fallback_recovery_reuses_existing_pr_workspace(
 
 
 @pytest.mark.unit
+async def test_monitoring_pr_fallback_missing_monitor_metadata_creates_workspace(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    source_id = await _seed_monitoring_provider_workspace(
+        factory,
+        max_same_provider_retries=0,
+    )
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        source.compose_file_path = None
+        before_workspaces = list((await session.execute(select(Workspace))).scalars())
+        await session.commit()
+
+    async with factory() as session:
+        result = await create_provider_recovery_attempt_row(
+            session,
+            source_id,
+            now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
+            metadata={
+                "reason_code": AGENT_IDLE_TIMEOUT,
+                "failure_type": "idle_timeout",
+                "retryable": True,
+                "provider": "google",
+                "model": "gemini-2.5-pro",
+                "failure_fingerprint": "idle-timeout:missing-monitor-metadata",
+                "recommended_action": "Retry PR monitor on another provider.",
+            },
+        )
+        assert result is not None
+        assert result != "terminal"
+        await session.commit()
+
+    async with factory() as session:
+        source = await WorkspaceRepository(session).get(source_id)
+        assert source is not None
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        fallback = next(workspace for workspace in workspaces if workspace.id != source_id)
+        recovery_events = [
+            event
+            for event in source.events
+            if event.event_type == "workspace.provider_recovery_requested"
+        ]
+
+    assert result.action == "fallback"
+    assert result.new_workspace_id == fallback.id
+    assert result.in_place is False
+    assert len(workspaces) == len(before_workspaces) + 1
+    assert source.status == WorkspaceStatus.monitoring_pr.value
+    assert source.agent == "gemini"
+    assert fallback.status == WorkspaceStatus.requested.value
+    assert fallback.agent == "codex"
+    assert fallback.pr_url == source.pr_url
+    assert fallback.pr_number == source.pr_number
+    assert fallback.remote_push_branch == source.remote_push_branch
+    assert len(recovery_events) == 1
+    assert recovery_events[0].payload is not None
+    assert recovery_events[0].payload["new_workspace_id"] == fallback.id
+    assert "recovery_scope" not in recovery_events[0].payload
+
+
+@pytest.mark.unit
 async def test_monitoring_pr_duplicate_in_place_fallback_does_not_mutate_source(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -1620,6 +1683,12 @@ def test_monitoring_pr_recovery_guard_requires_open_pr() -> None:
 
     ws.pr_number = 1
     ws.remote_push_branch = "feature/head"
+    assert _is_recoverable_monitoring_pr_source(ws) is False
+
+    ws.compose_project_name = "awf_ws_1"
+    assert _is_recoverable_monitoring_pr_source(ws) is False
+
+    ws.compose_file_path = "/tmp/awf/ws_1/compose.yml"
     assert _is_recoverable_monitoring_pr_source(ws) is True
 
     ws.remote_push_branch = None
@@ -1628,11 +1697,11 @@ def test_monitoring_pr_recovery_guard_requires_open_pr() -> None:
     assert _is_recoverable_monitoring_pr_source(ws) is True
 
     ws.task_kind = "sync_feature_pr"
-    assert _is_recoverable_monitoring_pr_source(ws) is True
+    assert _is_recoverable_monitoring_pr_source(ws) is False
 
     ws.task_kind = "future_monitor_kind"
     ws.branch_name = None
-    assert _is_recoverable_monitoring_pr_source(ws) is True
+    assert _is_recoverable_monitoring_pr_source(ws) is False
 
 
 def test_provider_recovery_state_view_handles_event_payload_fallbacks() -> None:
