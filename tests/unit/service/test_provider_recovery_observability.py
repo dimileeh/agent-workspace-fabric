@@ -912,3 +912,35 @@ def test_merge_view_prefers_policy_recommended_action_over_event() -> None:
     view = provider_recovery_state_for_workspace(workspace)
     assert view is not None
     assert view.recommended_action == "Retry with exponential backoff."
+
+
+def test_provider_recovery_state_from_events_falls_back_to_event_reason_code() -> None:
+    now = datetime.now(UTC)
+    event_payload: dict[str, Any] = {
+        "source_workspace_id": "ws-source-001",
+        "provider_recovery": {
+            "action": "retry",
+        },
+    }
+    event = SimpleNamespace(
+        event_type=PROVIDER_RECOVERY_COOLDOWN_EVENT,
+        reason_code=PROVIDER_RETRY_DELAYED_REASON,
+        payload=event_payload,
+        occurred_at=now,
+        old_state="running",
+        new_state="failed",
+        id="evt-fallback-rc",
+    )
+    workspace = SimpleNamespace(
+        id="ws-fallback-rc",
+        status="failed",
+        task_policy={},
+        failure_reason="agent_failure",
+        failure_message="Provider exhausted",
+        agent="codex",
+        events=[event],
+    )
+    view = provider_recovery_state_for_workspace(workspace)
+    assert view is not None
+    assert view.action == "retry"
+    assert view.reason_code == PROVIDER_RETRY_DELAYED_REASON

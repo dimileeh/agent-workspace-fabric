@@ -964,7 +964,11 @@ def _provider_recovery_state_from_events(
     if not isinstance(recovery, Mapping):
         recovery = payload
     action = _validate_recovery_action(_mapping_str(recovery, "action"))
-    reason_code = _mapping_str(recovery, "decision_reason_code") or _mapping_str(recovery, "reason_code")
+    reason_code = (
+        _mapping_str(recovery, "decision_reason_code")
+        or _mapping_str(recovery, "reason_code")
+        or (getattr(latest_event, "reason_code", None) or None)
+    )
     source_provider = _mapping_str(recovery, "source_provider") or _mapping_str(recovery, "provider")
     source_model = _mapping_str(recovery, "source_model") or _mapping_str(recovery, "model")
     cooldown_until, next_eligible_at = _parse_not_before(_mapping_str(recovery, "not_before"))
