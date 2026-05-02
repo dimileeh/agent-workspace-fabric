@@ -56,8 +56,6 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 Security, Secrets, And Egress Policy | Explicit workspace network postures | `ws_6c58298db1c14c8cb6a6f906` | [#177](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/177) | monitoring_pr | Codex `gpt-5.5`; launched 2026-05-02 after P0 provider resilience drain, pull, rebuild, restart, and GC. |
-| P1 Control-Plane Restart Recovery Hardening | Monitoring PR restart claim recovery | `ws_50038cfe37f64e3ebb11bdae` | [#176](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/176) | validating | Codex `gpt-5.5`; launched 2026-05-02; has advisory overlap with scheduler slice on `src/awf/db/**`. |
 
 ### Reschedule Required Slices
 
@@ -68,12 +66,14 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness priority and decision records | `ws_fcee67cfbc274297b5b692df` | `awf/ws_fcee67cfbc274297b5b692df` | salvage required | Codex `gpt-5.5` produced 4 useful commits and passed validation/coverage, but AWF failed it with `AGENT_STALLED_IN_CONFORMANCE` after conformance reported one remaining bounded Postgres `FOR UPDATE SKIP LOCKED` candidate-window gap. Recover from the preserved clean worktree/branch with a narrow follow-up rather than restarting from scratch. |
 
 ### Completed Slices
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness priority and decision records | `ws_fcee67cfbc274297b5b692df` | [#178](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/178) | merged | Codex `gpt-5.5`; recovered from the earlier conformance-stall failure, passed validation/coverage, handled comments, waited non-check reviewer settle, and merged 2026-05-02. |
+| P1 Security, Secrets, And Egress Policy | Explicit workspace network postures | `ws_6c58298db1c14c8cb6a6f906` | [#177](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/177) | merged | Codex `gpt-5.5`; merged 2026-05-02; adds explicit workspace network posture support and operator surfacing. |
+| P1 Control-Plane Restart Recovery Hardening | Monitoring PR restart claim recovery | `ws_50038cfe37f64e3ebb11bdae` | [#176](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/176) | merged | Codex `gpt-5.5`; merged 2026-05-02; hardens restart recovery claims for persisted `monitoring_pr` workspaces. |
 | P1 Operator Console Completion | Dark theme and accessibility controls | `ws_55a1e9ab508e42038e965097` | [#175](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/175) | merged | Codex `gpt-5.5`; merged 2026-05-02; adds console dark theme and accessibility controls. |
 | P1 MCP And Project Onboarding Client Parity | API / CLI / MCP parity matrix | `ws_b5a63a8954c94df5b38454f9` | [#174](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/174) | merged | Codex `gpt-5.5`; merged 2026-05-02; publishes the parity matrix, while follow-up implementation/test alignment remains tracked in the P1 checklist. |
 | P0 Provider Resilience And Automated Fallback Recovery | Prevent duplicate full retry from live PR monitor | `ws_f58d575afe79430aac35ed7c` | [#173](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/173) | merged | Codex `gpt-5.5`; merged 2026-05-02 after comment handling, validation recovery, non-check reviewer settle, and auto-merge; owns the no-duplicate retry regression for live PR monitors. |
@@ -176,7 +176,6 @@ reschedule its corresponding slice.
 | P0 Reliability, Cleanup, And SLOs | Orphan AWF resource detection and cleanup readiness reporting | `ws_04560f5cfd914095b357cdcb` | failed | PR [#98](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/98) repeatedly hit monitor-driven stale rebase recovery; local AWF now has a rebase-recovery fix, and the slice was retried as `ws_5605c5ca71c942d999f5b78f`. |
 | P0 Operation And Recovery Truth | Persist operation audit details and log stream references | `ws_83f4e614951446cf883f5c09` | failed | PR [#101](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/101) merged, so no feature retry is needed; the workspace failure exposed the stale-rebase recovery bug fixed locally before service rebuild. |
 | P1 API Contract Completion | External operator callback subscriptions | `ws_0e2fc82ece7541659287e063` | failed | Agent produced local commits and passed validation/coverage, but exhausted the Plan -> Execute -> Compare iteration budget with one remaining conformance gap: event type validation was prefix-based and still allowed internal-looking namespaced event types such as `workspace.internal_secret`. Recover by redispatching a narrow callback hardening/completion slice or salvaging the preserved worktree branch. |
-| P1 Scheduler, Reservations, And Advisory Overlap Graph | Queue fairness priority and decision records | `ws_fcee67cfbc274297b5b692df` | failed | Codex `gpt-5.5` preserved a clean branch with 4 commits and passing validation/coverage, but AWF failed it as `AGENT_STALLED_IN_CONFORMANCE` after the conformance report still required a bounded Postgres `FOR UPDATE SKIP LOCKED` candidate-window regression. Recover via a narrow follow-up from `awf/ws_fcee67cfbc274297b5b692df`; this incident also proves AWF should auto-create focused salvage attempts for near-complete conformance gaps instead of terminal-failing. |
 | P0 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification via Gemini 3.1 | `ws_033d1772828042c9afa6a491` | failed | No-work Gemini auth failure: container had copied `~/.gemini` files but no Gemini/Google auth env; Gemini CLI 0.39.1 selected API-key auth and exited 41 `AGENT_AUTH_FAILED` requiring `GEMINI_API_KEY`. |
 | P0 Provider Resilience And Automated Fallback Recovery | Duplicate full retry spawned from live PR monitor | `ws_46a6c903fc7c42098a63edad` | destroyed | Duplicate retry of active workspace `ws_52d8415a02424c4aa4730fa1` / PR #169 after `AGENT_IDLE_TIMEOUT`; no PR or useful work produced. Destroyed manually and tracked as urgent P0 regression under provider recovery. |
 | P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_927647b0535242c58879f7b8` | failed | Same no-work Gemini auth failure as `ws_033d1772828042c9afa6a491`; retry only after Gemini container auth/readiness is fixed or with a different provider/model. |
@@ -299,7 +298,7 @@ reschedule its corresponding slice.
 - [x] Enforce egress policy at Docker network/profile level in local mode.
 - [x] Add provider-specific least-privilege credential checks for Codex, Claude, Gemini, OpenCode/Ollama, GitHub, and Docker.
 - [x] Add audit trails for PR creation, push, merge, comment resolution, and destructive operations.
-- [ ] Add explicit workspace network posture profiles in `.awf/workspace.yml`:
+- [x] Add explicit workspace network posture profiles in `.awf/workspace.yml`:
   `offline`, `restricted`, and `open`. `open` should remain available for
   trusted local dogfood work such as AWF self-development, but it must be
   declared intentionally and surfaced as unrestricted internet access in API,
@@ -343,10 +342,10 @@ reschedule its corresponding slice.
 - [x] Add an operator-visible overlap graph for running and queued workspaces.
 - [x] Use overlap graph to warn agents in prompts and stale policy, not to prevent parallel work.
 - [x] Finish resource reservation accounting for CPU, memory, disk, and DinD pressure.
-- [ ] Add fairness and starvation prevention for long-lived queues.
-- [ ] Add task class bias and priority scoring as described in the PRD.
-- [ ] Add human-escalation boost and retry-aware queue scoring.
-- [ ] Make scheduler decisions visible as durable records and console explanations.
+- [x] Add fairness and starvation prevention for long-lived queues.
+- [x] Add task class bias and priority scoring as described in the PRD.
+- [x] Add human-escalation boost and retry-aware queue scoring.
+- [x] Make scheduler decisions visible as durable records and console explanations.
 
 ## P0: Provider Resilience And Automated Fallback Recovery
 
@@ -425,7 +424,7 @@ reschedule its corresponding slice.
 
 ## P1: Control-Plane Restart Recovery Hardening
 
-- [ ] When a restarted worker recovers a persisted `monitoring_pr` workspace,
+- [x] When a restarted worker recovers a persisted `monitoring_pr` workspace,
   clear or expire irrelevant stale execution claims from the previous worker,
   preserve the active monitor claim, emit an explicit recovery event, and prove
   with regression tests that PR monitoring continues without duplicate monitor
@@ -440,7 +439,7 @@ reschedule its corresponding slice.
 - [x] Add first-class operation endpoints for rebase, validate, refresh, and make-canonical.
 - [x] Add artifact listing and download semantics beyond metadata.
 - [x] Add failure analysis API with root cause, evidence links, and suggested recovery actions.
-- [ ] Keep old compatibility endpoints stable until a documented v2 API cutover.
+- [x] Keep old compatibility endpoints stable until a documented v2 API cutover.
 
 ## P1: MCP And Project Onboarding Client Parity
 
@@ -457,7 +456,7 @@ coding agent in any project to use AWF for a feature.
 - [x] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
 - [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
 - [ ] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
-- [ ] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
+- [x] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
 - [ ] Convert the parity matrix into an implementation driver: every surface marked
   missing or partial must map to a concrete P1 implementation issue/slice, with
   REST endpoint, CLI command, MCP tool name, schema/error-code contract, and
@@ -503,7 +502,7 @@ coding agent in any project to use AWF for a feature.
   warnings so operators can distinguish a genuinely working agent from a
   stuck `running` workspace whose row `updated_at` has not changed.
 - [x] Add security/secret/egress status panels.
-- [ ] Add a polished dark theme and accessibility controls for the web console,
+- [x] Add a polished dark theme and accessibility controls for the web console,
   including larger font-size options, high-contrast mode, preserved operator
   preference, keyboard/focus-visible coverage, and browser-verified responsive
   screenshots for the main dashboard, workspace inspector, logs, and merge
