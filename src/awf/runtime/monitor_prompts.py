@@ -36,7 +36,6 @@ def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThrea
         if thread.path and thread.line
         else "inside the file under review"
     )
-    author = thread.author or "reviewer"
     evidence = render_untrusted_evidence(
         UntrustedEvidence(
             source_kind="github_pr_review_thread",
@@ -51,7 +50,7 @@ def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThrea
     return (
         f"An inline review thread on PR #{pr_number} ({repo_slug}) at "
         f"{line_hint} (thread id {thread.thread_id}) needs to be resolved. "
-        f"{author} wrote this external evidence:\n\n"
+        "The review author wrote this external evidence:\n\n"
         f"{evidence}\n\n"
         "Decide in this order:\n"
         "  (1) If the reviewer is right, make the fix, stage only the files "
@@ -71,7 +70,6 @@ def address_thread_prompt(*, pr_number: int, repo_slug: str, thread: ReviewThrea
 
 def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: ReviewComment) -> str:
     """Prompt for a review-level (outside-diff) comment — CodeRabbit summaries etc."""
-    author = comment.author or "reviewer"
     evidence = render_untrusted_evidence(
         UntrustedEvidence(
             source_kind="github_pr_review_comment",
@@ -89,7 +87,7 @@ def address_review_comment_prompt(*, pr_number: int, repo_slug: str, comment: Re
     )
     return (
         f"A review-level (outside-diff) comment on PR #{pr_number} ({repo_slug}) "
-        f"from {author} (comment id {comment.comment_id}) needs to be addressed. "
+        f"(comment id {comment.comment_id}) needs to be addressed. "
         "These are usually summary / architecture remarks from CodeRabbit or similar. "
         f"Body evidence:\n\n{evidence}\n\n"
         "Use the same decision tree as for inline threads: either fix and reply "
