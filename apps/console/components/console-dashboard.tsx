@@ -348,12 +348,6 @@ export function ConsoleDashboard() {
   }, [overview]);
 
   useEffect(() => {
-    if (modelFilter !== "all" && !availableModels.includes(modelFilter)) {
-      setModelFilter("all");
-    }
-  }, [availableModels, modelFilter]);
-
-  useEffect(() => {
     setOperatorPreferences(readStoredOperatorPreferences());
     setOperatorPreferencesHydrated(true);
   }, []);
@@ -1329,7 +1323,7 @@ function WorkspaceFilters({
             label="Model"
             value={modelFilter}
             onChange={onModelFilter}
-            options={["all", ...availableModels]}
+            options={Array.from(new Set(["all", modelFilter, ...availableModels]))}
           />
         </div>
         <div className="grid grid-cols-[minmax(0,1fr)_auto] items-end gap-2">
