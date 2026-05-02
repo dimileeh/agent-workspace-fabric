@@ -2513,6 +2513,7 @@ class WorkspaceExecutor:
                 # bubble up so the outer agent_failure handler captures it.
                 raise compare_error
 
+            assert report is not None
             gaps = report.gaps or (report.summary,)
             _log.info(
                 "executor.planning_conformance_needs_iteration",
