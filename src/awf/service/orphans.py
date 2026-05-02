@@ -19,6 +19,7 @@ from awf.service.gc import (
     PROTECTED_WORKSPACE_GC_STATUSES,
     TERMINAL_WORKSPACE_GC_STATUSES,
 )
+from awf.service.profile_metadata import NetworkPosture
 
 CHECK_TIMEOUT_SECONDS = 5.0
 ORPHAN_EXAMPLE_LIMIT = 5
@@ -65,7 +66,7 @@ class WorkspaceLifecycleSnapshot:
     compose_project_name: str | None = None
     compose_file_path: str | None = None
     pr_url: str | None = None
-    network_posture: str | None = None
+    network_posture: NetworkPosture | None = None
 
 
 @dataclass(frozen=True)

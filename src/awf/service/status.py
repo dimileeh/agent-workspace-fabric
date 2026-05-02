@@ -32,7 +32,6 @@ from awf.service.orphans import (
     workspace_id_from_project,
 )
 from awf.service.profile_metadata import (
-    NetworkPosture,
     network_posture_from_profile_snapshot,
 )
 from awf.service.provider_readiness import HttpGet as ProviderHttpGet
@@ -406,7 +405,7 @@ def _network_posture_check_payload(workspace_view: WorkspaceIdView) -> CheckPayl
     counts: Counter[str] = Counter()
     open_examples: list[dict[str, object]] = []
     for snapshot in active_snapshots:
-        posture = _known_network_posture(snapshot.network_posture)
+        posture = snapshot.network_posture
         counts[posture or "unknown"] += 1
         if posture == "open" and len(open_examples) < 5:
             open_examples.append(
@@ -436,12 +435,6 @@ def _network_posture_check_payload(workspace_view: WorkspaceIdView) -> CheckPayl
         "active_counts_by_posture": active_counts,
         "open_examples": open_examples,
     }
-
-
-def _known_network_posture(value: object) -> NetworkPosture | None:
-    if value in {"restricted", "offline", "open"}:
-        return cast(NetworkPosture, value)
-    return None
 
 
 def _runtime_workspaces_from_view(
