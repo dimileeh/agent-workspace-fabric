@@ -874,9 +874,14 @@ class TestHappyPath:
             returncode=0,
             stdout=" M src/awf/foo.py\n",
         )
-        # Conformance adapter raises AgentRunError; executor uses
-        # before_compare for after_compare on the error path, then captures
+        # Conformance adapter raises AgentRunError; executor still recomputes
+        # after_compare so the fail_on_unexplained_deviation scope check
+        # applies on the timeout branch (no extra paths here), then captures
         # HEAD for the iteration-end progress digest.
+        fake.queue_result(  # after_compare git status (post-timeout)
+            returncode=0,
+            stdout=" M src/awf/foo.py\n",
+        )
         fake.queue_result(returncode=0, stdout="sha_post\n")  # rev-parse HEAD iter 0 post
         # After raise, executor introspects implementation commits for stall evidence
         fake.queue_result(returncode=0, stdout="head_sha_after\n")  # post-stall rev-parse HEAD

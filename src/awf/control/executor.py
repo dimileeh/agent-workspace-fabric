@@ -2384,19 +2384,23 @@ class WorkspaceExecutor:
                 compare_error = exc
 
             elapsed_seconds = time.monotonic() - iteration_started_at
+            # Compute after_compare on both success and timeout paths so the
+            # scope check runs uniformly. Otherwise an idle/timeout that still
+            # leaves a satisfied report could write files outside report_path
+            # and slip past the success short-circuit below.
+            after_compare = await self._changed_paths(worktree_path)
+            if planning.fail_on_unexplained_deviation:
+                extra = sorted(after_compare - before_compare - {report_path})
+                if extra:
+                    return _build_planning_scope_failure(
+                        scope_phase="conformance",
+                        required_paths=(report_path,),
+                        offending_paths=extra,
+                        summary=(
+                            f"conformance phase changed files outside `{report_path}`"
+                        ),
+                    )
             if compare_error is None:
-                after_compare = await self._changed_paths(worktree_path)
-                if planning.fail_on_unexplained_deviation:
-                    extra = sorted(after_compare - before_compare - {report_path})
-                    if extra:
-                        return _build_planning_scope_failure(
-                            scope_phase="conformance",
-                            required_paths=(report_path,),
-                            offending_paths=extra,
-                            summary=(
-                                f"conformance phase changed files outside `{report_path}`"
-                            ),
-                        )
                 stdout = compare_result.stdout if compare_result is not None else ""
                 stderr = compare_result.stderr if compare_result is not None else ""
                 report_text = (
@@ -2409,7 +2413,6 @@ class WorkspaceExecutor:
             else:
                 stdout = compare_error.result.stdout
                 stderr = compare_error.result.stderr
-                after_compare = before_compare
                 # Even when the conformance call idles or times out, the agent
                 # may have already written a valid (potentially satisfied)
                 # report. Read and parse it so a satisfied run is not
