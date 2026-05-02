@@ -732,7 +732,7 @@ async def test_create_attempt_records_terminal_event_when_attempts_exhausted(
             response.id,
             now=datetime(2026, 5, 1, 12, 0, tzinfo=UTC),
         )
-        assert result is None
+        assert result == "terminal"
         await session.commit()
 
     async with factory() as session:
