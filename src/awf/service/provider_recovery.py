@@ -446,7 +446,9 @@ def _is_stale_provider_recovery_source(
         return False
     if not WorkspaceStateMachine.is_callback_terminal(status):
         return False
-    return status != WorkspaceStatus.failed or source_metadata is None
+    if status == WorkspaceStatus.failed:
+        return source_metadata is None
+    return True
 
 
 def parse_provider_recovery_policy(
