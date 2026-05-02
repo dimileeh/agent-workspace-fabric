@@ -2437,3 +2437,19 @@ class TestIso8601PostgresGuardRegex:
         import re
 
         assert not re.match(self._PATTERN, value), f"Expected invalid timestamp to be rejected: {value}"
+
+    @pytest.mark.parametrize(
+        "value",
+        [
+            "2026-02-30T11:00:00Z",
+            "2026-04-31T11:00:00Z",
+            "2025-02-29T11:00:00Z",
+        ],
+    )
+    def test_calendar_invalid_but_syntactically_valid_timestamps_match(self, value: str) -> None:
+        import re
+
+        assert re.match(self._PATTERN, value), (
+            "Regex accepts syntactically valid timestamps even if calendar-invalid; "
+            "safe because not_before is always produced by datetime.isoformat()"
+        )
