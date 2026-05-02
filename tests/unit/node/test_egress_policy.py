@@ -18,9 +18,31 @@ def test_local_egress_plan_is_explicitly_unhashable() -> None:
 
 
 @pytest.mark.unit
-def test_local_egress_plan_treats_missing_allowlist_as_empty() -> None:
-    egress = ProfileEgress.model_construct(mode=EgressMode.open, allowlist=None)
+def test_local_egress_plan_open_is_unrestricted_public_network() -> None:
+    egress = ProfileEgress(mode=EgressMode.open)
 
     plan = local_egress_plan(egress)
 
-    assert plan.details["allowlist_count"] == 0
+    assert plan.network_internal is False
+    assert plan.host_gateway_enabled is True
+    assert plan.reason_code == "LOCAL_EGRESS_OPEN_UNRESTRICTED"
+    assert plan.details["internet_access"] == "unrestricted"
+
+
+@pytest.mark.unit
+def test_local_egress_plan_offline_is_internal_without_host_gateway() -> None:
+    plan = local_egress_plan(ProfileEgress(mode=EgressMode.offline))
+
+    assert plan.network_internal is True
+    assert plan.host_gateway_enabled is False
+    assert plan.reason_code == "LOCAL_EGRESS_OFFLINE_NETWORK"
+
+
+@pytest.mark.unit
+def test_local_egress_plan_restricted_is_conservative_local_internal_network() -> None:
+    plan = local_egress_plan(ProfileEgress(mode=EgressMode.restricted))
+
+    assert plan.network_internal is True
+    assert plan.host_gateway_enabled is False
+    assert plan.reason_code == "LOCAL_EGRESS_RESTRICTED_LOCAL_ONLY"
+    assert plan.details["destination_filtering"] == "deferred"

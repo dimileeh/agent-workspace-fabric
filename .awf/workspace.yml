@@ -7,6 +7,9 @@ awf:
   runtime:
     environment:
       PYTHONUNBUFFERED: "1"
+  security:
+    egress:
+      mode: open
   planning:
     required: true
     plan_path: docs/awf-plans/{workspace_id}.md

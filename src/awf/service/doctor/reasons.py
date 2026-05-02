@@ -155,6 +155,18 @@ _REASON_TEXT: dict[str, _ReasonText] = {
         "Orphan AWF Docker resources were detected.",
         "Review the listed resources before running cleanup.",
     ),
+    "NETWORK_POSTURE_NO_ACTIVE_OPEN": _ReasonText(
+        "No active workspace is using open network posture.",
+        "No action required.",
+    ),
+    "NETWORK_POSTURE_OPEN_ACTIVE": _ReasonText(
+        "One or more active workspaces have unrestricted internet access.",
+        "Confirm the open workspaces are trusted local work or recreate them with restricted/offline posture.",
+    ),
+    "NETWORK_POSTURE_UNAVAILABLE": _ReasonText(
+        "Workspace network posture could not be inspected.",
+        "Restore control-plane database access and re-run doctor.",
+    ),
     "LOCAL_CONFIG_OK": _ReasonText(
         "Local AWF configuration looks usable.",
         "No action required.",

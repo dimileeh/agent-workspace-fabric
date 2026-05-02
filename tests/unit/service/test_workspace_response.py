@@ -487,6 +487,7 @@ def test_workspace_response_sanitizes_raw_profile_snapshots() -> None:
                 "ref": "secret/data/api-token",
             }
         ],
+        "security": {"egress": {"mode": "open"}},
     }
     workspace = SimpleNamespace(
         id="ws_endpoint_profile_safety",
@@ -529,6 +530,7 @@ def test_workspace_response_sanitizes_raw_profile_snapshots() -> None:
 
     assert response.requested_profile is not None
     assert response.resolved_profile is not None
+    assert response.network_posture == "open"
     assert "environment" not in response.requested_profile["runtime"]
     assert "environment" not in response.resolved_profile["services"][0]
     assert "ref" not in response.requested_profile["secrets"][0]
@@ -547,6 +549,57 @@ def test_workspace_response_sanitizes_raw_profile_snapshots() -> None:
     assert "ghp_abc123" not in rendered
     assert "session=secret" not in rendered
     assert "secret/data/api-token" not in rendered
+
+
+@pytest.mark.unit
+def test_workspace_response_network_posture_handles_missing_or_malformed_profile() -> None:
+    now = datetime(2026, 5, 2, 12, 35, tzinfo=UTC)
+    base = {
+        "id": "ws_network_posture",
+        "status": WorkspaceStatus.ready.value,
+        "version": 2,
+        "repo_url": "git@github.com:example/project.git",
+        "branch_base": "main",
+        "branch_name": "awf/ws_network_posture",
+        "base_commit": "abc123",
+        "task_title": "Expose posture safely",
+        "task_prompt": "Exercise network posture extraction.",
+        "task_external_id": None,
+        "task_class": None,
+        "owned_paths": [],
+        "task_policy": {},
+        "auto_merge": True,
+        "initial_review_grace_period_seconds": None,
+        "agent": "codex",
+        "env_profile": None,
+        "profile_ref": "inline",
+        "requested_profile": None,
+        "test_commands": [],
+        "requires_database": False,
+        "node_id": "local",
+        "compose_project_name": "awf_ws_network_posture",
+        "compose_file_path": "/tmp/compose.yml",
+        "pr_url": None,
+        "failure_reason": None,
+        "failure_message": None,
+        "active_policy_findings": [],
+        "operations": [],
+        "events": [],
+        "secret_leases": [],
+        "created_at": now,
+        "updated_at": now,
+    }
+
+    missing = workspace_response(SimpleNamespace(**base, resolved_profile=None))  # type: ignore[arg-type]
+    malformed = workspace_response(
+        SimpleNamespace(
+            **base,
+            resolved_profile={"security": {"egress": {"mode": "allowlist"}}},
+        )
+    )  # type: ignore[arg-type]
+
+    assert missing.network_posture is None
+    assert malformed.network_posture is None
 
 
 @pytest.mark.unit

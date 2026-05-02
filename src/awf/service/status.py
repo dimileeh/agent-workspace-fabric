@@ -6,7 +6,9 @@ import asyncio
 import contextlib
 import os
 import subprocess
+from collections import Counter
 from collections.abc import Awaitable, Callable, Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol, cast
 
@@ -29,6 +31,10 @@ from awf.service.orphans import (
     WorkspaceLifecycleSnapshot,
     detect_orphan_resources,
     workspace_id_from_project,
+)
+from awf.service.profile_metadata import (
+    NetworkPosture,
+    network_posture_from_profile_snapshot,
 )
 from awf.service.provider_readiness import HttpGet as ProviderHttpGet
 from awf.service.provider_readiness import collect_agent_readiness
@@ -102,7 +108,17 @@ async def collect_service_status(
     resolved_db_probe = db_probe or check_database
     resolved_run = run_subprocess or _run_subprocess
     resolved_socket_exists = socket_exists or Path.exists
-    resolved_workspace_lookup = workspace_id_lookup or _default_workspace_id_lookup
+    resolved_workspace_lookup: WorkspaceIdLookup
+    if workspace_id_lookup is None:
+        async def _settings_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
+            return await _default_workspace_id_lookup(
+                database_url,
+                legacy_open_default_cutoff=settings.network_posture_open_legacy_cutoff,
+            )
+
+        resolved_workspace_lookup = _settings_workspace_id_lookup
+    else:
+        resolved_workspace_lookup = workspace_id_lookup
 
     async def _await_workspace_view() -> WorkspaceIdView:
         return await resolved_workspace_lookup(settings.database_url)
@@ -173,12 +189,14 @@ async def collect_service_status(
         workspace_view,
         runtime_docker_scan,
     )
+    network_posture_check = _network_posture_check_payload(workspace_view)
     checks = {
         "api": api_check,
         "db": db_check,
         "docker": docker_check,
         "agent_runtime_image": image_check,
         "disk": disk_check.to_dict(),
+        "network_posture": network_posture_check,
         "stranded_workspaces": stranded_workspaces_check,
         "orphan_resources": orphan_resources_check,
         "orphan_workspaces": orphan_workspaces_check,
@@ -377,6 +395,60 @@ def _stranded_workspaces_check_payload(
     return summary.to_check_payload()
 
 
+def _network_posture_check_payload(workspace_view: WorkspaceIdView) -> CheckPayload:
+    if not workspace_view.available:
+        return {
+            "ok": True,
+            "status": "unknown",
+            "reason": "NETWORK_POSTURE_UNAVAILABLE",
+            "active_counts_by_posture": {
+                "restricted": 0,
+                "offline": 0,
+                "open": 0,
+                "unknown": 0,
+            },
+            "open_examples": [],
+        }
+
+    active_ids = workspace_view.active_ids
+    active_snapshots = [
+        snapshot for snapshot in workspace_view.snapshots if snapshot.workspace_id in active_ids
+    ]
+    counts: Counter[str] = Counter()
+    open_examples: list[dict[str, object]] = []
+    for snapshot in active_snapshots:
+        posture = snapshot.network_posture
+        counts[posture or "unknown"] += 1
+        if posture == "open" and len(open_examples) < 5:
+            open_examples.append(
+                {
+                    "workspace_id": snapshot.workspace_id,
+                    "status": snapshot.status,
+                    "pr_url": snapshot.pr_url,
+                }
+            )
+    counts["unknown"] += len(active_ids - {snapshot.workspace_id for snapshot in active_snapshots})
+
+    active_counts = {
+        "restricted": counts.get("restricted", 0),
+        "offline": counts.get("offline", 0),
+        "open": counts.get("open", 0),
+        "unknown": counts.get("unknown", 0),
+    }
+    open_count = active_counts["open"]
+    return {
+        "ok": True,
+        "status": "warn" if open_count else "ok",
+        "reason": (
+            "NETWORK_POSTURE_OPEN_ACTIVE"
+            if open_count
+            else "NETWORK_POSTURE_NO_ACTIVE_OPEN"
+        ),
+        "active_counts_by_posture": active_counts,
+        "open_examples": open_examples,
+    }
+
+
 def _runtime_workspaces_from_view(
     workspace_view: WorkspaceIdView,
 ) -> tuple[RuntimeWorkspace, ...]:
@@ -437,7 +509,11 @@ def _workspace_id_from_project(project: str) -> str | None:
     return workspace_id_from_project(project)
 
 
-async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
+async def _default_workspace_id_lookup(
+    database_url: str,
+    *,
+    legacy_open_default_cutoff: datetime | None = None,
+) -> WorkspaceIdView:
     """Read live workspace ids from the control-plane DB.
 
     Failures (missing tables, unreachable host, auth errors, or even a
@@ -453,6 +529,8 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
         Workspace.compose_project_name,
         Workspace.compose_file_path,
         Workspace.pr_url,
+        Workspace.resolved_profile,
+        Workspace.created_at,
     ).where(Workspace.status.in_(KNOWN_WORKSPACE_STATUSES))
     engine = None
     try:
@@ -472,11 +550,16 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
     active: set[str] = set()
     terminal: set[str] = set()
     snapshots: list[WorkspaceLifecycleSnapshot] = []
-    for row in rows:
-        values = tuple(row)
-        ws_id, status, updated_at, compose_project_name = values[:4]
-        compose_file_path = values[4] if len(values) > 4 else None
-        pr_url = values[5] if len(values) > 5 else None
+    for (
+        ws_id,
+        status,
+        updated_at,
+        compose_project_name,
+        compose_file_path,
+        pr_url,
+        resolved_profile,
+        created_at,
+    ) in rows:
         ws_id_str = str(ws_id)
         status_str = str(status)
         snapshots.append(
@@ -491,6 +574,11 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
                     str(compose_file_path) if compose_file_path is not None else None
                 ),
                 pr_url=str(pr_url) if pr_url is not None else None,
+                network_posture=_status_network_posture_from_profile_snapshot(
+                    resolved_profile,
+                    created_at,
+                    legacy_open_default_cutoff=legacy_open_default_cutoff,
+                ),
             )
         )
         if status_str in ACTIVE_WORKSPACE_STATUSES:
@@ -503,6 +591,39 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
         available=True,
         snapshots=tuple(snapshots),
     )
+
+
+def _status_network_posture_from_profile_snapshot(
+    resolved_profile: object,
+    created_at: object,
+    *,
+    legacy_open_default_cutoff: datetime | None = None,
+) -> NetworkPosture | None:
+    posture = network_posture_from_profile_snapshot(resolved_profile)
+    if posture == "open" and _is_legacy_open_default_workspace(
+        created_at,
+        legacy_open_default_cutoff=legacy_open_default_cutoff,
+    ):
+        return None
+    return posture
+
+
+def _is_legacy_open_default_workspace(
+    created_at: object,
+    *,
+    legacy_open_default_cutoff: datetime | None,
+) -> bool:
+    if legacy_open_default_cutoff is None:
+        return False
+    if not isinstance(created_at, datetime):
+        return True
+    return _utc_datetime(created_at) < _utc_datetime(legacy_open_default_cutoff)
+
+
+def _utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 async def _http_get(url: str, *, timeout: float) -> HttpResponse:

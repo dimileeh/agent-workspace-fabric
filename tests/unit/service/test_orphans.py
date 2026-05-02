@@ -6,7 +6,7 @@ import json
 import subprocess
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, get_type_hints
 
 import pytest
 
@@ -21,6 +21,7 @@ from awf.service.orphans import (
     _legacy_workspace_id_from_managed_tail,
     detect_orphan_resources,
 )
+from awf.service.profile_metadata import NetworkPosture
 
 
 class _Completed:
@@ -61,6 +62,12 @@ def _run_with(
         raise AssertionError(f"unexpected docker command: {args}")
 
     return _run
+
+
+def test_workspace_lifecycle_snapshot_network_posture_uses_validated_literal() -> None:
+    hints = get_type_hints(WorkspaceLifecycleSnapshot)
+
+    assert hints["network_posture"] == NetworkPosture | None
 
 
 def _result(payload: list[dict[str, object]] | str | Exception) -> _Completed:

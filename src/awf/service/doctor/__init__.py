@@ -178,6 +178,14 @@ def _service_status_diagnostics(
                 ok_reason="NO_ORPHANS",
                 secrets=secrets,
             ),
+            _check_diagnostic(
+                "network_posture",
+                "Network Posture",
+                checks.get("network_posture"),
+                source="checks.network_posture",
+                ok_reason="NETWORK_POSTURE_NO_ACTIVE_OPEN",
+                secrets=secrets,
+            ),
         ]
     )
     return diagnostics
