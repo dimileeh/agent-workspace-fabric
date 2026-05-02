@@ -37,12 +37,12 @@ def _extract_mcp_tool_names() -> set[str]:
 def _extract_cli_commands() -> set[str]:
     main_content = (SRC_ROOT / "cli" / "main.py").read_text(encoding="utf-8")
     commands: set[str] = set()
-    cli_map: dict[str, str] = {
-        "workspace_app": "workspace",
-        "profile_app": "profile",
-        "service_app": "service",
-        "locks_app": "locks",
-    }
+    cli_map: dict[str, str] = {}
+    for m in re.finditer(
+        r"app\.add_typer\(\s*(\w+)\s*,\s*name\s*=\s*\"([^\"]+)\"",
+        main_content,
+    ):
+        cli_map[m.group(1)] = m.group(2)
     for m in re.finditer(
         r"@(\w+)\.command\(\s*(?:\"([^\"]+)\")?\s*\)",
         main_content,
