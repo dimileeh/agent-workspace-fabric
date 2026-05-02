@@ -2362,6 +2362,18 @@ class WorkspaceExecutor:
                 workspace_id=workspace.id,
             )
             before_compare = await self._changed_paths(worktree_path)
+            # Snapshot any pre-existing report digest so the timeout branch
+            # can distinguish a report this compare call produced from a
+            # stale leftover (e.g., a satisfied JSON written by a prior
+            # interrupted run on this workspace, or by an out-of-scope
+            # earlier-phase write). Without this guard, a satisfied JSON
+            # already on disk would short-circuit the loop on
+            # AGENT_IDLE_TIMEOUT/AGENT_TIMEOUT with no evidence the current
+            # compare call produced it.
+            before_report_text = _read_text_if_present(worktree_path / report_path)
+            before_report_digest = (
+                _digest_text(before_report_text) if before_report_text else None
+            )
             iteration_started_at = time.monotonic()
             compare_error: AgentRunError | None = None
             compare_result = None
@@ -2415,11 +2427,25 @@ class WorkspaceExecutor:
                 stderr = compare_error.result.stderr
                 # Even when the conformance call idles or times out, the agent
                 # may have already written a valid (potentially satisfied)
-                # report. Read and parse it so a satisfied run is not
-                # misclassified as AGENT_STALLED_IN_CONFORMANCE, and so the
-                # iteration record carries a real digest for the
-                # repeated_output detector.
-                report_text = _read_text_if_present(worktree_path / report_path) or stdout
+                # report. Honor the on-disk report only when its digest
+                # changed during this call so a stale satisfied JSON cannot
+                # short-circuit the loop. Fall back to stdout — which is
+                # always produced by this call — when the file is stale or
+                # absent. A truly fresh write will produce a digest
+                # different from the pre-call snapshot; otherwise the
+                # iteration is treated as no_output by stall classification.
+                current_report_text = _read_text_if_present(
+                    worktree_path / report_path
+                )
+                if (
+                    current_report_text is not None
+                    and _digest_text(current_report_text) != before_report_digest
+                ):
+                    report_text = current_report_text
+                elif stdout:
+                    report_text = stdout
+                else:
+                    report_text = None
                 if report_text:
                     report = parse_conformance_report(report_text)
                     last_report = report

@@ -945,6 +945,173 @@ class TestHappyPath:
         assert len(post_stall_diff) == 1
 
     @pytest.mark.unit
+    async def test_planning_profile_ignores_stale_satisfied_report_on_compare_idle_timeout(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A satisfied JSON sitting at ``report_path`` before the conformance
+        call (e.g., left by a prior interrupted AWF run on the same workspace)
+        must not short-circuit the loop on AGENT_IDLE_TIMEOUT. The timeout
+        branch is required to honor only a report whose digest changed during
+        the current compare call; otherwise the iteration is treated as
+        no_output by the stall classifier.
+        """
+        from typing import Any
+
+        from awf.adapters import base as adapter_base
+        from awf.adapters.base import AgentRunResult
+        from awf.common.commands import CommandResult
+        from awf.control import executor as executor_module
+        from awf.db.enums import AgentRuntime
+        from awf.runtime.planning import AGENT_STALLED_IN_CONFORMANCE
+
+        ws_id = await _seed_ready_workspace(
+            factory,
+            resolved_profile={
+                "name": "planned",
+                "planning": {
+                    "required": True,
+                    "max_iterations": 1,
+                    "conformance_stall": {
+                        "no_output_seconds": 600,
+                        "over_duration_seconds": 1800,
+                        "repeated_output_threshold": 3,
+                        "recovery_action": "proceed_to_validation",
+                    },
+                },
+            },
+        )
+
+        # Plant a stale satisfied report at the configured path BEFORE the
+        # executor runs. The conformance call will idle out without writing
+        # anything, so without the freshness guard the success short-circuit
+        # would falsely fire on this leftover JSON.
+        worktree_path = _test_worktrees_root(factory) / ws_id
+        report_dir = worktree_path / "docs" / "awf-plans"
+        report_dir.mkdir(parents=True, exist_ok=True)
+        (report_dir / f"{ws_id}.conformance.json").write_text(
+            '{"status":"satisfied","summary":"stale leftover","gaps":[]}',
+            encoding="utf-8",
+        )
+
+        clock = [0.0]
+
+        def _fake_monotonic() -> float:
+            clock[0] += 700.0
+            return clock[0]
+
+        monkeypatch.setattr(executor_module.time, "monotonic", _fake_monotonic)
+
+        class _IdleConformanceAdapter(adapter_base.AgentAdapter):
+            runtime = AgentRuntime.codex
+
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.codex
+
+            def get_provider(self, model: str | None) -> str:
+                return "openai"
+
+            def _cli_args(self, *, prompt: str, model: str | None) -> list[str]:
+                return []
+
+            async def run(self, *, prompt: str, **kwargs: Any) -> AgentRunResult:
+                if "## Conformance phase" in prompt:
+                    raise adapter_base.AgentRunError(
+                        agent=self.name,
+                        result=CommandResult(
+                            returncode=124,
+                            stdout="",
+                            stderr="idle timeout exceeded after 600s",
+                        ),
+                        reason_code="AGENT_IDLE_TIMEOUT",
+                    )
+                return AgentRunResult(returncode=0, stdout="ok", stderr="")
+
+        monkeypatch.setitem(
+            adapter_base._REGISTRY, AgentRuntime.codex, _IdleConformanceAdapter
+        )
+
+        executor = WorkspaceExecutor(
+            session_factory=factory,
+            runner=fake,
+            compose=ComposeManager(work_dir=tmp_path / "work", template_path=_TEMPLATE),
+            validation=ValidationRunner(runner=fake, artifacts_dir=tmp_path / "artifacts"),
+            pr_creator=PullRequestCreator(fake),
+            config=ExecutorConfig(
+                worktrees_root=tmp_path / "work" / "worktrees",
+                compose_projects_root=tmp_path / "work" / "compose",
+            ),
+        )
+
+        # The stale satisfied JSON pre-exists planning, so git sees it as
+        # untracked from the start. The planning phase then adds the plan
+        # artifact alongside it. The conformance JSON stays unchanged across
+        # both phases, so it never registers as a phase-introduced path and
+        # the planning scope check does not fire on it.
+        stale_only_status = f"?? docs/awf-plans/{ws_id}.conformance.json\n"
+        plan_plus_stale_status = (
+            f"?? docs/awf-plans/{ws_id}.md\n"
+            f"?? docs/awf-plans/{ws_id}.conformance.json\n"
+        )
+
+        fake.queue_result(  # before planning git status (stale JSON already present)
+            returncode=0,
+            stdout=stale_only_status,
+        )
+        fake.queue_result(returncode=0, stdout="sha_pre\n")  # rev-parse HEAD baseline
+        # planning adapter (custom) — no runner call
+        fake.queue_result(  # changed_paths after planning (plan added; stale persists)
+            returncode=0,
+            stdout=plan_plus_stale_status,
+        )
+        fake.queue_result(returncode=0, stdout="")  # committed_paths_since (empty)
+        fake.queue_result(returncode=0, stdout="sha_pre\n")  # rev-parse HEAD pre-loop
+        # iteration 0:
+        # execute adapter (custom) — no runner call
+        fake.queue_result(  # before_compare git status
+            returncode=0,
+            stdout=plan_plus_stale_status,
+        )
+        # conformance adapter raises AgentRunError
+        fake.queue_result(  # after_compare git status (post-timeout, unchanged)
+            returncode=0,
+            stdout=plan_plus_stale_status,
+        )
+        fake.queue_result(returncode=0, stdout="sha_pre\n")  # rev-parse HEAD iter 0 post
+        # post-stall introspection
+        fake.queue_result(returncode=0, stdout="head_sha_after\n")  # post-stall rev-parse HEAD
+        fake.queue_result(returncode=0, stdout="0\n")  # post-stall rev-list count
+        fake.queue_result(returncode=0, stdout="")  # post-stall git diff
+
+        await executor.execute(ws_id)
+
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            # The stale satisfied JSON must not flip the workspace to a
+            # successful completion. Expect the no_output stall instead.
+            assert ws.status == WorkspaceStatus.failed.value
+            assert ws.failure_reason == "agent_failure"
+            failed_event = next(
+                event
+                for event in reversed(ws.events)
+                if event.event_type == "workspace.state_changed"
+                and event.new_state == WorkspaceStatus.failed.value
+            )
+            assert failed_event.reason_code == AGENT_STALLED_IN_CONFORMANCE
+            assert failed_event.payload is not None
+            stall = failed_event.payload["details"]["conformance_stall"]
+            assert stall["kind"] == "no_output"
+            assert stall["reason_code"] == AGENT_STALLED_IN_CONFORMANCE
+            # last_report_digest must not match the stale on-disk JSON; the
+            # iteration is treated as if no report was produced.
+            assert stall.get("last_report_digest") is None
+
+    @pytest.mark.unit
     async def test_planning_profile_does_not_record_stall_for_deterministic_needs_iteration_within_budget(
         self,
         executor: WorkspaceExecutor,
