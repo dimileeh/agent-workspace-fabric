@@ -1494,11 +1494,11 @@ def test_status_workspace_lookup_ignores_unknown_status_rows(
     disposed = False
 
     class _Rows:
-        def all(self) -> list[tuple[str, str, object, object]]:
+        def all(self) -> list[tuple[str, str, object, object, object, object, object]]:
             return [
-                ("ws_active", "running", None, None),
-                ("ws_done", "completed", None, None),
-                ("ws_future", "future_status", None, None),
+                ("ws_active", "running", None, None, None, None, None),
+                ("ws_done", "completed", None, None, None, None, None),
+                ("ws_future", "future_status", None, None, None, None, None),
             ]
 
     class _Connection:

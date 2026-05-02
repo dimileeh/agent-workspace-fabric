@@ -533,12 +533,15 @@ async def _default_workspace_id_lookup(database_url: str) -> WorkspaceIdView:
     active: set[str] = set()
     terminal: set[str] = set()
     snapshots: list[WorkspaceLifecycleSnapshot] = []
-    for row in rows:
-        values = tuple(row)
-        ws_id, status, updated_at, compose_project_name = values[:4]
-        compose_file_path = values[4] if len(values) > 4 else None
-        pr_url = values[5] if len(values) > 5 else None
-        resolved_profile = values[6] if len(values) > 6 else None
+    for (
+        ws_id,
+        status,
+        updated_at,
+        compose_project_name,
+        compose_file_path,
+        pr_url,
+        resolved_profile,
+    ) in rows:
         ws_id_str = str(ws_id)
         status_str = str(status)
         snapshots.append(
