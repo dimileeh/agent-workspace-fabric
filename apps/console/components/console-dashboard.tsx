@@ -821,6 +821,12 @@ export function ConsoleDashboard() {
     return [...filtered].sort((left, right) => compareWorkspaceDates(left, right, sortKey, sortDirection));
   }, [overview, searchText, modelFilter, sortDirection, sortKey]);
 
+  useEffect(() => {
+    if (selectedId && !filteredOverview.some((item) => item.workspace_id === selectedId)) {
+      setSelectedId(filteredOverview[0]?.workspace_id ?? null);
+    }
+  }, [filteredOverview, selectedId]);
+
   const selectedOverview = overview.find((item) => item.workspace_id === selectedId) ?? null;
   const selectedMergeQueueItem = useMemo(
     () => mergeQueue.find((item) => item.workspace_id === selectedId) ?? null,
