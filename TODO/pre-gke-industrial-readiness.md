@@ -300,6 +300,11 @@ reschedule its corresponding slice.
 
 ## P1: Security, Secrets, And Egress Policy
 
+- [x] Add a public AWF Core trust model document covering Docker daemon access,
+  local internet egress, secrets, provider auth, GitHub credentials, untrusted
+  external text, package installs, and what deterministic Core does and does
+  not enforce locally. The document must also separate current AWF Core from
+  future AI Operator/Architect layers above REST/CLI/MCP.
 - [x] Replace broad static auth mounts with declared secret leases where possible.
 - [x] Track secret lease issue, mount, expiry, revoke, and audit events.
 - [x] Revoke workspace secrets when workspace reaches terminal cleanup.
@@ -461,6 +466,37 @@ and a CLI-assisted inspect/preview/smoke path. New-computer setup should be
 absurdly easy: install AWF, run `awf init`, start the local service, then ask a
 coding agent in any project to use AWF for a feature.
 
+- [x] Add an executable local AWF Core release scorecard as
+  `awf service readiness --format json`, aggregating service readiness, doctor
+  diagnostics, provider readiness, cleanup/orphan posture, failure analysis, and
+  in-repo demo smoke evidence.
+- [x] Add PRD SLO thresholds to the Core release scorecard: workspace creation
+  success, cleanup success, stuck-state rate, and actionable failure reason
+  coverage must meet the local release bar or be explicitly allowlisted with a
+  written rationale.
+- [x] Reuse collected service readiness status inside the scorecard doctor path
+  so expensive Docker/provider probes are not double-run, while preserving
+  standalone `awf service doctor` independence.
+- [x] Make the release scorecard fail on unknown or generic recent workspace
+  failure reasons such as `unknown` and `agent_failure`, unless explicitly
+  allowlisted with release rationale.
+- [x] Add a maintained in-repo golden-path demo project under
+  `examples/awf-core-demo` so onboarding/profile preview and smoke-request
+  generation are exercised against a realistic Python/Postgres project shape.
+- [x] Add an executable offline golden-path smoke for `examples/awf-core-demo`
+  covering profile preview, generated workspace request, local validation
+  evidence, mocked-local PR monitor evidence, and mocked-local cleanup evidence.
+- [x] Expose the Core release scorecard through REST and MCP parity surfaces:
+  `GET /release-readiness`, `awf service readiness --format json`, and
+  `awf_get_core_release_readiness`.
+- [x] Document the AWF Core release gate as the local open-source readiness bar
+  before GKE discussion.
+- [x] Add open-source hygiene files for local Core: `SECURITY.md`,
+  `CONTRIBUTING.md`, GitHub issue templates, and a PR template with local/BYOK
+  support boundary notes.
+- [x] Add CI gates for console lint/typecheck/build/browser smoke and release
+  artifact/image validation for wheel/sdist, CLI entrypoints, control-plane
+  image, and agent-runtime image.
 - [ ] Define the primary install path: package-manager install such as `uv tool install aira-awf`/`uv pip install aira-awf`, with git clone as the contributor path.
 - [ ] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
 - [x] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
@@ -526,6 +562,9 @@ coding agent in any project to use AWF for a feature.
 - [x] Make local service bootstrap one-command and repeatable.
 - [x] Make migrations run safely during service startup or documented bootstrap.
 - [x] Add image versioning and local upgrade notes.
+- [x] Add release-readiness CI checks that build/install wheel and sdist,
+  verify CLI entrypoints, and validate control-plane plus agent-runtime Docker
+  image builds before public release.
 - [x] Add backup/restore instructions for AWF control-plane Postgres.
 - [x] Add local disaster recovery instructions for stuck containers, broken migrations, and corrupt work dirs.
 - [x] Keep `scripts/run_awf.py` compatibility documented until the API-backed runner fully replaces it.
@@ -553,6 +592,9 @@ local open-source AWF Core.
   umbrella provider-recovery acceptance item.
 - [ ] All P1 items are complete, or explicitly deferred with a written reason
   that preserves the local open-source Core readiness bar.
+- [ ] `awf service readiness --format json` passes without generic recent
+  failure reasons, with PRD SLO thresholds met over the rolling window; any
+  temporary allowlist has written release rationale.
 - [ ] PR monitor and merge queue can safely handle many parallel PRs with overlap.
 - [ ] Stale detection and validation tier policy are enforced as merge blockers.
 - [ ] Recovery operations are idempotent, observable, and restart-safe.
@@ -562,6 +604,10 @@ local open-source AWF Core.
   prompt-injection boundaries, and supply-chain guardrails.
 - [ ] Provider/model capacity failures are classified, retried or routed through
   approved fallback policy, and cleaned up without manual intervention.
+- [ ] The public AWF Core trust model is current for Docker, egress, secrets,
+  provider auth, GitHub credentials, untrusted text, and package installs.
 - [ ] The console can explain every blocked workspace without reading raw logs.
 - [ ] AWF self-development passes 99%+ coverage with meaningful tests.
-- [ ] A Dockerized toy project with DB, app, and browser validation passes end to end.
+- [ ] The maintained `examples/awf-core-demo` golden path proves onboarding,
+  profile preview, smoke request generation, workspace lifecycle, validation,
+  PR monitor path, and cleanup end to end.

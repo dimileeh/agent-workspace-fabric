@@ -21,6 +21,7 @@ from typer.testing import CliRunner
 from awf.cli.main import app
 from awf.common.config import Settings
 from awf.service.gc import WorkspaceGCComposeTeardownResult
+from awf.service.readiness import CoreReadinessCheck, CoreReadinessReport
 from awf.service.target_branch_monitor import (
     TargetBranchMonitorResult,
     TargetBranchMonitorStatus,
@@ -102,6 +103,112 @@ def _mock_compose_teardown_failed(_candidate: object) -> WorkspaceGCComposeTeard
         reason_code="DOCKER_COMPOSE_DOWN_FAILED",
         error="compose teardown failed",
     )
+
+
+@pytest.mark.unit
+def test_service_readiness_emits_json_scorecard(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    import awf.service.config as config_module
+    import awf.service.readiness as readiness_module
+
+    settings = SimpleNamespace(service_name="awf-local")
+    report = CoreReadinessReport(
+        status="ok",
+        checks=(
+            CoreReadinessCheck(
+                name="service_status",
+                status="ok",
+                reason_code="SERVICE_STATUS_OK",
+                message="service dependencies are ready",
+                evidence={"status": "ok"},
+            ),
+        ),
+        next_actions=(),
+    )
+    calls: list[dict[str, object]] = []
+
+    async def _collect(**kwargs: object) -> CoreReadinessReport:
+        calls.append(kwargs)
+        return report
+
+    monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(config_module, "resolve_service_settings", lambda: settings)
+
+    result = _runner.invoke(
+        app,
+        [
+            "service",
+            "readiness",
+            "--format",
+            "json",
+            "--demo-path",
+            str(tmp_path),
+            "--failure-window-hours",
+            "12",
+            "--slo-window-hours",
+            "168",
+            "--provider",
+            "codex",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "ok"
+    assert payload["summary"] == {"ok": 1, "warn": 0, "fail": 0}
+    assert payload["checks"][0]["name"] == "service_status"
+    assert calls == [
+        {
+            "settings": settings,
+            "demo_path": tmp_path,
+            "failure_window_hours": 12,
+            "slo_window_hours": 168,
+            "strict_providers": frozenset({"codex"}),
+            "provider_environ": os.environ,
+            "environ": os.environ,
+            "allow_generic_failures": False,
+            "allow_slo_breach": False,
+        }
+    ]
+
+
+@pytest.mark.unit
+def test_service_readiness_exits_nonzero_when_scorecard_fails(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import awf.service.config as config_module
+    import awf.service.readiness as readiness_module
+
+    async def _collect(**_kwargs: object) -> CoreReadinessReport:
+        return CoreReadinessReport(
+            status="fail",
+            checks=(
+                CoreReadinessCheck(
+                    name="recent_failure_taxonomy",
+                    status="fail",
+                    reason_code="GENERIC_FAILURE_REASON_BLOCKS_RELEASE",
+                    message="recent failures include generic reason codes",
+                    evidence={"workspace_ids": ["ws_unknown"]},
+                ),
+            ),
+            next_actions=("Classify generic recent workspace failures.",),
+        )
+
+    monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+    monkeypatch.setattr(
+        config_module,
+        "resolve_service_settings",
+        lambda: SimpleNamespace(service_name="awf-local"),
+    )
+
+    result = _runner.invoke(app, ["service", "readiness", "--format", "json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "fail"
+    assert payload["checks"][0]["reason_code"] == "GENERIC_FAILURE_REASON_BLOCKS_RELEASE"
 
 
 @pytest.mark.unit

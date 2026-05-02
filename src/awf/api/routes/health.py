@@ -40,6 +40,7 @@ from awf.service.provider_readiness import (
     collect_agent_readiness,
     validate_provider_names,
 )
+from awf.service.readiness import collect_core_readiness_report
 
 router = APIRouter(tags=["system"])
 
@@ -95,6 +96,41 @@ class ReadyResponse(BaseModel):
 @router.get("/healthz", response_model=HealthResponse)
 async def healthz() -> HealthResponse:
     return HealthResponse(status="ok", service="awf", version=__version__)
+
+
+@router.get("/release-readiness")
+async def release_readiness(
+    response: Response,
+    provider: list[str] = Query(default=[]),
+    failure_window_hours: int = Query(default=24, ge=1, le=168),
+    slo_window_hours: int = Query(default=168, ge=1, le=720),
+    allow_generic_failures: bool = Query(default=False),
+    allow_slo_breach: bool = Query(default=False),
+) -> dict[str, object]:
+    """Return the executable AWF Core local release scorecard.
+
+    This intentionally mirrors ``awf service readiness --format json`` so REST,
+    CLI, and MCP clients can make the same Core-ready decision.
+    """
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=str(exc),
+        ) from exc
+
+    report = await collect_core_readiness_report(
+        settings=resolve_service_settings(get_settings()),
+        failure_window_hours=failure_window_hours,
+        slo_window_hours=slo_window_hours,
+        strict_providers=frozenset(strict_providers),
+        allow_generic_failures=allow_generic_failures,
+        allow_slo_breach=allow_slo_breach,
+    )
+    if report.status == "fail":
+        response.status_code = status.HTTP_503_SERVICE_UNAVAILABLE
+    return report.to_dict()
 
 
 # Bound every subprocess call so a hung docker daemon can't wedge readiness probes

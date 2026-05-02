@@ -34,6 +34,7 @@ from awf.common.commands import AsyncioSubprocessRunner, CommandResult, FakeComm
 from awf.common.config import Settings
 from awf.db.enums import WorkspaceStatus
 from awf.db.session import make_session_factory
+from awf.service.readiness import CoreReadinessCheck, CoreReadinessReport
 from tests.unit.helpers import create_workspace
 
 _PROVIDER_ENV_KEYS = (
@@ -85,6 +86,83 @@ async def test_healthz_does_not_require_auth(client: AsyncClient) -> None:
     response = await client.get("/healthz")
     assert response.status_code != 401
     assert response.status_code != 403
+
+
+# ---- /release-readiness -----------------------------------------------------
+
+
+@pytest.mark.unit
+async def test_release_readiness_returns_core_scorecard(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app, client = ready_app_and_client
+    calls: list[dict[str, object]] = []
+
+    async def _collect(**kwargs: object) -> CoreReadinessReport:
+        calls.append(kwargs)
+        return CoreReadinessReport(
+            status="ok",
+            checks=(
+                CoreReadinessCheck(
+                    name="prd_slo_thresholds",
+                    status="ok",
+                    reason_code="PRD_SLO_THRESHOLDS_MET",
+                    message="rolling PRD SLO thresholds meet Core release criteria",
+                    evidence={"since_hours": 168},
+                ),
+            ),
+            next_actions=(),
+        )
+
+    monkeypatch.setattr(health_route, "collect_core_readiness_report", _collect)
+
+    response = await client.get(
+        "/release-readiness",
+        params={
+            "provider": "codex",
+            "failure_window_hours": 12,
+            "slo_window_hours": 168,
+        },
+    )
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["status"] == "ok"
+    assert body["checks"][0]["name"] == "prd_slo_thresholds"
+    assert calls[0]["failure_window_hours"] == 12
+    assert calls[0]["slo_window_hours"] == 168
+    assert calls[0]["strict_providers"] == frozenset({"codex"})
+
+
+@pytest.mark.unit
+async def test_release_readiness_returns_503_when_scorecard_fails(
+    ready_app_and_client: tuple[Any, AsyncClient],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _app, client = ready_app_and_client
+
+    async def _collect(**_kwargs: object) -> CoreReadinessReport:
+        return CoreReadinessReport(
+            status="fail",
+            checks=(
+                CoreReadinessCheck(
+                    name="recent_failure_taxonomy",
+                    status="fail",
+                    reason_code="GENERIC_FAILURE_REASON_BLOCKS_RELEASE",
+                    message="recent failed workspaces include generic or unknown reasons",
+                    evidence={},
+                ),
+            ),
+            next_actions=("Classify or reconcile recent generic workspace failures.",),
+        )
+
+    monkeypatch.setattr(health_route, "collect_core_readiness_report", _collect)
+
+    response = await client.get("/release-readiness")
+
+    assert response.status_code == 503
+    assert response.json()["status"] == "fail"
 
 
 # ---- /readyz fixtures -------------------------------------------------------

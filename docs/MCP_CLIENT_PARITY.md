@@ -43,6 +43,7 @@ not add MCP tools.
 | Locks and owned-path reservations | `GET /v1/locks` | `awf locks list` | `awf_list_locks` | `WorkspaceLockListResponse` | `require_api_token` | MCP implemented | — |
 | Advisory overlap graph | `GET /v1/locks/overlap-graph` | CLI absent | `awf_get_overlap_graph` | `WorkspaceOverlapGraphResponse` | `require_api_token` | MCP implemented | — |
 | Service health and readiness | `GET /healthz`, `GET /readyz` | `awf service status`, `awf service doctor` | `awf_get_service_health`, `awf_get_service_readiness` | `HealthResponse`; `ReadyResponse` | `require_api_token` (readyz); healthz: public | MCP implemented | — |
+| Core release readiness scorecard | `GET /release-readiness` | `awf service readiness --format json` | `awf_get_core_release_readiness` | `CoreReadinessReport` | `require_api_token`; CLI may run local diagnostics and reuse cached service status | MCP implemented | — |
 | Workspace runtime snapshot | `GET /v1/workspaces/{workspace_id}/runtime` | `awf workspace runtime` | `awf_get_workspace_runtime` | `WorkspaceRuntimeResponse` | `require_api_token`; MCP: no shell, no exec | MCP implemented | — |
 | Workspace operations | `GET /v1/workspaces/{workspace_id}/operations` | `awf workspace operations` | `awf_list_workspace_operations` | `OperationListResponse` | `require_api_token` | MCP implemented | — |
 | Global operations | `GET /v1/operations`, `GET /v1/operations/{operation_id}` | CLI absent | `awf_list_operations`, `awf_get_operation` | `OperationListResponse`; `OperationResponse` | `require_api_token` | MCP implemented | — |

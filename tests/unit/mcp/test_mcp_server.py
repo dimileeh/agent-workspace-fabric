@@ -165,6 +165,7 @@ class TestToolRegistration:
             "awf_get_workspace_reliability_summary",
             "awf_get_resource_saturation_summary",
             "awf_get_slo_metrics_summary",
+            "awf_get_core_release_readiness",
             "awf_list_operations",
             "awf_get_operation",
             "awf_get_overlap_graph",

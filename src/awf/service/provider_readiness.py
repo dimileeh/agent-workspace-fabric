@@ -677,8 +677,8 @@ def _check_opencode(
             isolation="none",
         )
 
-    version_url = _ollama_version_url(environ)
-    probe = _probe_ollama(version_url, http_get=http_get, secrets=secrets)
+    version_urls = _ollama_version_urls(environ)
+    probe = _probe_ollama(version_urls, http_get=http_get, secrets=secrets)
     if not probe["ok"]:
         probe_detail = probe.get("detail")
         return _provider_result(
@@ -1101,6 +1101,10 @@ def _truncate(value: str, *, limit: int = 240) -> str:
 
 
 def _ollama_version_url(environ: Mapping[str, str]) -> str:
+    return _ollama_version_urls(environ)[0]
+
+
+def _ollama_version_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
     raw = (
         environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
         or environ.get("OLLAMA_HOST")
@@ -1113,29 +1117,33 @@ def _ollama_version_url(environ: Mapping[str, str]) -> str:
     if path.endswith("/v1"):
         path = path[: -len("/v1")]
     path = f"{path}/api/version" if path else "/api/version"
-    return urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    primary = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
+    if parts.hostname == "host.docker.internal":
+        fallback = urlunsplit((parts.scheme, "localhost:11434", path, "", ""))
+        return (primary, fallback)
+    return (primary,)
 
 
 def _probe_ollama(
-    url: str,
+    urls: tuple[str, ...],
     *,
     http_get: HttpGet,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
-    try:
-        response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
-    except Exception as exc:
-        return {
-            "ok": False,
-            "detail": _redact(f"{type(exc).__name__}: {exc}", secrets),
-        }
-    if 200 <= response.status_code < 300:
-        return {"ok": True}
-    detail = response.text or f"HTTP {response.status_code}"
-    return {
-        "ok": False,
-        "detail": _redact(f"HTTP {response.status_code}: {detail}", secrets),
-    }
+    failures: list[str] = []
+    for url in urls:
+        try:
+            response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
+            continue
+        if 200 <= response.status_code < 300:
+            return {"ok": True}
+        detail = response.text or f"HTTP {response.status_code}"
+        failure = f"HTTP {response.status_code}: {detail}"
+        failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
+    return {"ok": False, "detail": _redact("; ".join(failures), secrets)}
 
 
 def _ordered_names(providers: set[ProviderName]) -> list[str]:

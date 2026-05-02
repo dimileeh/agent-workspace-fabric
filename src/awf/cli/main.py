@@ -761,6 +761,82 @@ def service_doctor(
         raise typer.Exit(code=1)
 
 
+@service_app.command("readiness")
+def service_readiness(
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+    demo_path: Path = typer.Option(
+        Path("examples/awf-core-demo"),
+        "--demo-path",
+        help="Path to the maintained AWF Core golden-path demo project.",
+    ),
+    failure_window_hours: int = typer.Option(
+        24,
+        "--failure-window-hours",
+        min=1,
+        max=168,
+        help="Recent failure-analysis window used by the release gate.",
+    ),
+    slo_window_hours: int = typer.Option(
+        168,
+        "--slo-window-hours",
+        min=1,
+        max=720,
+        help="Rolling PRD SLO metrics window used by the release gate.",
+    ),
+    allow_generic_failures: bool = typer.Option(
+        False,
+        "--allow-generic-failures/--no-allow-generic-failures",
+        help=(
+            "Permit generic recent failure reasons in the scorecard. Use only with "
+            "a written release rationale."
+        ),
+    ),
+    allow_slo_breach: bool = typer.Option(
+        False,
+        "--allow-slo-breach/--no-allow-slo-breach",
+        help=(
+            "Permit PRD SLO threshold breaches in the scorecard. Use only with "
+            "a written release rationale."
+        ),
+    ),
+    provider: list[str] = typer.Option(
+        [],
+        "--provider",
+        help=(
+            "Repeatable provider strictness check: github, codex, claude_code, "
+            "gemini, opencode, or docker."
+        ),
+    ),
+) -> None:
+    """Run the executable local AWF Core release-readiness gate."""
+    from awf.service.config import resolve_service_settings
+    from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+    from awf.service.readiness import collect_core_readiness_report
+
+    try:
+        strict_providers = validate_provider_names(provider)
+    except ProviderReadinessError as exc:
+        typer.echo(f"error: {exc}", err=True)
+        raise typer.Exit(code=2) from exc
+
+    report = asyncio.run(
+        collect_core_readiness_report(
+            settings=resolve_service_settings(),
+            demo_path=demo_path,
+            failure_window_hours=failure_window_hours,
+            slo_window_hours=slo_window_hours,
+            strict_providers=frozenset(strict_providers),
+            provider_environ=os.environ,
+            environ=os.environ,
+            allow_generic_failures=allow_generic_failures,
+            allow_slo_breach=allow_slo_breach,
+        )
+    )
+    _emit(report.to_dict(), fmt)
+    if report.status == "fail":
+        raise typer.Exit(code=1)
+
+
 @service_app.command("bootstrap")
 def service_bootstrap(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),

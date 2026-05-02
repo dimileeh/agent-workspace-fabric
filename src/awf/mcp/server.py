@@ -801,6 +801,54 @@ def build_mcp_server(
         )
         return _tool_result(payload)
 
+    @mcp.tool(name="awf_get_core_release_readiness")
+    async def awf_get_core_release_readiness(
+        providers: list[str] | None = Field(
+            default=None,
+            description="Optional strict provider names for the release scorecard.",
+        ),
+        failure_window_hours: int = Field(
+            default=24,
+            ge=1,
+            le=168,
+            description="Recent failure-analysis window used by the release gate.",
+        ),
+        slo_window_hours: int = Field(
+            default=168,
+            ge=1,
+            le=720,
+            description="Rolling PRD SLO metrics window used by the release gate.",
+        ),
+        allow_generic_failures: bool = Field(
+            default=False,
+            description="Allow generic recent failure reasons with written rationale.",
+        ),
+        allow_slo_breach: bool = Field(
+            default=False,
+            description="Allow PRD SLO threshold breaches with written rationale.",
+        ),
+    ) -> StructuredToolResult:
+        """Read-only operator observability: AWF Core local release scorecard."""
+        from awf.service.config import resolve_service_settings
+        from awf.service.provider_readiness import ProviderReadinessError, validate_provider_names
+        from awf.service.readiness import collect_core_readiness_report
+
+        validated_strict_providers = None
+        if providers is not None and len(providers) > 0:
+            try:
+                validated_strict_providers = validate_provider_names(providers)
+            except ProviderReadinessError as exc:
+                return _error_result("INVALID_PROVIDERS", str(exc))
+        report = await collect_core_readiness_report(
+            settings=resolve_service_settings(settings_value),
+            failure_window_hours=failure_window_hours,
+            slo_window_hours=slo_window_hours,
+            strict_providers=frozenset(validated_strict_providers or ()),
+            allow_generic_failures=allow_generic_failures,
+            allow_slo_breach=allow_slo_breach,
+        )
+        return _tool_result(report.to_dict())
+
     @mcp.tool(name="awf_get_service_health")
     async def awf_get_service_health() -> StructuredToolResult:
         """Read-only operator observability: report AWF service liveness."""

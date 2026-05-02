@@ -108,6 +108,8 @@ See:
 - [docs/PLAN_MVP.md](docs/PLAN_MVP.md) for the MVP plan.
 - [docs/PLAN_PR_MONITOR.md](docs/PLAN_PR_MONITOR.md) for PR monitor design.
 - [docs/PLAN_RELEASE_PR_SYNC.md](docs/PLAN_RELEASE_PR_SYNC.md) for release PR sync.
+- [docs/AWF_CORE_TRUST_MODEL.md](docs/AWF_CORE_TRUST_MODEL.md) for the local
+  Core trust boundary and future Operator/Architect split.
 
 ## Architecture
 
@@ -761,7 +763,9 @@ Inspect the service and logs from another terminal:
 ```bash
 uv run --python 3.12 --extra dev awf service status
 uv run --python 3.12 --extra dev awf service status --provider github --format pretty
+uv run --python 3.12 --extra dev awf service readiness --format json
 curl 'http://localhost:8000/readyz?provider=github'
+curl 'http://localhost:8000/release-readiness'
 uv run --python 3.12 --extra dev awf service logs --follow --service worker
 ```
 
@@ -772,6 +776,27 @@ structured warnings. Missing optional providers and local least-privilege
 downgrades are warnings by default. Pass `--provider <name>` or
 `?provider=<name>` to make that provider strict for scheduling or rollout
 checks.
+
+`awf service readiness --format json` is the executable local Core release
+scorecard. It aggregates service readiness, doctor diagnostics with cached
+status reuse, provider readiness, cleanup/orphan posture, PRD SLO thresholds,
+recent failure taxonomy, and the maintained `examples/awf-core-demo` onboarding
+smoke evidence. The same report is exposed through `GET /release-readiness` and
+the MCP `awf_get_core_release_readiness` tool. The gate fails when recent
+workspace failures still have generic or unknown reason codes, or rolling PRD
+SLO metrics are unavailable/stale/below threshold, unless an operator
+explicitly runs it with an allowlist flag and records the rationale in the
+release ledger.
+
+The demo project also includes an offline executable smoke:
+
+```bash
+uv run --python 3.12 --extra dev python examples/awf-core-demo/scripts/core_release_smoke.py
+```
+
+It proves the local profile preview and workspace request path, then emits
+explicit mocked-local PR monitor and cleanup evidence so the Core demo remains
+deterministic without live GitHub or provider credentials.
 
 The service-mode default database URL is local Postgres
 (`postgresql+asyncpg://awf:...@localhost:5433/awf`). SQLite remains supported
@@ -987,6 +1012,7 @@ the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 | `awf_get_workspace_reliability_summary` | Fetch the workspace reliability metrics summary. |
 | `awf_get_resource_saturation_summary` | Fetch resource saturation, cleanup readiness, and admission status. |
 | `awf_get_slo_metrics_summary` | Fetch the SLO metrics summary. |
+| `awf_get_core_release_readiness` | Fetch the executable AWF Core release scorecard. |
 | `awf_list_operations` | List operations globally with REST-compatible filters. |
 | `awf_get_operation` | Fetch one operation by id. |
 | `awf_list_workspace_operations` | List one workspace's active and completed operations newest-first. |

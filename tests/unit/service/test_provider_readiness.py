@@ -1022,6 +1022,36 @@ def test_provider_readiness_opencode_ollama_file_reason_without_opencode_config(
 
 
 @pytest.mark.unit
+def test_provider_readiness_opencode_default_host_gateway_falls_back_to_localhost(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+    urls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        urls.append(url)
+        if url == "http://host.docker.internal:11434/api/version":
+            raise RuntimeError("nodename nor servname provided")
+        return SimpleNamespace(status_code=200, text="ok")
+
+    payload = collect_agent_readiness(
+        _settings(tmp_path),
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_http_get,
+    )
+
+    opencode = payload["providers"]["opencode"]
+    assert opencode["ok"] is True
+    assert opencode["reason"] == "OPENCODE_FILE_AUTH_PRESENT"
+    assert urls == [
+        "http://host.docker.internal:11434/api/version",
+        "http://localhost:11434/api/version",
+    ]
+
+
+@pytest.mark.unit
 def test_provider_readiness_opencode_env_only_reason_when_ollama_reachable(
     tmp_path: Path,
 ) -> None:

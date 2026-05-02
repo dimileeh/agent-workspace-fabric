@@ -43,6 +43,7 @@ from awf.service.orphan_resources import (
     empty_docker_scan,
     scan_managed_worktrees,
 )
+from awf.service.readiness import CoreReadinessCheck, CoreReadinessReport
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
 
 
@@ -65,6 +66,7 @@ NEW_OPERATOR_TOOLS = {
     "awf_get_workspace_reliability_summary",
     "awf_get_resource_saturation_summary",
     "awf_get_slo_metrics_summary",
+    "awf_get_core_release_readiness",
     "awf_list_operations",
     "awf_get_operation",
     "awf_get_overlap_graph",
@@ -538,6 +540,47 @@ class TestMcpOperatorSurfaceRegistration:
 
 
 class TestMcpOperatorSurfaceParity:
+    @pytest.mark.unit
+    async def test_core_release_readiness_tool_matches_rest_payload(
+        self,
+        operator_stack: OperatorStack,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        import awf.api.routes.health as health_route
+        import awf.service.readiness as readiness_module
+
+        async def _collect(**_kwargs: object) -> CoreReadinessReport:
+            return CoreReadinessReport(
+                status="ok",
+                checks=(
+                    CoreReadinessCheck(
+                        name="prd_slo_thresholds",
+                        status="ok",
+                        reason_code="PRD_SLO_THRESHOLDS_MET",
+                        message="rolling PRD SLO thresholds meet Core release criteria",
+                        evidence={"since_hours": 168},
+                    ),
+                ),
+                next_actions=(),
+            )
+
+        monkeypatch.setattr(health_route, "collect_core_readiness_report", _collect)
+        monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
+
+        rest_response = await operator_stack.client.get(
+            "/release-readiness",
+            params={"failure_window_hours": 12, "slo_window_hours": 168},
+        )
+        assert rest_response.status_code == 200
+
+        mcp = await _call(
+            operator_stack.mcp,
+            "awf_get_core_release_readiness",
+            {"failure_window_hours": 12, "slo_window_hours": 168},
+        )
+
+        assert mcp == rest_response.json()
+
     @pytest.mark.unit
     async def test_missing_read_only_resources_return_null_tool_results(
         self,
