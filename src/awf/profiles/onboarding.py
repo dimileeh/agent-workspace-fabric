@@ -395,20 +395,9 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
 
 def _ensure_restricted_egress(profile: WorkspaceProfile) -> WorkspaceProfile:
     if profile.security.egress.mode == EgressMode.restricted:
-        profile = profile.model_copy(
-            deep=True,
-            update={
-                "security": profile.security.model_copy(
-                    update={
-                        "egress": profile.security.egress.model_copy(
-                            update={
-                                "mode": EgressMode.restricted,
-                                "allowlist_templates": list(_DEFAULT_RESTRICTED_ALLOWLIST_TEMPLATES),
-                            }
-                        )
-                    }
-                )
-            },
+        profile.security.egress.mode = EgressMode.restricted
+        profile.security.egress.allowlist_templates = list(
+            _DEFAULT_RESTRICTED_ALLOWLIST_TEMPLATES
         )
     return profile
 
