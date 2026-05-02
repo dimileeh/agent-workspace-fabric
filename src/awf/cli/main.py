@@ -521,10 +521,17 @@ def _run_init_service_bootstrap(
             )
         )
         docker_diag = _docker_diagnostic_from_report(docker_report)
-        if docker_diag is not None and getattr(docker_diag, "status", "ok") == "fail":
-            message = getattr(docker_diag, "message", "Docker is not available.")
-            action = getattr(docker_diag, "action", "")
-            reason = getattr(docker_diag, "reason", "DOCKER_DAEMON_UNREACHABLE")
+        docker_status = getattr(docker_diag, "status", None)
+        docker_unknown = docker_diag is None or docker_status is None
+        if docker_unknown or docker_status == "fail":
+            if docker_unknown:
+                message = "Docker availability could not be determined from the doctor report."
+                action = "Run `awf doctor` to investigate the local environment."
+                reason = "DOCKER_DIAGNOSTIC_MISSING"
+            else:
+                message = getattr(docker_diag, "message", "Docker is not available.")
+                action = getattr(docker_diag, "action", "")
+                reason = getattr(docker_diag, "reason", "DOCKER_DAEMON_UNREACHABLE")
             if pretty:
                 typer.echo(f"  docker: {message}")
                 if action:

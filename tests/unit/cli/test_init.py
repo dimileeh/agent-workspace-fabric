@@ -483,6 +483,42 @@ def test_init_without_path_runs_docker_availability_check_first(
 
 
 @pytest.mark.unit
+def test_init_without_path_fails_when_docker_diagnostic_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from awf.service import bootstrap as bootstrap_mod
+    from awf.service import config as config_mod
+    from awf.service import doctor as doctor_mod
+
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("AWF_HOST_WORK_DIR", str(tmp_path / "state"))
+
+    bootstrap_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: object())
+
+    report = _doctor_report()  # No diagnostics: no docker entry.
+
+    async def _collect_doctor_report(_settings: object, **_kwargs: Any) -> Any:
+        return report
+
+    async def _bootstrap(received_settings: Any, **kwargs: Any) -> Any:
+        bootstrap_calls.append({"settings": received_settings, **kwargs})
+        return None
+
+    monkeypatch.setattr(doctor_mod, "collect_doctor_report", _collect_doctor_report)
+    monkeypatch.setattr(bootstrap_mod, "run_service_bootstrap", _bootstrap)
+
+    result = _runner.invoke(app, ["init", "--format", "json"])
+
+    assert result.exit_code == 1, result.output
+    assert bootstrap_calls == []
+    payload = json.loads(result.output)
+    assert payload["status"] == "failed"
+    assert payload["reason_code"] == "DOCKER_DIAGNOSTIC_MISSING"
+    assert not (tmp_path / "state").exists()
+
+
+@pytest.mark.unit
 def test_init_without_path_passes_strict_provider_options_to_bootstrap(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
