@@ -995,6 +995,47 @@ def test_classify_conformance_stall_no_output_streak_breaks_on_changed_report_di
 
 
 @pytest.mark.unit
+def test_classify_conformance_stall_no_output_streak_includes_iter_zero_with_stale_preexisting_digest() -> None:
+    # A preserved worktree (retry/salvage) can leave a report file on disk
+    # before iteration 0 ever runs, so iteration 0's report_digest is non-
+    # None even when the iteration produced no output and made no
+    # worktree changes. The classifier must not treat that pre-existing
+    # digest as fresh progress; otherwise the empty streak skips iter 0
+    # and the stall is masked.
+    history = [
+        _iter_record(
+            iteration=0,
+            elapsed_seconds=320.0,
+            report_digest="stale-preexisting-digest",
+            worktree_changed=False,
+            stdout="",
+            stderr="",
+        ),
+        _iter_record(
+            iteration=1,
+            elapsed_seconds=320.0,
+            report_digest="stale-preexisting-digest",
+            worktree_changed=False,
+            stdout="",
+            stderr="",
+        ),
+    ]
+
+    evidence = classify_conformance_stall(
+        history=history,
+        policy=_stall_policy(no_output_seconds=600),
+        plan_path=Path("docs/awf-plans/ws_preexisting_digest.md"),
+        report_path=Path("docs/awf-plans/ws_preexisting_digest.conformance.json"),
+        latest_error=None,
+    )
+
+    assert evidence is not None
+    assert evidence.kind == ConformanceStallKind.no_output
+    assert evidence.iteration_index == 1
+    assert evidence.no_output_seconds == pytest.approx(640.0)
+
+
+@pytest.mark.unit
 def test_classify_conformance_stall_returns_repeated_output_when_report_digest_repeats() -> None:
     history = [
         _iter_record(

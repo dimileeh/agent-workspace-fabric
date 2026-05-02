@@ -392,12 +392,18 @@ def classify_conformance_stall(
     # report left behind by an earlier iteration keeps yielding the same
     # non-None digest even when the current iteration produced no output.
     # Treat the digest as fresh progress only when it differs from the
-    # immediately-prior iteration's digest.
+    # immediately-prior iteration's digest. At iteration 0 there is no
+    # prior record to compare against, and a preserved worktree (e.g.,
+    # retry of a salvaged workspace) can leave a stale report on disk
+    # before the loop even starts; fall back to ``worktree_changed`` so
+    # the digest only counts as fresh when iteration 0 actually moved
+    # the worktree.
     for index in range(len(history) - 1, -1, -1):
         record = history[index]
         prior = history[index - 1] if index > 0 else None
         fresh_report_digest = record.report_digest is not None and (
-            prior is None or prior.report_digest != record.report_digest
+            (prior is None and record.worktree_changed)
+            or (prior is not None and prior.report_digest != record.report_digest)
         )
         if record.stdout.strip() or record.stderr.strip() or fresh_report_digest:
             break
