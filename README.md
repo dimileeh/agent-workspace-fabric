@@ -969,7 +969,10 @@ destructive cleanup, then use the restore flow above.
 ## MCP Surface
 
 AWF also exposes MCP tools for clients that want typed tool calls instead of
-shelling out to the REST API:
+shelling out to the REST API. REST is canonical, the CLI is a JSON-first
+operator convenience layer, and MCP is a first-class parity client for agent
+orchestrators. See [docs/MCP_CLIENT_PARITY.md](docs/MCP_CLIENT_PARITY.md) for
+the API/CLI/MCP parity matrix and explicit MCP backlog surfaces.
 
 | Tool | Purpose |
 | --- | --- |
@@ -995,14 +998,23 @@ shelling out to the REST API:
 | `awf_list_workspace_logs` | List indexed durable log streams for one workspace. |
 | `awf_read_workspace_log` | Read a bounded log chunk by stream id and byte offset. |
 | `awf_get_overlap_graph` | Fetch the advisory owned-path overlap graph. |
+| `awf_list_tasks` | List task records backed by workspace attempts. |
+| `awf_list_task_attempts` | List attempts for one task reference. |
+| `awf_list_locks` | List owned-path reservations and overlap-risk summaries. |
+| `awf_get_service_readiness` | Fetch service readiness checks. |
+| `awf_get_service_health` | Fetch service liveness. |
 | `awf_cancel_workspace` | Operator control: request cancellation for a workspace. |
 | `awf_stop_workspace` | Operator control: stop a workspace stack. |
 | `awf_destroy_workspace` | Operator control: destroy AWF-managed workspace resources. |
+| `awf_remonitor_workspace` | Operator control: request PR monitor recovery. |
+| `awf_request_workspace_validation` | Operator control: request workspace re-validation. |
 
 The observability tools return `null` for a missing workspace, log stream, or
 operation rather than surfacing raw storage errors. Operator observability tools
 are read-only and mirror REST response envelopes; the explicit control tools do
-not provide shell access or arbitrary Docker execution.
+not provide shell access or arbitrary Docker execution. Known MCP parity backlog
+is documented in the matrix, including refresh, rebase, retry, artifact
+content/download, and `If-Match` concurrency coverage.
 
 Example `awf_create_workspace_v2` arguments:
 
