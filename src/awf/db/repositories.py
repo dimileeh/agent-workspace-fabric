@@ -2479,6 +2479,7 @@ class WorkspaceRepository:
         status: WorkspaceStatus,
         limit: int,
         exclude_ids: set[str] | None = None,
+        offset: int = 0,
     ) -> builtins.list[str]:
         """Return candidate workspace IDs for one worker poll.
 
@@ -2495,6 +2496,7 @@ class WorkspaceRepository:
             status=status,
             limit=limit,
             exclude_ids=exclude_ids,
+            offset=offset,
             skip_locked=self._dialect_name == "postgresql",
             claim_cutoff=datetime.now(UTC) if status == WorkspaceStatus.monitoring_pr else None,
         )
@@ -3039,6 +3041,7 @@ def _schedulable_workspace_ids_stmt(
     status: WorkspaceStatus,
     limit: int,
     exclude_ids: set[str] | None = None,
+    offset: int = 0,
     skip_locked: bool,
     claim_cutoff: datetime | None = None,
 ) -> Select[tuple[Workspace]]:
@@ -3053,6 +3056,8 @@ def _schedulable_workspace_ids_stmt(
     if exclude_ids:
         stmt = stmt.where(~Workspace.id.in_(sorted(exclude_ids)))
     stmt = stmt.order_by(Workspace.created_at.asc(), Workspace.id.asc()).limit(limit)
+    if offset > 0:
+        stmt = stmt.offset(offset)
     if skip_locked:
         stmt = stmt.with_for_update(skip_locked=True, of=Workspace)
     return stmt

@@ -342,19 +342,20 @@ class ControlWorker:
                 return ids[:limit]
 
             filtered: list[str] = []
-            seen_ids: set[str] = set()
             base_exclude_ids = set(exclude_ids or set())
             candidate_limit = _scheduler_candidate_fetch_limit(limit)
+            candidate_offset = 0
             repo = WorkspaceRepository(session)
             while len(filtered) < limit:
                 ids = await repo.list_schedulable_ids(
                     status=status,
                     limit=candidate_limit,
-                    exclude_ids=base_exclude_ids | seen_ids,
+                    exclude_ids=base_exclude_ids,
+                    offset=candidate_offset,
                 )
                 if not ids:
                     break
-                seen_ids.update(ids)
+                candidate_offset += len(ids)
                 eligible = await self._filter_provider_recovery_suppressed(
                     session,
                     ids,

@@ -758,6 +758,84 @@ class TestRunOnceExecution:
         assert executor.calls == [allowed_id]
 
     @pytest.mark.unit
+    async def test_provider_cooldown_refill_keeps_exclusions_bounded(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        session_factory: async_sessionmaker[AsyncSession],
+        origin_repo: Path,
+    ) -> None:
+        not_before = datetime.now(UTC) + timedelta(minutes=10)
+        suppressed_ids = [
+            await _create_ready(
+                session_factory,
+                origin_repo,
+                f"cooling-ready-{index}",
+                agent="gemini",
+                task_class="refactor_task",
+                task_policy={
+                    "agent_model": "gemini-2.5-pro",
+                    "scheduler": {"base_priority": 100},
+                    "provider_recovery_state": {
+                        "not_before": not_before.isoformat(),
+                        "action": "retry",
+                    },
+                },
+            )
+            for index in range(_scheduler_candidate_fetch_limit(1))
+        ]
+        allowed_id = await _create_ready(
+            session_factory,
+            origin_repo,
+            "allowed-after-cooldown-buffer",
+            task_class="refactor_task",
+            task_policy={"scheduler": {"base_priority": 1}},
+        )
+        ordered_ids = [*suppressed_ids, allowed_id]
+        base_exclude_ids = {"active-workspace"}
+        queries: list[tuple[int, set[str]]] = []
+
+        async def _list_schedulable_ids(
+            self: WorkspaceRepository,
+            *,
+            status: WorkspaceStatus,
+            limit: int,
+            exclude_ids: set[str] | None = None,
+            offset: int = 0,
+        ) -> list[str]:
+            del self
+            assert status == WorkspaceStatus.ready
+            excluded = set(exclude_ids or set())
+            queries.append((offset, excluded))
+            visible = [
+                workspace_id for workspace_id in ordered_ids if workspace_id not in excluded
+            ]
+            return visible[offset : offset + limit]
+
+        monkeypatch.setattr(
+            WorkspaceRepository,
+            "list_schedulable_ids",
+            _list_schedulable_ids,
+            raising=False,
+        )
+        worker = ControlWorker(
+            session_factory=session_factory,
+            provisioner=_TransitioningProvisioner(session_factory),  # type: ignore[arg-type]
+            executor=_RecordingExecutor(),
+            runtime_inspector=_HealthyRuntimeInspector(),
+            config=WorkerConfig(
+                poll_interval_seconds=0.01,
+                max_concurrent_provisions=0,
+                max_concurrent_executions=1,
+            ),
+        )
+
+        assert await worker._list_ready(limit=1, exclude_ids=base_exclude_ids) == [allowed_id]
+        assert queries == [
+            (0, base_exclude_ids),
+            (_scheduler_candidate_fetch_limit(1), base_exclude_ids),
+        ]
+
+    @pytest.mark.unit
     async def test_provider_model_circuit_defer_records_decision_and_fills_limit(
         self,
         session_factory: async_sessionmaker[AsyncSession],
@@ -1153,8 +1231,9 @@ class TestRunOnceExecution:
             status: WorkspaceStatus,
             limit: int,
             exclude_ids: set[str] | None = None,
+            offset: int = 0,
         ) -> list[str]:
-            del self
+            del self, offset
             queries.append((status, limit, set(exclude_ids or set())))
             return []
 
