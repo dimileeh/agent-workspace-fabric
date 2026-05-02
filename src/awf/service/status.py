@@ -34,6 +34,7 @@ from awf.service.orphans import (
 )
 from awf.service.profile_metadata import (
     NetworkPosture,
+    egress_allowlist_templates_from_profile_snapshot,
     network_posture_from_profile_snapshot,
 )
 from awf.service.provider_readiness import HttpGet as ProviderHttpGet
@@ -415,10 +416,13 @@ def _network_posture_check_payload(workspace_view: WorkspaceIdView) -> CheckPayl
         snapshot for snapshot in workspace_view.snapshots if snapshot.workspace_id in active_ids
     ]
     counts: Counter[str] = Counter()
+    active_restricted_templates: list[str] = []
     open_examples: list[dict[str, object]] = []
     for snapshot in active_snapshots:
         posture = snapshot.network_posture
         counts[posture or "unknown"] += 1
+        if posture == "restricted" and snapshot.allowlist_templates:
+            active_restricted_templates.extend(snapshot.allowlist_templates)
         if posture == "open" and len(open_examples) < 5:
             open_examples.append(
                 {
@@ -445,6 +449,11 @@ def _network_posture_check_payload(workspace_view: WorkspaceIdView) -> CheckPayl
             else "NETWORK_POSTURE_NO_ACTIVE_OPEN"
         ),
         "active_counts_by_posture": active_counts,
+        "active_restricted_templates": sorted(set(active_restricted_templates)),
+        "deferred_enforcement_note": (
+            "Destination-level filtering is deferred in the local Docker backend; "
+            "allowlist_templates are metadata-only intent."
+        ),
         "open_examples": open_examples,
     }
 
@@ -562,6 +571,12 @@ async def _default_workspace_id_lookup(
     ) in rows:
         ws_id_str = str(ws_id)
         status_str = str(status)
+        posture = _status_network_posture_from_profile_snapshot(
+            resolved_profile,
+            created_at,
+            legacy_open_default_cutoff=legacy_open_default_cutoff,
+        )
+        templates = egress_allowlist_templates_from_profile_snapshot(resolved_profile)
         snapshots.append(
             WorkspaceLifecycleSnapshot(
                 workspace_id=ws_id_str,
@@ -574,11 +589,8 @@ async def _default_workspace_id_lookup(
                     str(compose_file_path) if compose_file_path is not None else None
                 ),
                 pr_url=str(pr_url) if pr_url is not None else None,
-                network_posture=_status_network_posture_from_profile_snapshot(
-                    resolved_profile,
-                    created_at,
-                    legacy_open_default_cutoff=legacy_open_default_cutoff,
-                ),
+                network_posture=posture,
+                allowlist_templates=tuple(templates) if templates is not None else (),
             )
         )
         if status_str in ACTIVE_WORKSPACE_STATUSES:

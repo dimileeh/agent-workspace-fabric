@@ -72,16 +72,21 @@ def local_egress_plan(egress: ProfileEgress) -> LocalEgressPlan:
             },
         )
     if egress.mode == EgressMode.restricted:
+        details: dict[str, object] = {
+            "network_posture": egress.mode.value,
+            "internet_access": "internal_only",
+            "destination_filtering": "deferred",
+        }
+        if egress.allowlist_templates:
+            details["allowlist_templates"] = [
+                template.value for template in egress.allowlist_templates
+            ]
         return LocalEgressPlan(
             mode=egress.mode,
             network_internal=True,
             host_gateway_enabled=False,
             reason_code="LOCAL_EGRESS_RESTRICTED_LOCAL_ONLY",
-            details={
-                "network_posture": egress.mode.value,
-                "internet_access": "internal_only",
-                "destination_filtering": "deferred",
-            },
+            details=details,
         )
     raise LocalEgressPolicyError(  # pragma: no cover - enum validation prevents this.
         reason_code="LOCAL_EGRESS_MODE_UNSUPPORTED",

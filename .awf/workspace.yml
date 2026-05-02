@@ -10,6 +10,7 @@ awf:
   security:
     egress:
       mode: open
+      open_explanation: AWF self-dogfood needs unrestricted internet to bootstrap services, run the local API/worker Postgres stack, pull agent and control-plane images, and support broad engineering dogfood experiments.
   planning:
     required: true
     plan_path: docs/awf-plans/{workspace_id}.md

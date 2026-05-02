@@ -480,6 +480,16 @@ class ProfileSecret(BaseModel):
     ref: str | None = Field(default=None, max_length=512)
 
 
+class EgressAllowlistTemplate(StrEnum):
+    """Reusable restricted egress allowlist categories for common destinations."""
+
+    github = "github"
+    model_providers = "model_providers"
+    package_registries = "package_registries"
+    os_mirrors = "os_mirrors"
+    documentation = "documentation"
+
+
 class EgressMode(StrEnum):
     open = "open"
     restricted = "restricted"
@@ -492,6 +502,8 @@ class ProfileEgress(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     mode: EgressMode = EgressMode.restricted
+    allowlist_templates: list[EgressAllowlistTemplate] = Field(default_factory=list)
+    open_explanation: str | None = Field(default=None, max_length=512)
 
 
 class ProfileLintSeverity(StrEnum):

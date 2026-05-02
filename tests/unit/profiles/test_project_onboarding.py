@@ -9,7 +9,13 @@ import pytest
 import yaml
 
 import awf.profiles.onboarding as onboarding_module
-from awf.profiles.models import DockerMode, WorkspaceProfile
+from awf.profiles.models import (
+    DockerMode,
+    EgressMode,
+    ProfileEgress,
+    ProfileSecurity,
+    WorkspaceProfile,
+)
 from awf.profiles.onboarding import (
     PreviewDiagnostics,
     ProjectInspection,
@@ -666,3 +672,72 @@ def test_node_playwright_diagnostics_do_not_report_app_when_declared(
     declared = _diagnostics_for(inspection, profile=profile, template="node-playwright")
     assert declared.missing_ports == ()
     assert declared.missing_healthchecks == ()
+
+
+@pytest.mark.unit
+def test_onboarding_restricted_draft_includes_default_allowlist_templates(
+    tmp_path: Path,
+) -> None:
+    preview = preview_project_onboarding(tmp_path)
+    profile = preview.draft.profile
+    assert profile.security.egress.mode == "restricted"
+    assert profile.security.egress.allowlist_templates
+    assert all(
+        template in [t.value for t in profile.security.egress.allowlist_templates]
+        for template in ("github", "model_providers", "package_registries", "os_mirrors", "documentation")
+    )
+    dumped = profile.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert "allowlist_templates" in dumped["security"]["egress"]
+
+
+@pytest.mark.unit
+def test_onboarding_open_profile_can_carry_open_explanation(tmp_path: Path) -> None:
+    profile = WorkspaceProfile(
+        name="open",
+        source="test",
+        security=ProfileSecurity(
+            egress=ProfileEgress(
+                mode=EgressMode.open,
+                open_explanation="Intentionally open for local dogfood.",
+            ),
+        ),
+    )
+    dumped = profile.model_dump(mode="json", by_alias=True, exclude_none=True)
+    assert dumped["security"]["egress"]["mode"] == "open"
+    assert dumped["security"]["egress"]["open_explanation"] == "Intentionally open for local dogfood."
+
+
+@pytest.mark.unit
+def test_onboarding_offline_profile_is_not_mutated_by_egress_guard(tmp_path: Path) -> None:
+    offline_profile = WorkspaceProfile(
+        name="offline",
+        source="test",
+        security=ProfileSecurity(
+            egress=ProfileEgress(mode=EgressMode.offline),
+        ),
+    )
+    from awf.profiles.onboarding import _ensure_restricted_egress
+
+    result = _ensure_restricted_egress(offline_profile)
+    assert result.security.egress.mode == EgressMode.offline
+    assert result.security.egress.allowlist_templates == []
+
+
+@pytest.mark.unit
+def test_onboarding_open_profile_is_not_mutated_by_egress_guard(tmp_path: Path) -> None:
+    open_profile = WorkspaceProfile(
+        name="open",
+        source="test",
+        security=ProfileSecurity(
+            egress=ProfileEgress(
+                mode=EgressMode.open,
+                open_explanation="Intentionally open for local dogfood.",
+            ),
+        ),
+    )
+    from awf.profiles.onboarding import _ensure_restricted_egress
+
+    result = _ensure_restricted_egress(open_profile)
+    assert result.security.egress.mode == EgressMode.open
+    assert result.security.egress.open_explanation == "Intentionally open for local dogfood."
+    assert result.security.egress.allowlist_templates == []

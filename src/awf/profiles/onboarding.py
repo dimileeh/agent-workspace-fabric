@@ -12,6 +12,8 @@ import yaml
 
 from awf.profiles.models import (
     DockerMode,
+    EgressAllowlistTemplate,
+    EgressMode,
     ProfileCommand,
     ProfileDocker,
     ProfileHealthCheck,
@@ -39,6 +41,7 @@ _SUPPORTED_TEMPLATES = frozenset(
         "multi-service",
     )
 )
+_DEFAULT_RESTRICTED_ALLOWLIST_TEMPLATES = tuple(EgressAllowlistTemplate)
 _PLACEHOLDER_RE = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)[^}]*\}")
 _SECRET_NAME_RE = re.compile(
     r"(SECRET|TOKEN|PASSWORD|PASSWD|API_KEY|PRIVATE_KEY|CREDENTIAL|ACCESS_KEY)",
@@ -291,14 +294,14 @@ def write_workspace_profile(preview: ProjectOnboardingPreview, force: bool = Fal
 
 def _profile_for_template(inspection: ProjectInspection, template: str) -> WorkspaceProfile:
     if template == "generic":
-        return WorkspaceProfile(
+        profile = WorkspaceProfile(
             name="generic",
             source="onboarding:generic",
             confidence="low",
             description="Draft generic AWF profile. Add project setup and validation commands.",
         )
-    if template == "python":
-        return WorkspaceProfile(
+    elif template == "python":
+        profile = WorkspaceProfile(
             name="python",
             source="onboarding:python",
             confidence="medium",
@@ -308,16 +311,16 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
                 "validate": ["pytest -q"],
             },
         )
-    if template == "node-nextjs":
-        return _node_profile(
+    elif template == "node-nextjs":
+        profile = _node_profile(
             inspection,
             name="node-nextjs",
             description="Draft Node/Next.js project profile.",
             validation_scripts=("lint", "test", "build"),
             fallback_validation=("build",),
         )
-    if template == "node-playwright":
-        return _node_profile(
+    elif template == "node-playwright":
+        profile = _node_profile(
             inspection,
             name="node-playwright",
             description="Draft Node/Playwright browser-test project profile.",
@@ -325,12 +328,12 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
             fallback_validation=(),
             fallback_commands=(_playwright_command(inspection.package_manager or "npm"),),
         )
-    if template == "python-postgres":
+    elif template == "python-postgres":
         database_url = "postgresql+psycopg://awf:${POSTGRES_PASSWORD}@postgres:5432/awf"
         setup = [_python_setup_command(inspection.path)]
         if (inspection.path / "alembic.ini").is_file():
             setup.append(ProfileCommand(command="alembic upgrade head"))
-        return WorkspaceProfile(
+        profile = WorkspaceProfile(
             name="python-postgres",
             source="onboarding:python-postgres",
             confidence="medium",
@@ -367,8 +370,8 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
                 )
             ],
         )
-    if template in {"docker-compose", "multi-service"}:
-        return WorkspaceProfile(
+    elif template in {"docker-compose", "multi-service"}:
+        profile = WorkspaceProfile(
             name=template,
             source=f"onboarding:{template}",
             confidence="medium",
@@ -384,7 +387,19 @@ def _profile_for_template(inspection: ProjectInspection, template: str) -> Works
             },
             ports=_compose_ports(inspection),
         )
-    raise ValueError(f"unsupported onboarding template: {template}")
+    else:
+        raise ValueError(f"unsupported onboarding template: {template}")
+
+    return _ensure_restricted_egress(profile)
+
+
+def _ensure_restricted_egress(profile: WorkspaceProfile) -> WorkspaceProfile:
+    if profile.security.egress.mode == EgressMode.restricted:
+        profile.security.egress.mode = EgressMode.restricted
+        profile.security.egress.allowlist_templates = list(
+            _DEFAULT_RESTRICTED_ALLOWLIST_TEMPLATES
+        )
+    return profile
 
 
 def _node_profile(

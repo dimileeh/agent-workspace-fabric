@@ -67,6 +67,7 @@ class WorkspaceLifecycleSnapshot:
     compose_file_path: str | None = None
     pr_url: str | None = None
     network_posture: NetworkPosture | None = None
+    allowlist_templates: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)

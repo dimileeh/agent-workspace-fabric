@@ -25,3 +25,20 @@ def network_posture_from_profile_snapshot(profile: object) -> NetworkPosture | N
     if isinstance(mode, str) and mode in _NETWORK_POSTURES:
         return cast(NetworkPosture, mode)
     return None
+
+
+def egress_allowlist_templates_from_profile_snapshot(profile: object) -> list[str] | None:
+    """Extract declared egress allowlist templates from a resolved-profile JSON snapshot."""
+
+    if not isinstance(profile, Mapping):
+        return None
+    security = profile.get("security")
+    if not isinstance(security, Mapping):
+        return None
+    egress = security.get("egress")
+    if not isinstance(egress, Mapping):
+        return None
+    templates = egress.get("allowlist_templates")
+    if isinstance(templates, list):
+        return [str(t) for t in templates]
+    return None
