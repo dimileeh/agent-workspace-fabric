@@ -104,6 +104,10 @@ def _request() -> WorkspaceCreateV2Request:
         workspace={"profile_ref": "python", "profile": None},
         validation={"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
         resources={},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "provider recovery test fixture",
+        },
     )
 
 

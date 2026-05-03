@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 import re
 import subprocess
+import traceback
 from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -13,7 +17,9 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
+from awf.db.enums import AgentRuntime
 from awf.service.config import ServiceSettings
+from awf.service.workspace_observability import effective_agent_identity
 
 ProviderName = Literal["github", "codex", "claude_code", "gemini", "opencode", "docker"]
 
@@ -28,6 +34,8 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
 
 _GITHUB_TIMEOUT_SECONDS = 5.0
 _HTTP_TIMEOUT_SECONDS = 2.0
+_PROVIDER_PROBE_TIMEOUT_SECONDS = 5.0
+_TRACEBACK_LOG_LIMIT = 4000
 _REDACTION = "<redacted>"
 _CODEX_AUTH_FILES = ("auth.json", "config.toml", "installation_id")
 _OLLAMA_AUTH_FILES = ("config.json", "id_ed25519", "id_ed25519.pub")
@@ -91,6 +99,14 @@ _TOKEN_RE = re.compile(
     + "|".join(_KNOWN_TOKEN_PATTERNS)
     + r")(?![A-Za-z0-9])"
 )
+_LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
+    AgentRuntime.codex: "codex",
+    AgentRuntime.claude_code: "claude_code",
+    AgentRuntime.gemini: "gemini",
+    AgentRuntime.opencode: "opencode",
+}
+_RedactionSegment = tuple[Literal["literal", "redaction"], str]
+_log = logging.getLogger(__name__)
 
 
 class CompletedProcessLike(Protocol):
@@ -161,46 +177,17 @@ def collect_agent_readiness(
     resolved_http_get = http_get or _http_get
 
     providers: dict[str, dict[str, Any]] = {
-        "github": _check_github(
+        provider: _check_provider_readiness(
+            provider,
             settings,
             environ=env,
             host_home=host_home,
-            strict="github" in strict,
+            strict=provider in strict,
             run_subprocess=resolved_run,
-            secrets=secrets,
-        ),
-        "codex": _check_codex(
-            environ=env,
-            host_home=host_home,
-            strict="codex" in strict,
-            secrets=secrets,
-        ),
-        "claude_code": _check_claude(
-            environ=env,
-            host_home=host_home,
-            strict="claude_code" in strict,
-            secrets=secrets,
-        ),
-        "gemini": _check_gemini(
-            environ=env,
-            host_home=host_home,
-            strict="gemini" in strict,
-            secrets=secrets,
-        ),
-        "opencode": _check_opencode(
-            environ=env,
-            host_home=host_home,
-            strict="opencode" in strict,
             http_get=resolved_http_get,
             secrets=secrets,
-        ),
-        "docker": _check_docker_provider(
-            settings,
-            environ=env,
-            host_home=host_home,
-            strict="docker" in strict,
-            secrets=secrets,
-        ),
+        )
+        for provider in PROVIDER_NAMES
     }
     return {
         "status": "fail"
@@ -210,6 +197,121 @@ def collect_agent_readiness(
         "providers": providers,
         "security": _security_summary(providers),
     }
+
+
+def selected_provider_readiness_preflight(
+    settings: ServiceSettings,
+    *,
+    agent: AgentRuntime | str,
+    task_policy: Mapping[str, object] | None,
+    override: bool = False,
+    override_reason: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    run_subprocess: SubprocessRun | None = None,
+    http_get: HttpGet | None = None,
+    checked_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Return launch admission readiness for the selected LLM provider.
+
+    This is intentionally stricter than the broad service readiness report:
+    only the selected agent provider is strict, the effective model is included,
+    and providers with stale/non-portable file auth get a cheap non-prompt probe.
+    """
+
+    env = os.environ if environ is None else environ
+    secrets = _secret_values(settings, env)
+    host_home = Path(settings.host_home or "~").expanduser()
+    identity = effective_agent_identity(agent=agent, task_policy=task_policy)
+    runtime = _coerce_launch_agent(agent)
+    checked = checked_at or datetime.now(UTC)
+    resolved_run = run_subprocess or _run_subprocess
+    resolved_http_get = http_get or _http_get
+
+    if runtime is None or runtime not in _LAUNCH_PROVIDER_BY_AGENT:
+        return _launch_preflight_payload(
+            agent=str(agent),
+            provider="unknown",
+            model=identity.model,
+            model_source=identity.model_source,
+            provider_result=None,
+            probe={"status": "skipped", "reason_code": "UNSUPPORTED_AGENT_RUNTIME"},
+            reason_code="UNSUPPORTED_AGENT_RUNTIME",
+            message=f"Agent runtime {agent!s} is not supported for launch preflight.",
+            override=override,
+            override_reason=override_reason,
+            checked_at=checked,
+            secrets=secrets,
+        )
+
+    provider = _LAUNCH_PROVIDER_BY_AGENT[runtime]
+    provider_result = _check_provider_readiness(
+        provider,
+        settings,
+        environ=env,
+        host_home=host_home,
+        strict=True,
+        run_subprocess=resolved_run,
+        http_get=resolved_http_get,
+        secrets=secrets,
+    )
+    probe = _selected_launch_probe(
+        provider,
+        provider_result=provider_result,
+        model=identity.model,
+        environ=env,
+        run_subprocess=resolved_run,
+        http_get=resolved_http_get,
+        secrets=secrets,
+    )
+
+    reason_code = _preflight_reason_code(
+        provider_result=provider_result,
+        probe=probe,
+        model=identity.model,
+    )
+    message = _preflight_message(
+        provider_result=provider_result,
+        probe=probe,
+        model=identity.model,
+    )
+
+    return _launch_preflight_payload(
+        agent=runtime.value,
+        provider=provider,
+        model=identity.model,
+        model_source=identity.model_source,
+        provider_result=provider_result,
+        probe=probe,
+        reason_code=reason_code,
+        message=message,
+        override=override,
+        override_reason=override_reason,
+        checked_at=checked,
+        secrets=secrets,
+    )
+
+
+def provider_readiness_preflight_from_task_policy(
+    task_policy: Mapping[str, object] | None,
+) -> dict[str, Any] | None:
+    """Return the persisted preflight snapshot from task policy, if present."""
+
+    if not isinstance(task_policy, Mapping):
+        return None
+    value = task_policy.get("provider_readiness_preflight")
+    return dict(value) if isinstance(value, Mapping) else None
+
+
+def redact_launch_preflight_text(
+    settings: ServiceSettings,
+    value: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Normalize launch preflight text with the same redaction used for snapshots."""
+
+    env = os.environ if environ is None else environ
+    return _redact(value, _secret_values(settings, env))
 
 
 def validate_provider_names(values: Iterable[str]) -> set[ProviderName]:
@@ -231,6 +333,338 @@ def validate_provider_names(values: Iterable[str]) -> set[ProviderName]:
             f"unknown provider(s): {', '.join(sorted(unknown))}; expected one of: {expected}"
         )
     return providers
+
+
+def _coerce_launch_agent(agent: AgentRuntime | str) -> AgentRuntime | None:
+    try:
+        return agent if isinstance(agent, AgentRuntime) else AgentRuntime(str(agent))
+    except ValueError:
+        return None
+
+
+def _check_provider_readiness(
+    provider: ProviderName,
+    settings: ServiceSettings,
+    *,
+    environ: Mapping[str, str],
+    host_home: Path,
+    strict: bool,
+    run_subprocess: SubprocessRun,
+    http_get: HttpGet,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    if provider == "github":
+        return _check_github(
+            settings,
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            run_subprocess=run_subprocess,
+            secrets=secrets,
+        )
+    if provider == "codex":
+        return _check_codex(
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            secrets=secrets,
+        )
+    if provider == "claude_code":
+        return _check_claude(
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            secrets=secrets,
+        )
+    if provider == "gemini":
+        return _check_gemini(
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            secrets=secrets,
+        )
+    if provider == "opencode":
+        return _check_opencode(
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            http_get=http_get,
+            secrets=secrets,
+        )
+    if provider == "docker":
+        return _check_docker_provider(
+            settings,
+            environ=environ,
+            host_home=host_home,
+            strict=strict,
+            secrets=secrets,
+        )
+    raise AssertionError(f"unsupported provider: {provider}")
+
+
+def _selected_launch_probe(
+    provider: ProviderName,
+    *,
+    provider_result: Mapping[str, Any],
+    model: str | None,
+    environ: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    http_get: HttpGet,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    if not provider_result.get("ok") or not model:
+        return {"status": "skipped"}
+    if provider == "claude_code":
+        return _probe_cli_auth_status(
+            provider_label="Claude Code",
+            args=["claude", "auth", "status"],
+            failure_reason="CLAUDE_AUTH_PROBE_FAILED",
+            timeout_reason="CLAUDE_AUTH_PROBE_TIMEOUT",
+            missing_reason="CLAUDE_CLI_NOT_FOUND",
+            error_reason="CLAUDE_AUTH_PROBE_ERROR",
+            environ=environ,
+            run_subprocess=run_subprocess,
+            secrets=secrets,
+        )
+    if provider == "gemini":
+        return _probe_cli_auth_status(
+            provider_label="Gemini",
+            args=["gemini", "auth", "status"],
+            failure_reason="GEMINI_AUTH_PROBE_FAILED",
+            timeout_reason="GEMINI_AUTH_PROBE_TIMEOUT",
+            missing_reason="GEMINI_CLI_NOT_FOUND",
+            error_reason="GEMINI_AUTH_PROBE_ERROR",
+            environ=environ,
+            run_subprocess=run_subprocess,
+            secrets=secrets,
+        )
+    if provider == "opencode":
+        return _probe_ollama_model(
+            _ollama_tags_urls(environ),
+            model=model,
+            http_get=http_get,
+            secrets=secrets,
+        )
+    return {"status": "unavailable", "reason_code": "PROVIDER_PROBE_UNAVAILABLE"}
+
+
+def _probe_cli_auth_status(
+    *,
+    provider_label: str,
+    args: list[str],
+    failure_reason: str,
+    timeout_reason: str,
+    missing_reason: str,
+    error_reason: str,
+    environ: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    try:
+        result = run_subprocess(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_PROVIDER_PROBE_TIMEOUT_SECONDS,
+            env=environ,
+        )
+    except FileNotFoundError:
+        return {
+            "status": "fail",
+            "reason_code": missing_reason,
+            "message": f"{provider_label} CLI was not found for auth status probing.",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "fail",
+            "reason_code": timeout_reason,
+            "message": (
+                f"{provider_label} auth status probe exceeded "
+                f"{_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
+            ),
+        }
+    except Exception as exc:
+        _log_redacted_exception(
+            "provider_readiness.cli_auth_probe_exception",
+            exc,
+            secrets,
+        )
+        detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
+        return {
+            "status": "fail",
+            "reason_code": error_reason,
+            "message": f"{provider_label} auth status probe failed before completion.",
+            "detail": detail,
+        }
+
+    if result.returncode == 0:
+        return {
+            "status": "ok",
+            "reason_code": f"{failure_reason.removesuffix('_FAILED')}_OK",
+        }
+
+    detail = _redact(
+        _truncate(result.stderr or result.stdout or "auth status exited non-zero"),
+        secrets,
+    )
+    return {
+        "status": "fail",
+        "reason_code": failure_reason,
+        "message": f"{provider_label} auth status probe reported unusable auth.",
+        "detail": detail,
+    }
+
+
+def _preflight_reason_code(
+    *,
+    provider_result: Mapping[str, Any],
+    probe: Mapping[str, Any],
+    model: str | None,
+) -> str:
+    if not model:
+        return "MODEL_NOT_SELECTED"
+    if provider_result.get("ok") is not True:
+        return str(provider_result.get("reason") or "PROVIDER_AUTH_NOT_READY")
+    if probe.get("status") == "fail":
+        return str(probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+    return "PROVIDER_READY"
+
+
+def _preflight_message(
+    *,
+    provider_result: Mapping[str, Any],
+    probe: Mapping[str, Any],
+    model: str | None,
+) -> str:
+    if not model:
+        return "No effective model was selected for the workspace agent."
+    if provider_result.get("ok") is not True:
+        return str(
+            provider_result.get("message")
+            or "Selected provider authentication is not ready."
+        )
+    if probe.get("status") == "fail":
+        return str(
+            probe.get("message")
+            or "Selected provider auth probe did not report readiness."
+        )
+    return "Selected provider authentication and model readiness are sufficient for launch."
+
+
+def _launch_preflight_payload(
+    *,
+    agent: str,
+    provider: str,
+    model: str | None,
+    model_source: str,
+    provider_result: Mapping[str, Any] | None,
+    probe: Mapping[str, Any],
+    reason_code: str,
+    message: str,
+    override: bool,
+    override_reason: str | None,
+    checked_at: datetime,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    auth_ok = provider_result is not None and provider_result.get("ok") is True
+    model_ok = bool(model)
+    probe_status = str(probe.get("status") or "skipped")
+    probe_ok = probe_status in {"ok", "unavailable"}
+    override_required = not (auth_ok and model_ok and probe_ok)
+    override_used = bool(override and override_required)
+    blocks_launch = override_required and not override_used
+    readiness_status = (
+        "ready"
+        if not override_required
+        else "admitted_with_override"
+        if override_used
+        else "blocked"
+    )
+    credential_sources = _credential_sources(provider_result)
+    redacted_override_reason: str | None = None
+    override_reason_redaction_parts: list[str] | None = None
+    if override_reason:
+        (
+            redacted_override_reason,
+            override_reason_redaction_parts,
+        ) = _redact_with_redaction_parts(override_reason, secrets)
+
+    payload: dict[str, Any] = {
+        "provider": provider,
+        "agent": agent,
+        "model": model,
+        "model_source": model_source,
+        "readiness_status": readiness_status,
+        "auth_status": _auth_status(provider_result),
+        "auth_source": _auth_source(provider_result),
+        "credential_scope": _provider_field(provider_result, "credential_scope", "not_observed"),
+        "isolation": _provider_field(provider_result, "isolation", "none"),
+        "probe_status": probe_status,
+        "reason_code": reason_code,
+        "message": _redact(message, secrets),
+        "override_required": override_required,
+        "override_requested": bool(override),
+        "override_used": override_used,
+        "override_reason": redacted_override_reason,
+        "blocks_launch": blocks_launch,
+        "checked_at": checked_at.isoformat(),
+        "credential_sources": credential_sources,
+    }
+    if override_reason_redaction_parts is not None:
+        payload["override_reason_redaction_parts"] = override_reason_redaction_parts
+    probe_detail = probe.get("detail")
+    if isinstance(probe_detail, str) and probe_detail:
+        payload["probe_detail"] = _redact(_truncate(probe_detail), secrets)
+    warnings = provider_result.get("warnings") if provider_result is not None else None
+    if isinstance(warnings, list):
+        payload["warnings"] = [
+            warning for warning in warnings if isinstance(warning, Mapping)
+        ]
+    return payload
+
+
+def _auth_status(provider_result: Mapping[str, Any] | None) -> str:
+    value = provider_result.get("status") if provider_result is not None else None
+    return value if isinstance(value, str) and value else "unknown"
+
+
+def _auth_source(provider_result: Mapping[str, Any] | None) -> str:
+    sources = _credential_sources(provider_result)
+    if sources:
+        signal = sources[0].get("signal")
+        if isinstance(signal, str) and signal:
+            return signal
+    return _provider_field(provider_result, "credential_scope", "not_observed")
+
+
+def _provider_field(
+    provider_result: Mapping[str, Any] | None,
+    key: str,
+    default: str,
+) -> str:
+    value = provider_result.get(key) if provider_result is not None else None
+    return value if isinstance(value, str) and value else default
+
+
+def _credential_sources(
+    provider_result: Mapping[str, Any] | None,
+) -> list[dict[str, str]]:
+    raw = provider_result.get("credential_sources") if provider_result is not None else None
+    if not isinstance(raw, list):
+        return []
+    sources: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        source: dict[str, str] = {}
+        for key in ("type", "signal", "credential_scope", "isolation"):
+            value = item.get(key)
+            if isinstance(value, str):
+                source[key] = value
+        if source:
+            sources.append(source)
+    return sources
 
 
 def _check_github(
@@ -339,6 +773,11 @@ def _check_github(
             warnings=token_warnings,
         )
     except Exception as exc:
+        _log_redacted_exception(
+            "provider_readiness.github_auth_check_exception",
+            exc,
+            secrets,
+        )
         return _provider_result(
             ok=False,
             strict=strict,
@@ -1093,6 +1532,160 @@ def _redact(value: str, secrets: frozenset[str]) -> str:
     return _TOKEN_RE.sub(_REDACTION, redacted)
 
 
+def _redact_with_redaction_parts(
+    value: str,
+    secrets: frozenset[str],
+) -> tuple[str, list[str] | None]:
+    segments: list[_RedactionSegment] = [("literal", value)]
+    for secret in sorted(secrets, key=len, reverse=True):
+        segments = _replace_literal_redaction_spans(segments, secret)
+    segments = _replace_url_credential_redaction_spans(segments)
+    segments = _replace_token_redaction_spans(segments)
+    return _render_redaction_segments(segments), _redaction_parts(segments)
+
+
+def _replace_literal_redaction_spans(
+    segments: list[_RedactionSegment],
+    text: str,
+) -> list[_RedactionSegment]:
+    if not text:
+        return segments
+    replaced: list[_RedactionSegment] = []
+    for kind, segment_text in segments:
+        if kind == "redaction":
+            replaced.append((kind, segment_text))
+            continue
+        parts = segment_text.split(text)
+        if len(parts) == 1:
+            replaced.append((kind, segment_text))
+            continue
+        for index, part in enumerate(parts):
+            if part:
+                replaced.append(("literal", part))
+            if index < len(parts) - 1:
+                replaced.append(("redaction", ""))
+    return _merge_literal_redaction_segments(replaced)
+
+
+def _replace_url_credential_redaction_spans(
+    segments: list[_RedactionSegment],
+) -> list[_RedactionSegment]:
+    rendered = _render_redaction_segments(segments)
+    replacements: list[tuple[int, int, list[_RedactionSegment]]] = []
+    for match in _URL_CREDENTIAL_RE.finditer(rendered):
+        replacements.append(
+            (match.start(2), match.end(2), [("redaction", ""), ("literal", "@")])
+        )
+    return _replace_rendered_redaction_spans(segments, replacements)
+
+
+def _replace_token_redaction_spans(
+    segments: list[_RedactionSegment],
+) -> list[_RedactionSegment]:
+    rendered = _render_redaction_segments(segments)
+    replacements: list[tuple[int, int, list[_RedactionSegment]]] = []
+    for match in _TOKEN_RE.finditer(rendered):
+        replacements.append((match.start(1), match.end(1), [("redaction", "")]))
+    return _replace_rendered_redaction_spans(segments, replacements)
+
+
+def _replace_rendered_redaction_spans(
+    segments: list[_RedactionSegment],
+    replacements: list[tuple[int, int, list[_RedactionSegment]]],
+) -> list[_RedactionSegment]:
+    if not replacements:
+        return segments
+
+    rendered_length = len(_render_redaction_segments(segments))
+    cursor = 0
+    replaced: list[_RedactionSegment] = []
+    for start, end, replacement in replacements:
+        replaced.extend(_slice_redaction_segments(segments, cursor, start))
+        replaced.extend(replacement)
+        cursor = end
+    replaced.extend(_slice_redaction_segments(segments, cursor, rendered_length))
+    return _merge_literal_redaction_segments(replaced)
+
+
+def _slice_redaction_segments(
+    segments: list[_RedactionSegment],
+    start: int,
+    end: int,
+) -> list[_RedactionSegment]:
+    if start >= end:
+        return []
+
+    sliced: list[_RedactionSegment] = []
+    position = 0
+    for kind, segment_text in segments:
+        rendered = segment_text if kind == "literal" else _REDACTION
+        next_position = position + len(rendered)
+        overlap_start = max(start, position)
+        overlap_end = min(end, next_position)
+        if overlap_start < overlap_end:
+            inner_start = overlap_start - position
+            inner_end = overlap_end - position
+            if (
+                kind == "redaction"
+                and inner_start == 0
+                and inner_end == len(_REDACTION)
+            ):
+                sliced.append(("redaction", ""))
+            else:
+                sliced.append(("literal", rendered[inner_start:inner_end]))
+        position = next_position
+        if position >= end:
+            break
+    return sliced
+
+
+def _merge_literal_redaction_segments(
+    segments: list[_RedactionSegment],
+) -> list[_RedactionSegment]:
+    merged: list[_RedactionSegment] = []
+    for kind, text in segments:
+        if kind == "literal" and not text:
+            continue
+        if kind == "literal" and merged and merged[-1][0] == "literal":
+            merged[-1] = ("literal", f"{merged[-1][1]}{text}")
+            continue
+        merged.append((kind, text))
+    return merged
+
+
+def _render_redaction_segments(segments: list[_RedactionSegment]) -> str:
+    return "".join(text if kind == "literal" else _REDACTION for kind, text in segments)
+
+
+def _redaction_parts(segments: list[_RedactionSegment]) -> list[str] | None:
+    if not any(kind == "redaction" for kind, _text in segments):
+        return None
+
+    parts = [""]
+    for kind, text in segments:
+        if kind == "redaction":
+            parts.append("")
+        else:
+            parts[-1] += text
+    return parts
+
+
+def _log_redacted_exception(
+    event: str,
+    exc: Exception,
+    secrets: frozenset[str],
+) -> None:
+    detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
+    trace = _redact(
+        _truncate(
+            "".join(traceback.format_exception(type(exc), exc, exc.__traceback__)),
+            limit=_TRACEBACK_LOG_LIMIT,
+        ),
+        secrets,
+    )
+    _log.error("%s: %s\n%s", event, detail, trace)
+
+
 def _truncate(value: str, *, limit: int = 240) -> str:
     stripped = value.strip()
     if len(stripped) <= limit:
@@ -1105,6 +1698,14 @@ def _ollama_version_url(environ: Mapping[str, str]) -> str:
 
 
 def _ollama_version_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
+    return _ollama_api_urls(environ, "api/version")
+
+
+def _ollama_tags_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
+    return _ollama_api_urls(environ, "api/tags")
+
+
+def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
     raw = (
         environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
         or environ.get("OLLAMA_HOST")
@@ -1116,10 +1717,12 @@ def _ollama_version_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
     path = parts.path.rstrip("/")
     if path.endswith("/v1"):
         path = path[: -len("/v1")]
-    path = f"{path}/api/version" if path else "/api/version"
+    suffix = api_path if api_path.startswith("/") else f"/{api_path}"
+    path = f"{path}{suffix}" if path else suffix
     primary = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
     if parts.hostname == "host.docker.internal":
-        fallback = urlunsplit((parts.scheme, "localhost:11434", path, "", ""))
+        fallback_port = parts.port or 11434
+        fallback = urlunsplit((parts.scheme, f"localhost:{fallback_port}", path, "", ""))
         return (primary, fallback)
     return (primary,)
 
@@ -1135,6 +1738,11 @@ def _probe_ollama(
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
         except Exception as exc:
+            _log_redacted_exception(
+                "provider_readiness.ollama_probe_exception",
+                exc,
+                secrets,
+            )
             detail = f"{type(exc).__name__}: {exc}"
             failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
             continue
@@ -1144,6 +1752,116 @@ def _probe_ollama(
         failure = f"HTTP {response.status_code}: {detail}"
         failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
     return {"ok": False, "detail": _redact("; ".join(failures), secrets)}
+
+
+def _probe_ollama_model(
+    urls: tuple[str, ...],
+    *,
+    model: str | None,
+    http_get: HttpGet,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    candidates = _ollama_model_candidates(model)
+    if not candidates:
+        return {
+            "status": "fail",
+            "reason_code": "MODEL_NOT_SELECTED",
+            "message": "No OpenCode/Ollama model was selected for launch.",
+        }
+
+    failures: list[str] = []
+    available_models: set[str] = set()
+    saw_model_response = False
+    for url in urls:
+        try:
+            response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
+        except Exception as exc:
+            _log_redacted_exception(
+                "provider_readiness.ollama_model_probe_exception",
+                exc,
+                secrets,
+            )
+            detail = f"{type(exc).__name__}: {exc}"
+            failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
+            continue
+        if not 200 <= response.status_code < 300:
+            detail = response.text or f"HTTP {response.status_code}"
+            failure = f"HTTP {response.status_code}: {detail}"
+            failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
+            continue
+        try:
+            payload = json.loads(response.text or "{}")
+        except json.JSONDecodeError as exc:
+            failures.append(
+                f"{url}: invalid JSON from Ollama /api/tags: {exc}"
+                if len(urls) > 1
+                else f"invalid JSON from Ollama /api/tags: {exc}"
+            )
+            continue
+
+        available = _ollama_model_names(payload)
+        if candidates & available:
+            return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+        saw_model_response = True
+        available_models.update(available)
+
+    if saw_model_response:
+        detail = f"selected={model}; available_count={len(available_models)}"
+        if failures:
+            detail = f"{detail}; probe_failures={'; '.join(failures)}"
+        return {
+            "status": "fail",
+            "reason_code": "OLLAMA_MODEL_NOT_AVAILABLE",
+            "message": "Selected OpenCode/Ollama model is not available from Ollama /api/tags.",
+            "detail": _redact(
+                _truncate(detail),
+                secrets,
+            ),
+        }
+
+    return {
+        "status": "fail",
+        "reason_code": "OLLAMA_MODEL_PROBE_FAILED",
+        "message": "Ollama model availability probe did not complete successfully.",
+        "detail": _redact(_truncate("; ".join(failures)), secrets),
+    }
+
+
+def _ollama_model_candidates(model: str | None) -> set[str]:
+    if model is None:
+        return set()
+    raw = model.strip()
+    if not raw:
+        return set()
+    candidates = {raw}
+    model_name = raw
+    if "/" in raw:
+        provider, remainder = raw.split("/", 1)
+        if provider == "ollama" and remainder:
+            model_name = remainder
+            candidates.add(model_name)
+    if ":" not in model_name:
+        candidates.add(f"{model_name}:latest")
+    return candidates
+
+
+def _ollama_model_names(payload: object) -> set[str]:
+    if not isinstance(payload, Mapping):
+        return set()
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list):
+        return set()
+    names: set[str] = set()
+    for item in raw_models:
+        if isinstance(item, str) and item:
+            names.add(item)
+            continue
+        if not isinstance(item, Mapping):
+            continue
+        name = item.get("name") or item.get("model")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
 
 
 def _ordered_names(providers: set[ProviderName]) -> list[str]:

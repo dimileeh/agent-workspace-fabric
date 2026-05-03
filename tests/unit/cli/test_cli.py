@@ -141,6 +141,34 @@ class TestWorkspaceCreate:
         assert kwargs["headers"]["Idempotency-Key"] == "same-key-42"
 
     @pytest.mark.unit
+    def test_provider_readiness_override_flag_is_sent(self) -> None:
+        response = _mock_response(status_code=202, payload={"workspace_id": "ws_override"})
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "create",
+                    "--repo",
+                    "git@x:y.git",
+                    "--title",
+                    "t",
+                    "--prompt",
+                    "p",
+                    "--provider-readiness-override",
+                    "--provider-readiness-override-reason",
+                    "operator verified auth",
+                ],
+            )
+
+        assert result.exit_code == 0
+        body = mock.call_args.kwargs["json"]
+        assert body["preflight"] == {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "operator verified auth",
+        }
+
+    @pytest.mark.unit
     def test_non_2xx_returns_nonzero_exit(self) -> None:
         response = _mock_response(
             status_code=422,
@@ -219,6 +247,61 @@ class TestWorkspaceRetry:
             "POST",
             "http://localhost:8000/v1/workspaces/ws_old/retry",
         )
+
+    @pytest.mark.unit
+    def test_retry_provider_readiness_override_flag_is_sent(self) -> None:
+        response = _mock_response(
+            status_code=202,
+            payload={
+                "source_workspace_id": "ws_old",
+                "new_workspace_id": "ws_new",
+                "operation_id": "op_retry",
+                "status": "requested",
+                "attempt_number": 2,
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response) as mock:
+            result = _runner.invoke(
+                app,
+                [
+                    "workspace",
+                    "retry",
+                    "ws_old",
+                    "--provider-readiness-override",
+                    "--provider-readiness-override-reason",
+                    "operator verified auth",
+                ],
+            )
+
+        assert result.exit_code == 0
+        assert mock.call_args.kwargs["params"] == {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "operator verified auth",
+        }
+
+    @pytest.mark.unit
+    def test_retry_blocked_provider_readiness_prints_structured_error(self) -> None:
+        response = _mock_response(
+            status_code=409,
+            payload={
+                "error_code": "PROVIDER_READINESS_PRECHECK_FAILED",
+                "message": "Selected provider readiness blocked workspace launch.",
+                "detail": {
+                    "provider_readiness_preflight": {
+                        "provider": "codex",
+                        "model": "gpt-5.5",
+                        "auth_status": "fail",
+                        "auth_source": "not_observed",
+                    }
+                },
+            },
+        )
+        with patch("awf.cli.main.httpx.request", return_value=response):
+            result = _runner.invoke(app, ["workspace", "retry", "ws_old"])
+
+        assert result.exit_code == 1
+        assert "PROVIDER_READINESS_PRECHECK_FAILED" in result.stderr
+        assert "gpt-5.5" in result.stderr
 
 
 class TestWorkspaceRemonitor:

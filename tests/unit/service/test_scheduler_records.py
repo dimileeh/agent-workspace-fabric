@@ -55,6 +55,10 @@ def _request() -> WorkspaceCreateV2Request:
             "peak_memory_gb": 24.0,
             "disk_mb": 4096,
         },
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "scheduler test fixture",
+        },
     )
 
 

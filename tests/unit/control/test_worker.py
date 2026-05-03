@@ -1901,6 +1901,8 @@ class TestRunOnceExecution:
                 max_concurrent_executions=1,
             ),
         )
+        worker_a._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
+        worker_b._next_stale_active_execution_scan_at = float("inf")  # noqa: SLF001
 
         await asyncio.gather(worker_a.run_once(), worker_b.run_once())
         await asyncio.wait_for(started.wait(), timeout=1.0)

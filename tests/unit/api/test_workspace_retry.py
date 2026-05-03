@@ -7,6 +7,8 @@ from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 import awf.api.routes.workspaces as workspaces_route
+import awf.service.workspaces as workspace_service
+from awf.common.config import Settings
 from awf.db.enums import FailureReason, WorkspaceStatus
 from awf.db.repositories import WorkspaceRepository
 from awf.db.session import make_session_factory
@@ -231,3 +233,58 @@ async def test_retry_endpoint_rejects_non_terminal_workspace(client: AsyncClient
     assert body["error_code"] == "WORKSPACE_NOT_RETRYABLE"
     assert body["detail"]["status"] == "requested"
     assert body["detail"]["retryable_statuses"] == ["failed", "cancelled"]
+
+
+@pytest.mark.unit
+async def test_retry_endpoint_blocks_missing_provider_readiness(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    original_id = await _create_failed_workspace(client, engine)
+    monkeypatch.setattr(
+        workspace_service,
+        "get_settings",
+        lambda: Settings(_env_file=None, host_home=str(tmp_path / "home"), docker_host=""),
+    )
+
+    response = await client.post(f"/v1/workspaces/{original_id}/retry")
+
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
+    preflight = body["detail"]["provider_readiness_preflight"]
+    assert preflight["provider"] == "codex"
+    assert preflight["model"] == "gpt-5.5"
+    assert preflight["blocks_launch"] is True
+
+
+@pytest.mark.unit
+async def test_retry_endpoint_override_records_preflight(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    original_id = await _create_failed_workspace(client, engine)
+    monkeypatch.setattr(
+        workspace_service,
+        "get_settings",
+        lambda: Settings(_env_file=None, host_home=str(tmp_path / "home"), docker_host=""),
+    )
+
+    response = await client.post(
+        f"/v1/workspaces/{original_id}/retry",
+        params={
+            "provider_readiness_override": "true",
+            "provider_readiness_override_reason": "operator verified local auth",
+        },
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    preflight = body["provider_readiness_preflight"]
+    assert preflight["source_workspace_id"] == original_id
+    assert preflight["override_used"] is True
+    assert preflight["override_reason"] == "operator verified local auth"

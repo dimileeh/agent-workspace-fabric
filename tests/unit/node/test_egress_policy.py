@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import pytest
 
-from awf.node.egress_policy import LocalEgressPlan, local_egress_plan
+from awf.node.egress_policy import (
+    LocalEgressPlan,
+    LocalEgressPolicyError,
+    local_egress_plan,
+)
 from awf.profiles.models import EgressMode, ProfileEgress
 
 
@@ -46,3 +50,18 @@ def test_local_egress_plan_restricted_is_conservative_local_internal_network() -
     assert plan.host_gateway_enabled is False
     assert plan.reason_code == "LOCAL_EGRESS_RESTRICTED_LOCAL_ONLY"
     assert plan.details["destination_filtering"] == "deferred"
+
+
+@pytest.mark.unit
+def test_local_egress_policy_error_exposes_structured_metadata() -> None:
+    error = LocalEgressPolicyError(
+        reason_code="LOCAL_EGRESS_MODE_UNSUPPORTED",
+        mode=EgressMode.restricted,
+        message="unsupported in test",
+        details={"network_posture": "restricted"},
+    )
+
+    assert error.reason_code == "LOCAL_EGRESS_MODE_UNSUPPORTED"
+    assert error.mode == "restricted"
+    assert error.details == {"network_posture": "restricted"}
+    assert str(error) == "LOCAL_EGRESS_MODE_UNSUPPORTED: unsupported in test"

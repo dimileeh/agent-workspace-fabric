@@ -172,6 +172,15 @@ class WorkspaceProviderRecoveryPolicy(BaseModel):
     circuit_breaker: WorkspaceProviderRecoveryCircuitBreakerPolicy | None = None
 
 
+class WorkspaceLaunchPreflight(BaseModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
+
+    provider_readiness_override: bool = False
+    provider_readiness_override_reason: Annotated[
+        str | None, Field(default=None, max_length=512)
+    ] = None
+
+
 class WorkspaceV2Task(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
 
@@ -234,6 +243,9 @@ class WorkspaceCreateV2Request(BaseModel):
     validation: WorkspaceV2Validation = Field(default_factory=lambda: WorkspaceV2Validation())
     resources: WorkspaceV2Resources = Field(
         default_factory=lambda: WorkspaceV2Resources(cpu=None, memory=None)
+    )
+    preflight: WorkspaceLaunchPreflight = Field(
+        default_factory=lambda: WorkspaceLaunchPreflight()
     )
 
 
@@ -527,6 +539,40 @@ class WorkspaceCoordinationWarningResponse(BaseModel):
     overlaps_truncated: bool = False
 
 
+class ProviderReadinessCredentialSourceResponse(BaseModel):
+    type: str | None = None
+    signal: str | None = None
+    credential_scope: str | None = None
+    isolation: str | None = None
+
+
+class ProviderReadinessPreflightResponse(BaseModel):
+    provider: str
+    agent: str
+    model: str | None = None
+    model_source: str | None = None
+    readiness_status: str
+    auth_status: str
+    auth_source: str
+    credential_scope: str | None = None
+    isolation: str | None = None
+    probe_status: str
+    reason_code: str
+    message: str
+    override_required: bool
+    override_requested: bool = False
+    override_used: bool
+    override_reason: str | None = None
+    blocks_launch: bool
+    checked_at: datetime
+    credential_sources: list[ProviderReadinessCredentialSourceResponse] = Field(
+        default_factory=list
+    )
+    warnings: list[dict[str, Any]] = Field(default_factory=list)
+    probe_detail: str | None = None
+    source_workspace_id: str | None = None
+
+
 class WorkspaceResponse(BaseModel):
     """Representation of a workspace in API responses."""
 
@@ -594,6 +640,7 @@ class WorkspaceResponse(BaseModel):
     secret_leases: list[WorkspaceSecretLeaseResponse] = Field(default_factory=list)
     app_endpoints: list[WorkspaceAppEndpointResponse] = Field(default_factory=list)
     provider_recovery_state: ProviderRecoveryStateResponse | None = None
+    provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
 
     created_at: datetime
     updated_at: datetime
@@ -634,6 +681,7 @@ class WorkspaceAcceptedResponse(BaseModel):
     events_url: str
     accepted_at: datetime
     warnings: list[WorkspaceWarningResponse] = Field(default_factory=list)
+    provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
 
 
 class WorkspaceRetryResponse(BaseModel):
@@ -646,6 +694,7 @@ class WorkspaceRetryResponse(BaseModel):
     attempt_number: int
     status_url: str
     events_url: str
+    provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
 
 
 class WorkspaceEventResponse(BaseModel):
@@ -770,6 +819,7 @@ class WorkspaceOverviewResponse(BaseModel):
     coordination_warnings: list[WorkspaceCoordinationWarningResponse] = Field(
         default_factory=list
     )
+    provider_readiness_preflight: ProviderReadinessPreflightResponse | None = None
     status: WorkspaceStatus
     current_phase: str
     active_operation: str | None

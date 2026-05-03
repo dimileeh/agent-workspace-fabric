@@ -68,11 +68,18 @@ async def _create_v2_workspace(
     title: str = "Add task attempts",
     agent: str = "codex",
     model: str | None = None,
+    provider_readiness_override: bool = False,
     headers: dict[str, str] | None = None,
 ) -> str:
+    payload = _v2_body(external_id=external_id, title=title, agent=agent, model=model)
+    if provider_readiness_override:
+        payload["preflight"] = {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "test fixture only observes task identity",
+        }
     response = await client.post(
         "/v2/workspaces",
-        json=_v2_body(external_id=external_id, title=title, agent=agent, model=model),
+        json=payload,
         headers=headers,
     )
     assert response.status_code == 202
@@ -130,6 +137,7 @@ class TestTaskList:
             external_id="TICKET-OBSERVE",
             title="Observe model identity",
             agent="opencode",
+            provider_readiness_override=True,
         )
 
         response = await client.get("/v1/tasks")

@@ -138,6 +138,38 @@ def _v2_body(
     }
 
 
+@pytest.mark.unit
+def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() -> None:
+    body = json.loads(json.dumps(_V2_MINIMAL_BODY))
+    body["task"]["provider_recovery"] = {
+        "fallbacks": [
+            {
+                "agent": "opencode",
+                "provider": "ollama",
+                "model": "ollama/kimi-k2.6:cloud",
+            }
+        ],
+        "max_fallback_attempts": 1,
+    }
+    payload = WorkspaceCreateV2Request.model_validate(body)
+    existing = SimpleNamespace(task_policy={})
+
+    assert workspaces_route._requested_task_provider_recovery_policy(payload) == {
+        "fallbacks": [
+            {
+                "agent": "opencode",
+                "provider": "ollama",
+                "model": "ollama/kimi-k2.6:cloud",
+            }
+        ],
+        "max_fallback_attempts": 1,
+    }
+    assert workspaces_route._stored_task_provider_readiness_override(existing) == (
+        False,
+        None,
+    )
+
+
 async def _create_workspace(client: AsyncClient, **overrides: object) -> str:
     body = {**_MINIMAL_BODY, **overrides}
     response = await client.post("/v1/workspaces", json=body)
@@ -200,6 +232,14 @@ def _request_with_disk_check() -> SimpleNamespace:
                 )
             )
         )
+    )
+
+
+def _provider_preflight_settings(tmp_path: Any) -> Settings:
+    return Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
     )
 
 
@@ -701,6 +741,295 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert replay.status_code == 409
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
 
+
+class TestWorkspaceCreateProviderReadinessPreflight:
+    @pytest.mark.unit
+    async def test_v2_create_blocks_missing_selected_provider_readiness(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
+            tmp_path
+        )
+
+        response = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY)
+
+        assert response.status_code == 409
+        body = response.json()
+        assert body["error_code"] == "PROVIDER_READINESS_PRECHECK_FAILED"
+        preflight = body["detail"]["provider_readiness_preflight"]
+        assert preflight["provider"] == "codex"
+        assert preflight["model"] == "gpt-5.5"
+        assert preflight["auth_status"] == "fail"
+        assert preflight["auth_source"] == "not_observed"
+        assert preflight["probe_status"] == "skipped"
+        assert preflight["blocks_launch"] is True
+
+    @pytest.mark.unit
+    async def test_v2_create_override_returns_preflight_summary(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
+            tmp_path
+        )
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "operator verified local auth",
+            },
+        }
+
+        response = await client.post("/v2/workspaces", json=payload)
+
+        assert response.status_code == 202
+        preflight = response.json()["provider_readiness_preflight"]
+        assert preflight["provider"] == "codex"
+        assert preflight["readiness_status"] == "admitted_with_override"
+        assert preflight["override_used"] is True
+        assert preflight["override_reason"] == "operator verified local auth"
+
+    @pytest.mark.unit
+    async def test_idempotent_replay_normalizes_blank_override_reason(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
+            tmp_path
+        )
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "   ",
+            },
+        }
+        headers = {"Idempotency-Key": "provider-readiness-blank-reason-replay"}
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert replay.json()["provider_readiness_preflight"]["override_reason"] is None
+
+    @pytest.mark.unit
+    async def test_idempotent_replay_returns_existing_preflight_without_rerun(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        home = tmp_path / "home"
+        codex_home = home / ".codex"
+        codex_home.mkdir(parents=True)
+        (codex_home / "auth.json").write_text('{"token":"codex_file_secret"}')
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
+            tmp_path
+        )
+        headers = {"Idempotency-Key": "provider-readiness-replay"}
+
+        first = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+        (codex_home / "auth.json").unlink()
+        codex_home.rmdir()
+        replay = await client.post("/v2/workspaces", json=_V2_MINIMAL_BODY, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert replay.json()["provider_readiness_preflight"]["readiness_status"] == "ready"
+
+    @pytest.mark.unit
+    async def test_idempotent_replay_preserves_ready_override_request(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        home = tmp_path / "home"
+        codex_home = home / ".codex"
+        codex_home.mkdir(parents=True)
+        (codex_home / "auth.json").write_text('{"token":"codex_file_secret"}')
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
+            tmp_path
+        )
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "operator always requires audit",
+            },
+        }
+        headers = {"Idempotency-Key": "provider-readiness-ready-override-replay"}
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        preflight = replay.json()["provider_readiness_preflight"]
+        assert preflight["readiness_status"] == "ready"
+        assert preflight["override_requested"] is True
+        assert preflight["override_used"] is False
+
+    @pytest.mark.unit
+    async def test_idempotent_replay_accepts_redacted_override_reason(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: Settings(
+            _env_file=None,
+            host_home=str(tmp_path / "home"),
+            docker_host="",
+            github_token="opaque-local-secret",
+        )
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": (
+                    "operator verified opaque-local-secret "
+                    "and sk-abcdefghijklmnopqrstuvwxyz manually"
+                ),
+            },
+        }
+        headers = {"Idempotency-Key": "provider-readiness-redacted-reason-replay"}
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+
+        assert first.status_code == 202
+        assert (
+            first.json()["provider_readiness_preflight"]["override_reason"]
+            == "operator verified <redacted> and <redacted> manually"
+        )
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+
+    @pytest.mark.unit
+    async def test_idempotent_replay_rejects_changed_literal_redacted_reason(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
+            tmp_path
+        )
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": (
+                    "operator typed <redacted> manually"
+                ),
+            },
+        }
+        replay_payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": (
+                    "operator typed changed text manually"
+                ),
+            },
+        }
+        headers = {"Idempotency-Key": "provider-readiness-literal-redacted-conflict"}
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        replay = await client.post(
+            "/v2/workspaces", json=replay_payload, headers=headers
+        )
+
+        assert first.status_code == 202
+        assert replay.status_code == 409
+        assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
+    @pytest.mark.unit
+    async def test_idempotent_replay_accepts_redacted_override_reason_after_secret_rotation(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        old_settings = Settings(
+            _env_file=None,
+            host_home=str(tmp_path / "home"),
+            docker_host="",
+            github_token="initial-local-secret",
+        )
+        new_settings = Settings(
+            _env_file=None,
+            host_home=str(tmp_path / "home"),
+            docker_host="",
+            github_token="rotated-local-secret",
+        )
+        active_settings = old_settings
+        app.dependency_overrides[get_settings] = lambda: active_settings
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": (
+                    "operator verified initial-local-secret manually"
+                ),
+            },
+        }
+        headers = {
+            "Idempotency-Key": "provider-readiness-redacted-rotated-reason-replay"
+        }
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        active_settings = new_settings
+        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+
+        assert first.status_code == 202
+        assert first.json()["provider_readiness_preflight"]["override_reason"] == (
+            "operator verified <redacted> manually"
+        )
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+
+    @pytest.mark.unit
+    async def test_workspace_detail_list_and_overview_include_stored_preflight(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
+            tmp_path
+        )
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "operator verified local auth",
+            },
+        }
+        created = await client.post("/v2/workspaces", json=payload)
+        workspace_id = created.json()["workspace_id"]
+
+        detail = await client.get(f"/v1/workspaces/{workspace_id}")
+        listed = await client.get("/v1/workspaces")
+        overview = await client.get("/v1/workspaces/overview")
+
+        for item in (detail.json(), listed.json()[0], overview.json()["items"][0]):
+            preflight = item["provider_readiness_preflight"]
+            assert preflight["provider"] == "codex"
+            assert preflight["model"] == "gpt-5.5"
+            assert preflight["override_used"] is True
+
     @pytest.mark.unit
     async def test_direct_v2_replay_returns_existing_row_and_conflict_response(
         self,
@@ -1056,6 +1385,10 @@ class TestCreateWorkspaceV2PolicyMetadata:
         payload["task"] = {
             **payload["task"],  # type: ignore[index]
             "agent": "gemini",
+        }
+        payload["preflight"] = {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "identity projection test",
         }
 
         create = await client.post("/v2/workspaces", json=payload)

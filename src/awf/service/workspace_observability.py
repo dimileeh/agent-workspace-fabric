@@ -300,6 +300,9 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         llm_usage=observability["llm_usage"],
         recovery=observability["recovery"],
         coordination_warnings=coordination_warnings_from_task_policy(ws.task_policy),
+        provider_readiness_preflight=_provider_readiness_preflight_from_task_policy(
+            ws.task_policy
+        ),
         status=WorkspaceStatus(ws.status),
         current_phase=ws.status,
         active_operation=active_operation.type if active_operation is not None else None,
@@ -314,6 +317,15 @@ def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:
         created_at=ws.created_at,
         updated_at=ws.updated_at,
     )
+
+
+def _provider_readiness_preflight_from_task_policy(
+    task_policy: Mapping[str, object] | None,
+) -> dict[str, Any] | None:
+    if not isinstance(task_policy, Mapping):
+        return None
+    value = task_policy.get("provider_readiness_preflight")
+    return dict(value) if isinstance(value, Mapping) else None
 
 
 def _encode_overview_cursor(workspace: Workspace) -> str:

@@ -49,6 +49,10 @@ def _request(
         workspace={"profile_ref": "auto", "profile": None},
         validation={"commands": ["pytest -q"], "requested_tier": 1},
         resources={},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "owned path policy test fixture",
+        },
     )
 
 

@@ -85,6 +85,11 @@ import {
   summarizeWorkspaceOperatorSuccess,
 } from "@/lib/workspace-operator-controls";
 import {
+  formatProviderReadinessRetryError,
+  providerReadinessPreflightFacts,
+  providerReadinessPreflightTone,
+} from "@/lib/provider-readiness-format";
+import {
   DEFAULT_OPERATOR_PREFERENCES,
   OPERATOR_PREFERENCES_STORAGE_KEY,
   decodeOperatorPreferences,
@@ -101,6 +106,7 @@ import type {
   ListEnvelope,
   MergeQueueItem,
   Operation,
+  ProviderReadinessPreflight,
   CapacityDimension,
   ConcurrencyLane,
   PolicyFinding,
@@ -509,7 +515,7 @@ export function ConsoleDashboard() {
       `/api/awf/workspaces/${encodeURIComponent(selectedId)}/retry`,
     );
     if (!result.ok) {
-      setRetryState({ status: "error", message: retryErrorMessage(result) });
+      setRetryState({ status: "error", message: formatProviderReadinessRetryError(result) });
       return;
     }
     setRetryState({
@@ -1750,6 +1756,9 @@ function WorkspaceSummary({
           onAction={onOperatorAction}
         />
         <UsageSummaryBlock usage={workspace?.llm_usage ?? overview.llm_usage} />
+        <ProviderReadinessPreflightBlock
+          preflight={workspace?.provider_readiness_preflight ?? overview.provider_readiness_preflight ?? null}
+        />
         {recovery && overview.status !== "completed" ? (
           <RecoveryCallout recovery={recovery} status={overview.status} />
         ) : null}
@@ -2009,6 +2018,45 @@ function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] | null | u
           ? (safeUsage.reason ?? "usage unavailable")
           : `${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
       </div>
+    </div>
+  );
+}
+
+function ProviderReadinessPreflightBlock({
+  preflight,
+}: {
+  preflight: ProviderReadinessPreflight | null;
+}) {
+  if (!preflight) {
+    return null;
+  }
+  const tone = providerReadinessPreflightTone(preflight);
+  const facts = providerReadinessPreflightFacts(preflight, {
+    formatCheckedAt: relativeTime,
+  });
+  return (
+    <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(tone)}`}>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <span className="font-semibold text-slate-900">Provider preflight</span>
+        <span className="mono truncate text-[11px]">{preflight.reason_code}</span>
+      </div>
+      <div className="mt-2 grid gap-1 sm:grid-cols-2 xl:grid-cols-4">
+        {facts.map((fact) => (
+          <QueueChip
+            key={fact.label}
+            label={fact.label}
+            value={fact.value}
+            detail={fact.detail}
+            mono={fact.mono}
+            tone={fact.tone}
+          />
+        ))}
+      </div>
+      {preflight.override_reason ? (
+        <div className="mt-2 truncate text-[11px] text-slate-600">
+          override: {preflight.override_reason}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -3872,11 +3920,6 @@ function Td({
   className?: string;
 }) {
   return <td className={`min-w-0 overflow-hidden px-3 py-2 align-top ${className}`}>{children}</td>;
-}
-
-function retryErrorMessage(result: Extract<ApiEnvelope<unknown>, { ok: false }>): string {
-  const code = result.errorCode ? `${result.errorCode}: ` : "";
-  return `${code}${result.message} Confirm the workspace is still failed or cancelled, resolve any reported lock conflict, then retry.`;
 }
 
 function formatScalar(value: number): string {

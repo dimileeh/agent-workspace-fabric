@@ -499,7 +499,7 @@ coding agent in any project to use AWF for a feature.
   `awf service readiness --format json`, aggregating service readiness, doctor
   diagnostics, provider readiness, cleanup/orphan posture, failure analysis, and
   in-repo demo smoke evidence.
-- [ ] Add launch-time LLM provider readiness preflight for workspace create and
+- [x] Add launch-time LLM provider readiness preflight for workspace create and
   retry. Acceptance: AWF checks the selected agent/model provider before
   provisioning, reports exact provider/model/readiness/auth-source status
   through REST, CLI, MCP, console, and workspace events, blocks launch or
