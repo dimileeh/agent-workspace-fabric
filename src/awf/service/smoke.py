@@ -188,8 +188,11 @@ def _phase_auth_readiness(
 
     auth_status = result.get("status", "fail")
     providers = result.get("providers", {})
-    usable = sum(1 for p in providers.values() if p.get("ok", False))
-    total = len(providers)
+    agent_providers = {
+        name: p for name, p in providers.items() if name != "docker"
+    }
+    usable = sum(1 for p in agent_providers.values() if p.get("ok", False))
+    total = len(agent_providers)
 
     if auth_status == "ok" and usable > 0:
         return {
