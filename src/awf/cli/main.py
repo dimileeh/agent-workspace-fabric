@@ -32,7 +32,7 @@ from awf.db.enums import OperationStatus, OperationType, TaskClass, WorkspaceSta
 from awf.service.gc import WorkspaceGCComposeTeardownResult
 from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
-_COMMON_HELP_TEXT = """
+_DX_FIRST_PATH_HELP = """
 For first-time users: the recommended first path is to run `awf init`
 to verify prerequisites and bootstrap your local service stack, followed by
 `awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md
@@ -59,13 +59,13 @@ _PROVIDER_HELP_PASSTHROUGH = (
 
 app = typer.Typer(
     name="awf",
-    help=f"Aira Agent Workspace Fabric — CLI operator surface.\n{_COMMON_HELP_TEXT}",
+    help=f"Aira Agent Workspace Fabric — CLI operator surface.\n{_DX_FIRST_PATH_HELP}",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
 
 workspace_app = typer.Typer(
-    help=f"Workspace lifecycle (create/inspect/destroy).\n{_COMMON_HELP_TEXT}"
+    help=f"Workspace lifecycle (create/inspect/destroy).\n{_DX_FIRST_PATH_HELP}"
 )
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
@@ -269,7 +269,7 @@ _DEFAULT_INIT_BOOTSTRAP_POLL_INTERVAL_SECONDS = 2.0
 
 @app.command(
     "init",
-    help=f"Bootstrap AWF on this machine, or run local onboarding checks for a project path.\n{_COMMON_HELP_TEXT}",
+    help=f"Bootstrap AWF on this machine, or run local onboarding checks for a project path.\n{_DX_FIRST_PATH_HELP}",
 )
 def init(
     path: Path | None = typer.Argument(
@@ -855,7 +855,7 @@ def service_readiness(
 
 @service_app.command(
     "bootstrap",
-    help=f"Start local Postgres, migrations, API, worker, and verify readiness.\n{_COMMON_HELP_TEXT}",
+    help=f"Start local Postgres, migrations, API, worker, and verify readiness.\n{_DX_FIRST_PATH_HELP}",
 )
 def service_bootstrap(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
