@@ -1,5 +1,5 @@
 [project]
-name = "awf"
+name = "aira-awf"
 version = "0.1.0"
 description = "Aira Agent Workspace Fabric — isolated Docker execution substrate for AI coding agents"
 readme = "README.md"
