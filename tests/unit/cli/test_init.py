@@ -795,7 +795,7 @@ def test_project_onboarding_doc_has_provider_prompts() -> None:
         start = doc.find(f"### {provider}")
         assert start != -1
         # Grab the block up to the next ### or end of file
-        end = doc.find("###", start + 1)
+        end = doc.find("\n### ", start + 1)
         block = doc[start:end] if end != -1 else doc[start:]
         for keyword in keyword_set:
             assert keyword in block, f"{provider} prompt missing {keyword}"
