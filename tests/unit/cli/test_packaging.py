@@ -4,7 +4,7 @@ from pathlib import Path
 
 def test_packaging_metadata() -> None:
     """Test that the pyproject.toml package name and entrypoints match the plan."""
-    pyproject_path = Path("pyproject.toml")
+    pyproject_path = Path(__file__).parents[3] / "pyproject.toml"
     with pyproject_path.open("rb") as f:
         data = tomllib.load(f)
 
@@ -19,7 +19,7 @@ def test_packaging_metadata() -> None:
 
 def test_readme_install_paths() -> None:
     """Test that the README explicitly documents the primary install paths."""
-    readme_path = Path("README.md")
+    readme_path = Path(__file__).parents[3] / "README.md"
     content = readme_path.read_text()
 
     # 3. README explicitly documents `uv tool install aira-awf` and `uv pip install aira-awf`
