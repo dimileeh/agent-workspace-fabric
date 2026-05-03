@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import event, select
@@ -84,12 +86,49 @@ def _request_with_preflight_override(
     return WorkspaceCreateV2Request.model_validate(payload)
 
 
+def _opencode_request() -> WorkspaceCreateV2Request:
+    payload = _request(provider_readiness_override=False).model_dump(mode="python")
+    payload["task"]["agent"] = "opencode"
+    payload["task"]["model"] = "ollama/kimi-k2.6:cloud"
+    return WorkspaceCreateV2Request.model_validate(payload)
+
+
 def _settings_with_host_home(tmp_path) -> Settings:  # type: ignore[no-untyped-def]
     return Settings(
         _env_file=None,
         host_home=str(tmp_path / "home"),
         docker_host="",
     )
+
+
+def _ollama_provider_environ() -> dict[str, str]:
+    return {
+        "OLLAMA_API_KEY": "ollama_secret",
+        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+    }
+
+
+def _ollama_ok(url: str, *, timeout: float) -> SimpleNamespace:
+    text = (
+        '{"models":[{"name":"kimi-k2.6:cloud"}]}'
+        if url.endswith("/api/tags")
+        else "{}"
+    )
+    return SimpleNamespace(status_code=200, text=text)
+
+
+def _ollama_ok_requiring_worker_thread(
+    url: str,
+    *,
+    timeout: float,
+) -> SimpleNamespace:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("provider preflight probe ran on the event-loop thread")
+    return _ollama_ok(url, timeout=timeout)
 
 
 async def _retry_with_preflight_override(
@@ -136,6 +175,27 @@ async def test_create_v2_blocks_provider_readiness_before_rows(
     assert preflight["blocks_launch"] is True
     assert workspaces == []
     assert attempts == []
+
+
+@pytest.mark.unit
+async def test_create_v2_runs_provider_preflight_probe_off_event_loop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+
+    async with factory() as session:
+        workspace = await create_workspace_v2_row(
+            session,
+            _opencode_request(),
+            settings=settings,
+            provider_environ=_ollama_provider_environ(),
+            http_get=_ollama_ok_requiring_worker_thread,
+        )
+
+    preflight = workspace.task_policy["provider_readiness_preflight"]
+    assert preflight["provider"] == "opencode"
+    assert preflight["readiness_status"] == "ready"
 
 
 @pytest.mark.unit
@@ -228,6 +288,38 @@ async def test_retry_blocks_provider_readiness_before_new_attempt(
 
     assert [workspace.id for workspace in workspaces] == [first.id]
     assert [attempt.workspace_id for attempt in attempts] == [first.id]
+
+
+@pytest.mark.unit
+async def test_retry_runs_provider_preflight_probe_off_event_loop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    provider_environ = _ollama_provider_environ()
+    async with factory() as session:
+        first = await create_workspace_v2_row(
+            session,
+            _opencode_request(),
+            settings=settings,
+            provider_environ=provider_environ,
+            http_get=_ollama_ok,
+        )
+        await session.commit()
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            settings=settings,
+            provider_environ=provider_environ,
+            http_get=_ollama_ok_requiring_worker_thread,
+        )
+
+    preflight = retry.new_workspace.task_policy["provider_readiness_preflight"]
+    assert preflight["source_workspace_id"] == first.id
+    assert preflight["readiness_status"] == "ready"
 
 
 @pytest.mark.unit

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -658,7 +659,7 @@ async def create_workspace_v2_row(
     repo = WorkspaceRepository(session)
     base_task_policy = v2_task_policy_snapshot(payload)
     requested_profile, resolved_profile = v2_profile_snapshots(payload)
-    preflight = _selected_provider_preflight_for_task(
+    preflight = await _selected_provider_preflight_for_task_async(
         resolved_settings,
         agent=payload.task.agent,
         task_policy=base_task_policy,
@@ -814,7 +815,7 @@ async def retry_workspace_row(
         owned_path_overlap_coordination_warnings(overlaps),
         planning_scope_context=planning_scope_context,
     )
-    preflight = _selected_provider_preflight_for_task(
+    preflight = await _selected_provider_preflight_for_task_async(
         resolved_settings,
         agent=source.agent,
         task_policy=retried_task_policy,
@@ -1079,6 +1080,30 @@ def _selected_provider_preflight_for_task(
         override=override,
         override_reason=override_reason,
         environ=provider_environ,
+        run_subprocess=run_subprocess,
+        http_get=http_get,
+    )
+
+
+async def _selected_provider_preflight_for_task_async(
+    settings: Settings,
+    *,
+    agent: AgentRuntime | str,
+    task_policy: Mapping[str, object] | None,
+    override: bool,
+    override_reason: str | None,
+    provider_environ: Mapping[str, str] | None,
+    run_subprocess: SubprocessRun | None,
+    http_get: HttpGet | None,
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        _selected_provider_preflight_for_task,
+        settings,
+        agent=agent,
+        task_policy=task_policy,
+        override=override,
+        override_reason=override_reason,
+        provider_environ=provider_environ,
         run_subprocess=run_subprocess,
         http_get=http_get,
     )
