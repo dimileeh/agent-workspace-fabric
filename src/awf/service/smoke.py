@@ -424,13 +424,10 @@ def _collect_next_actions(phases: list[dict[str, Any]]) -> list[str]:
 async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any]:
     import httpx
 
-    try:
-        async with httpx.AsyncClient(timeout=5.0) as client:
-            response = await client.get(f"{settings.api_base_url.rstrip('/')}/health")
-            if response.status_code == 200:
-                return {"status": "ok"}
-            return {"status": "unreachable"}
-    except Exception:
+    async with httpx.AsyncClient(timeout=5.0) as client:
+        response = await client.get(f"{settings.api_base_url.rstrip('/')}/health")
+        if response.status_code == 200:
+            return {"status": "ok"}
         return {"status": "unreachable"}
 
 

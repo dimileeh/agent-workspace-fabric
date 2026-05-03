@@ -12,6 +12,7 @@ from awf.service.smoke import (
     _default_config_resolver,
     _default_service_collector,
     _extract_validation_commands,
+    _phase_service_readiness,
     collect_smoke_report,
 )
 
@@ -792,7 +793,7 @@ class TestCollectSmokeReportExceptionPaths:
             result = await _default_service_collector(_settings())
         assert result["status"] == "unreachable"
 
-    async def test_default_service_collector_returns_unreachable_on_error(
+    async def test_default_service_collector_error_bubbles_to_phase_handler(
         self,
     ) -> None:
         with patch("httpx.AsyncClient") as mock_cls:
@@ -802,8 +803,12 @@ class TestCollectSmokeReportExceptionPaths:
             mock_instance.get = mock_get
             mock_cls.return_value.__aenter__.return_value = mock_instance
 
-            result = await _default_service_collector(_settings())
-        assert result["status"] == "unreachable"
+            result = await _phase_service_readiness(
+                _settings(), mocked_local=False, service_collector=None
+            )
+        assert result["status"] == "fail"
+        assert result["reason_code"] == "SMOKE_SERVICE_UNREACHABLE"
+        assert "boom" in result["evidence"]["error"]
 
     async def test_extract_validation_commands_direct_call_no_phases(self) -> None:
         class NoDraftPreview:
