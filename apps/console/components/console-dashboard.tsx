@@ -101,6 +101,7 @@ import type {
   ListEnvelope,
   MergeQueueItem,
   Operation,
+  ProviderReadinessPreflight,
   CapacityDimension,
   ConcurrencyLane,
   PolicyFinding,
@@ -1750,6 +1751,9 @@ function WorkspaceSummary({
           onAction={onOperatorAction}
         />
         <UsageSummaryBlock usage={workspace?.llm_usage ?? overview.llm_usage} />
+        <ProviderReadinessPreflightBlock
+          preflight={workspace?.provider_readiness_preflight ?? overview.provider_readiness_preflight ?? null}
+        />
         {recovery && overview.status !== "completed" ? (
           <RecoveryCallout recovery={recovery} status={overview.status} />
         ) : null}
@@ -2009,6 +2013,50 @@ function UsageSummaryBlock({ usage }: { usage: Workspace["llm_usage"] | null | u
           ? (safeUsage.reason ?? "usage unavailable")
           : `${safeUsage.source}${safeUsage.reason ? ` / ${safeUsage.reason}` : ""}`}
       </div>
+    </div>
+  );
+}
+
+function ProviderReadinessPreflightBlock({
+  preflight,
+}: {
+  preflight: ProviderReadinessPreflight | null;
+}) {
+  if (!preflight) {
+    return null;
+  }
+  const tone =
+    preflight.blocks_launch || preflight.readiness_status === "blocked"
+      ? "bad"
+      : preflight.override_used
+        ? "warn"
+        : "good";
+  return (
+    <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(tone)}`}>
+      <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
+        <span className="font-semibold text-slate-900">Provider preflight</span>
+        <span className="mono truncate text-[11px]">{preflight.reason_code}</span>
+      </div>
+      <div className="mt-2 grid gap-1 sm:grid-cols-2 xl:grid-cols-4">
+        <QueueChip label="Provider" value={preflight.provider} detail={preflight.agent} mono />
+        <QueueChip label="Model" value={preflight.model ?? "unavailable"} mono />
+        <QueueChip label="Readiness" value={preflight.readiness_status} tone={tone} />
+        <QueueChip
+          label="Auth"
+          value={preflight.auth_status}
+          detail={`${preflight.auth_source} / ${preflight.credential_scope ?? "unknown"}`}
+          mono
+        />
+        <QueueChip label="Probe" value={preflight.probe_status} mono />
+        <QueueChip label="Override" value={preflight.override_used ? "used" : "not used"} />
+        <QueueChip label="Checked" value={relativeTime(preflight.checked_at)} />
+        <QueueChip label="Isolation" value={preflight.isolation ?? "unknown"} mono />
+      </div>
+      {preflight.override_reason ? (
+        <div className="mt-2 truncate text-[11px] text-slate-600">
+          override: {preflight.override_reason}
+        </div>
+      ) : null}
     </div>
   );
 }
@@ -3876,7 +3924,38 @@ function Td({
 
 function retryErrorMessage(result: Extract<ApiEnvelope<unknown>, { ok: false }>): string {
   const code = result.errorCode ? `${result.errorCode}: ` : "";
+  const preflight = providerReadinessPreflightFromError(result.detail);
+  if (preflight) {
+    return `${code}${result.message} ${preflight.provider}/${preflight.model ?? "model unavailable"} readiness ${preflight.readiness_status}; auth ${preflight.auth_status} via ${preflight.auth_source}; probe ${preflight.probe_status}; reason ${preflight.reason_code}.`;
+  }
   return `${code}${result.message} Confirm the workspace is still failed or cancelled, resolve any reported lock conflict, then retry.`;
+}
+
+function providerReadinessPreflightFromError(detail: unknown): ProviderReadinessPreflight | null {
+  if (!detail || typeof detail !== "object") {
+    return null;
+  }
+  const root = detail as { detail?: unknown; provider_readiness_preflight?: unknown };
+  const nested =
+    root.provider_readiness_preflight ??
+    (root.detail && typeof root.detail === "object"
+      ? (root.detail as { provider_readiness_preflight?: unknown }).provider_readiness_preflight
+      : null);
+  if (!nested || typeof nested !== "object") {
+    return null;
+  }
+  const candidate = nested as Partial<ProviderReadinessPreflight>;
+  if (
+    typeof candidate.provider === "string" &&
+    typeof candidate.readiness_status === "string" &&
+    typeof candidate.auth_status === "string" &&
+    typeof candidate.auth_source === "string" &&
+    typeof candidate.probe_status === "string" &&
+    typeof candidate.reason_code === "string"
+  ) {
+    return candidate as ProviderReadinessPreflight;
+  }
+  return null;
 }
 
 function formatScalar(value: number): string {

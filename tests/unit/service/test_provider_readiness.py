@@ -16,6 +16,7 @@ from awf.service.config import ServiceSettings
 from awf.service.provider_readiness import (
     ProviderReadinessError,
     collect_agent_readiness,
+    selected_provider_readiness_preflight,
     validate_provider_names,
 )
 
@@ -88,6 +89,159 @@ def test_provider_readiness_validates_codex_and_docker_providers(tmp_path: Path)
         "opencode",
         "docker",
     }
+
+
+@pytest.mark.unit
+def test_selected_provider_preflight_blocks_missing_strict_auth(tmp_path: Path) -> None:
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="codex",
+        task_policy={},
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert result["provider"] == "codex"
+    assert result["agent"] == "codex"
+    assert result["model"] == "gpt-5.5"
+    assert result["readiness_status"] == "blocked"
+    assert result["auth_status"] == "fail"
+    assert result["auth_source"] == "not_observed"
+    assert result["probe_status"] == "skipped"
+    assert result["reason_code"] == "CODEX_AUTH_MISSING"
+    assert result["override_required"] is True
+    assert result["override_used"] is False
+    assert result["blocks_launch"] is True
+
+
+@pytest.mark.unit
+def test_selected_provider_preflight_override_preserves_original_reason(
+    tmp_path: Path,
+) -> None:
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="codex",
+        task_policy={},
+        override=True,
+        override_reason="operator verified temporary auth repair",
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert result["readiness_status"] == "admitted_with_override"
+    assert result["reason_code"] == "CODEX_AUTH_MISSING"
+    assert result["override_required"] is True
+    assert result["override_used"] is True
+    assert result["override_reason"] == "operator verified temporary auth repair"
+    assert result["blocks_launch"] is False
+
+
+@pytest.mark.unit
+def test_selected_provider_preflight_maps_agents_to_effective_models(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "auth.json").write_text('{"token":"codex_file_secret"}')
+    (home / ".claude").mkdir()
+    (home / ".gemini").mkdir()
+    (home / ".config" / "opencode").mkdir(parents=True)
+    env = {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"}
+    probe_calls: list[list[str]] = []
+
+    def _run(args: list[str], **_kwargs: object) -> Any:
+        probe_calls.append(args)
+        return _completed(stdout="authenticated\n")
+
+    cases = [
+        ("codex", "codex", "gpt-custom", "unavailable"),
+        ("claude_code", "claude_code", "claude-opus-4-7", "ok"),
+        ("gemini", "gemini", "gemini-3.1-pro-preview", "ok"),
+        ("opencode", "opencode", "ollama/kimi-k2.6:cloud", "ok"),
+    ]
+    for agent, provider, expected_model, expected_probe_status in cases:
+        task_policy = {"agent_model": expected_model} if agent == "codex" else {}
+        result = selected_provider_readiness_preflight(
+            _settings(tmp_path),
+            agent=agent,
+            task_policy=task_policy,
+            environ=env,
+            run_subprocess=_run,
+            http_get=_ollama_ok,
+        )
+
+        assert result["provider"] == provider
+        assert result["model"] == expected_model
+        assert result["readiness_status"] == "ready"
+        assert result["probe_status"] == expected_probe_status
+        assert result["blocks_launch"] is False
+
+    assert ["claude", "auth", "status"] in probe_calls
+    assert ["gemini", "auth", "status"] in probe_calls
+
+
+@pytest.mark.unit
+def test_selected_claude_preflight_requires_usable_non_secret_probe(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / ".claude.json").write_text('{"oauth":"claude_file_secret"}')
+    token = "sk-ant-stale-oauth-secret"
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        assert args == ["claude", "auth", "status"]
+        assert kwargs["env"]["CLAUDE_CODE_OAUTH_TOKEN"] == token
+        return _completed(returncode=1, stderr=f"expired token {token}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="claude_code",
+        task_policy={},
+        environ={"CLAUDE_CODE_OAUTH_TOKEN": token},
+        run_subprocess=_run,
+    )
+
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "CLAUDE_AUTH_PROBE_FAILED"
+    assert result["blocks_launch"] is True
+    serialized = json.dumps(result, sort_keys=True)
+    assert token not in serialized
+    assert "claude_file_secret" not in serialized
+    assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
+def test_selected_gemini_preflight_requires_usable_non_secret_probe(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".gemini").mkdir(parents=True)
+    (home / ".gemini" / "oauth_creds.json").write_text("gemini_file_secret")
+    token = "AIzaGeminiProbeSecret"
+
+    def _run(args: list[str], **kwargs: object) -> Any:
+        assert args == ["gemini", "auth", "status"]
+        assert kwargs["env"]["GEMINI_API_KEY"] == token
+        return _completed(returncode=1, stdout=f"account rejected {token}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="gemini",
+        task_policy={},
+        environ={"GEMINI_API_KEY": token},
+        run_subprocess=_run,
+    )
+
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "GEMINI_AUTH_PROBE_FAILED"
+    assert result["blocks_launch"] is True
+    serialized = json.dumps(result, sort_keys=True)
+    assert token not in serialized
+    assert "gemini_file_secret" not in serialized
+    assert "<redacted>" in serialized
 
 
 @pytest.mark.unit

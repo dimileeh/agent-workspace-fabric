@@ -1115,6 +1115,16 @@ def workspace_create(
         max=86400,
         help="Override profile monitor grace; omit to use the profile setting.",
     ),
+    provider_readiness_override: bool = typer.Option(
+        False,
+        "--provider-readiness-override",
+        help="Explicitly admit launch when selected provider readiness is not ready.",
+    ),
+    provider_readiness_override_reason: str | None = typer.Option(
+        None,
+        "--provider-readiness-override-reason",
+        help="Audit reason for --provider-readiness-override.",
+    ),
     idempotency_key: str | None = typer.Option(None, "--idempotency-key"),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
@@ -1133,6 +1143,10 @@ def workspace_create(
         "workspace": {"profile_ref": "aira" if requires_database else profile_ref, "profile": None},
         "validation": {"commands": test_commands, "requested_tier": 1},
         "resources": {},
+        "preflight": {
+            "provider_readiness_override": provider_readiness_override,
+            "provider_readiness_override_reason": provider_readiness_override_reason,
+        },
     }
     headers = {"Idempotency-Key": idempotency_key} if idempotency_key else {}
     response = _call(
@@ -1159,6 +1173,16 @@ def workspace_show(
 @workspace_app.command("retry")
 def workspace_retry(
     workspace_id: str = typer.Argument(...),
+    provider_readiness_override: bool = typer.Option(
+        False,
+        "--provider-readiness-override",
+        help="Explicitly admit retry when selected provider readiness is not ready.",
+    ),
+    provider_readiness_override_reason: str | None = typer.Option(
+        None,
+        "--provider-readiness-override-reason",
+        help="Audit reason for --provider-readiness-override.",
+    ),
     api_token: str | None = _api_token_option(),
     base_url: str | None = typer.Option(None, "--base-url"),
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
@@ -1169,6 +1193,15 @@ def workspace_retry(
         f"/v1/workspaces/{workspace_id}/retry",
         base_url=_base_url(base_url),
         headers=_api_token_headers(api_token),
+        params=(
+            {
+                "provider_readiness_override": provider_readiness_override,
+                "provider_readiness_override_reason": provider_readiness_override_reason,
+            }
+            if provider_readiness_override
+            or provider_readiness_override_reason is not None
+            else None
+        ),
     )
     _handle_response(response, fmt)
 

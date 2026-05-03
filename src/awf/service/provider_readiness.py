@@ -6,6 +6,7 @@ import os
 import re
 import subprocess
 from collections.abc import Iterable, Mapping
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Literal, Protocol
 from urllib.parse import urlsplit, urlunsplit
@@ -13,7 +14,9 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 
 from awf.adapters.opencode import DEFAULT_OLLAMA_OPENAI_BASE_URL
+from awf.db.enums import AgentRuntime
 from awf.service.config import ServiceSettings
+from awf.service.workspace_observability import effective_agent_identity
 
 ProviderName = Literal["github", "codex", "claude_code", "gemini", "opencode", "docker"]
 
@@ -28,6 +31,7 @@ PROVIDER_NAMES: tuple[ProviderName, ...] = (
 
 _GITHUB_TIMEOUT_SECONDS = 5.0
 _HTTP_TIMEOUT_SECONDS = 2.0
+_PROVIDER_PROBE_TIMEOUT_SECONDS = 5.0
 _REDACTION = "<redacted>"
 _CODEX_AUTH_FILES = ("auth.json", "config.toml", "installation_id")
 _OLLAMA_AUTH_FILES = ("config.json", "id_ed25519", "id_ed25519.pub")
@@ -91,6 +95,12 @@ _TOKEN_RE = re.compile(
     + "|".join(_KNOWN_TOKEN_PATTERNS)
     + r")(?![A-Za-z0-9])"
 )
+_LAUNCH_PROVIDER_BY_AGENT: Mapping[AgentRuntime, ProviderName] = {
+    AgentRuntime.codex: "codex",
+    AgentRuntime.claude_code: "claude_code",
+    AgentRuntime.gemini: "gemini",
+    AgentRuntime.opencode: "opencode",
+}
 
 
 class CompletedProcessLike(Protocol):
@@ -212,6 +222,105 @@ def collect_agent_readiness(
     }
 
 
+def selected_provider_readiness_preflight(
+    settings: ServiceSettings,
+    *,
+    agent: AgentRuntime | str,
+    task_policy: Mapping[str, object] | None,
+    override: bool = False,
+    override_reason: str | None = None,
+    environ: Mapping[str, str] | None = None,
+    run_subprocess: SubprocessRun | None = None,
+    http_get: HttpGet | None = None,
+    checked_at: datetime | None = None,
+) -> dict[str, Any]:
+    """Return launch admission readiness for the selected LLM provider.
+
+    This is intentionally stricter than the broad service readiness report:
+    only the selected agent provider is strict, the effective model is included,
+    and providers with stale/non-portable file auth get a cheap non-prompt probe.
+    """
+
+    env = os.environ if environ is None else environ
+    secrets = _secret_values(settings, env)
+    identity = effective_agent_identity(agent=agent, task_policy=task_policy)
+    runtime = _coerce_launch_agent(agent)
+    checked = checked_at or datetime.now(UTC)
+    resolved_run = run_subprocess or _run_subprocess
+    resolved_http_get = http_get or _http_get
+
+    if runtime is None or runtime not in _LAUNCH_PROVIDER_BY_AGENT:
+        return _launch_preflight_payload(
+            agent=str(agent),
+            provider="unknown",
+            model=identity.model,
+            model_source=identity.model_source,
+            provider_result=None,
+            probe={"status": "skipped", "reason_code": "UNSUPPORTED_AGENT_RUNTIME"},
+            reason_code="UNSUPPORTED_AGENT_RUNTIME",
+            message=f"Agent runtime {agent!s} is not supported for launch preflight.",
+            override=override,
+            override_reason=override_reason,
+            checked_at=checked,
+            secrets=secrets,
+        )
+
+    provider = _LAUNCH_PROVIDER_BY_AGENT[runtime]
+    readiness = collect_agent_readiness(
+        settings,
+        environ=env,
+        validated_strict_providers={provider},
+        run_subprocess=resolved_run,
+        http_get=resolved_http_get,
+    )
+    provider_result = readiness["providers"][provider]
+    probe = _selected_launch_probe(
+        provider,
+        provider_result=provider_result,
+        model=identity.model,
+        environ=env,
+        run_subprocess=resolved_run,
+        secrets=secrets,
+    )
+
+    reason_code = _preflight_reason_code(
+        provider_result=provider_result,
+        probe=probe,
+        model=identity.model,
+    )
+    message = _preflight_message(
+        provider_result=provider_result,
+        probe=probe,
+        model=identity.model,
+    )
+
+    return _launch_preflight_payload(
+        agent=runtime.value,
+        provider=provider,
+        model=identity.model,
+        model_source=identity.model_source,
+        provider_result=provider_result,
+        probe=probe,
+        reason_code=reason_code,
+        message=message,
+        override=override,
+        override_reason=override_reason,
+        checked_at=checked,
+        secrets=secrets,
+    )
+
+
+def provider_readiness_preflight_from_task_policy(
+    task_policy: Mapping[str, object] | None,
+) -> dict[str, Any] | None:
+    """Return the persisted preflight snapshot from task policy, if present."""
+
+    if not isinstance(task_policy, Mapping):
+        return None
+    value = task_policy.get("provider_readiness_preflight")
+    return dict(value) if isinstance(value, Mapping) else None
+
+
 def validate_provider_names(values: Iterable[str]) -> set[ProviderName]:
     """Normalize and validate provider names accepted by strict checks."""
 
@@ -231,6 +340,257 @@ def validate_provider_names(values: Iterable[str]) -> set[ProviderName]:
             f"unknown provider(s): {', '.join(sorted(unknown))}; expected one of: {expected}"
         )
     return providers
+
+
+def _coerce_launch_agent(agent: AgentRuntime | str) -> AgentRuntime | None:
+    try:
+        return agent if isinstance(agent, AgentRuntime) else AgentRuntime(str(agent))
+    except ValueError:
+        return None
+
+
+def _selected_launch_probe(
+    provider: ProviderName,
+    *,
+    provider_result: Mapping[str, Any],
+    model: str | None,
+    environ: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    if not provider_result.get("ok") or not model:
+        return {"status": "skipped"}
+    if provider == "claude_code":
+        return _probe_cli_auth_status(
+            provider_label="Claude Code",
+            args=["claude", "auth", "status"],
+            failure_reason="CLAUDE_AUTH_PROBE_FAILED",
+            timeout_reason="CLAUDE_AUTH_PROBE_TIMEOUT",
+            missing_reason="CLAUDE_CLI_NOT_FOUND",
+            error_reason="CLAUDE_AUTH_PROBE_ERROR",
+            environ=environ,
+            run_subprocess=run_subprocess,
+            secrets=secrets,
+        )
+    if provider == "gemini":
+        return _probe_cli_auth_status(
+            provider_label="Gemini",
+            args=["gemini", "auth", "status"],
+            failure_reason="GEMINI_AUTH_PROBE_FAILED",
+            timeout_reason="GEMINI_AUTH_PROBE_TIMEOUT",
+            missing_reason="GEMINI_CLI_NOT_FOUND",
+            error_reason="GEMINI_AUTH_PROBE_ERROR",
+            environ=environ,
+            run_subprocess=run_subprocess,
+            secrets=secrets,
+        )
+    if provider == "opencode":
+        return {"status": "ok", "reason_code": "OLLAMA_HOST_REACHABLE"}
+    return {"status": "unavailable", "reason_code": "PROVIDER_PROBE_UNAVAILABLE"}
+
+
+def _probe_cli_auth_status(
+    *,
+    provider_label: str,
+    args: list[str],
+    failure_reason: str,
+    timeout_reason: str,
+    missing_reason: str,
+    error_reason: str,
+    environ: Mapping[str, str],
+    run_subprocess: SubprocessRun,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    try:
+        result = run_subprocess(
+            args,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_PROVIDER_PROBE_TIMEOUT_SECONDS,
+            env=environ,
+        )
+    except FileNotFoundError:
+        return {
+            "status": "fail",
+            "reason_code": missing_reason,
+            "message": f"{provider_label} CLI was not found for auth status probing.",
+        }
+    except subprocess.TimeoutExpired:
+        return {
+            "status": "fail",
+            "reason_code": timeout_reason,
+            "message": (
+                f"{provider_label} auth status probe exceeded "
+                f"{_PROVIDER_PROBE_TIMEOUT_SECONDS:g}s."
+            ),
+        }
+    except Exception as exc:
+        detail = _redact(_truncate(f"{type(exc).__name__}: {exc}"), secrets)
+        return {
+            "status": "fail",
+            "reason_code": error_reason,
+            "message": f"{provider_label} auth status probe failed before completion.",
+            "detail": detail,
+        }
+
+    if result.returncode == 0:
+        return {
+            "status": "ok",
+            "reason_code": f"{failure_reason.removesuffix('_FAILED')}_OK",
+        }
+
+    detail = _redact(
+        _truncate(result.stderr or result.stdout or "auth status exited non-zero"),
+        secrets,
+    )
+    return {
+        "status": "fail",
+        "reason_code": failure_reason,
+        "message": f"{provider_label} auth status probe reported unusable auth.",
+        "detail": detail,
+    }
+
+
+def _preflight_reason_code(
+    *,
+    provider_result: Mapping[str, Any],
+    probe: Mapping[str, Any],
+    model: str | None,
+) -> str:
+    if not model:
+        return "MODEL_NOT_SELECTED"
+    if provider_result.get("ok") is not True:
+        return str(provider_result.get("reason") or "PROVIDER_AUTH_NOT_READY")
+    if probe.get("status") == "fail":
+        return str(probe.get("reason_code") or "PROVIDER_PROBE_FAILED")
+    return "PROVIDER_READY"
+
+
+def _preflight_message(
+    *,
+    provider_result: Mapping[str, Any],
+    probe: Mapping[str, Any],
+    model: str | None,
+) -> str:
+    if not model:
+        return "No effective model was selected for the workspace agent."
+    if provider_result.get("ok") is not True:
+        return str(
+            provider_result.get("message")
+            or "Selected provider authentication is not ready."
+        )
+    if probe.get("status") == "fail":
+        return str(
+            probe.get("message")
+            or "Selected provider auth probe did not report readiness."
+        )
+    return "Selected provider authentication and model readiness are sufficient for launch."
+
+
+def _launch_preflight_payload(
+    *,
+    agent: str,
+    provider: str,
+    model: str | None,
+    model_source: str,
+    provider_result: Mapping[str, Any] | None,
+    probe: Mapping[str, Any],
+    reason_code: str,
+    message: str,
+    override: bool,
+    override_reason: str | None,
+    checked_at: datetime,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    auth_ok = provider_result is not None and provider_result.get("ok") is True
+    model_ok = bool(model)
+    probe_status = str(probe.get("status") or "skipped")
+    probe_ok = probe_status in {"ok", "unavailable"}
+    override_required = not (auth_ok and model_ok and probe_ok)
+    override_used = bool(override and override_required)
+    blocks_launch = override_required and not override_used
+    readiness_status = (
+        "ready"
+        if not override_required
+        else "admitted_with_override"
+        if override_used
+        else "blocked"
+    )
+    credential_sources = _credential_sources(provider_result)
+    payload: dict[str, Any] = {
+        "provider": provider,
+        "agent": agent,
+        "model": model,
+        "model_source": model_source,
+        "readiness_status": readiness_status,
+        "auth_status": _auth_status(provider_result),
+        "auth_source": _auth_source(provider_result),
+        "credential_scope": _provider_field(provider_result, "credential_scope", "not_observed"),
+        "isolation": _provider_field(provider_result, "isolation", "none"),
+        "probe_status": probe_status,
+        "reason_code": reason_code,
+        "message": _redact(message, secrets),
+        "override_required": override_required,
+        "override_requested": bool(override),
+        "override_used": override_used,
+        "override_reason": _redact(override_reason, secrets) if override_reason else None,
+        "blocks_launch": blocks_launch,
+        "checked_at": checked_at.isoformat(),
+        "credential_sources": credential_sources,
+    }
+    probe_detail = probe.get("detail")
+    if isinstance(probe_detail, str) and probe_detail:
+        payload["probe_detail"] = _redact(_truncate(probe_detail), secrets)
+    warnings = provider_result.get("warnings") if provider_result is not None else None
+    if isinstance(warnings, list):
+        payload["warnings"] = [
+            warning for warning in warnings if isinstance(warning, Mapping)
+        ]
+    return payload
+
+
+def _auth_status(provider_result: Mapping[str, Any] | None) -> str:
+    value = provider_result.get("status") if provider_result is not None else None
+    return value if isinstance(value, str) and value else "unknown"
+
+
+def _auth_source(provider_result: Mapping[str, Any] | None) -> str:
+    sources = _credential_sources(provider_result)
+    if sources:
+        signal = sources[0].get("signal")
+        if isinstance(signal, str) and signal:
+            return signal
+    return _provider_field(provider_result, "credential_scope", "not_observed")
+
+
+def _provider_field(
+    provider_result: Mapping[str, Any] | None,
+    key: str,
+    default: str,
+) -> str:
+    value = provider_result.get(key) if provider_result is not None else None
+    return value if isinstance(value, str) and value else default
+
+
+def _credential_sources(
+    provider_result: Mapping[str, Any] | None,
+) -> list[dict[str, str]]:
+    raw = provider_result.get("credential_sources") if provider_result is not None else None
+    if not isinstance(raw, list):
+        return []
+    sources: list[dict[str, str]] = []
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        source: dict[str, str] = {}
+        for key in ("type", "signal", "credential_scope", "isolation"):
+            value = item.get(key)
+            if isinstance(value, str):
+                source[key] = value
+        if source:
+            sources.append(source)
+    return sources
 
 
 def _check_github(

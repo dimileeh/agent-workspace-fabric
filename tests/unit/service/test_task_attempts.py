@@ -48,6 +48,10 @@ def _request(
         workspace={"profile_ref": "auto", "profile": None},
         validation={"commands": ["uv run pytest -q"], "requested_tier": 1},
         resources={},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "task attempt test fixture",
+        },
     )
 
 

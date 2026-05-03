@@ -58,12 +58,14 @@ from awf.service.workspace_observability import (
     list_workspace_stale_reasons_response,
 )
 from awf.service.workspaces import (
+    WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryError,
     WorkspaceRetryNotAllowedError,
     WorkspaceRetryNotFoundError,
     create_workspace_v2_row,
     owned_path_overlap_warnings,
     retry_workspace_row,
+    workspace_provider_readiness_preflight,
     workspace_response,
     workspace_retry_response,
 )
@@ -171,6 +173,9 @@ async def create_workspace_v2(
                 existing.version,
                 existing.created_at,
                 warnings=owned_path_overlap_warnings(existing),
+                provider_readiness_preflight=workspace_provider_readiness_preflight(
+                    existing
+                ),
             )
 
     disk_check = await _workspace_admission_disk_check(request, settings)
@@ -194,6 +199,8 @@ async def create_workspace_v2(
                 detail=exc.detail,
             ).model_dump(),
         )
+    except WorkspaceProviderReadinessBlockedError as exc:
+        return _provider_readiness_blocked_response(exc)
 
     return _accepted(
         ws.id,
@@ -201,6 +208,7 @@ async def create_workspace_v2(
         ws.version,
         ws.created_at,
         warnings=owned_path_overlap_warnings(ws),
+        provider_readiness_preflight=workspace_provider_readiness_preflight(ws),
     )
 
 
@@ -238,6 +246,19 @@ def _retry_error_response(exc: WorkspaceRetryError) -> JSONResponse:
         status_code = status.HTTP_409_CONFLICT
     return JSONResponse(
         status_code=status_code,
+        content=ErrorResponse(
+            error_code=exc.error_code,
+            message=exc.message,
+            detail=exc.detail,
+        ).model_dump(),
+    )
+
+
+def _provider_readiness_blocked_response(
+    exc: WorkspaceProviderReadinessBlockedError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_409_CONFLICT,
         content=ErrorResponse(
             error_code=exc.error_code,
             message=exc.message,
@@ -333,10 +354,19 @@ async def list_workspace_stale_reasons(
 )
 async def retry_workspace(
     workspace_id: str,
+    provider_readiness_override: Annotated[bool, Query()] = False,
+    provider_readiness_override_reason: Annotated[
+        str | None, Query(max_length=512)
+    ] = None,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceRetryResponse | JSONResponse:
     try:
-        result = await retry_workspace_row(session, workspace_id)
+        result = await retry_workspace_row(
+            session,
+            workspace_id,
+            provider_readiness_override=provider_readiness_override,
+            provider_readiness_override_reason=provider_readiness_override_reason,
+        )
     except WorkspaceRetryError as exc:
         return _retry_error_response(exc)
 
@@ -405,6 +435,7 @@ def _accepted(
     created_at: datetime,
     *,
     warnings: list[WorkspaceWarningResponse] | None = None,
+    provider_readiness_preflight: dict[str, object] | None = None,
 ) -> WorkspaceAcceptedResponse:
     return WorkspaceAcceptedResponse(
         workspace_id=ws_id,
@@ -414,6 +445,7 @@ def _accepted(
         events_url=f"/v1/workspaces/{ws_id}/events",
         accepted_at=created_at,
         warnings=list(warnings or []),
+        provider_readiness_preflight=provider_readiness_preflight,
     )
 
 
@@ -469,6 +501,8 @@ def _payloads_match_v2(existing: Workspace, payload: WorkspaceCreateV2Request) -
             or _resolved_profile_requested_tier(existing) == payload.validation.requested_tier
         )
         and list(existing.test_commands) == list(payload.validation.commands)
+        and _stored_task_provider_readiness_override(existing)
+        == _requested_provider_readiness_override(payload)
     )
 
 
@@ -518,3 +552,28 @@ def _stored_task_provider_recovery_policy(
 def _stored_task_agent_model(existing: Workspace) -> str | None:
     model = existing.task_policy.get("agent_model")
     return model if isinstance(model, str) and model else None
+
+
+def _requested_provider_readiness_override(
+    payload: WorkspaceCreateV2Request,
+) -> tuple[bool, str | None]:
+    return (
+        payload.preflight.provider_readiness_override,
+        payload.preflight.provider_readiness_override_reason,
+    )
+
+
+def _stored_task_provider_readiness_override(
+    existing: Workspace,
+) -> tuple[bool, str | None]:
+    preflight = workspace_provider_readiness_preflight(existing)
+    if preflight is None:
+        return (False, None)
+    reason = preflight.get("override_reason")
+    override_requested = preflight.get("override_requested")
+    return (
+        override_requested
+        if isinstance(override_requested, bool)
+        else preflight.get("override_used") is True,
+        reason if isinstance(reason, str) else None,
+    )

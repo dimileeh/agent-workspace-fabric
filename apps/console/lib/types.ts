@@ -113,6 +113,38 @@ export interface WorkspaceCoordinationWarning {
   overlaps_truncated: boolean;
 }
 
+export interface ProviderReadinessCredentialSource {
+  type: string | null;
+  signal: string | null;
+  credential_scope: string | null;
+  isolation: string | null;
+}
+
+export interface ProviderReadinessPreflight {
+  provider: string;
+  agent: string;
+  model: string | null;
+  model_source: string | null;
+  readiness_status: string;
+  auth_status: string;
+  auth_source: string;
+  credential_scope: string | null;
+  isolation: string | null;
+  probe_status: string;
+  reason_code: string;
+  message: string;
+  override_required: boolean;
+  override_requested: boolean;
+  override_used: boolean;
+  override_reason: string | null;
+  blocks_launch: boolean;
+  checked_at: string;
+  credential_sources: ProviderReadinessCredentialSource[];
+  warnings?: Record<string, unknown>[];
+  probe_detail?: string | null;
+  source_workspace_id?: string | null;
+}
+
 export type ApiEnvelope<T> =
   | { ok: true; data: T }
   | { ok: false; status: number; message: string; errorCode?: string; detail?: unknown };
@@ -146,6 +178,7 @@ export interface WorkspaceOverview {
   llm_usage: LlmUsageSummary;
   recovery?: WorkspaceRecoverySummary | null;
   coordination_warnings: WorkspaceCoordinationWarning[];
+  provider_readiness_preflight?: ProviderReadinessPreflight | null;
   status: WorkspaceStatus;
   current_phase: string;
   active_operation: string | null;
@@ -417,6 +450,7 @@ export interface Workspace {
   llm_usage: LlmUsageSummary;
   recovery?: WorkspaceRecoverySummary | null;
   coordination_warnings: WorkspaceCoordinationWarning[];
+  provider_readiness_preflight: ProviderReadinessPreflight | null;
   validation_provenance?: ValidationFreshnessSummary | null;
   app_endpoints: WorkspaceAppEndpoint[];
   env_profile: string | null;
@@ -533,6 +567,7 @@ export interface WorkspaceRetryResponse {
   attempt_number: number;
   status_url: string;
   events_url: string;
+  provider_readiness_preflight?: ProviderReadinessPreflight | null;
 }
 
 export interface ListEnvelope<T> {
