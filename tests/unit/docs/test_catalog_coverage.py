@@ -37,7 +37,6 @@ ALLOWLIST = {
     "GITHUB_MERGE_FAILED": "Grandfathered",
     "GITHUB_TRANSIENT_ERROR": "Grandfathered",
     "IDEMPOTENCY_CONFLICT": "Grandfathered",
-    "INSUFFICIENT_DISK": "Grandfathered",
     "INVALID_ARTIFACT_PATH": "Grandfathered",
     "INVALID_CURSOR": "Grandfathered",
     "INVALID_PROFILE": "Grandfathered",
@@ -112,4 +111,10 @@ def test_catalog_coverage() -> None:
             missing_docs.append(code)
 
     assert not missing_docs, f"The following reason codes are missing from {CATALOG_PATH}: {', '.join(missing_docs)}"
+
+    documented_but_allowlisted = [
+        code for code in ALLOWLIST
+        if code in documented_codes and ALLOWLIST[code] == "Grandfathered"
+    ]
+    assert not documented_but_allowlisted, f"The following reason codes are fully documented but still in ALLOWLIST (Grandfathered): {', '.join(documented_but_allowlisted)}"
 
