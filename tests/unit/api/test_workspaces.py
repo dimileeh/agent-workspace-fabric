@@ -15,6 +15,9 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures('mock_docker_cli_probe')
+
 from fastapi import HTTPException
 from fastapi.responses import JSONResponse
 from httpx import ASGITransport, AsyncClient
@@ -740,6 +743,7 @@ class TestCreateWorkspaceV2MonitorPolicy:
         assert first.status_code == 202
         assert replay.status_code == 409
         assert replay.json()["error_code"] == "IDEMPOTENCY_CONFLICT"
+
 
 
 class TestWorkspaceCreateProviderReadinessPreflight:

@@ -7,6 +7,9 @@ from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures('mock_docker_cli_probe')
+
 from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import text

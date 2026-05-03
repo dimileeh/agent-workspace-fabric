@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures('mock_docker_cli_probe')
+
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncEngine
 

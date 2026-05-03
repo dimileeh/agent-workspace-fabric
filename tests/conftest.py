@@ -93,12 +93,9 @@ import pytest
 from collections import namedtuple
 import subprocess
 
-@pytest.fixture(autouse=True)
-def mock_docker_cli_probe(request, monkeypatch):
-    """Safely mock docker CLI probes unless the test file explicitly checks provider readiness."""
-    if "test_provider_readiness" in request.node.fspath.strpath:
-        return
-    
+@pytest.fixture
+def mock_docker_cli_probe(monkeypatch):
+    """Safely mock docker CLI probes."""
     original_run = subprocess.run
     def _mock_run(args, **kwargs):
         if len(args) > 0 and args[0] == "docker" and any("command -v" in str(a) for a in args):

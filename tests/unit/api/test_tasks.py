@@ -3,6 +3,9 @@
 from __future__ import annotations
 
 import pytest
+
+pytestmark = pytest.mark.usefixtures('mock_docker_cli_probe')
+
 from fastapi import HTTPException
 from httpx import AsyncClient
 from sqlalchemy import select
