@@ -111,7 +111,7 @@ async def collect_smoke_report(
 
     return {
         "status": status,
-        "project": str(project),
+        "project": str(effective_project),
         "mode": mode,
         "phases": phases,
         "console_links": console_links,
