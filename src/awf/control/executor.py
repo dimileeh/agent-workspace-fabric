@@ -128,6 +128,17 @@ from awf.runtime.validation_identity import (
     environment_identity_inputs,
     resolved_profile_digest,
 )
+from awf.service.conformance_salvage import (
+    CONFORMANCE_SALVAGE_APPLIED_EVENT_TYPE,
+    CONFORMANCE_SALVAGE_APPLIED_REASON,
+    CONFORMANCE_SALVAGE_CONFLICT_EVENT_TYPE,
+    CONFORMANCE_SALVAGE_CONFLICT_REASON,
+    SALVAGE_PATCH_APPLY_FAILED,
+    SALVAGE_PATCH_DIGEST_MISMATCH,
+    SALVAGE_PATCH_UNAVAILABLE,
+    build_conformance_salvage_conflict_prompt,
+    conformance_salvage_from_task_policy,
+)
 from awf.service.coordination import coordination_warnings_from_task_policy
 from awf.service.provider_recovery import create_provider_recovery_attempt_row
 
@@ -383,6 +394,12 @@ class ExecutorConfig:
     planning.max_iterations. Explicit profile values win."""
 
 
+@dataclass(frozen=True)
+class _ConformanceSalvageExecutionResult:
+    status: str
+    prompt_override: str | None = None
+
+
 class WorkspaceExecutor:
     """Drives a single workspace through run → validate → push → completed."""
 
@@ -513,6 +530,192 @@ class WorkspaceExecutor:
             evidence=evidence,
         )
 
+    async def _prepare_conformance_salvage_for_execution(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+        worktree_path: Path,
+    ) -> _ConformanceSalvageExecutionResult | None:
+        salvage = conformance_salvage_from_task_policy(workspace.task_policy)
+        if salvage is None:
+            return None
+
+        patch_path_value = salvage.get("patch_path")
+        expected_sha = salvage.get("patch_sha256")
+        if not isinstance(patch_path_value, str) or not patch_path_value.strip():
+            return await self._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_UNAVAILABLE,
+                message="conformance salvage patch path is missing",
+                salvage=salvage,
+            )
+        if not isinstance(expected_sha, str) or not expected_sha.strip():
+            return await self._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_DIGEST_MISMATCH,
+                message="conformance salvage patch digest is missing",
+                salvage=salvage,
+            )
+
+        patch_path = Path(patch_path_value)
+        if not patch_path.is_file():
+            return await self._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_UNAVAILABLE,
+                message=f"conformance salvage patch is unavailable: {patch_path}",
+                salvage=salvage,
+            )
+
+        patch_bytes = patch_path.read_bytes()
+        actual_sha = hashlib.sha256(patch_bytes).hexdigest()
+        if actual_sha != expected_sha:
+            return await self._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_DIGEST_MISMATCH,
+                message=(
+                    "conformance salvage patch digest mismatch "
+                    f"(expected={expected_sha}, actual={actual_sha})"
+                ),
+                salvage=salvage,
+            )
+
+        async def git(args: list[str]) -> CommandResult:
+            return await self._runner.run(
+                [
+                    "git",
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                    *args,
+                ]
+            )
+
+        check = await git(["apply", "--check", str(patch_path)])
+        if check.ok:
+            applied = await git(["apply", str(patch_path)])
+            if not applied.ok:
+                return await self._fail_conformance_salvage_execution(
+                    workspace_id=workspace_id,
+                    reason_code=SALVAGE_PATCH_APPLY_FAILED,
+                    message=(
+                        "conformance salvage patch passed preflight but failed to apply: "
+                        f"{applied.stderr or applied.stdout}"
+                    )[:2000],
+                    salvage=salvage,
+                )
+            await self._record_conformance_salvage_event(
+                workspace_id=workspace_id,
+                event_type=CONFORMANCE_SALVAGE_APPLIED_EVENT_TYPE,
+                reason_code=CONFORMANCE_SALVAGE_APPLIED_REASON,
+                payload={
+                    "conformance_salvage": salvage,
+                    "patch_sha256": actual_sha,
+                    "implementation_paths": salvage.get("implementation_paths", []),
+                },
+            )
+            return _ConformanceSalvageExecutionResult(status="applied")
+
+        agent_patch_path = self._materialize_salvage_patch_for_agent(
+            worktree_path=worktree_path,
+            patch_path=patch_path,
+            patch_bytes=patch_bytes,
+        )
+        apply_error = (check.stderr or check.stdout or "git apply --check failed").strip()
+        await self._record_conformance_salvage_event(
+            workspace_id=workspace_id,
+            event_type=CONFORMANCE_SALVAGE_CONFLICT_EVENT_TYPE,
+            reason_code=CONFORMANCE_SALVAGE_CONFLICT_REASON,
+            payload={
+                "conformance_salvage": salvage,
+                "agent_patch_path": agent_patch_path,
+                "apply_error": apply_error[:2000],
+            },
+        )
+        return _ConformanceSalvageExecutionResult(
+            status="conflict",
+            prompt_override=build_conformance_salvage_conflict_prompt(
+                task_prompt=workspace.task_prompt,
+                salvage=salvage,
+                agent_patch_path=agent_patch_path,
+                apply_error=apply_error,
+            ),
+        )
+
+    async def _fail_conformance_salvage_execution(
+        self,
+        *,
+        workspace_id: str,
+        reason_code: str,
+        message: str,
+        salvage: Mapping[str, Any],
+    ) -> _ConformanceSalvageExecutionResult:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"{reason_code}: {message}"[:2000],
+            reason_code=reason_code,
+            details={
+                "reason_code": reason_code,
+                "conformance_salvage": dict(salvage),
+            },
+        )
+        return _ConformanceSalvageExecutionResult(status="failed")
+
+    async def _record_conformance_salvage_event(
+        self,
+        *,
+        workspace_id: str,
+        event_type: str,
+        reason_code: str,
+        payload: dict[str, Any],
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:  # pragma: no cover - destroyed mid-flight
+                return
+            await repo.add_event(
+                workspace,
+                event_type=event_type,
+                reason_code=reason_code,
+                payload=payload,
+            )
+            await session.commit()
+
+    def _materialize_salvage_patch_for_agent(
+        self,
+        *,
+        worktree_path: Path,
+        patch_path: Path,
+        patch_bytes: bytes,
+    ) -> str:
+        relative_path = Path(".awf") / "salvage" / patch_path.name
+        agent_patch_path = worktree_path / relative_path
+        agent_patch_path.parent.mkdir(parents=True, exist_ok=True)
+        agent_patch_path.write_bytes(patch_bytes)
+        self._exclude_agent_salvage_artifacts(worktree_path)
+        return relative_path.as_posix()
+
+    def _exclude_agent_salvage_artifacts(self, worktree_path: Path) -> None:
+        git_dir_file = worktree_path / ".git"
+        exclude_path = worktree_path / ".git" / "info" / "exclude"
+        if git_dir_file.is_file():
+            content = git_dir_file.read_text(encoding="utf-8", errors="replace").strip()
+            prefix = "gitdir:"
+            if content.startswith(prefix):
+                git_dir = Path(content[len(prefix) :].strip())
+                if not git_dir.is_absolute():
+                    git_dir = (worktree_path / git_dir).resolve()
+                exclude_path = git_dir / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        pattern = "/.awf/salvage/"
+        if pattern not in existing.splitlines():
+            suffix = "" if existing.endswith("\n") or not existing else "\n"
+            exclude_path.write_text(f"{existing}{suffix}{pattern}\n", encoding="utf-8")
+
     async def execute(
         self,
         workspace_id: str,
@@ -562,6 +765,17 @@ class WorkspaceExecutor:
             if guard_result.blocked:
                 return
             recovery = guard_result.recovery
+        if recovery is None:
+            salvage_result = await self._prepare_conformance_salvage_for_execution(
+                workspace_id=workspace_id,
+                workspace=ws,
+                worktree_path=worktree_path,
+            )
+            if salvage_result is not None:
+                if salvage_result.status == "failed":
+                    return
+                if salvage_result.prompt_override is not None:
+                    ws.task_prompt = salvage_result.prompt_override
         rebase_recovery_result: _RebaseRecoveryResult | None = None
         baseline_coverage: ValidationCoverageResult | None = None
         try:

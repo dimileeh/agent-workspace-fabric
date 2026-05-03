@@ -15,7 +15,9 @@ file targets specific error branches that need dedicated fixtures:
 
 from __future__ import annotations
 
+import hashlib
 import shutil
+import subprocess
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -29,7 +31,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import awf.control.executor as executor_module
 from awf.adapters import registry as _registry  # noqa: F401 — populate registry
-from awf.common.commands import FakeCommandRunner
+from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor, _call_pr_monitor_factory
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
@@ -128,6 +130,9 @@ class _RecordingValidation:
     ) -> ValidationResult:
         self.calls.append(phase_names)
         return ValidationResult()
+
+    async def run_profile_coverage(self, **_kwargs: Any) -> None:
+        return None
 
 
 class _ExplodingValidation:
@@ -1632,6 +1637,457 @@ class TestValidationInfrastructureError:
 
 
 class TestPullRequestUnexpectedError:
+    @pytest.mark.unit
+    def test_salvage_patch_exclusion_supports_linked_worktree_gitdir(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+        relative_worktree = tmp_path / "relative-worktree"
+        relative_git_dir = tmp_path / "relative-gitdir"
+        relative_worktree.mkdir()
+        (relative_git_dir / "info").mkdir(parents=True)
+        (relative_worktree / ".git").write_text("gitdir: ../relative-gitdir\n", encoding="utf-8")
+
+        executor._exclude_agent_salvage_artifacts(relative_worktree)
+        executor._exclude_agent_salvage_artifacts(relative_worktree)
+
+        relative_exclude = relative_git_dir / "info" / "exclude"
+        assert relative_exclude.read_text(encoding="utf-8").splitlines() == ["/.awf/salvage/"]
+
+        absolute_worktree = tmp_path / "absolute-worktree"
+        absolute_git_dir = tmp_path / "absolute-gitdir"
+        absolute_worktree.mkdir()
+        (absolute_git_dir / "info").mkdir(parents=True)
+        (absolute_worktree / ".git").write_text(
+            f"gitdir: {absolute_git_dir}\n",
+            encoding="utf-8",
+        )
+
+        executor._exclude_agent_salvage_artifacts(absolute_worktree)
+
+        absolute_exclude = absolute_git_dir / "info" / "exclude"
+        assert absolute_exclude.read_text(encoding="utf-8").splitlines() == ["/.awf/salvage/"]
+
+    @pytest.mark.unit
+    async def test_execute_stops_when_conformance_salvage_cannot_be_prepared(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        validation = _RecordingValidation()
+        ws_id = await _seed_ready(
+            factory,
+            task_policy={"conformance_salvage": {"source_workspace_id": "ws_source"}},
+        )
+        executor = _make_executor(fake, factory, tmp_path, validation=validation)
+
+        await executor.execute(ws_id)
+
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == "infrastructure_failure"
+        assert workspace.failure_message is not None
+        assert "SALVAGE_PATCH_UNAVAILABLE" in workspace.failure_message
+        assert validation.calls == []
+
+    @pytest.mark.unit
+    async def test_execute_passes_salvage_conflict_prompt_to_agent(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        patch_path = tmp_path / "conflict-execute.patch"
+        patch_path.write_text(
+            "diff --git a/src/app.py b/src/app.py\n"
+            "index 51f15c8..5f2b6d7 100644\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n",
+            encoding="utf-8",
+        )
+        digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+        ws_id = await _seed_ready(
+            factory,
+            task_prompt="finish original task",
+            task_policy={
+                "conformance_salvage": {
+                    "source_workspace_id": "ws_source",
+                    "patch_path": str(patch_path),
+                    "patch_sha256": digest,
+                    "implementation_paths": ["src/app.py"],
+                    "remaining_gaps": ["add regression test"],
+                }
+            },
+        )
+        worktree_path = _test_worktree_path(factory, ws_id)
+        subprocess.run(["git", "init", "-q"], cwd=worktree_path, check=True)
+        (worktree_path / "src").mkdir()
+        (worktree_path / "src/app.py").write_text("current\n", encoding="utf-8")
+        captured: dict[str, str] = {}
+
+        class _CaptureAdapter:
+            def get_provider(self, model: str | None) -> str:
+                del model
+                return "fake"
+
+            @property
+            def name(self) -> AgentRuntime:
+                return AgentRuntime.codex
+
+            async def run(
+                self,
+                *,
+                compose_project: str,
+                compose_file: Path,
+                prompt: str,
+                model: str | None = None,
+                workspace_id: str | None = None,
+            ) -> None:
+                del compose_project, compose_file, model, workspace_id
+                captured["prompt"] = prompt
+                raise RuntimeError("stop after prompt capture")
+
+        def _get_adapter(_runtime: AgentRuntime, **_kwargs: Any) -> _CaptureAdapter:
+            return _CaptureAdapter()
+
+        monkeypatch.setattr(executor_module, "get_adapter", _get_adapter)
+        executor = _make_executor(
+            AsyncioSubprocessRunner(),
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+
+        await executor.execute(ws_id)
+
+        prompt = captured["prompt"]
+        assert "Automatic AWF salvage conflict" in prompt
+        assert ".awf/salvage/conflict-execute.patch" in prompt
+        assert "add regression test" in prompt
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+            events = await WorkspaceEventRepository(session).list(workspace_id=ws_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert any(
+            event.event_type == "workspace.conformance_salvage_conflict"
+            and event.payload["agent_patch_path"] == ".awf/salvage/conflict-execute.patch"
+            for event in events
+        )
+
+    @pytest.mark.unit
+    async def test_clean_conformance_salvage_patch_is_applied_before_agent(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        patch_path = tmp_path / "source.patch"
+        patch_path.write_text(
+            "diff --git a/src/restored.py b/src/restored.py\n"
+            "new file mode 100644\n"
+            "index 0000000..7f5af8e\n"
+            "--- /dev/null\n"
+            "+++ b/src/restored.py\n"
+            "@@ -0,0 +1 @@\n"
+            "+VALUE = 'restored'\n",
+            encoding="utf-8",
+        )
+        digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+        ws_id = await _seed_ready(
+            factory,
+            task_policy={
+                "conformance_salvage": {
+                    "source_workspace_id": "ws_source",
+                    "patch_path": str(patch_path),
+                    "patch_sha256": digest,
+                    "implementation_paths": ["src/restored.py"],
+                    "remaining_gaps": ["finish tests"],
+                }
+            },
+        )
+        worktree_path = _test_worktree_path(factory, ws_id)
+        subprocess.run(["git", "init", "-q"], cwd=worktree_path, check=True)
+        executor = _make_executor(
+            AsyncioSubprocessRunner(),
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                ws_id,
+                from_status=WorkspaceStatus.ready,
+                to=WorkspaceStatus.running,
+                reason_code="TEST",
+            )
+            assert ws is not None
+            await session.commit()
+
+        result = await executor._prepare_conformance_salvage_for_execution(
+            workspace_id=ws_id,
+            workspace=ws,
+            worktree_path=worktree_path,
+        )
+
+        assert result is not None
+        assert result.status == "applied"
+        assert result.prompt_override is None
+        assert (worktree_path / "src/restored.py").read_text(encoding="utf-8") == (
+            "VALUE = 'restored'\n"
+        )
+        async with factory() as session:
+            events = await WorkspaceEventRepository(session).list(workspace_id=ws_id)
+        assert any(
+            event.event_type == "workspace.conformance_salvage_applied"
+            and event.reason_code == "CONFORMANCE_SALVAGE_APPLIED"
+            for event in events
+        )
+
+    @pytest.mark.unit
+    async def test_conflicting_conformance_salvage_launches_resolver_prompt(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        patch_path = tmp_path / "conflict.patch"
+        patch_path.write_text(
+            "diff --git a/src/app.py b/src/app.py\n"
+            "index 51f15c8..5f2b6d7 100644\n"
+            "--- a/src/app.py\n"
+            "+++ b/src/app.py\n"
+            "@@ -1 +1 @@\n"
+            "-old\n"
+            "+new\n",
+            encoding="utf-8",
+        )
+        digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+        ws_id = await _seed_ready(
+            factory,
+            task_prompt="finish original task",
+            task_policy={
+                "conformance_salvage": {
+                    "source_workspace_id": "ws_source",
+                    "patch_path": str(patch_path),
+                    "patch_sha256": digest,
+                    "implementation_paths": ["src/app.py"],
+                    "remaining_gaps": ["add regression test"],
+                    "plan_path": "docs/awf-plans/ws_old.md",
+                }
+            },
+        )
+        worktree_path = _test_worktree_path(factory, ws_id)
+        subprocess.run(["git", "init", "-q"], cwd=worktree_path, check=True)
+        (worktree_path / "src").mkdir()
+        (worktree_path / "src/app.py").write_text("current\n", encoding="utf-8")
+        executor = _make_executor(
+            AsyncioSubprocessRunner(),
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                ws_id,
+                from_status=WorkspaceStatus.ready,
+                to=WorkspaceStatus.running,
+                reason_code="TEST",
+            )
+            assert ws is not None
+            await session.commit()
+
+        result = await executor._prepare_conformance_salvage_for_execution(
+            workspace_id=ws_id,
+            workspace=ws,
+            worktree_path=worktree_path,
+        )
+
+        assert result is not None
+        assert result.status == "conflict"
+        assert result.prompt_override is not None
+        assert "could not be applied cleanly" in result.prompt_override
+        assert ".awf/salvage/" in result.prompt_override
+        assert "add regression test" in result.prompt_override
+        assert (worktree_path / "src/app.py").read_text(encoding="utf-8") == "current\n"
+        assert (worktree_path / ".awf/salvage/conflict.patch").exists()
+        async with factory() as session:
+            events = await WorkspaceEventRepository(session).list(workspace_id=ws_id)
+        assert any(
+            event.event_type == "workspace.conformance_salvage_conflict"
+            and event.reason_code == "CONFORMANCE_SALVAGE_CONFLICT"
+            for event in events
+        )
+
+    @pytest.mark.unit
+    async def test_conformance_salvage_digest_mismatch_marks_failed(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        patch_path = tmp_path / "source.patch"
+        patch_path.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        ws_id = await _seed_ready(
+            factory,
+            task_policy={
+                "conformance_salvage": {
+                    "source_workspace_id": "ws_source",
+                    "patch_path": str(patch_path),
+                    "patch_sha256": "0" * 64,
+                    "implementation_paths": ["x"],
+                }
+            },
+        )
+        worktree_path = _test_worktree_path(factory, ws_id)
+        subprocess.run(["git", "init", "-q"], cwd=worktree_path, check=True)
+        executor = _make_executor(
+            AsyncioSubprocessRunner(),
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                ws_id,
+                from_status=WorkspaceStatus.ready,
+                to=WorkspaceStatus.running,
+                reason_code="TEST",
+            )
+            assert ws is not None
+            await session.commit()
+
+        result = await executor._prepare_conformance_salvage_for_execution(
+            workspace_id=ws_id,
+            workspace=ws,
+            worktree_path=worktree_path,
+        )
+
+        assert result is not None
+        assert result.status == "failed"
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+        assert workspace is not None
+        assert workspace.status == WorkspaceStatus.failed.value
+        assert workspace.failure_reason == "infrastructure_failure"
+        assert workspace.failure_message is not None
+        assert "SALVAGE_PATCH_DIGEST_MISMATCH" in workspace.failure_message
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        ("salvage", "expected_reason"),
+        [
+            ({}, "SALVAGE_PATCH_UNAVAILABLE"),
+            ({"patch_path": "missing.patch"}, "SALVAGE_PATCH_DIGEST_MISMATCH"),
+            (
+                {"patch_path": "/tmp/awf-missing-salvage.patch", "patch_sha256": "0" * 64},
+                "SALVAGE_PATCH_UNAVAILABLE",
+            ),
+        ],
+    )
+    async def test_conformance_salvage_missing_patch_metadata_marks_failed(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+        salvage: dict[str, str],
+        expected_reason: str,
+    ) -> None:
+        ws_id = await _seed_ready(
+            factory,
+            task_policy={"conformance_salvage": {"source_workspace_id": "ws_source", **salvage}},
+        )
+        worktree_path = _test_worktree_path(factory, ws_id)
+        subprocess.run(["git", "init", "-q"], cwd=worktree_path, check=True)
+        executor = _make_executor(
+            AsyncioSubprocessRunner(),
+            factory,
+            tmp_path,
+            validation=_RecordingValidation(),
+        )
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                ws_id,
+                from_status=WorkspaceStatus.ready,
+                to=WorkspaceStatus.running,
+                reason_code="TEST",
+            )
+            assert ws is not None
+            await session.commit()
+
+        result = await executor._prepare_conformance_salvage_for_execution(
+            workspace_id=ws_id,
+            workspace=ws,
+            worktree_path=worktree_path,
+        )
+
+        assert result is not None
+        assert result.status == "failed"
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+        assert workspace is not None
+        assert workspace.failure_message is not None
+        assert expected_reason in workspace.failure_message
+
+    @pytest.mark.unit
+    async def test_conformance_salvage_apply_failure_marks_failed(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        patch_path = tmp_path / "source.patch"
+        patch_path.write_text("diff --git a/x b/x\n", encoding="utf-8")
+        digest = hashlib.sha256(patch_path.read_bytes()).hexdigest()
+        ws_id = await _seed_ready(
+            factory,
+            task_policy={
+                "conformance_salvage": {
+                    "source_workspace_id": "ws_source",
+                    "patch_path": str(patch_path),
+                    "patch_sha256": digest,
+                    "implementation_paths": ["x"],
+                }
+            },
+        )
+        worktree_path = _test_worktree_path(factory, ws_id)
+        fake.queue_result(returncode=0)
+        fake.queue_result(returncode=1, stderr="apply exploded")
+        executor = _make_executor(fake, factory, tmp_path, validation=_RecordingValidation())
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            ws = await repo.transition_if_current(
+                ws_id,
+                from_status=WorkspaceStatus.ready,
+                to=WorkspaceStatus.running,
+                reason_code="TEST",
+            )
+            assert ws is not None
+            await session.commit()
+
+        result = await executor._prepare_conformance_salvage_for_execution(
+            workspace_id=ws_id,
+            workspace=ws,
+            worktree_path=worktree_path,
+        )
+
+        assert result is not None
+        assert result.status == "failed"
+        async with factory() as session:
+            workspace = await WorkspaceRepository(session).get(ws_id)
+        assert workspace is not None
+        assert workspace.failure_message is not None
+        assert "SALVAGE_PATCH_APPLY_FAILED" in workspace.failure_message
+
     @pytest.mark.unit
     async def test_plan_only_output_fails_before_validation_and_pr_creation(
         self,

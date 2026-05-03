@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import subprocess
 from collections.abc import AsyncIterator
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -26,7 +29,7 @@ from awf.runtime.planning import (
 from awf.service.workspaces import (
     WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryNotFoundError,
-    WorkspaceRetryRequiresSalvageError,
+    WorkspaceRetrySalvageUnavailableError,
     WorkspaceService,
     create_workspace_v2_row,
     retry_workspace_row,
@@ -131,6 +134,57 @@ def _ollama_ok_requiring_worker_thread(
     else:
         raise AssertionError("provider preflight probe ran on the event-loop thread")
     return _ollama_ok(url, timeout=timeout)
+
+
+def _git(args: list[str], cwd: Path) -> str:
+    result = subprocess.run(
+        ["git", *args],
+        cwd=cwd,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
+def _settings_with_work_dir(tmp_path: Path) -> Settings:
+    return Settings(
+        _env_file=None,
+        work_dir=str(tmp_path / "awf-state"),
+        host_home=str(tmp_path / "home"),
+        docker_host="",
+    )
+
+
+def _create_conformance_source_worktree(
+    settings: Settings,
+    workspace_id: str,
+    *,
+    implementation_diff: bool = True,
+) -> str:
+    worktree = Path(settings.work_dir) / "git" / "worktrees" / workspace_id
+    worktree.mkdir(parents=True)
+    _git(["init", "-q"], worktree)
+    _git(["config", "user.name", "AWF Test"], worktree)
+    _git(["config", "user.email", "awf@test.local"], worktree)
+    (worktree / "src/awf").mkdir(parents=True)
+    (worktree / "src/awf/retry.py").write_text("def retry():\n    return 'old'\n")
+    _git(["add", "."], worktree)
+    _git(["commit", "-q", "-m", "base"], worktree)
+    base_commit = _git(["rev-parse", "HEAD"], worktree)
+
+    (worktree / "docs/awf-plans").mkdir(parents=True)
+    (worktree / "docs/awf-plans/ws_old.md").write_text("# Plan\n")
+    (worktree / "docs/awf-plans/ws_old.conformance.json").write_text(
+        '{"status":"needs_iteration"}\n'
+    )
+    if implementation_diff:
+        (worktree / "src/awf/retry.py").write_text("def retry():\n    return 'new'\n")
+        (worktree / "tests/unit").mkdir(parents=True)
+        (worktree / "tests/unit/test_retry.py").write_text(
+            "def test_retry():\n    assert True\n"
+        )
+    return base_commit
 
 
 async def _retry_with_preflight_override(
@@ -389,6 +443,8 @@ async def _mark_failed(
 async def _mark_conformance_failed(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
+    *,
+    base_commit: str | None = None,
 ) -> None:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -400,6 +456,8 @@ async def _mark_conformance_failed(
             "plan conformance was not satisfied after 0 iteration(s): add tests"
         )
         workspace.branch_name = "awf/ws_old"
+        workspace.remote_push_branch = "awf/ws_old"
+        workspace.base_commit = base_commit
         await repo.transition(
             workspace,
             to=WorkspaceStatus.failed,
@@ -431,6 +489,8 @@ async def _mark_conformance_failed(
 async def _mark_conformance_failed_without_evidence(
     factory: async_sessionmaker[AsyncSession],
     workspace_id: str,
+    *,
+    base_commit: str | None = None,
 ) -> None:
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -439,6 +499,9 @@ async def _mark_conformance_failed_without_evidence(
         await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
         workspace.failure_reason = FailureReason.agent_failure.value
         workspace.failure_message = "plan conformance was not satisfied"
+        workspace.branch_name = "awf/ws_old"
+        workspace.remote_push_branch = "awf/ws_old"
+        workspace.base_commit = base_commit
         await repo.transition(
             workspace,
             to=WorkspaceStatus.failed,
@@ -652,22 +715,33 @@ async def test_retry_recomputes_resource_reservation_from_current_defaults(
 
 
 @pytest.mark.unit
-async def test_retry_conformance_unsatisfied_requires_salvage(
+async def test_retry_conformance_unsatisfied_auto_salvages_implementation_diff(
     factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
 ) -> None:
+    settings = _settings_with_work_dir(tmp_path)
     service = WorkspaceService(factory)
     first = await service.create_v2(_request())
-    await _mark_conformance_failed(factory, first.id)
-
-    with pytest.raises(WorkspaceRetryRequiresSalvageError) as exc_info:
-        await service.retry_workspace(first.id)
+    base_commit = _create_conformance_source_worktree(settings, first.id)
+    await _mark_conformance_failed(factory, first.id, base_commit=base_commit)
 
     async with factory() as session:
-        workspaces = list((await session.execute(select(Workspace))).scalars())
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry service test fixture",
+            settings=settings,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried = await WorkspaceRepository(session).get(retry.new_workspace.id)
+        assert retried is not None
         operations = list(
             (
                 await session.execute(
-                    select(Operation).where(Operation.type == "retry")
+                    select(Operation).where(Operation.workspace_id == retried.id)
                 )
             ).scalars()
         )
@@ -681,51 +755,103 @@ async def test_retry_conformance_unsatisfied_requires_salvage(
             ).scalars()
         )
 
-    assert exc_info.value.error_code == "WORKSPACE_RETRY_REQUIRES_SALVAGE"
-    assert exc_info.value.detail == {
-        "source_workspace_id": first.id,
-        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
-        "gaps": ["Add regression test", "Wire retry endpoint"],
-        "plan_path": "docs/awf-plans/ws_old.md",
-        "report_path": "docs/awf-plans/ws_old.conformance.json",
-        "recovery_guidance": (
-            "Retry is blocked because AWF cannot yet carry the implementation diff "
-            "from the failed conformance attempt into a fresh workspace. Inspect the "
-            "source worktree or relaunch the original task explicitly."
-        ),
-    }
-    assert len(workspaces) == 1
-    assert operations == []
-    assert retry_created == []
+    salvage = retried.task_policy["conformance_salvage"]
+    patch_path = Path(salvage["patch_path"])
+    assert salvage["source_workspace_id"] == first.id
+    assert salvage["source_base_commit"] == base_commit
+    assert salvage["implementation_paths"] == [
+        "src/awf/retry.py",
+        "tests/unit/test_retry.py",
+    ]
+    assert salvage["plan_artifact_paths"] == [
+        "docs/awf-plans/ws_old.conformance.json",
+        "docs/awf-plans/ws_old.md",
+    ]
+    assert patch_path.exists()
+    assert hashlib.sha256(patch_path.read_bytes()).hexdigest() == salvage["patch_sha256"]
+    assert "docs/awf-plans" not in patch_path.read_text()
+    assert "AWF automatically captured the prior implementation diff" in retried.task_prompt
+    assert "Add regression test" in retried.task_prompt
+    assert operations[0].payload["conformance_salvage"] == salvage
+    assert operations[0].result["conformance_salvage"] == salvage
+    assert any(
+        event.event_type == "workspace.retry_created"
+        and event.payload["conformance_salvage"] == salvage
+        for event in retry_created
+    )
 
 
 @pytest.mark.unit
-async def test_retry_conformance_unsatisfied_without_evidence_requires_salvage(
+async def test_retry_conformance_unsatisfied_without_evidence_still_salvages_diff(
     factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
 ) -> None:
+    settings = _settings_with_work_dir(tmp_path)
     service = WorkspaceService(factory)
     first = await service.create_v2(_request())
-    await _mark_conformance_failed_without_evidence(factory, first.id)
+    base_commit = _create_conformance_source_worktree(settings, first.id)
+    await _mark_conformance_failed_without_evidence(
+        factory,
+        first.id,
+        base_commit=base_commit,
+    )
 
-    with pytest.raises(WorkspaceRetryRequiresSalvageError) as exc_info:
-        await service.retry_workspace(first.id)
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry service test fixture",
+            settings=settings,
+        )
+        await session.commit()
+
+    async with factory() as session:
+        retried = await WorkspaceRepository(session).get(retry.new_workspace.id)
+
+    assert retried is not None
+    salvage = retried.task_policy["conformance_salvage"]
+    assert salvage["source_workspace_id"] == first.id
+    assert salvage["remaining_gaps"] == []
+    assert salvage["conformance_evidence_ref"] is None
+
+
+@pytest.mark.unit
+async def test_retry_conformance_plan_only_diff_fails_without_retry_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    settings = _settings_with_work_dir(tmp_path)
+    service = WorkspaceService(factory)
+    first = await service.create_v2(_request())
+    base_commit = _create_conformance_source_worktree(
+        settings,
+        first.id,
+        implementation_diff=False,
+    )
+    await _mark_conformance_failed(factory, first.id, base_commit=base_commit)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceRetrySalvageUnavailableError) as exc_info:
+            await retry_workspace_row(
+                session,
+                first.id,
+                provider_readiness_override=True,
+                provider_readiness_override_reason="retry service test fixture",
+                settings=settings,
+            )
 
     async with factory() as session:
         workspaces = list((await session.execute(select(Workspace))).scalars())
         operations = list((await session.execute(select(Operation))).scalars())
 
-    assert exc_info.value.detail == {
-        "source_workspace_id": first.id,
-        "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
-        "gaps": [],
-        "plan_path": None,
-        "report_path": None,
-        "recovery_guidance": (
-            "Retry is blocked because AWF cannot yet carry the implementation diff "
-            "from the failed conformance attempt into a fresh workspace. Inspect the "
-            "source worktree or relaunch the original task explicitly."
-        ),
-    }
+    assert exc_info.value.error_code == "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE"
+    assert exc_info.value.detail["reason_code"] == "SALVAGE_NO_IMPLEMENTATION_DIFF"
+    assert exc_info.value.detail["source_workspace_id"] == first.id
+    assert exc_info.value.detail["plan_artifact_paths"] == [
+        "docs/awf-plans/ws_old.conformance.json",
+        "docs/awf-plans/ws_old.md",
+    ]
     assert len(workspaces) == 1
     assert operations == []
 

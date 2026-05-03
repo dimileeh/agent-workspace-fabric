@@ -63,6 +63,12 @@ from awf.runtime.planning import (
     build_planning_scope_retry_prompt,
 )
 from awf.service.config import resolve_service_settings
+from awf.service.conformance_salvage import (
+    CONFORMANCE_SALVAGE_POLICY_KEY,
+    ConformanceSalvageError,
+    build_conformance_salvage_retry_prompt,
+    capture_conformance_salvage,
+)
 from awf.service.controls import (
     CleanerFactory,
     ProjectStopper,
@@ -215,26 +221,35 @@ class WorkspaceRetryExhaustedError(WorkspaceRetryError):
         )
 
 
-class WorkspaceRetryRequiresSalvageError(WorkspaceRetryError):
-    error_code = "WORKSPACE_RETRY_REQUIRES_SALVAGE"
+class WorkspaceRetrySalvageUnavailableError(WorkspaceRetryError):
+    error_code = "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE"
 
-    def __init__(self, workspace: Workspace, evidence: Mapping[str, Any] | None) -> None:
+    def __init__(
+        self,
+        workspace: Workspace,
+        *,
+        reason_code: str,
+        message: str,
+        evidence: Mapping[str, Any] | None,
+        detail: Mapping[str, Any] | None = None,
+    ) -> None:
         evidence = evidence or {}
-        super().__init__(
-            "Conformance retry requires explicit implementation diff salvage.",
-            detail={
-                "source_workspace_id": workspace.id,
-                "reason_code": PLAN_CONFORMANCE_UNSATISFIED,
-                "gaps": _retry_evidence_gaps(evidence),
-                "plan_path": _optional_retry_evidence_str(evidence.get("plan_path")),
-                "report_path": _optional_retry_evidence_str(evidence.get("report_path")),
-                "recovery_guidance": (
-                    "Retry is blocked because AWF cannot yet carry the implementation diff "
-                    "from the failed conformance attempt into a fresh workspace. Inspect the "
-                    "source worktree or relaunch the original task explicitly."
-                ),
-            },
-        )
+        payload: dict[str, Any] = {
+            "source_workspace_id": workspace.id,
+            "source_reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+            "reason_code": reason_code,
+            "gaps": _retry_evidence_gaps(evidence),
+            "plan_path": _optional_retry_evidence_str(evidence.get("plan_path")),
+            "report_path": _optional_retry_evidence_str(evidence.get("report_path")),
+            "recovery_guidance": (
+                "AWF could not automatically preserve the failed conformance "
+                "attempt's implementation diff. Inspect the source worktree or "
+                "relaunch the original task explicitly."
+            ),
+        }
+        if detail:
+            payload.update(dict(detail))
+        super().__init__(message, detail=payload)
 
 
 class WorkspaceProviderReadinessBlockedError(WorkspaceRetryError):
@@ -807,11 +822,12 @@ async def retry_workspace_row(
     conformance_context = (
         None if planning_scope_context is not None else _conformance_retry_context(source)
     )
-    if conformance_context is not None or _is_plan_conformance_unsatisfied(source):
-        raise WorkspaceRetryRequiresSalvageError(
-            source,
-            conformance_context.evidence if conformance_context is not None else None,
-        )
+    conformance_retry_requested = planning_scope_context is None and (
+        conformance_context is not None or _is_plan_conformance_unsatisfied(source)
+    )
+    conformance_evidence: Mapping[str, Any] = (
+        conformance_context.evidence if conformance_context is not None else {}
+    )
 
     if planning_scope_context is not None:
         retried_prompt = build_planning_scope_retry_prompt(
@@ -843,6 +859,39 @@ async def retry_workspace_row(
     )
     preflight = {**preflight, "source_workspace_id": source.id}
     _raise_if_provider_preflight_blocks(preflight)
+    conformance_salvage: dict[str, Any] | None = None
+    if conformance_retry_requested:
+        try:
+            salvage_capture = await asyncio.to_thread(
+                capture_conformance_salvage,
+                work_dir=resolved_settings.work_dir,
+                source_workspace_id=source.id,
+                source_base_commit=source.base_commit,
+                conformance_evidence=conformance_evidence,
+                conformance_evidence_ref=(
+                    conformance_context.evidence_ref
+                    if conformance_context is not None
+                    else None
+                ),
+                source_branch_name=source.branch_name,
+                source_remote_push_branch=source.remote_push_branch,
+                run_subprocess=run_subprocess,
+            )
+        except ConformanceSalvageError as exc:
+            raise WorkspaceRetrySalvageUnavailableError(
+                source,
+                reason_code=exc.reason_code,
+                message=str(exc),
+                evidence=conformance_evidence,
+                detail=exc.detail,
+            ) from exc
+        conformance_salvage = salvage_capture.as_policy()
+        retried_task_policy[CONFORMANCE_SALVAGE_POLICY_KEY] = conformance_salvage
+        retried_prompt = build_conformance_salvage_retry_prompt(
+            task_prompt=source.task_prompt,
+            evidence=conformance_evidence,
+            salvage=conformance_salvage,
+        )
     retried_task_policy = {
         **retried_task_policy,
         "provider_readiness_preflight": preflight,
@@ -945,6 +994,13 @@ async def retry_workspace_row(
     operation_payload: dict[str, Any] = {"source_workspace_id": source.id}
     if planning_scope_context is not None:
         operation_payload.update(_planning_scope_recovery_payload(planning_scope_context))
+    if conformance_salvage is not None:
+        operation_payload.update(
+            _conformance_salvage_recovery_payload(
+                conformance_context=conformance_context,
+                salvage=conformance_salvage,
+            )
+        )
     operation = await operation_repo.create(
         workspace_id=retried.id,
         operation_type=OperationType.retry,
@@ -959,6 +1015,13 @@ async def retry_workspace_row(
     }
     if planning_scope_context is not None:
         event_payload.update(_planning_scope_recovery_payload(planning_scope_context))
+    if conformance_salvage is not None:
+        event_payload.update(
+            _conformance_salvage_recovery_payload(
+                conformance_context=conformance_context,
+                salvage=conformance_salvage,
+            )
+        )
     await repo.add_event(
         source,
         event_type="workspace.retry_requested",
@@ -982,12 +1045,11 @@ async def retry_workspace_row(
             "status": retried.status,
         }
         | (
-            {
-                "source_reason_code": conformance_context.reason_code,
-                "conformance_evidence_ref": conformance_context.evidence_ref,
-                "remaining_gaps": conformance_context.evidence.get("gaps", []),
-            }
-            if conformance_context is not None
+            _conformance_salvage_recovery_payload(
+                conformance_context=conformance_context,
+                salvage=conformance_salvage,
+            )
+            if conformance_salvage is not None
             else {}
         )
         | (
@@ -1040,6 +1102,25 @@ def _planning_scope_recovery_payload(
         payload["salvage"] = context.salvage
     if context.fallback_model is not None:
         payload["fallback_model"] = context.fallback_model
+    return payload
+
+
+def _conformance_salvage_recovery_payload(
+    *,
+    conformance_context: _ConformanceRetryContext | None,
+    salvage: Mapping[str, Any],
+) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "source_reason_code": PLAN_CONFORMANCE_UNSATISFIED,
+        "conformance_salvage": dict(salvage),
+    }
+    remaining_gaps = _compact_string_list(salvage.get("remaining_gaps"))
+    if remaining_gaps:
+        payload["remaining_gaps"] = remaining_gaps
+    if conformance_context is not None:
+        payload["conformance_evidence_ref"] = conformance_context.evidence_ref
+    elif salvage.get("conformance_evidence_ref") is not None:
+        payload["conformance_evidence_ref"] = salvage.get("conformance_evidence_ref")
     return payload
 
 
