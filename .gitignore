@@ -75,3 +75,4 @@ workspaces/
 # keep migration files; ignore local db dumps only
 *.dump
 *.sql.bak
+query.json

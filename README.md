@@ -1,5 +1,7 @@
 # Aira Agent Workspace Fabric (AWF)
 
+*New to AWF? See the [Start Here Quickstart](docs/START_HERE.md) to bootstrap a local evaluation workspace in under 5 minutes.*
+
 **AWF is an industrial workspace fabric for AI coding agents.**
 
 It gives Codex, Claude Code, Gemini, and future coding agents a repeatable way
