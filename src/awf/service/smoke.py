@@ -189,7 +189,7 @@ def _phase_auth_readiness(
             "evidence": {"providers_ready": usable, "providers_total": total},
             "action": "No action required.",
         }
-    if usable > 0 or mocked_local:
+    if usable > 0:
         return {
             "name": "auth_readiness",
             "status": "warn",
