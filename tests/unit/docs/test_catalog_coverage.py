@@ -36,6 +36,7 @@ ALLOWLIST = {
     "GITHUB_ERROR": "Grandfathered",
     "GITHUB_MERGE_FAILED": "Grandfathered",
     "GITHUB_TRANSIENT_ERROR": "Grandfathered",
+    "GIT_PUSH_FAILED": "Grandfathered",
     "IDEMPOTENCY_CONFLICT": "Grandfathered",
     "INVALID_ARTIFACT_PATH": "Grandfathered",
     "INVALID_CURSOR": "Grandfathered",
@@ -47,6 +48,7 @@ ALLOWLIST = {
     "MONITOR_RECOVERY_NO_EXECUTOR": "Grandfathered",
     "MONITOR_RECOVERY_REBASE_FAILED": "Grandfathered",
     "NOT_FOUND": "Grandfathered",
+    "OPERATOR_REMONITOR": "Grandfathered",
     "PROVIDER_FALLBACK": "Grandfathered",
     "PROVIDER_OUTAGE": "Grandfathered",
     "PROVIDER_READINESS_PRECHECK_FAILED": "Grandfathered",
@@ -84,22 +86,41 @@ def test_catalog_coverage() -> None:
     for py_file in SRC_AWF_PATH.rglob("*.py"):
         try:
             tree = ast.parse(py_file.read_text())
+            
+            # Map file-level constants to their string values
+            file_constants: dict[str, str] = {}
             for node in ast.walk(tree):
-                # keyword arg: error_code="XYZ"
-                if isinstance(node, ast.keyword) and node.arg == "error_code" and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                    all_reason_codes.add(node.value.value)
+                if isinstance(node, ast.Assign) and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                    for target in node.targets:
+                        if isinstance(target, ast.Name):
+                            file_constants[target.id] = node.value.value
+
+            for node in ast.walk(tree):
+                # keyword arg: error_code="XYZ" or error_code=CONSTANT
+                if isinstance(node, ast.keyword) and node.arg == "error_code":
+                    if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                        all_reason_codes.add(node.value.value)
+                    elif isinstance(node.value, ast.Name) and node.value.id in file_constants:
+                        all_reason_codes.add(file_constants[node.value.id])
+                
                 # assignment: error_code = "XYZ" or self.error_code = "XYZ"
                 elif isinstance(node, ast.Assign):
                     for target in node.targets:
-                        if isinstance(target, ast.Name) and target.id == "error_code" and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                            all_reason_codes.add(node.value.value)
-                        elif isinstance(target, ast.Attribute) and target.attr == "error_code" and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
-                            all_reason_codes.add(node.value.value)
-                # dict key: {"error_code": "XYZ"}
+                        if (isinstance(target, ast.Name) and target.id == "error_code") or \
+                           (isinstance(target, ast.Attribute) and target.attr == "error_code"):
+                            if isinstance(node.value, ast.Constant) and isinstance(node.value.value, str):
+                                all_reason_codes.add(node.value.value)
+                            elif isinstance(node.value, ast.Name) and node.value.id in file_constants:
+                                all_reason_codes.add(file_constants[node.value.id])
+                
+                # dict key: {"error_code": "XYZ"} or {"error_code": CONSTANT}
                 elif isinstance(node, ast.Dict):
                     for key, val in zip(node.keys, node.values):
-                        if isinstance(key, ast.Constant) and key.value == "error_code" and isinstance(val, ast.Constant) and isinstance(val.value, str):
-                            all_reason_codes.add(val.value)
+                        if isinstance(key, ast.Constant) and key.value == "error_code":
+                            if isinstance(val, ast.Constant) and isinstance(val.value, str):
+                                all_reason_codes.add(val.value)
+                            elif isinstance(val, ast.Name) and val.id in file_constants:
+                                all_reason_codes.add(file_constants[val.id])
         except SyntaxError:
             pass
 
