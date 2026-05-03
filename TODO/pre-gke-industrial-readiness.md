@@ -75,7 +75,7 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_f59bc95ca0d24c4c8d9144ab` | _none_ | failed | Destroyed and replaced before implementation because the base branch baseline had stale PR-monitor active-recovery test expectations; fixed on `codex/awf-post-merge-fixes` in `20bb479`. |
+| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_b8f4de29ba874a3092f1b7f6` | _pending_ | running | Replaces destroyed red-baseline `ws_f59bc95ca0d24c4c8d9144ab`; implementation adds bounded read-tool contracts, empty-state parity, secret/artifact safety regressions, and parity-doc reconciliation. |
 
 ### Reschedule Required Slices
 
@@ -87,7 +87,6 @@ not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_b438a31ffd7d4433aa0cdcac`, `ws_f59bc95ca0d24c4c8d9144ab` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03 produced no PR or useful work. The first single-workspace retry `ws_f59bc95ca0d24c4c8d9144ab` was destroyed before implementation because the base branch baseline was red; relaunch from fixed base `20bb479`. |
 | P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_ea414c0722a74815bc474d13` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. This was incorrectly marked `superseded`; it still needs a fresh retry after the active wave drains. |
 | P1 Operator Console Completion | Live workspace activity signals | `ws_451cc5007fa845ad85a0f7b3` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. This was incorrectly marked `superseded`; it still needs a fresh retry after the active wave drains. |
 
@@ -537,7 +536,12 @@ coding agent in any project to use AWF for a feature.
   REST endpoint, CLI command, MCP tool name, schema/error-code contract, and
   security boundary recorded. The matrix should not be considered complete if it
   only documents gaps without creating executable follow-up work.
-- [ ] Add MCP tools for merge queue, task attempts, validation provenance, stale reasons, artifacts, metrics, locks/overlap graph, and service health/status.
+- [x] Add MCP tools for merge queue, task attempts, validation provenance,
+  stale reasons, artifacts, metrics, locks/overlap graph, and service
+  health/status. Evidence: `src/awf/mcp/server.py` registers the read-only
+  tools with bounded list inputs; `tests/unit/mcp/test_mcp_operator_surfaces.py`
+  covers populated and empty REST-vs-MCP parity, structured error/null states,
+  secret redaction, artifact metadata-only behavior, and route-handler bypass.
 - [ ] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics.
 - [ ] Add first-class AWF PR monitor adoption for existing GitHub PRs. Acceptance:
   an operator can provide `repo_url`/repo slug plus PR number or URL, and AWF
@@ -553,7 +557,12 @@ coding agent in any project to use AWF for a feature.
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
   why that surface is intentionally MCP/API-only.
-- [ ] Keep MCP read/control scoped: expose AWF-managed runtime snapshots, logs, operations, and controls, but do not expose arbitrary shell or unrestricted Docker exec.
+- [x] Keep MCP read/control scoped: expose AWF-managed runtime snapshots, logs,
+  operations, and controls, but do not expose arbitrary shell or unrestricted
+  Docker exec. Evidence: MCP operator-surface tests reject shell/exec/Docker
+  exec/host-file/secret/artifact-content tool names and inputs, require bounded
+  list/read schemas, and assert service health/readiness/resource summaries do
+  not echo token values.
 - [ ] Add contract tests proving REST API, CLI, and MCP stay aligned: request
   payloads, response payloads, reason codes, idempotency keys, `If-Match` /
   workspace-version concurrency, auth failures, and structured error semantics

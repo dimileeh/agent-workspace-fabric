@@ -23,6 +23,11 @@ from awf.api.schemas import (
 from awf.db.enums import AgentRuntime, OperationStatus, WorkspaceStatus
 from awf.db.models import Workspace, WorkspaceEvent
 from awf.db.repositories import StaleReasonRepository, WorkspaceRepository
+from awf.service.bounded_list import (
+    bounded_list_limit,
+    decode_bounded_list_cursor,
+    encode_bounded_list_cursor,
+)
 from awf.service.coordination import coordination_warnings_from_task_policy
 from awf.service.profile_metadata import network_posture_from_profile_snapshot
 from awf.service.provider_recovery import (
@@ -33,6 +38,8 @@ from awf.service.provider_recovery import (
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
 LlmUsageStatus = Literal["available", "unavailable"]
+DEFAULT_STALE_REASON_LIMIT = 50
+MAX_STALE_REASON_LIMIT = 500
 
 LIFECYCLE_STAGES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.requested,
@@ -247,19 +254,37 @@ async def list_workspace_stale_reasons_response(
     *,
     workspace_id: str,
     include_resolved: bool = False,
+    limit: int = DEFAULT_STALE_REASON_LIMIT,
+    cursor: str | None = None,
 ) -> StaleReasonListResponse | None:
     if not await WorkspaceRepository(session).exists(workspace_id):
         return None
     stale_repo = StaleReasonRepository(session)
+    bounded_limit = bounded_list_limit(limit, MAX_STALE_REASON_LIMIT)
+    offset = decode_bounded_list_cursor(cursor)
     rows = (
-        await stale_repo.list_for_workspace(workspace_id)
+        await stale_repo.list_for_workspace_page(
+            workspace_id,
+            limit=bounded_limit + 1,
+            offset=offset,
+        )
         if include_resolved
-        else await stale_repo.list_active_for_workspace(workspace_id)
+        else await stale_repo.list_active_for_workspace_page(
+            workspace_id,
+            limit=bounded_limit + 1,
+            offset=offset,
+        )
     )
+    page_rows = rows[:bounded_limit]
+    has_more = len(rows) > bounded_limit
     return StaleReasonListResponse(
-        items=[StaleReasonResponse.model_validate(row) for row in rows],
-        limit=len(rows),
-        cursor=None,
+        items=[StaleReasonResponse.model_validate(row) for row in page_rows],
+        next_cursor=(
+            encode_bounded_list_cursor(offset + bounded_limit) if has_more else None
+        ),
+        has_more=has_more,
+        limit=bounded_limit,
+        cursor=cursor,
     )
 
 

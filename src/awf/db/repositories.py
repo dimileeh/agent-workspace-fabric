@@ -1564,11 +1564,39 @@ class StaleReasonRepository:
     ) -> builtins.list[StaleReason]:
         return await self._list_for_workspace(workspace_id, status=self._ACTIVE)
 
+    async def list_active_for_workspace_page(
+        self,
+        workspace_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> builtins.list[StaleReason]:
+        return await self._list_for_workspace(
+            workspace_id,
+            status=self._ACTIVE,
+            limit=limit,
+            offset=offset,
+        )
+
     async def list_for_workspace(
         self,
         workspace_id: str,
     ) -> builtins.list[StaleReason]:
         return await self._list_for_workspace(workspace_id, status=None)
+
+    async def list_for_workspace_page(
+        self,
+        workspace_id: str,
+        *,
+        limit: int,
+        offset: int,
+    ) -> builtins.list[StaleReason]:
+        return await self._list_for_workspace(
+            workspace_id,
+            status=None,
+            limit=limit,
+            offset=offset,
+        )
 
     async def replace_active_findings(
         self,
@@ -1645,11 +1673,17 @@ class StaleReasonRepository:
         workspace_id: str,
         *,
         status: str | None,
+        limit: int | None = None,
+        offset: int | None = None,
     ) -> builtins.list[StaleReason]:
         stmt = select(StaleReason).where(StaleReason.workspace_id == workspace_id)
         if status is not None:
             stmt = stmt.where(StaleReason.status == status)
         stmt = stmt.order_by(StaleReason.detected_at.asc(), StaleReason.id.asc())
+        if limit is not None:
+            stmt = stmt.limit(limit)
+        if offset is not None:
+            stmt = stmt.offset(offset)
         return list((await self._session.execute(stmt)).scalars())
 
 

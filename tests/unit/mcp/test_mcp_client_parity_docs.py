@@ -32,11 +32,37 @@ STATUS_VOCABULARY = {
     "Out of scope",
 }
 
+READ_ONLY_OPERATOR_ROWS = {
+    "Workspace overview": {"awf_list_workspace_overview"},
+    "Merge queue": {"awf_list_merge_queue"},
+    "Task attempts": {"awf_list_tasks", "awf_list_task_attempts"},
+    "Validation provenance": {"awf_list_workspace_validation"},
+    "Stale reasons": {"awf_list_workspace_stale_reasons"},
+    "Artifact metadata": {"awf_list_workspace_artifacts"},
+    "Failure analysis metrics": {"awf_get_failure_analysis_summary"},
+    "Workspace reliability metrics": {"awf_get_workspace_reliability_summary"},
+    "Resource saturation metrics": {"awf_get_resource_saturation_summary"},
+    "SLO metrics": {"awf_get_slo_metrics_summary"},
+    "Locks and owned-path reservations": {"awf_list_locks"},
+    "Advisory overlap graph": {"awf_get_overlap_graph"},
+    "Service health and readiness": {
+        "awf_get_service_health",
+        "awf_get_service_readiness",
+    },
+}
+
 
 def _split_cell(cell: str) -> list[str]:
     cell = _strip_backticks(cell)
     parts = [p.strip() for p in cell.split(",")]
     return [p for p in parts if p]
+
+
+def _row_for_capability(rows: list[dict[str, str]], capability: str) -> dict[str, str]:
+    for row in rows:
+        if row.get("Capability", "").strip() == capability:
+            return row
+    raise AssertionError(f"Missing parity matrix row for {capability!r}")
 
 
 @pytest.mark.unit
@@ -60,6 +86,41 @@ def test_mcp_client_parity_doc_publishes_roles_and_backlog_surfaces() -> None:
 
     assert "not arbitrary shell" in doc
     assert "unrestricted Docker exec" in doc
+
+
+@pytest.mark.unit
+def test_parity_doc_no_longer_claims_read_tool_slice_is_backlog_only() -> None:
+    doc = PARITY_DOC.read_text(encoding="utf-8")
+
+    assert "this slice does not add MCP tools" not in " ".join(doc.split())
+
+
+@pytest.mark.unit
+def test_read_only_operator_rows_are_implementation_backed() -> None:
+    rows = _parity_rows()
+
+    for capability, expected_tools in READ_ONLY_OPERATOR_ROWS.items():
+        row = _row_for_capability(rows, capability)
+        tools = set(_split_cell(row.get("MCP tool name", "")))
+        backlog = _strip_backticks(row.get("Backlog Slice", "")).strip()
+
+        assert row.get("Status", "").strip() == "MCP implemented", capability
+        assert expected_tools <= tools, capability
+        assert not any(tool.startswith("No ") for tool in tools), capability
+        assert not backlog.startswith("TODO§"), capability
+
+
+@pytest.mark.unit
+def test_retry_workspace_row_reflects_registered_mcp_tool() -> None:
+    rows = _parity_rows()
+    row = _row_for_capability(rows, "Retry workspace")
+    tools = set(_split_cell(row.get("MCP tool name", "")))
+    backlog = _strip_backticks(row.get("Backlog Slice", "")).strip()
+
+    assert "awf_retry_workspace" in tools
+    assert not any(tool.startswith("No ") for tool in tools)
+    assert row.get("Status", "").strip() in {"MCP implemented", "MCP partial"}
+    assert backlog != "TODO§P1-mcp-retry"
 
 
 @pytest.mark.unit

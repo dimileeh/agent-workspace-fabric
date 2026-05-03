@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine
 from awf.api.routes import artifacts
 from awf.common.config import get_settings
 from awf.db.session import make_session_factory
+from awf.service import artifacts as artifact_service
 from awf.service.artifacts import list_workspace_artifacts_metadata
 
 _MINIMAL_BODY = {
@@ -210,6 +211,85 @@ class TestWorkspaceArtifacts:
         assert stdout_item["kind"] == "txt"
         assert stdout_item["size_bytes"] == len("alpha\n")
         datetime.fromisoformat(stdout_item["modified_at"])
+
+    @pytest.mark.unit
+    async def test_artifact_list_next_cursor_fetches_second_page(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        work_dir, headers = _configure_artifact_api(monkeypatch, tmp_path)
+        artifact_dir = work_dir / "artifacts" / workspace_id
+        artifact_dir.mkdir(parents=True)
+        (artifact_dir / "a.txt").write_text("alpha\n", encoding="utf-8")
+        (artifact_dir / "b.txt").write_text("beta\n", encoding="utf-8")
+
+        first_response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            params={"limit": 1},
+            headers=headers,
+        )
+
+        assert first_response.status_code == 200
+        first_page = first_response.json()
+        assert [item["relative_path"] for item in first_page["items"]] == ["a.txt"]
+        assert first_page["has_more"] is True
+        assert first_page["next_cursor"] is not None
+
+        second_response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            params={"limit": 1, "cursor": first_page["next_cursor"]},
+            headers=headers,
+        )
+
+        assert second_response.status_code == 200
+        second_page = second_response.json()
+        assert [item["relative_path"] for item in second_page["items"]] == ["b.txt"]
+        assert second_page["has_more"] is False
+        assert second_page["next_cursor"] is None
+        assert second_page["cursor"] == first_page["next_cursor"]
+
+    @pytest.mark.unit
+    async def test_artifact_listing_bounds_filesystem_metadata_reads(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        work_dir, headers = _configure_artifact_api(monkeypatch, tmp_path)
+        artifact_dir = work_dir / "artifacts" / workspace_id
+        artifact_dir.mkdir(parents=True)
+        for name in ("a.txt", "b.txt", "c.txt"):
+            (artifact_dir / name).write_text(f"{name}\n", encoding="utf-8")
+        original_metadata_from_stat = artifact_service._metadata_from_stat
+        metadata_reads: list[str] = []
+
+        def tracking_metadata_from_stat(
+            workspace_id: str,
+            relative_path: str,
+            resolved: Path,
+            stat: os.stat_result,
+        ) -> artifact_service.ArtifactMetadata:
+            metadata_reads.append(relative_path)
+            return original_metadata_from_stat(workspace_id, relative_path, resolved, stat)
+
+        monkeypatch.setattr(artifact_service, "_metadata_from_stat", tracking_metadata_from_stat)
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            params={"limit": 1},
+            headers=headers,
+        )
+
+        assert response.status_code == 200
+        body = response.json()
+        assert [item["relative_path"] for item in body["items"]] == ["a.txt"]
+        assert body["has_more"] is True
+        assert body["next_cursor"] is not None
+        assert metadata_reads == ["a.txt", "b.txt"]
 
     @pytest.mark.unit
     async def test_download_artifact_serves_bytes_and_headers(
@@ -476,8 +556,13 @@ class TestWorkspaceArtifacts:
         }
         assert calls == [
             (
-                artifacts._list_artifacts,
-                (workspace_id, artifacts._workspace_artifact_dir(workspace_id)),
+                artifact_service._list_artifacts_page,
+                (
+                    workspace_id,
+                    artifacts._workspace_artifact_dir(workspace_id),
+                    artifacts.DEFAULT_ARTIFACT_LIST_LIMIT,
+                    None,
+                ),
             )
         ]
 

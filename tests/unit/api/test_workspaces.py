@@ -2542,7 +2542,7 @@ class TestWorkspaceDirectRoutes:
         assert events.cursor is None
         assert stale.next_cursor is None
         assert stale.has_more is False
-        assert stale.limit == len(stale.items)
+        assert stale.limit == workspace_observability.DEFAULT_STALE_REASON_LIMIT
         assert stale.cursor is None
         assert [workspace.id for workspace in listed] == [workspace_id]
         assert detail.id == workspace_id
