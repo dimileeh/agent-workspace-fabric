@@ -92,8 +92,8 @@ async def test_create_v2_reuses_task_and_increments_attempt_for_same_external_id
 
     service = WorkspaceService(factory)
 
-    first = await service.create_v2(_request(title="first dispatch", owned_paths=[]))
-    second = await service.create_v2(_request(title="manual redispatch", owned_paths=[]))
+    first = await service.create_v2(_request(title="same backlog slice", owned_paths=[]))
+    second = await service.create_v2(_request(title="same backlog slice", owned_paths=[]))
 
     async with factory() as session:
         tasks = list((await session.execute(select(Task))).scalars())
@@ -109,3 +109,55 @@ async def test_create_v2_reuses_task_and_increments_attempt_for_same_external_id
     assert [attempt.attempt_number for attempt in attempts] == [1, 2]
     assert [attempt.workspace_id for attempt in attempts] == [first.id, second.id]
     assert {attempt.task_id for attempt in attempts} == {tasks[0].id}
+
+
+@pytest.mark.unit
+async def test_create_v2_rejects_external_id_reuse_for_different_owned_paths(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.db.repositories import TaskExternalIdConflictError
+
+    service = WorkspaceService(factory)
+
+    await service.create_v2(_request(external_id="WAVE-1", owned_paths=["docs/**"]))
+
+    with pytest.raises(TaskExternalIdConflictError) as excinfo:
+        await service.create_v2(
+            _request(
+                external_id="WAVE-1",
+                title="different backlog slice",
+                owned_paths=["src/awf/api/**"],
+            )
+        )
+
+    assert excinfo.value.external_id == "WAVE-1"
+    assert "already belongs to a different task scope" in str(excinfo.value)
+
+
+@pytest.mark.unit
+async def test_create_v2_rejects_external_id_reuse_for_different_title(
+    factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from awf.db.repositories import TaskExternalIdConflictError
+
+    service = WorkspaceService(factory)
+
+    await service.create_v2(
+        _request(
+            external_id="WAVE-1",
+            title="docs(onboarding): add prompts",
+            owned_paths=["docs/**", "README.md"],
+        )
+    )
+
+    with pytest.raises(TaskExternalIdConflictError) as excinfo:
+        await service.create_v2(
+            _request(
+                external_id="WAVE-1",
+                title="docs(install): document local install",
+                owned_paths=["docs/**", "README.md"],
+            )
+        )
+
+    assert excinfo.value.external_id == "WAVE-1"
+    assert "already belongs to a different task scope" in str(excinfo.value)
