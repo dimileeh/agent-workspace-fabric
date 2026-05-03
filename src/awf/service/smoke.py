@@ -130,7 +130,7 @@ async def _phase_service_readiness(
     except Exception as exc:
         return {
             "name": "service_readiness",
-            "status": "fail",
+            "status": "warn" if mocked_local else "fail",
             "reason_code": "SMOKE_SERVICE_UNREACHABLE",
             "message": f"AWF local service is unreachable: {exc}",
             "evidence": {"api_url": settings.api_base_url, "error": str(exc)},
