@@ -80,6 +80,7 @@ class WorktreeLayout:
 class _ChownTarget:
     path: Path
     recursive: bool
+    directories_only: bool = False
 
 
 class GitManager:
@@ -473,7 +474,16 @@ def _agent_writable_git_targets(
     if linked_git_dir is not None:
         targets.append(_ChownTarget(linked_git_dir, recursive=True))
     targets.append(_ChownTarget(layout_mirror, recursive=False))
-    for child in ("objects", "refs", "logs"):
+    objects = layout_mirror / "objects"
+    if objects.exists():
+        # Git's object database is special: loose object files are normally
+        # read-only and only need to be readable, while the fanout directories
+        # must be writable so the agent can add new objects. Recursively
+        # chowning object files breaks on Docker Desktop/macOS when a host file
+        # lacks Docker ownership metadata and appears as unwritable root:root in
+        # the control-plane container. Linux still gets writable object dirs.
+        targets.append(_ChownTarget(objects, recursive=True, directories_only=True))
+    for child in ("refs", "logs"):
         candidate = layout_mirror / child
         if candidate.exists():
             targets.append(_ChownTarget(candidate, recursive=True))
@@ -501,23 +511,27 @@ def _linked_worktree_git_dir(worktree_path: Path) -> Path | None:
 
 
 def _chown_targets(targets: tuple[_ChownTarget, ...], uid: int, gid: int) -> None:
-    seen: set[tuple[Path, bool]] = set()
+    seen: set[tuple[Path, bool, bool]] = set()
     for target in targets:
         resolved = target.path.resolve()
-        key = (resolved, target.recursive)
+        key = (resolved, target.recursive, target.directories_only)
         if key in seen or not target.path.exists():
             continue
         seen.add(key)
         if target.recursive:
-            _chown_tree(target.path, uid, gid)
+            _chown_tree(target.path, uid, gid, directories_only=target.directories_only)
         else:
             os.chown(target.path, uid, gid)
 
 
-def _chown_tree(path: Path, uid: int, gid: int) -> None:
+def _chown_tree(path: Path, uid: int, gid: int, *, directories_only: bool = False) -> None:
     os.chown(path, uid, gid)
     if not path.is_dir():
         return
     for root, dirs, files in os.walk(path):
-        for name in (*dirs, *files):
+        for name in dirs:
+            os.chown(Path(root) / name, uid, gid)
+        if directories_only:
+            continue
+        for name in files:
             os.chown(Path(root) / name, uid, gid)

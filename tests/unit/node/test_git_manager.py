@@ -213,6 +213,50 @@ class TestAddWorktree:
             1000,
         ) in chowned
         assert (layout.worktree_path / "README.md", 1000, 1000) in chowned
+        object_files = [
+            path
+            for path in (layout.mirror_path / "objects").glob("*/*")
+            if path.is_file()
+        ]
+        assert object_files
+        assert all((path, 1000, 1000) not in chowned for path in object_files)
+
+    @pytest.mark.unit
+    async def test_agent_owner_repair_skips_unwritable_loose_object_files(
+        self, origin_repo: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        manager_without_owner = GitManager(tmp_path / "awf-work")
+        mirror = await manager_without_owner.ensure_mirror(str(origin_repo))
+        protected_object = next(
+            path for path in (mirror / "objects").glob("*/*") if path.is_file()
+        )
+
+        chowned: list[Path] = []
+
+        def fake_chown(path: str | bytes | os.PathLike[str] | os.PathLike[bytes], uid: int, gid: int) -> None:
+            target = Path(path)
+            if target == protected_object:
+                raise PermissionError(target)
+            chowned.append(target)
+
+        monkeypatch.setattr(os, "geteuid", lambda: 0)
+        monkeypatch.setattr(os, "chown", fake_chown)
+        manager = GitManager(
+            tmp_path / "awf-work",
+            worktree_owner_uid=1000,
+            worktree_owner_gid=1000,
+        )
+
+        layout = await manager.add_worktree(
+            workspace_id="ws_object_skip",
+            repo_url=str(origin_repo),
+            base_branch="development",
+            new_branch="awf/ws_object_skip",
+        )
+
+        assert layout.worktree_path in chowned
+        assert mirror / "objects" in chowned
+        assert protected_object not in chowned
 
 
 class TestRemoveWorktree:
