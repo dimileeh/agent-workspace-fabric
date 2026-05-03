@@ -1432,8 +1432,8 @@ def smoke_run(
         "--mocked-local",
         help="Run in mocked-local mode without live external services.",
     ),
-    demo_path: Path | None = typer.Option(
-        None,
+    demo_path: Path = typer.Option(
+        Path("examples/awf-core-demo"),
         "--demo-path",
         help="Fallback project path when --project has no profile.",
     ),
@@ -1443,7 +1443,7 @@ def smoke_run(
     from awf.service.smoke import collect_smoke_report
 
     resolved = project.expanduser().resolve()
-    resolved_demo = demo_path.expanduser().resolve() if demo_path is not None else None
+    resolved_demo = demo_path.expanduser().resolve()
     settings = resolve_service_settings()
 
     report = asyncio.run(
