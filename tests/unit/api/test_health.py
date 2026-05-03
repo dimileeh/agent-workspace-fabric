@@ -165,6 +165,18 @@ async def test_release_readiness_returns_503_when_scorecard_fails(
     assert response.json()["status"] == "fail"
 
 
+@pytest.mark.unit
+async def test_release_readiness_invalid_provider_returns_422(
+    ready_app_and_client: tuple[Any, AsyncClient],
+) -> None:
+    _app, client = ready_app_and_client
+
+    response = await client.get("/release-readiness", params={"provider": "bogus"})
+
+    assert response.status_code == 422
+    assert "unknown provider" in response.json()["detail"]
+
+
 # ---- /readyz fixtures -------------------------------------------------------
 
 

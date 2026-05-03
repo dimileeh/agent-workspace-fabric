@@ -609,3 +609,43 @@ def test_monitor_recovery_operation_policy_false_and_true_paths() -> None:
     )
     assert merge_queue._is_monitor_owned_recovery(recovery_candidate)
     assert merge_queue._blocking_state(recovery_candidate) == "monitor_owned_recovery"
+
+
+@pytest.mark.unit
+def test_provider_recovery_state_response_includes_fallback_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    view = SimpleNamespace(
+        action="fallback",
+        reason_code="PROVIDER_FALLBACK_SELECTED",
+        source_provider="anthropic",
+        source_model="claude-sonnet-4.5",
+        retry_attempt_number=0,
+        fallback_attempt_number=1,
+        cooldown_until=None,
+        next_eligible_at=None,
+        fallback_target=SimpleNamespace(
+            agent=AgentRuntime.codex.value,
+            provider="openai",
+            model="gpt-5.3-codex",
+        ),
+        source_workspace_id="ws_source",
+        source_attempt_id="att_source",
+        recommended_action="Run fallback workspace.",
+        terminal=False,
+    )
+
+    monkeypatch.setattr(
+        merge_queue,
+        "provider_recovery_state_for_workspace",
+        lambda _workspace: view,
+    )
+
+    response = merge_queue._provider_recovery_state_response(object())
+
+    assert response is not None
+    assert response.action == "fallback"
+    assert response.fallback_target is not None
+    assert response.fallback_target.agent == AgentRuntime.codex.value
+    assert response.fallback_target.provider == "openai"
+    assert response.fallback_target.model == "gpt-5.3-codex"

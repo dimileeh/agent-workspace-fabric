@@ -247,7 +247,7 @@ async def test_task_create_or_get_backfills_identifiers_and_get_by_ref(
     same_by_external = await repo.create_or_get(
         repo_url="git@github.com:example/repository-coverage.git",
         base_branch="development",
-        title="Backfill idempotency again",
+        title="Backfill idempotency",
         prompt="second external request",
         external_id="TICKET-KEY",
         idempotency_key="task-key-2",
