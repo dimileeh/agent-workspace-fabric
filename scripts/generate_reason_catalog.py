@@ -1,43 +1,66 @@
 import sys
-import os
+from pathlib import Path
 
 # Add src to sys.path to import awf
-sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'src')))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 from awf.service.doctor.reasons import _REASON_TEXT
 
-def generate_catalog():
+
+def generate_catalog(existing_content: str = "") -> str:
     lines = [
         "# AWF Reason and Error Code Catalog\n",
         "This catalog documents common API/CLI/MCP failures, likely causes, and operator fixes.\n"
     ]
-    
+
+    sections = {}
+    current_section = None
+    current_lines = []
+    for line in existing_content.splitlines():
+        if line.startswith("### "):
+            if current_section:
+                sections[current_section] = "\n".join(current_lines).strip()
+            current_section = line[4:].strip()
+            current_lines = []
+        elif current_section:
+            current_lines.append(line)
+
+    if current_section:
+        sections[current_section] = "\n".join(current_lines).strip()
+
     # Filter out "OK" reasons or those with empty problem (message) or action
     reasons = {k: v for k, v in _REASON_TEXT.items() if v.likely_cause and v.action and v.message}
-    
-    for key in sorted(reasons.keys()):
-        val = reasons[key]
-        lines.append(f"### {key}")
-        lines.append(f"**Problem:** {val.message}")
-        lines.append(f"**Likely Cause:** {val.likely_cause}")
-        lines.append(f"**Operator Fix:** {val.action}")
+
+    for key, val in reasons.items():
+        block_lines = []
+        block_lines.append(f"**Problem:** {val.message}")
+        block_lines.append(f"**Likely Cause:** {val.likely_cause}")
+        block_lines.append(f"**Operator Fix:** {val.action}")
         if val.related_command:
-            lines.append(f"**Related Command:** `{val.related_command}`")
+            block_lines.append(f"**Related Command:** `{val.related_command}`")
         if val.docs_link:
             if val.docs_link.startswith("http"):
-                lines.append(f"**Docs Link:** [{val.docs_link}]({val.docs_link})")
+                block_lines.append(f"**Docs Link:** [{val.docs_link}]({val.docs_link})")
             elif val.docs_link.startswith("docs/REASON_CATALOG.md#"):
                 anchor = val.docs_link.split("#", 1)[1]
-                lines.append(f"**Docs Link:** [{val.docs_link}](#{anchor})")
+                block_lines.append(f"**Docs Link:** [{val.docs_link}](#{anchor})")
             else:
-                lines.append(f"**Docs Link:** [{val.docs_link}]({val.docs_link})")
+                block_lines.append(f"**Docs Link:** [{val.docs_link}]({val.docs_link})")
+        sections[key] = "\n".join(block_lines)
+
+    for key in sorted(sections.keys()):
+        lines.append(f"### {key}")
+        lines.append(sections[key])
         lines.append("")
-        
+
     return "\n".join(lines)
 
 if __name__ == "__main__":
-    catalog = generate_catalog()
-    catalog_path = os.path.abspath(os.path.join(os.path.dirname(__file__), '..', 'docs', 'REASON_CATALOG.md'))
-    with open(catalog_path, 'w') as f:
-        f.write(catalog)
+    catalog_path = Path(__file__).resolve().parent.parent / "docs" / "REASON_CATALOG.md"
+    existing_content = ""
+    if catalog_path.exists():
+        existing_content = catalog_path.read_text()
+
+    catalog = generate_catalog(existing_content)
+    catalog_path.write_text(catalog)
     print(f"Generated {catalog_path}")
