@@ -43,6 +43,81 @@ payload (local-only, no submission). Keep secrets as
 profile declarations or `${VAR}` placeholders; never write raw secret values.
 ```
 
+## Per-provider copy-paste prompts
+
+Each prompt below is tuned for the provider's CLI or chat style. They are
+generic for any repository and do not contain project-specific assumptions.
+
+### Codex
+
+```text
+Inspect this repository for AWF onboarding. Do not launch a workspace yet.
+
+1. Run `awf init .` to inspect the repo.
+2. Run `awf profile init . --write` to generate `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf profile init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+
+Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
+```
+
+### Claude Code
+
+```text
+I will inspect this repository for AWF onboarding. I will not launch a workspace yet.
+
+1. Run `awf init .` to inspect the repo.
+2. Run `awf profile init . --write` to generate `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf profile init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+
+Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
+```
+
+### Gemini
+
+```text
+Inspect this repository for AWF onboarding. Do not launch a workspace yet.
+
+1. Run `awf init .` to inspect the repo.
+2. Run `awf profile init . --write` to generate `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf profile init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+
+Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
+```
+
+### OpenCode
+
+```text
+Inspect this repository for AWF onboarding. Do not launch a workspace yet.
+
+1. Run `awf init .` to inspect the repo.
+2. Run `awf profile init . --write` to generate `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf profile init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+
+Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
+```
+
+### OpenClaw
+
+```text
+Inspect this repository for AWF onboarding. Do not launch a workspace yet.
+
+1. Run `awf init .` to inspect the repo.
+2. Run `awf profile init . --write` to generate `.awf/workspace.yml`.
+3. Run `awf profile preview .` to preview the resolved profile.
+4. Run `awf profile init . --include-smoke-request` to produce a smoke workspace request, then submit it to validate the profile end-to-end.
+5. Once the smoke workspace succeeds, implement the requested feature through AWF by creating a real workspace with an appropriate task prompt and owned paths.
+
+Keep secrets as profile declarations or `${VAR}` placeholders; never write raw secret values.
+```
+
 ## CLI flow
 
 Preview only:

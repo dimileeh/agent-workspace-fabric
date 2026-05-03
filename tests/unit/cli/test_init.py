@@ -770,3 +770,32 @@ def test_project_onboarding_doc_distinguishes_init_modes() -> None:
     assert "awf init" in doc
     assert "awf init <path>" in doc
     assert "AWF-on-this-machine" in doc or "local service bootstrap" in doc
+
+
+@pytest.mark.unit
+def test_project_onboarding_doc_has_provider_prompts() -> None:
+    """Regression: every supported provider has a copy-paste prompt block."""
+    readme = Path("README.md").read_text(encoding="utf-8")
+    doc = Path("docs/PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
+
+    # README links to the onboarding doc
+    assert "docs/PROJECT_ONBOARDING.md" in readme
+
+    providers = ["Codex", "Claude Code", "Gemini", "OpenCode", "OpenClaw"]
+    for provider in providers:
+        # Each provider must have a clear heading
+        assert f"### {provider}" in doc, f"missing heading for {provider}"
+
+    # Generic fallback prompt must still exist
+    assert "## One-message prompt" in doc
+
+    # Each provider block must contain the onboarding keyword set
+    keyword_set = [".awf/workspace.yml", "awf profile preview", "smoke", "implement"]
+    for provider in providers:
+        start = doc.find(f"### {provider}")
+        assert start != -1
+        # Grab the block up to the next ### or end of file
+        end = doc.find("###", start + 1)
+        block = doc[start:end] if end != -1 else doc[start:]
+        for keyword in keyword_set:
+            assert keyword in block, f"{provider} prompt missing {keyword}"

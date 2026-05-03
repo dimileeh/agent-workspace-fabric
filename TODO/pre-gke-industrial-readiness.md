@@ -541,7 +541,7 @@ coding agent in any project to use AWF for a feature.
 - [ ] Define the primary install path: package-manager install such as `uv tool install aira-awf`/`uv pip install aira-awf`, with git clone as the contributor path.
 - [x] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
 - [x] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
-- [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
+- [x] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
 - [ ] Add a smoke workspace command that can be run from any project after `awf init` to prove the local service, auth, profile, validation, PR creation, and console links work.
 - [x] Publish an API/CLI/MCP parity matrix and treat missing MCP coverage as an explicit backlog item.
 - [x] Convert the parity matrix into an implementation driver: every surface marked
