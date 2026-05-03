@@ -189,7 +189,14 @@ def _seed_origin_repo(repo: Path) -> None:
 @pytest.mark.integration
 @pytest.mark.docker
 @pytest.mark.slow
-@pytest.mark.timeout(180)
+# Worst case under ``CI=true`` with a cold image cache: the in-test
+# ``_ensure_agent_image_present()`` call on the first line below shells out to
+# ``docker build`` with its own 900s subprocess timeout, plus the actual
+# workspace-up + git-status/add/commit exec dance. The pytest-timeout marker
+# wraps the whole test function, so it must comfortably exceed the docker-build
+# subprocess timeout — otherwise pytest-timeout kills the test mid-build on a
+# cold runner while the build subprocess keeps running, masking the contract.
+@pytest.mark.timeout(1200)
 async def test_agent_container_can_git_status_add_commit_in_workspace(
     tmp_path: Path,
 ) -> None:
