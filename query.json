@@ -1,3 +1,0 @@
-{
-  "query": "mutation { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: \"PRRT_kwDOSJAM6s5_N4AJ\", body: \"fixed in commit d2d29968c58b34b7a961ca0bb7ebe9b1352a50e1\"}) { clientMutationId } }"
-}
