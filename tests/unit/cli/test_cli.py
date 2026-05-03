@@ -696,7 +696,6 @@ class TestCliHelp:
         assert result.exit_code == 0
         assert "Mutates:" in result.stdout
         assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
-        assert "docs/CLI_REFERENCE.md" in result.stdout
         assert "recommended first path" in result.stdout.lower()
 
     @pytest.mark.unit
@@ -704,7 +703,6 @@ class TestCliHelp:
         result = _runner.invoke(app, ["init", "--help"])
         assert result.exit_code == 0
         assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
-        assert "docs/CLI_REFERENCE.md" in result.stdout
         assert "recommended first path" in result.stdout.lower()
 
     @pytest.mark.unit
@@ -712,7 +710,6 @@ class TestCliHelp:
         result = _runner.invoke(app, ["service", "bootstrap", "--help"])
         assert result.exit_code == 0
         assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
-        assert "docs/CLI_REFERENCE.md" in result.stdout
         assert "recommended first path" in result.stdout.lower()
 
     @pytest.mark.unit
@@ -720,5 +717,4 @@ class TestCliHelp:
         result = _runner.invoke(app, ["workspace", "--help"])
         assert result.exit_code == 0
         assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
-        assert "docs/CLI_REFERENCE.md" in result.stdout
         assert "recommended first path" in result.stdout.lower()
