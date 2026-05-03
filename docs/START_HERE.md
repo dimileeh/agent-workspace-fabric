@@ -18,11 +18,11 @@ Before running the commands below, ensure your system has the following installe
    ```
 2. **Install the AWF CLI**
    ```bash
-   uv tool install aira-awf
+   uv tool install .
    ```
    *Expected Output Snippet:*
    ```text
-   Installed 1 executable: awf
+   Installed 2 executables: awf, awf-watchdog
    ```
 
 3. **Bootstrap the local control plane**
