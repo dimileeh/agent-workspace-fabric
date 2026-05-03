@@ -397,6 +397,24 @@ async def _insert_validation_run(
         await session.commit()
 
 
+def _track_validation_item_response_builds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> list[dict[str, object]]:
+    built_items: list[dict[str, object]] = []
+    original_response = validation_service.ValidationProvenanceItemResponse
+
+    def counting_response(**kwargs: object) -> object:
+        built_items.append(dict(kwargs))
+        return original_response(**kwargs)
+
+    monkeypatch.setattr(
+        validation_service,
+        "ValidationProvenanceItemResponse",
+        counting_response,
+    )
+    return built_items
+
+
 @pytest.mark.unit
 async def test_validation_provenance_groups_streams_and_resolves_profile_commands(
     client: AsyncClient,
@@ -1424,6 +1442,85 @@ async def test_validation_provenance_next_cursor_fetches_second_page(
     assert second_page["has_more"] is False
     assert second_page["next_cursor"] is None
     assert second_page["cursor"] == first_page["next_cursor"]
+
+
+@pytest.mark.unit
+async def test_validation_provenance_paginates_persisted_items_before_building_responses(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _create_v1_workspace(client)
+    for index, command in enumerate(("uv sync", "pytest -q", "ruff check"), start=1):
+        await _insert_validation_run(
+            engine,
+            run_id=f"vr_build_window_{index:06d}",
+            workspace_id=workspace_id,
+            commands=[
+                {
+                    "phase": "validate",
+                    "command_index": index,
+                    "command": command,
+                    "stream_ids": {},
+                }
+            ],
+            started_at=datetime(2026, 4, 26, 13, index, tzinfo=UTC),
+        )
+    built_items = _track_validation_item_response_builds(monkeypatch)
+
+    async with make_session_factory(engine)() as session:
+        response = await validation_service.list_validation_provenance_response(
+            session,
+            workspace_id=workspace_id,
+            limit=1,
+        )
+
+    assert response is not None
+    assert [item.validation_run_id for item in response.items] == ["vr_build_window_000001"]
+    assert response.has_more is True
+    assert response.next_cursor is not None
+    assert [item["validation_run_id"] for item in built_items] == [
+        "vr_build_window_000001"
+    ]
+
+
+@pytest.mark.unit
+async def test_validation_provenance_paginates_stream_items_before_building_responses(
+    client: AsyncClient,
+    engine: AsyncEngine,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await _create_v1_workspace_with_commands(
+        client,
+        ["uv sync", "pytest -q", "ruff check"],
+    )
+    for index in range(1, 4):
+        await _create_stream_pair(
+            engine,
+            workspace_id=workspace_id,
+            base_stream_id=f"validation.cmd_{index:02d}",
+            phase="validate",
+            stdout_bytes=20,
+            stdout_lines=1,
+            stderr_bytes=0,
+            stderr_lines=0,
+        )
+    built_items = _track_validation_item_response_builds(monkeypatch)
+
+    async with make_session_factory(engine)() as session:
+        response = await validation_service.list_validation_provenance_response(
+            session,
+            workspace_id=workspace_id,
+            limit=1,
+        )
+
+    assert response is not None
+    assert [(item.command_index, item.command) for item in response.items] == [(1, "uv sync")]
+    assert response.has_more is True
+    assert response.next_cursor is not None
+    assert [(item["command_index"], item["command"]) for item in built_items] == [
+        (1, "uv sync")
+    ]
 
 
 @pytest.mark.unit

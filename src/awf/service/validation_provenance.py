@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -30,7 +31,11 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.profiles.models import WorkspaceProfile
-from awf.service.bounded_list import paginate_bounded_list
+from awf.service.bounded_list import (
+    BoundedListPage,
+    paginate_bounded_iterable,
+    paginate_bounded_list,
+)
 
 _LABEL_RE = re.compile(r"^(?P<index>\d+)_(?P<phase>[A-Za-z][A-Za-z0-9_-]*)$")
 _LEGACY_LABEL_RE = re.compile(r"^cmd_(?P<index>\d+)$")
@@ -79,19 +84,20 @@ async def list_validation_provenance_response(
     validation_runs = await ValidationRunRepository(session).list_for_workspace(workspace_id)
     streams = await stream_repo.list_validation_for_workspace(workspace_id)
     if validation_runs:
-        items = _build_persisted_validation_items(
+        page = _build_persisted_validation_items_page(
             workspace,
             validation_runs,
             streams,
+            limit=limit,
+            cursor=cursor,
         )
     else:
-        items = _build_validation_items(workspace, streams)
-    page = paginate_bounded_list(
-        items,
-        limit=limit,
-        max_limit=MAX_VALIDATION_PROVENANCE_LIMIT,
-        cursor=cursor,
-    )
+        page = _build_validation_items_page(
+            workspace,
+            streams,
+            limit=limit,
+            cursor=cursor,
+        )
     return ValidationProvenanceListResponse(
         items=page.items,
         next_cursor=page.next_cursor,
@@ -134,46 +140,104 @@ class _CommandRecord:
         )
 
 
-def _build_validation_items(
+@dataclass(frozen=True)
+class _PersistedCommandRecord:
+    run: ValidationRun
+    command: dict[str, Any]
+
+
+def _build_validation_items_page(
     workspace: Workspace,
     streams: list[WorkspaceLogStream],
-) -> list[ValidationProvenanceItemResponse]:
+    *,
+    limit: int,
+    cursor: str | None,
+) -> BoundedListPage[ValidationProvenanceItemResponse]:
     command_lookup = _command_lookup(workspace)
     records = [_command_record(pair, command_lookup) for pair in _group_streams(streams).values()]
     records.sort(key=lambda record: record.sort_key)
     failed_record = _failed_record(workspace, records)
-    return [
-        ValidationProvenanceItemResponse(
-            workspace_id=workspace.id,
-            phase=record.phase,
-            command_index=record.command_index,
-            command=record.command,
-            stream_ids={
-                "stdout": record.pair.stdout.stream_id if record.pair.stdout else None,
-                "stderr": record.pair.stderr.stream_id if record.pair.stderr else None,
-            },
-            stdout_byte_count=record.pair.stdout.byte_count if record.pair.stdout else 0,
-            stdout_line_count=record.pair.stdout.line_count if record.pair.stdout else 0,
-            stderr_byte_count=record.pair.stderr.byte_count if record.pair.stderr else 0,
-            stderr_line_count=record.pair.stderr.line_count if record.pair.stderr else 0,
-            opened_at=_opened_at(record.pair),
-            closed_at=_closed_at(record.pair),
-            status=_record_status(workspace, record, failed_record),
-            base_commit=workspace.base_commit,
-            branch_name=workspace.branch_name,
-        )
-        for record in records
-    ]
+    record_page = paginate_bounded_list(
+        records,
+        limit=limit,
+        max_limit=MAX_VALIDATION_PROVENANCE_LIMIT,
+        cursor=cursor,
+    )
+    return BoundedListPage(
+        items=[
+            _build_validation_item(workspace, record, failed_record)
+            for record in record_page.items
+        ],
+        next_cursor=record_page.next_cursor,
+        has_more=record_page.has_more,
+        limit=record_page.limit,
+        cursor=record_page.cursor,
+    )
 
 
-def _build_persisted_validation_items(
+def _build_validation_item(
+    workspace: Workspace,
+    record: _CommandRecord,
+    failed_record: _CommandRecord | None,
+) -> ValidationProvenanceItemResponse:
+    return ValidationProvenanceItemResponse(
+        workspace_id=workspace.id,
+        phase=record.phase,
+        command_index=record.command_index,
+        command=record.command,
+        stream_ids={
+            "stdout": record.pair.stdout.stream_id if record.pair.stdout else None,
+            "stderr": record.pair.stderr.stream_id if record.pair.stderr else None,
+        },
+        stdout_byte_count=record.pair.stdout.byte_count if record.pair.stdout else 0,
+        stdout_line_count=record.pair.stdout.line_count if record.pair.stdout else 0,
+        stderr_byte_count=record.pair.stderr.byte_count if record.pair.stderr else 0,
+        stderr_line_count=record.pair.stderr.line_count if record.pair.stderr else 0,
+        opened_at=_opened_at(record.pair),
+        closed_at=_closed_at(record.pair),
+        status=_record_status(workspace, record, failed_record),
+        base_commit=workspace.base_commit,
+        branch_name=workspace.branch_name,
+    )
+
+
+def _build_persisted_validation_items_page(
     workspace: Workspace,
     validation_runs: list[ValidationRun],
     streams: list[WorkspaceLogStream],
-) -> list[ValidationProvenanceItemResponse]:
+    *,
+    limit: int,
+    cursor: str | None,
+) -> BoundedListPage[ValidationProvenanceItemResponse]:
     stream_lookup = {stream.stream_id: stream for stream in streams}
     current_target_head_sha = _current_target_head_sha(workspace)
-    items: list[ValidationProvenanceItemResponse] = []
+    record_page = paginate_bounded_iterable(
+        _iter_persisted_command_records(validation_runs),
+        limit=limit,
+        max_limit=MAX_VALIDATION_PROVENANCE_LIMIT,
+        cursor=cursor,
+    )
+    return BoundedListPage(
+        items=[
+            _build_persisted_validation_item(
+                workspace,
+                record.run,
+                record.command,
+                stream_lookup,
+                current_target_head_sha,
+            )
+            for record in record_page.items
+        ],
+        next_cursor=record_page.next_cursor,
+        has_more=record_page.has_more,
+        limit=record_page.limit,
+        cursor=record_page.cursor,
+    )
+
+
+def _iter_persisted_command_records(
+    validation_runs: list[ValidationRun],
+) -> Iterator[_PersistedCommandRecord]:
     for run in validation_runs:
         commands = _run_commands(run)
         if not commands:
@@ -186,46 +250,53 @@ def _build_persisted_validation_items(
                 }
             ]
         for command in commands:
-            stream_ids = _command_stream_ids(command)
-            stdout = stream_lookup.get(stream_ids.get("stdout") or "")
-            stderr = stream_lookup.get(stream_ids.get("stderr") or "")
-            items.append(
-                ValidationProvenanceItemResponse(
-                    validation_run_id=run.id,
-                    workspace_id=workspace.id,
-                    attempt_id=run.attempt_id,
-                    tier=_validation_tier(run.tier),
-                    command_set_hash=run.command_set_hash,
-                    phase=_command_phase(command),
-                    command_index=_command_index(command),
-                    command=_command_text(command),
-                    stream_ids=stream_ids,
-                    stdout_byte_count=stdout.byte_count if stdout else 0,
-                    stdout_line_count=stdout.line_count if stdout else 0,
-                    stderr_byte_count=stderr.byte_count if stderr else 0,
-                    stderr_line_count=stderr.line_count if stderr else 0,
-                    opened_at=_ensure_utc(run.started_at),
-                    closed_at=_ensure_utc(run.finished_at) if run.finished_at else None,
-                    status=_validation_status(run.status),
-                    reason_code=run.reason_code,
-                    base_commit=run.base_commit,
-                    **validation_identity_fields(run),
-                    branch_name=run.target_branch or workspace.branch_name,
-                    target_branch=run.target_branch,
-                    target_head_sha=run.target_head_sha,
-                    current_target_head_sha=current_target_head_sha,
-                    started_at=_ensure_utc(run.started_at),
-                    finished_at=_ensure_utc(run.finished_at) if run.finished_at else None,
-                    log_stream_refs=_json_dict(run.log_stream_refs),
-                    fresh_for_target=fresh_for_target(
-                        validation_target_head_sha=run.target_head_sha,
-                        current_target_head_sha=current_target_head_sha,
-                    ),
-                    retry_count=run.retry_count,
-                    **validation_coverage_fields(run),
-                )
-            )
-    return items
+            yield _PersistedCommandRecord(run=run, command=command)
+
+
+def _build_persisted_validation_item(
+    workspace: Workspace,
+    run: ValidationRun,
+    command: dict[str, Any],
+    stream_lookup: dict[str, WorkspaceLogStream],
+    current_target_head_sha: str | None,
+) -> ValidationProvenanceItemResponse:
+    stream_ids = _command_stream_ids(command)
+    stdout = stream_lookup.get(stream_ids.get("stdout") or "")
+    stderr = stream_lookup.get(stream_ids.get("stderr") or "")
+    return ValidationProvenanceItemResponse(
+        validation_run_id=run.id,
+        workspace_id=workspace.id,
+        attempt_id=run.attempt_id,
+        tier=_validation_tier(run.tier),
+        command_set_hash=run.command_set_hash,
+        phase=_command_phase(command),
+        command_index=_command_index(command),
+        command=_command_text(command),
+        stream_ids=stream_ids,
+        stdout_byte_count=stdout.byte_count if stdout else 0,
+        stdout_line_count=stdout.line_count if stdout else 0,
+        stderr_byte_count=stderr.byte_count if stderr else 0,
+        stderr_line_count=stderr.line_count if stderr else 0,
+        opened_at=_ensure_utc(run.started_at),
+        closed_at=_ensure_utc(run.finished_at) if run.finished_at else None,
+        status=_validation_status(run.status),
+        reason_code=run.reason_code,
+        base_commit=run.base_commit,
+        **validation_identity_fields(run),
+        branch_name=run.target_branch or workspace.branch_name,
+        target_branch=run.target_branch,
+        target_head_sha=run.target_head_sha,
+        current_target_head_sha=current_target_head_sha,
+        started_at=_ensure_utc(run.started_at),
+        finished_at=_ensure_utc(run.finished_at) if run.finished_at else None,
+        log_stream_refs=_json_dict(run.log_stream_refs),
+        fresh_for_target=fresh_for_target(
+            validation_target_head_sha=run.target_head_sha,
+            current_target_head_sha=current_target_head_sha,
+        ),
+        retry_count=run.retry_count,
+        **validation_coverage_fields(run),
+    )
 
 
 def _current_target_head_sha(workspace: Workspace) -> str | None:
