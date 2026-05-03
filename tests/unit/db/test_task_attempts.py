@@ -171,7 +171,7 @@ class TestTaskAttemptRepository:
         assert "already belongs to a different task scope" in str(excinfo.value)
 
     @pytest.mark.unit
-    async def test_create_or_get_task_rejects_external_id_title_collision(
+    async def test_create_or_get_task_rejects_external_id_owned_paths_collision(
         self, session: AsyncSession
     ) -> None:
         from awf.db.repositories import TaskExternalIdConflictError, TaskRepository
@@ -193,12 +193,12 @@ class TestTaskAttemptRepository:
             await repo.create_or_get(
                 repo_url="git@github.com:example/app.git",
                 base_branch="development",
-                title="docs(install): document install flow",
+                title="docs(onboarding): add prompts",
                 prompt="Second prompt",
                 external_id="WAVE-1",
                 idempotency_key=None,
                 task_class="docs_task",
-                owned_paths=["docs/**", "README.md"],
+                owned_paths=["src/**"],
             )
 
         assert excinfo.value.external_id == "WAVE-1"
