@@ -444,7 +444,10 @@ def _default_profile_preview(project: Path) -> Any:
 
 
 def _default_config_resolver(settings: ServiceSettings) -> dict[str, Any]:
-    return {
+    result: dict[str, Any] = {
         "api_base_url": settings.api_base_url,
-        "console_url": None,
     }
+    console_url = getattr(settings, "console_url", None)
+    if console_url is not None:
+        result["console_url"] = console_url
+    return result

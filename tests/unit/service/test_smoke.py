@@ -819,7 +819,7 @@ class TestCollectSmokeReportExceptionPaths:
     def test_default_config_resolver_direct_call(self) -> None:
         result = _default_config_resolver(_settings())
         assert result["api_base_url"] == "http://localhost:8000"
-        assert result["console_url"] is None
+        assert "console_url" not in result
 
     def test_default_auth_collector_direct_call(self) -> None:
         with patch(
