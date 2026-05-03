@@ -75,7 +75,11 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| _None_ | _None_ | _None_ | _None_ | _None_ | Reconciled 2026-05-03 against the local AWF API, which reported zero active workspaces. A failed dogfood attempt from another machine had left stale `running` rows here; those rows were removed and the underlying P1 checklist items remain unchecked for future dispatch. |
+| P1 MCP And Project Onboarding Client Parity | Launch-time provider readiness preflight | `ws_6dcca29a9a4e47cd89e0c8c7` | _pending_ | running | Codex `gpt-5.5`; highest-risk provider/auth readiness slice with REST/CLI/MCP/console/event surfaces. |
+| P1 MCP And Project Onboarding Client Parity | Local control-plane UID/GID strategy | `ws_add274bc03eb49c28a00dd3d` | _pending_ | running | Claude Code `claude-opus-4-7`; documents Linux/macOS ownership strategy and adds git status/add/commit regression coverage. |
+| P1 MCP And Project Onboarding Client Parity | Primary local Core install path | `ws_9e695c9961bb45f9a9b1ff8b` | _pending_ | validating | Gemini `gemini-3.1-pro-preview`; documents package-manager install path versus contributor clone path. |
+| P1 MCP And Project Onboarding Client Parity | Copy-paste agent onboarding prompts | `ws_55479d5e2367490184a947ea` | _pending_ | validating | OpenCode/Ollama `kimi-k2.6:cloud`; adds first-time evaluator prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw. |
+| P1 MCP And Project Onboarding Client Parity | First-run smoke workspace command | `ws_cd491b1fdb514174974ed549` | _pending_ | running | OpenCode/Ollama `deepseek-v4-pro:cloud`; adds a CLI smoke command proving local service/profile/auth/validation/PR or mocked PR path. |
 
 ### Reschedule Required Slices
 
@@ -86,7 +90,9 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| _None_ | _None_ | _None_ | _None_ | _None_ | No active retry is recorded after reconciling the stale external dogfood ledger rows on 2026-05-03. |
+| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_b438a31ffd7d4433aa0cdcac` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. This was incorrectly marked `superseded`; it still needs a fresh retry after the active wave drains. |
+| P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_ea414c0722a74815bc474d13` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. This was incorrectly marked `superseded`; it still needs a fresh retry after the active wave drains. |
+| P1 Operator Console Completion | Live workspace activity signals | `ws_451cc5007fa845ad85a0f7b3` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. This was incorrectly marked `superseded`; it still needs a fresh retry after the active wave drains. |
 
 ### Completed Slices
 
@@ -207,11 +213,8 @@ reschedule its corresponding slice.
 | P1 MCP And Project Onboarding Client Parity | API / CLI / MCP parity implementation driver | `ws_c6ad9ca557d441e881329388` | superseded | No-work mirror `chown` provisioning failure; retried as `ws_f4f5d0934e5f45c1ba0d7998`. |
 | P1 Operator Console Completion | Agent and exact model workspace filters | `ws_a0f41e0ed1154727b9a35f16` | superseded | No-work mirror `chown` provisioning failure; retried as `ws_0e5f80c0f2be464db625c766`. |
 | P1 Security, Secrets, And Egress Policy | Restricted egress allowlist templates | `ws_b0db737f56e64894a53ad640` | superseded | No-work mirror `chown` provisioning failure; retried as `ws_acf536de3fe3434699bee650`. |
-| P1 MCP And Project Onboarding Client Parity | Launch-time provider readiness preflight | `ws_3839bcb384944623b1ff6d64` | superseded | No-work infrastructure failure during provisioning: the shared bare git mirror contained a host object file missing Docker Desktop ownership metadata, so the worker saw it as unwritable `root:root` and failed recursive ownership repair before checkout. Quarantined the broken mirror cache on 2026-05-03; retry only after the mirror is rebuilt. |
-| P1 MCP And Project Onboarding Client Parity | Define the primary install path for local Core | `ws_3426e9258cb54b3d91627956` | superseded | Same no-work mirror permission failure as `ws_3839bcb384944623b1ff6d64`; no PR or useful work produced. |
-| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_b438a31ffd7d4433aa0cdcac` | superseded | Same no-work mirror permission failure as `ws_3839bcb384944623b1ff6d64`; no PR or useful work produced. |
-| P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_ea414c0722a74815bc474d13` | superseded | Same no-work mirror permission failure as `ws_3839bcb384944623b1ff6d64`; no PR or useful work produced. |
-| P1 Operator Console Completion | Live workspace activity signals | `ws_451cc5007fa845ad85a0f7b3` | superseded | Same no-work mirror permission failure as `ws_3839bcb384944623b1ff6d64`; no PR or useful work produced. |
+| P1 MCP And Project Onboarding Client Parity | Launch-time provider readiness preflight | `ws_3839bcb384944623b1ff6d64` | superseded | No-work infrastructure failure during provisioning: the shared bare git mirror contained a host object file missing Docker Desktop ownership metadata, so the worker saw it as unwritable `root:root` and failed recursive ownership repair before checkout. Quarantined the broken mirror cache on 2026-05-03; retry is active as `ws_6dcca29a9a4e47cd89e0c8c7`. |
+| P1 MCP And Project Onboarding Client Parity | Define the primary install path for local Core | `ws_3426e9258cb54b3d91627956` | superseded | Same no-work mirror permission failure as `ws_3839bcb384944623b1ff6d64`; no PR or useful work produced. Retry is active as `ws_9e695c9961bb45f9a9b1ff8b`. |
 | P0 Provider Resilience And Automated Fallback Recovery | Provider-capacity failure classification via Gemini 3.1 | `ws_033d1772828042c9afa6a491` | failed | No-work Gemini auth failure: container had copied `~/.gemini` files but no Gemini/Google auth env; Gemini CLI 0.39.1 selected API-key auth and exited 41 `AGENT_AUTH_FAILED` requiring `GEMINI_API_KEY`. |
 | P0 Provider Resilience And Automated Fallback Recovery | Duplicate full retry spawned from live PR monitor | `ws_46a6c903fc7c42098a63edad` | destroyed | Duplicate retry of active workspace `ws_52d8415a02424c4aa4730fa1` / PR #169 after `AGENT_IDLE_TIMEOUT`; no PR or useful work produced. Destroyed manually and tracked as urgent P0 regression under provider recovery. |
 | P1 MCP And Project Onboarding Client Parity | `awf init` and smoke setup guidance via Gemini 3.1 | `ws_927647b0535242c58879f7b8` | failed | Same no-work Gemini auth failure as `ws_033d1772828042c9afa6a491`; retry only after Gemini container auth/readiness is fixed or with a different provider/model. |
@@ -538,7 +541,7 @@ coding agent in any project to use AWF for a feature.
 - [x] Add CI gates for console lint/typecheck/build/browser smoke and release
   artifact/image validation for wheel/sdist, CLI entrypoints, control-plane
   image, and agent-runtime image.
-- [ ] Define the primary install path: package-manager install such as `uv tool install aira-awf`/`uv pip install aira-awf`, with git clone as the contributor path.
+- [x] Define the primary install path: package-manager install such as `uv tool install aira-awf`/`uv pip install aira-awf`, with git clone as the contributor path.
 - [x] Add a one-command local bootstrap such as `awf init` that checks Docker, writes local env defaults, creates the AWF state directory, starts or validates Postgres/API/worker/console, and prints next steps.
 - [x] Add `awf doctor` or extend `awf service status` to diagnose missing Docker, auth, API token, GitHub CLI, provider credentials, ports, disk, and stale containers in plain language.
 - [ ] Add copy-paste onboarding prompts for Codex, Claude Code, Gemini, OpenCode, and OpenClaw: "inspect this project, generate `.awf/workspace.yml`, preview it, launch a smoke workspace, then implement feature X through AWF."
