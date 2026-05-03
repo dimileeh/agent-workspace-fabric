@@ -46,6 +46,7 @@ from awf.runtime.pr_monitor_runner import (
     BaseBehindCountError,
     BaseFetchError,
     MonitorRunnerConfig,
+    ProviderRecoveryFallbackError,
     ProviderRecoveryRetryError,
     PullRequestMonitorRunner,
     _as_utc,
@@ -63,6 +64,7 @@ from awf.runtime.pr_monitor_runner import (
     _is_pending_check,
     _is_transient_github_client_error,
     _merge_rejection_reason,
+    _MonitorPolicyBlockedError,
     _non_check_reviewer_settle_started_key,
     _non_check_reviewer_settle_state_for_persistence,
     _non_check_reviewer_settle_state_for_runtime,
@@ -1737,6 +1739,92 @@ async def test_fix_cycle_reraises_non_transient_settle_poll_error(
 
 
 @pytest.mark.unit
+async def test_fix_cycle_returns_failed_push_when_thread_fix_hits_policy_block(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    thread = ReviewThread(
+        thread_id="T_supply",
+        path="src/foo.py",
+        line=12,
+        body_excerpt="please adjust this",
+        author="reviewer",
+    )
+
+    async def _blocked_thread(**_kwargs: object) -> str:
+        raise _MonitorPolicyBlockedError("Supply-chain policy blocked thread fix.")
+
+    monkeypatch.setattr(runner, "_address_thread", _blocked_thread)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_supply_thread",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        initial_threads=(thread,),
+        initial_reviews=(),
+        state=MonitorState(),
+        remote_branch="awf/ws_supply_thread",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.returncode == 1
+    assert "Supply-chain policy blocked thread fix" in result.stderr
+
+
+@pytest.mark.unit
+async def test_fix_cycle_returns_failed_push_when_review_fix_hits_policy_block(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+    review = ReviewComment(
+        comment_id="R_supply",
+        body_excerpt="please adjust this",
+        author="reviewer",
+    )
+
+    async def _blocked_review(**_kwargs: object) -> str:
+        raise _MonitorPolicyBlockedError("Supply-chain policy blocked review fix.")
+
+    monkeypatch.setattr(runner, "_address_review_comment", _blocked_review)
+
+    result = await runner._run_fix_cycle(
+        workspace_id="ws_supply_review",
+        repo=RepoRef(owner="dimileeh", name="aira-web"),
+        pr_number=42,
+        initial_threads=(),
+        initial_reviews=(review,),
+        state=MonitorState(),
+        remote_branch="awf/ws_supply_review",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+    )
+
+    assert result.failed is True
+    assert result.pushed is False
+    assert result.returncode == 1
+    assert "Supply-chain policy blocked review fix" in result.stderr
+
+
+@pytest.mark.unit
 async def test_fix_cycle_zero_passes_still_runs_push(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2433,6 +2521,65 @@ async def test_monitor_comment_cleanup_failure_terminates_without_push(
 
 
 @pytest.mark.unit
+async def test_monitor_comment_provider_fallback_records_failed_operation(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    workspace_id = await seed_monitoring_workspace(factory)
+    thread = ReviewThread(
+        thread_id="T_provider_fallback",
+        path="src/app.py",
+        line=12,
+        body_excerpt="please fix",
+        author="reviewer",
+    )
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    async def _fallback_fix_cycle(**_kwargs: object) -> _GitPushResult:
+        raise ProviderRecoveryFallbackError()
+
+    monkeypatch.setattr(runner, "_run_fix_cycle", _fallback_fix_cycle)
+
+    with pytest.raises(ProviderRecoveryFallbackError):
+        await runner._execute(
+            action=AddressComments(threads=(thread,), review_comments=()),
+            workspace_id=workspace_id,
+            repo_url="git@github.com:dimileeh/aira-web.git",
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=42,
+            status=_status_for_helpers(threads=(thread,)),
+            state=MonitorState(),
+            base_branch="development",
+            remote_branch=f"awf/{workspace_id}",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            monitor_log=None,
+        )
+
+    async with factory() as s:
+        operations = await OperationRepository(s).list_all(workspace_id=workspace_id, limit=10)
+
+    comment_operation = next(
+        operation for operation in operations if operation.type == "comment_repair"
+    )
+    assert comment_operation.status == OperationStatus.failed.value
+    assert comment_operation.error_code == "PROVIDER_FALLBACK"
+    assert comment_operation.result == {
+        "status": "failed",
+        "outcome": "provider_fallback",
+        "reason_code": "PROVIDER_FALLBACK",
+        "pushed": False,
+    }
+
+
+@pytest.mark.unit
 async def test_monitor_comment_repair_push_failure_records_failed_audit_and_requeues(
     factory: async_sessionmaker[AsyncSession],
     tmp_path: Path,
@@ -2947,6 +3094,56 @@ async def test_git_push_result_blocks_existing_supply_chain_finding_before_git_p
     assert push_result.pushed is False
     assert "SUPPLY_CHAIN_REMOTE_SCRIPT_EXECUTION" in push_result.stderr
     assert cmd.calls == []
+
+
+@pytest.mark.unit
+async def test_active_policy_block_message_ignores_legacy_runner_without_session_factory(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    def _legacy_session_factory() -> object:
+        raise TypeError("legacy test double")
+
+    runner._deps.session_factory = _legacy_session_factory  # type: ignore[assignment]
+
+    assert await runner._active_policy_block_message("ws_legacy") is None
+
+
+@pytest.mark.unit
+async def test_protected_scope_status_check_ignores_empty_or_missing_workspace(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path: Path,
+) -> None:
+    runner = make_runner(
+        factory=factory,
+        cmd=FakeCommandRunner(),
+        adapter=FakeAdapter(),
+        sleep_fn=RecordedSleep(),
+        worktrees_root=tmp_path / "worktrees",
+    )
+
+    assert (
+        await runner._protected_scope_violations_for_status(
+            workspace_id="ws_missing",
+            status_stdout="",
+        )
+        == []
+    )
+    assert (
+        await runner._protected_scope_violations_for_status(
+            workspace_id="ws_missing",
+            status_stdout=" M .github/workflows/ci.yml\n",
+        )
+        == []
+    )
 
 
 @pytest.mark.unit

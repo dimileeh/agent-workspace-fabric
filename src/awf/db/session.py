@@ -22,7 +22,6 @@ from sqlalchemy.pool import NullPool
 from awf.db.dialect import SESSION_DIALECT_NAME_KEY
 from awf.runtime.events import ensure_workspace_event_broadcasting
 
-
 def make_engine(
     url: str,
     *,

@@ -9,7 +9,6 @@ import pytest
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import PolicyFindingResponse
-from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
 from awf.db.models import Workspace
 from awf.db.repositories import (
@@ -20,7 +19,7 @@ from awf.db.repositories import (
     WorkspaceEventRepository,
     WorkspaceRepository,
 )
-from awf.db.session import make_engine, make_session_factory
+from awf.db.session import make_session_factory
 from awf.profiles.models import ProfileSupplyChainPolicy
 from awf.service.supply_chain_policy import (
     SUPPLY_CHAIN_LOCKFILE_OUTSIDE_OWNED_PATHS,
@@ -40,17 +39,13 @@ from awf.service.supply_chain_policy import (
     evaluate_supply_chain_policy,
     supply_chain_policy_for_workspace,
 )
+from tests.postgres import postgres_test_engine
 
 
 @pytest.fixture
 async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
-    engine = make_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    try:
+    async with postgres_test_engine() as engine:
         yield make_session_factory(engine)
-    finally:
-        await engine.dispose()
 
 
 def _policy(mode: str = "warn") -> ProfileSupplyChainPolicy:

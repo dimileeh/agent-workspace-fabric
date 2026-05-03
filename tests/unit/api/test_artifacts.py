@@ -252,6 +252,28 @@ class TestWorkspaceArtifacts:
         assert second_page["cursor"] == first_page["next_cursor"]
 
     @pytest.mark.unit
+    async def test_artifact_list_rejects_invalid_cursor(
+        self,
+        client: AsyncClient,
+        monkeypatch: pytest.MonkeyPatch,
+        tmp_path: Path,
+    ) -> None:
+        workspace_id = await _create_workspace(client)
+        _, headers = _configure_artifact_api(monkeypatch, tmp_path)
+
+        response = await client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            params={"cursor": "not-a-valid-cursor"},
+            headers=headers,
+        )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == {
+            "error_code": "INVALID_CURSOR",
+            "message": "Invalid artifact list cursor.",
+        }
+
+    @pytest.mark.unit
     async def test_artifact_listing_bounds_filesystem_metadata_reads(
         self,
         client: AsyncClient,
