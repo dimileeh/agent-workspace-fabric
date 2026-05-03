@@ -19,6 +19,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from awf.api.schemas import OperationResponse, WorkspaceControlResponse
 from awf.common.config import Settings
+from awf.common.github_client import PullRequestAdoptionMetadata, RepoRef
 from awf.db.base import Base
 from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
@@ -150,6 +151,7 @@ class TestToolRegistration:
             "awf_get_workspace",
             "awf_list_workspaces",
             "awf_wait_for_workspace",
+            "awf_adopt_pull_request_monitor",
         } <= names
         assert {
             "awf_create_workspace_v2",
@@ -241,6 +243,54 @@ class TestToolRegistration:
             ]
             is None
         )
+
+    @pytest.mark.unit
+    async def test_adopt_pull_request_monitor_tool_creates_adoption(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        async def _fetcher(
+            *,
+            repo: RepoRef,
+            pr_number: int,
+        ) -> PullRequestAdoptionMetadata:
+            assert repo.slug() == "dimileeh/aira-web"
+            assert pr_number == 277
+            return PullRequestAdoptionMetadata(
+                number=277,
+                head_ref="feature/ready",
+                base_ref="development",
+                head_sha="h" * 40,
+                base_sha="b" * 40,
+                state="OPEN",
+                is_draft=False,
+                closed=False,
+                merged=False,
+                author="octocat",
+                url="https://github.com/dimileeh/aira-web/pull/277",
+                title="feature: ready",
+            )
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, pr_adoption_metadata_fetcher=_fetcher)
+        )
+
+        payload = await _call(
+            mcp,
+            "awf_adopt_pull_request_monitor",
+            {
+                "repo_slug": "dimileeh/aira-web",
+                "pr_number": 277,
+                "auto_merge": False,
+            },
+        )
+
+        assert isinstance(payload, dict)
+        assert payload["workspace_id"].startswith("ws_")
+        assert payload["repo_slug"] == "dimileeh/aira-web"
+        assert payload["pr_number"] == 277
+        assert payload["head_ref"] == "feature/ready"
+        assert payload["auto_merge"] is False
 
     @pytest.mark.unit
     async def test_operator_parity_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]

@@ -177,6 +177,90 @@ class TestSuccess:
             assert reloaded.compose_file_path == "/tmp/awf-compose/ws_launcher/compose.yml"
 
     @pytest.mark.unit
+    async def test_sync_feature_pr_checks_out_head_ref_and_records_remote_push_branch(
+        self,
+        session_factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        class _RecordingGit:
+            work_dir = tmp_path / "awf-work"
+
+            def __init__(self) -> None:
+                self.add_worktree_calls: list[dict[str, object]] = []
+
+            async def add_worktree(
+                self,
+                *,
+                workspace_id: str,
+                repo_url: str,
+                base_branch: str,
+                new_branch: str,
+            ) -> WorktreeLayout:
+                self.add_worktree_calls.append(
+                    {
+                        "workspace_id": workspace_id,
+                        "repo_url": repo_url,
+                        "base_branch": base_branch,
+                        "new_branch": new_branch,
+                    }
+                )
+                worktree = self.work_dir / "worktrees" / workspace_id
+                worktree.mkdir(parents=True, exist_ok=True)
+                return WorktreeLayout(
+                    mirror_path=self.work_dir / "mirrors" / "repo.git",
+                    worktree_path=worktree,
+                    branch_name=new_branch,
+                )
+
+            async def head_sha(self, *, workspace_id: str) -> str:
+                del workspace_id
+                return "h" * 40
+
+        git = _RecordingGit()
+        provisioner = Provisioner(
+            session_factory=session_factory,
+            git=git,  # type: ignore[arg-type]
+            config=ProvisionerConfig(node_id="test-node-01"),
+        )
+        async with session_factory() as s:
+            ws = await WorkspaceRepository(s).create(
+                repo_url="https://github.com/dimileeh/aira-web.git",
+                branch_base="development",
+                task_title="adopt",
+                task_prompt="monitor",
+                agent="codex",
+                test_commands=[],
+                task_kind="sync_feature_pr",
+                task_policy={
+                    "pr_adoption": {
+                        "head_ref": "feature/ready",
+                        "base_ref": "development",
+                    }
+                },
+                resolved_profile={"name": "generic"},
+            )
+            await s.commit()
+            workspace_id = ws.id
+
+        await provisioner.provision(workspace_id)
+
+        assert git.add_worktree_calls == [
+            {
+                "workspace_id": workspace_id,
+                "repo_url": "https://github.com/dimileeh/aira-web.git",
+                "base_branch": "feature/ready",
+                "new_branch": f"feature-sync/{workspace_id}",
+            }
+        ]
+        async with session_factory() as s:
+            reloaded = await WorkspaceRepository(s).get(workspace_id)
+            assert reloaded is not None
+            assert reloaded.status == WorkspaceStatus.ready.value
+            assert reloaded.branch_base == "development"
+            assert reloaded.branch_name == f"feature-sync/{workspace_id}"
+            assert reloaded.remote_push_branch == "feature/ready"
+
+    @pytest.mark.unit
     async def test_profile_secret_leases_are_issued_before_launch_and_mounted_after_success(
         self,
         session_factory: async_sessionmaker[AsyncSession],

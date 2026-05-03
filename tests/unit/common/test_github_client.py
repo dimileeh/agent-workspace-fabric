@@ -20,7 +20,10 @@ from awf.common.commands import FakeCommandRunner
 from awf.common.github_client import (
     GitHubClient,
     GitHubClientError,
+    PullRequestMetadataError,
     RepoRef,
+    fetch_pull_request_adoption_metadata,
+    parse_github_pull_request_url,
 )
 from awf.runtime.pr_monitor import CheckState, MergeableState, MergeStateStatus
 
@@ -32,6 +35,7 @@ class TestRepoRef:
     @pytest.mark.parametrize(
         "url, expected_slug",
         [
+            ("dimileeh/aira-web", "dimileeh/aira-web"),
             ("git@github.com:dimileeh/aira-web.git", "dimileeh/aira-web"),
             ("git@github.com:dimileeh/aira-web", "dimileeh/aira-web"),
             ("https://github.com/dimileeh/aira-agent.git", "dimileeh/aira-agent"),
@@ -47,6 +51,121 @@ class TestRepoRef:
     def test_rejects_non_github_urls(self) -> None:
         with pytest.raises(ValueError):
             RepoRef.from_url("git@gitlab.com:org/repo.git")
+
+
+class TestPullRequestUrlParsing:
+    @pytest.mark.unit
+    def test_parses_canonical_pr_url(self) -> None:
+        repo, number = parse_github_pull_request_url(
+            "https://github.com/dimileeh/aira-web/pull/277"
+        )
+
+        assert repo.slug() == "dimileeh/aira-web"
+        assert number == 277
+
+    @pytest.mark.unit
+    def test_rejects_non_pr_url(self) -> None:
+        with pytest.raises(ValueError):
+            parse_github_pull_request_url("https://github.com/dimileeh/aira-web/issues/277")
+
+
+def _adoption_pr_payload(
+    *,
+    number: int = 277,
+    head_ref: str = "feature/head",
+    base_ref: str = "development",
+    head_sha: str = "h" * 40,
+    base_sha: str = "b" * 40,
+    state: str = "OPEN",
+    is_draft: bool = False,
+    author: str | None = "octocat",
+    url: str = "https://github.com/dimileeh/aira-web/pull/277",
+    title: str = "feature: ready",
+) -> str:
+    return json.dumps(
+        {
+            "number": number,
+            "headRefName": head_ref,
+            "baseRefName": base_ref,
+            "headRefOid": head_sha,
+            "baseRefOid": base_sha,
+            "state": state,
+            "isDraft": is_draft,
+            "author": {"login": author} if author is not None else None,
+            "url": url,
+            "title": title,
+        }
+    )
+
+
+class TestFetchPullRequestAdoptionMetadata:
+    @pytest.mark.unit
+    async def test_returns_head_base_refs_and_shas_for_open_pr(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=_adoption_pr_payload())
+
+        metadata = await fetch_pull_request_adoption_metadata(
+            runner=fake,
+            repo=RepoRef(owner="dimileeh", name="aira-web"),
+            pr_number=277,
+        )
+
+        assert metadata.number == 277
+        assert metadata.head_ref == "feature/head"
+        assert metadata.base_ref == "development"
+        assert metadata.head_sha == "h" * 40
+        assert metadata.base_sha == "b" * 40
+        assert metadata.url == "https://github.com/dimileeh/aira-web/pull/277"
+        assert metadata.author == "octocat"
+        assert metadata.closed is False
+        assert metadata.merged is False
+
+        args = fake.calls[0].args
+        assert args[:3] == ["gh", "pr", "view"]
+        fields = args[args.index("--json") + 1].split(",")
+        assert "headRefOid" in fields
+        assert "baseRefOid" in fields
+        assert "closed" not in fields
+        assert "merged" not in fields
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "state, reason_code",
+        [
+            ("CLOSED", "PR_ALREADY_CLOSED"),
+            ("MERGED", "PR_ALREADY_MERGED"),
+        ],
+    )
+    async def test_terminal_prs_raise_structured_reason(
+        self,
+        state: str,
+        reason_code: str,
+    ) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=0, stdout=_adoption_pr_payload(state=state))
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await fetch_pull_request_adoption_metadata(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=277,
+            )
+
+        assert excinfo.value.reason_code == reason_code
+
+    @pytest.mark.unit
+    async def test_missing_pr_raises_not_found_reason(self) -> None:
+        fake = FakeCommandRunner()
+        fake.queue_result(returncode=1, stderr="GraphQL: Could not resolve to a PullRequest")
+
+        with pytest.raises(PullRequestMetadataError) as excinfo:
+            await fetch_pull_request_adoption_metadata(
+                runner=fake,
+                repo=RepoRef(owner="dimileeh", name="aira-web"),
+                pr_number=404,
+            )
+
+        assert excinfo.value.reason_code == "PR_NOT_FOUND"
 
 
 # ── fetch_pr_status ────────────────────────────────────────────────────────

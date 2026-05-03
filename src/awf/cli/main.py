@@ -1339,6 +1339,70 @@ def workspace_remonitor(
     _handle_response(response, fmt)
 
 
+@workspace_app.command("adopt-pr")
+def workspace_adopt_pr(
+    repo: str | None = typer.Option(
+        None,
+        "--repo",
+        help="GitHub repo slug or URL. Use with --pr.",
+    ),
+    pr_number: int | None = typer.Option(
+        None,
+        "--pr",
+        min=1,
+        help="Pull request number. Use with --repo.",
+    ),
+    pr_url: str | None = typer.Option(
+        None,
+        "--pr-url",
+        help="Full GitHub pull request URL.",
+    ),
+    agent: str = typer.Option("codex", "--agent"),
+    profile_ref: str | None = typer.Option("auto", "--profile"),
+    auto_merge: bool = typer.Option(
+        True,
+        "--auto-merge/--no-auto-merge",
+        help="Allow the adopted PR monitor to merge when gates are green.",
+    ),
+    initial_review_grace_period_seconds: float | None = typer.Option(
+        None,
+        "--initial-review-grace-period-seconds",
+        min=0,
+        max=86400,
+        help="Override profile monitor grace; omit to use the profile setting.",
+    ),
+    task_title: str | None = typer.Option(None, "--title"),
+    task_prompt: str | None = typer.Option(None, "--prompt"),
+    reason: str | None = typer.Option(None, "--reason", help="Operator audit reason."),
+    api_token: str | None = _api_token_option(),
+    base_url: str | None = typer.Option(None, "--base-url"),
+    fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
+) -> None:
+    """Adopt an already-open GitHub PR into AWF PR monitoring."""
+    body = {
+        "repo_url": repo if repo and "github.com" in repo else None,
+        "repo_slug": repo if repo and "github.com" not in repo else None,
+        "pr_number": pr_number,
+        "pr_url": pr_url,
+        "agent": agent,
+        "profile_ref": profile_ref,
+        "profile": None,
+        "auto_merge": auto_merge,
+        "initial_review_grace_period_seconds": initial_review_grace_period_seconds,
+        "task_title": task_title,
+        "task_prompt": task_prompt,
+        "reason": reason,
+    }
+    response = _call(
+        "POST",
+        "/v1/workspaces/adopt-pr",
+        base_url=_base_url(base_url),
+        json=body,
+        headers=_api_token_headers(api_token),
+    )
+    _handle_response(response, fmt)
+
+
 @workspace_app.command("list")
 def workspace_list(
     limit: int = typer.Option(50, "--limit"),

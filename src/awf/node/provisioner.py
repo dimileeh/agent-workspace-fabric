@@ -116,12 +116,17 @@ class Provisioner:
             return
 
         # 2. Do the git work outside a DB transaction (it's slow).
-        branch_name = f"{self._config.branch_prefix}/{workspace_id}"
+        branch_name = _provision_local_branch_name(
+            ws,
+            workspace_id=workspace_id,
+            branch_prefix=self._config.branch_prefix,
+        )
+        checkout_base = _provision_checkout_base_branch(ws)
         try:
             layout = await self._git.add_worktree(
                 workspace_id=workspace_id,
                 repo_url=ws.repo_url,
-                base_branch=ws.branch_base,
+                base_branch=checkout_base,
                 new_branch=branch_name,
             )
             if not await self._recheck_status(
@@ -252,6 +257,9 @@ class Provisioner:
             persisted.branch_name = layout.branch_name
             persisted.base_commit = base_commit
             persisted.compose_project_name = f"awf_{workspace_id}"
+            remote_push_branch = _provision_remote_push_branch(persisted)
+            if remote_push_branch is not None:
+                persisted.remote_push_branch = remote_push_branch
             if stack_paths is not None:
                 persisted.compose_file_path = str(stack_paths.compose_file)
                 await SecretLeaseService(session).record_secret_lease_mounts(
@@ -499,3 +507,36 @@ def _stack_secret_lease_mount_metadata(
         if key in plan_metadata:
             metadata[key] = plan_metadata[key]
     return metadata
+
+
+def _provision_local_branch_name(
+    ws: Workspace,
+    *,
+    workspace_id: str,
+    branch_prefix: str,
+) -> str:
+    if ws.task_kind == "sync_feature_pr":
+        return f"feature-sync/{workspace_id}"
+    return f"{branch_prefix}/{workspace_id}"
+
+
+def _provision_checkout_base_branch(ws: Workspace) -> str:
+    return _sync_feature_pr_head_ref(ws) or ws.branch_base
+
+
+def _provision_remote_push_branch(ws: Workspace) -> str | None:
+    return _sync_feature_pr_head_ref(ws) or ws.remote_push_branch
+
+
+def _sync_feature_pr_head_ref(ws: Workspace) -> str | None:
+    if ws.task_kind != "sync_feature_pr":
+        return None
+    policy = ws.task_policy if isinstance(ws.task_policy, dict) else {}
+    adoption = policy.get("pr_adoption")
+    if not isinstance(adoption, dict):
+        return None
+    head_ref = adoption.get("head_ref")
+    if not isinstance(head_ref, str):
+        return None
+    stripped = head_ref.strip()
+    return stripped or None

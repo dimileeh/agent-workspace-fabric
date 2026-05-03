@@ -28,6 +28,7 @@ from awf.api.schemas import (
     OperationListResponse,
     OperationResponse,
     OwnedPath,
+    PullRequestMonitorAdoptionRequest,
     WorkspaceCreateRequest,
     WorkspaceCreateV2Request,
     WorkspaceLockListResponse,
@@ -63,6 +64,7 @@ from awf.service.metrics import (
 )
 from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
+from awf.service.pr_monitor_adoption import PRMonitorAdoptionError
 from awf.service.provider_readiness import ProviderName
 from awf.service.tasks import build_task_attempt_list_response, build_task_list_response
 from awf.service.validation_provenance import (
@@ -960,6 +962,96 @@ def build_mcp_server(
             health_provider=health_provider,
         )
         return _safe_result(payload)
+
+    @mcp.tool(name="awf_adopt_pull_request_monitor")
+    async def awf_adopt_pull_request_monitor(
+        repo_url: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="GitHub repo URL. Use with pr_number, or pass pr_url instead.",
+        ),
+        repo_slug: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=256,
+            description="GitHub owner/repo slug. Use with pr_number, or pass pr_url instead.",
+        ),
+        pr_number: int | None = Field(
+            default=None,
+            ge=1,
+            description="GitHub pull request number when repo_url or repo_slug is supplied.",
+        ),
+        pr_url: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="Full GitHub pull request URL to adopt.",
+        ),
+        agent: AgentRuntime = Field(
+            default=AgentRuntime.codex,
+            description="Coding agent runtime used later by the PR monitor for repair work.",
+        ),
+        profile_ref: str | None = Field(
+            default="auto",
+            max_length=128,
+            description="Workspace profile reference for the adopted monitor workspace.",
+        ),
+        profile: dict[str, Any] | None = Field(
+            default=None,
+            description="Optional inline workspace profile dictionary.",
+        ),
+        auto_merge: bool = Field(
+            default=True,
+            description="Whether AWF may merge the adopted PR once monitor gates are green.",
+        ),
+        initial_review_grace_period_seconds: float | None = Field(
+            default=None,
+            ge=0,
+            le=86400,
+            description="Optional monitor grace override before auto-merge.",
+        ),
+        task_title: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=512,
+            description="Optional adopted workspace title.",
+        ),
+        task_prompt: str | None = Field(
+            default=None,
+            min_length=1,
+            max_length=16384,
+            description="Optional adopted workspace prompt.",
+        ),
+        reason: str | None = Field(
+            default=None,
+            max_length=512,
+            description="Optional operator audit reason.",
+        ),
+    ) -> StructuredToolResult:
+        """Operator control: adopt an existing GitHub PR into AWF monitoring; this is not shell access."""
+        try:
+            response = await service.adopt_pull_request_monitor(
+                PullRequestMonitorAdoptionRequest(
+                    repo_url=repo_url,
+                    repo_slug=repo_slug,
+                    pr_number=pr_number,
+                    pr_url=pr_url,
+                    agent=agent,
+                    profile_ref=profile_ref,
+                    profile=profile,
+                    auto_merge=auto_merge,
+                    initial_review_grace_period_seconds=(
+                        initial_review_grace_period_seconds
+                    ),
+                    task_title=task_title,
+                    task_prompt=task_prompt,
+                    reason=reason,
+                )
+            )
+        except PRMonitorAdoptionError as exc:
+            return _workspace_error_result(exc)
+        return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_remonitor_workspace")
     async def awf_remonitor_workspace(

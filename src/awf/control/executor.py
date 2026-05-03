@@ -171,6 +171,11 @@ _PR_CREATE_FAILED_REASON_CODE = "PR_CREATE_FAILED"
 GIT_AGENT_WRITABILITY_FAILED_REASON_CODE = "GIT_AGENT_WRITABILITY_FAILED"
 GIT_OBJECT_MISSING_REASON_CODE = "GIT_OBJECT_MISSING"
 GIT_OBJECT_MISSING_RECOVERED_REASON_CODE = "GIT_OBJECT_MISSING_RECOVERED"
+_PR_MONITOR_ADOPTED_EVENT = "workspace.pr_monitor_adopted"
+_PR_MONITOR_ADOPTED_REASON_CODE = "PR_MONITOR_ADOPTED"
+_PR_ADOPTION_SKIP_AGENT_REASON_CODE = "PR_ADOPTION_SKIP_AGENT"
+_PR_ADOPTION_METADATA_MISSING_REASON_CODE = "PR_ADOPTION_METADATA_MISSING"
+_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE = "PR_ADOPTION_MONITOR_UNAVAILABLE"
 
 _RECOVERY_ACTIVE_OPERATION_STATUSES = {
     OperationStatus.pending.value,
@@ -860,6 +865,200 @@ class WorkspaceExecutor:
             suffix = "" if existing.endswith("\n") or not existing else "\n"
             exclude_path.write_text(f"{existing}{suffix}{pattern}\n", encoding="utf-8")
 
+    async def _handoff_sync_feature_pr_monitor(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+        compose_project: str,
+        compose_file: Path,
+        worktree_path: Path,
+    ) -> None:
+        metadata = _sync_feature_pr_adoption_metadata(workspace)
+        missing = _missing_sync_feature_pr_adoption_metadata(workspace, metadata)
+        if missing:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=_sync_feature_pr_missing_metadata_message(missing),
+                reason_code=_PR_ADOPTION_METADATA_MISSING_REASON_CODE,
+                details={"missing": missing},
+            )
+            return
+
+        if not await self._ensure_worktree_available(
+            workspace_id=workspace_id,
+            worktree_path=worktree_path,
+            expected=WorkspaceStatus.running,
+            action="sync_feature_pr_handoff",
+        ):
+            return
+
+        monitor: _MonitorRunnerProto | None = self._pr_monitor
+        try:
+            if monitor is None and self._pr_monitor_factory is not None:
+                agent = AgentRuntime(workspace.agent)
+                defaults = self._defaults_for(agent)
+                adapter_defaults = _agent_defaults_for_workspace(workspace, defaults)
+                adapter = get_adapter(
+                    agent,
+                    runner=self._runner,
+                    defaults=adapter_defaults,
+                    log_store=self._log_store,
+                    agent_wall_timeout_seconds=self._config.agent_wall_timeout_seconds,
+                    agent_idle_timeout_seconds=self._config.agent_idle_timeout_seconds,
+                )
+                profile = _profile_for_workspace(
+                    workspace,
+                    worktree_path=worktree_path,
+                    planning_max_iterations_default=(
+                        self._config.planning_max_iterations_default
+                    ),
+                )
+                monitor = _call_pr_monitor_factory(
+                    self._pr_monitor_factory,
+                    adapter=adapter,
+                    profile=profile,
+                    workspace=workspace,
+                )
+        except Exception as exc:
+            _log.exception(
+                "executor.sync_feature_pr_monitor_build_failed",
+                workspace_id=workspace_id,
+            )
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"adopted PR monitor handoff failed: {exc!r}"[:2000],
+                reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+            )
+            return
+
+        if monitor is None:
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.running,
+                failure_reason=FailureReason.infrastructure_failure,
+                message="adopted PR monitor handoff failed: no PR monitor configured",
+                reason_code=_PR_ADOPTION_MONITOR_UNAVAILABLE_REASON_CODE,
+            )
+            return
+
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            persisted = await repo.get(workspace_id)
+            if persisted is None:  # pragma: no cover - destroyed mid-flight
+                return
+            if persisted.status != WorkspaceStatus.running.value:
+                await self._record_stale_action_skip(
+                    repo,
+                    persisted,
+                    action="sync_feature_pr_handoff",
+                    expected=WorkspaceStatus.running,
+                    reason_code="EXECUTOR_STALE_STATUS",
+                )
+                await session.commit()
+                return
+
+            persisted_metadata = _sync_feature_pr_adoption_metadata(persisted)
+            missing = _missing_sync_feature_pr_adoption_metadata(
+                persisted,
+                persisted_metadata,
+            )
+            if missing:
+                safe_message = redact_audit_text(
+                    _sync_feature_pr_missing_metadata_message(missing),
+                    limit=2000,
+                )
+                persisted.failure_reason = FailureReason.infrastructure_failure.value
+                persisted.failure_message = safe_message
+                await repo.transition(
+                    persisted,
+                    to=WorkspaceStatus.failed,
+                    reason_code=_PR_ADOPTION_METADATA_MISSING_REASON_CODE,
+                    payload={
+                        "failure_reason": FailureReason.infrastructure_failure.value,
+                        "reason_code": _PR_ADOPTION_METADATA_MISSING_REASON_CODE,
+                        "message": safe_message,
+                        "details": {"missing": missing},
+                    },
+                )
+                await session.commit()
+                return
+
+            head_sha = _required_metadata_str(persisted_metadata, "head_sha")
+            base_sha = _required_metadata_str(persisted_metadata, "base_sha")
+            head_ref = _required_metadata_str(persisted_metadata, "head_ref")
+            base_ref = _required_metadata_str(persisted_metadata, "base_ref")
+            pr_url = persisted.pr_url or _required_metadata_str(
+                persisted_metadata,
+                "pr_url",
+            )
+            pr_number = persisted.pr_number or _metadata_int(
+                persisted_metadata,
+                "pr_number",
+            )
+            remote_branch = persisted.remote_push_branch or head_ref
+
+            persisted.pr_url = pr_url
+            persisted.pr_number = pr_number
+            persisted.remote_push_branch = remote_branch
+            persisted.monitor_last_commit_sha = head_sha
+            persisted.base_commit = base_sha
+            await repo.add_event(
+                persisted,
+                event_type=_PR_MONITOR_ADOPTED_EVENT,
+                reason_code=_PR_MONITOR_ADOPTED_REASON_CODE,
+                payload={
+                    "pr_number": pr_number,
+                    "pr_url": pr_url,
+                    "head_ref": head_ref,
+                    "base_ref": base_ref,
+                    "head_sha": head_sha,
+                    "base_sha": base_sha,
+                    "remote_branch": remote_branch,
+                    "source": "existing_github_pr",
+                },
+            )
+            await repo.transition(
+                persisted,
+                to=WorkspaceStatus.validating,
+                reason_code=_PR_ADOPTION_SKIP_AGENT_REASON_CODE,
+                payload={"source": "existing_github_pr"},
+            )
+            await repo.transition(
+                persisted,
+                to=WorkspaceStatus.monitoring_pr,
+                reason_code=_PR_MONITOR_ADOPTED_REASON_CODE,
+                payload={
+                    "pr_number": pr_number,
+                    "pr_url": pr_url,
+                    "head_sha": head_sha,
+                    "base_sha": base_sha,
+                    "source": "existing_github_pr",
+                },
+            )
+            await session.commit()
+
+        _log.info(
+            "executor.sync_feature_pr_handoff_to_monitor",
+            workspace_id=workspace_id,
+            pr_url=workspace.pr_url,
+        )
+        if not await self._recheck_status(
+            workspace_id,
+            expected=WorkspaceStatus.monitoring_pr,
+            action="run_pr_monitor",
+        ):
+            return
+        await monitor.run(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+        )
+
     async def execute(
         self,
         workspace_id: str,
@@ -894,6 +1093,16 @@ class WorkspaceExecutor:
         )
         compose_project = ws.compose_project_name or f"awf_{workspace_id}"
         worktree_path = self._config.worktrees_root / workspace_id
+
+        if ws.task_kind == "sync_feature_pr":
+            await self._handoff_sync_feature_pr_monitor(
+                workspace_id=workspace_id,
+                workspace=ws,
+                compose_project=compose_project,
+                compose_file=compose_file,
+                worktree_path=worktree_path,
+            )
+            return
 
         # ── Step 1: agent CLI runs the task inside the container ────────────
         # When the PR monitor's RECOVERY_DISPATCH path delivered this
@@ -4803,6 +5012,51 @@ def _missing_monitor_recovery_metadata(ws: Workspace) -> list[str]:
     if not ws.compose_file_path:
         missing.append("compose_file_path")
     return missing
+
+
+def _sync_feature_pr_adoption_metadata(ws: Workspace) -> Mapping[str, object]:
+    policy = ws.task_policy if isinstance(ws.task_policy, Mapping) else {}
+    adoption = policy.get("pr_adoption")
+    return adoption if isinstance(adoption, Mapping) else {}
+
+
+def _missing_sync_feature_pr_adoption_metadata(
+    ws: Workspace,
+    metadata: Mapping[str, object],
+) -> list[str]:
+    missing: list[str] = []
+    if ws.pr_number is None and _metadata_int(metadata, "pr_number") is None:
+        missing.append("pr_number")
+    if not ws.pr_url and _nonblank_metadata_str(metadata, "pr_url") is None:
+        missing.append("pr_url")
+    if not ws.remote_push_branch and _nonblank_metadata_str(metadata, "head_ref") is None:
+        missing.append("remote_push_branch")
+    for key in ("head_ref", "base_ref", "head_sha", "base_sha"):
+        if _nonblank_metadata_str(metadata, key) is None:
+            missing.append(f"task_policy.pr_adoption.{key}")
+    return missing
+
+
+def _sync_feature_pr_missing_metadata_message(missing: Sequence[str]) -> str:
+    return (
+        "adopted PR workspace is missing required monitor handoff metadata: "
+        + ", ".join(missing)
+    )
+
+
+def _required_metadata_str(metadata: Mapping[str, object], key: str) -> str:
+    value = _nonblank_metadata_str(metadata, key)
+    if value is None:
+        raise ValueError(f"missing adoption metadata key: {key}")
+    return value
+
+
+def _nonblank_metadata_str(metadata: Mapping[str, object], key: str) -> str | None:
+    value = _metadata_str(metadata, key)
+    if value is None:
+        return None
+    stripped = value.strip()
+    return stripped or None
 
 
 def _call_pr_monitor_factory(

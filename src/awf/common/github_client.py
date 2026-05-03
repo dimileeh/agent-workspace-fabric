@@ -28,6 +28,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from urllib.parse import urlsplit
 
 from awf.common.commands import AsyncCommandRunner
 from awf.common.logging import get_logger
@@ -55,6 +56,22 @@ class GitHubClientError(Exception):
         super().__init__(
             f"{operation} failed (exit={returncode}): {stderr.strip() or '<no output>'}"
         )
+
+
+class PullRequestMetadataError(Exception):
+    """Structured failure while resolving static PR adoption metadata."""
+
+    def __init__(
+        self,
+        *,
+        reason_code: str,
+        message: str,
+        detail: dict[str, Any] | None = None,
+    ) -> None:
+        self.reason_code = reason_code
+        self.message = message
+        self.detail = detail
+        super().__init__(message)
 
 
 # GraphQL: fetch PR state + review threads + review comments in one query.
@@ -188,14 +205,216 @@ class RepoRef:
 
     @classmethod
     def from_url(cls, repo_url: str) -> RepoRef:
-        # SSH form: ``git@github.com:owner/repo.git``
-        m = re.search(r"github\.com[:/]([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url)
-        if not m:
+        value = repo_url.strip()
+        slug_match = re.fullmatch(r"([^/\s]+)/([^/\s]+?)(?:\.git)?/?", value)
+        if slug_match and "github.com" not in value and ":" not in value:
+            return cls(owner=slug_match.group(1), name=slug_match.group(2))
+
+        # SSH form: ``git@github.com:owner/repo.git``.
+        ssh_match = re.fullmatch(r"git@github\.com:([^/]+)/([^/]+?)(?:\.git)?/?", value)
+        if ssh_match:
+            return cls(owner=ssh_match.group(1), name=ssh_match.group(2))
+
+        parsed = urlsplit(value)
+        if parsed.scheme in {"http", "https"} and parsed.netloc.lower() == "github.com":
+            parts = [part for part in parsed.path.strip("/").split("/") if part]
+            if len(parts) >= 2 and parts[0] and parts[1]:
+                name = parts[1][:-4] if parts[1].endswith(".git") else parts[1]
+                if name:
+                    return cls(owner=parts[0], name=name)
+
             raise ValueError(f"Cannot parse GitHub repo from URL: {repo_url!r}")
-        return cls(owner=m.group(1), name=m.group(2))
+
+        raise ValueError(f"Cannot parse GitHub repo from URL: {repo_url!r}")
 
     def slug(self) -> str:
         return f"{self.owner}/{self.name}"
+
+    def https_url(self) -> str:
+        return f"https://github.com/{self.owner}/{self.name}.git"
+
+
+@dataclass(frozen=True)
+class PullRequestAdoptionMetadata:
+    """Static GitHub PR metadata needed to adopt an existing PR monitor."""
+
+    number: int
+    head_ref: str
+    base_ref: str
+    head_sha: str | None
+    base_sha: str | None
+    state: str
+    is_draft: bool
+    closed: bool
+    merged: bool
+    author: str | None
+    url: str
+    title: str
+
+
+_PR_ADOPTION_VIEW_JSON_FIELDS = (
+    "number,headRefName,baseRefName,headRefOid,baseRefOid,state,isDraft,author,url,title"
+)
+
+
+def parse_github_pull_request_url(pr_url: str) -> tuple[RepoRef, int]:
+    """Parse a canonical GitHub PR URL into ``(repo, number)``."""
+
+    parsed = urlsplit(pr_url.strip())
+    if parsed.scheme not in {"http", "https"} or parsed.netloc.lower() != "github.com":
+        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}")
+    parts = [part for part in parsed.path.strip("/").split("/") if part]
+    if len(parts) < 4 or parts[2] != "pull":
+        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}")
+    try:
+        number = int(parts[3])
+    except ValueError as exc:
+        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}") from exc
+    if number <= 0:
+        raise ValueError(f"Cannot parse GitHub pull request URL: {pr_url!r}")
+    return RepoRef(owner=parts[0], name=parts[1]), number
+
+
+async def fetch_pull_request_adoption_metadata(
+    *,
+    runner: AsyncCommandRunner,
+    repo: RepoRef,
+    pr_number: int,
+) -> PullRequestAdoptionMetadata:
+    """Fetch one-shot metadata for adopting an existing GitHub PR."""
+
+    result = await runner.run(
+        [
+            "gh",
+            "pr",
+            "view",
+            str(pr_number),
+            "--repo",
+            repo.slug(),
+            "--json",
+            _PR_ADOPTION_VIEW_JSON_FIELDS,
+        ]
+    )
+    if result.returncode != 0:
+        reason = (
+            "PR_NOT_FOUND"
+            if _looks_like_missing_pr_error(result.stderr)
+            else "PR_METADATA_FETCH_FAILED"
+        )
+        raise PullRequestMetadataError(
+            reason_code=reason,
+            message=(result.stderr or f"gh pr view exited {result.returncode}").strip(),
+            detail={
+                "repo_slug": repo.slug(),
+                "pr_number": pr_number,
+                "returncode": result.returncode,
+            },
+        )
+
+    try:
+        payload = json.loads(result.stdout)
+    except json.JSONDecodeError as exc:
+        raise PullRequestMetadataError(
+            reason_code="PR_METADATA_INVALID",
+            message=f"failed to parse gh pr view JSON: {exc}",
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number},
+        ) from exc
+
+    return _parse_pull_request_adoption_metadata(payload, repo=repo, pr_number=pr_number)
+
+
+def _parse_pull_request_adoption_metadata(
+    payload: dict[str, Any],
+    *,
+    repo: RepoRef,
+    pr_number: int,
+) -> PullRequestAdoptionMetadata:
+    try:
+        number = int(payload["number"])
+        head_ref = str(payload["headRefName"])
+        base_ref = str(payload["baseRefName"])
+        state = str(payload["state"])
+        is_draft = bool(payload.get("isDraft", False))
+        url = str(payload["url"])
+        title = str(payload.get("title") or "")
+    except (KeyError, TypeError, ValueError) as exc:
+        raise PullRequestMetadataError(
+            reason_code="PR_METADATA_INVALID",
+            message=f"gh pr view payload missing required adoption field: {exc}",
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number},
+        ) from exc
+
+    if number != pr_number:
+        raise PullRequestMetadataError(
+            reason_code="PR_METADATA_INVALID",
+            message=(
+                f"gh pr view returned PR #{number}, expected #{pr_number} "
+                f"for {repo.slug()}"
+            ),
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number},
+        )
+    if not head_ref.strip():
+        raise PullRequestMetadataError(
+            reason_code="PR_METADATA_INVALID",
+            message="PR has no headRefName; cannot check out the PR branch.",
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number},
+        )
+    if not base_ref.strip():
+        raise PullRequestMetadataError(
+            reason_code="PR_METADATA_INVALID",
+            message="PR has no baseRefName; cannot record the merge target.",
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number},
+        )
+
+    closed = state == "CLOSED"
+    merged = state == "MERGED"
+    if merged:
+        raise PullRequestMetadataError(
+            reason_code="PR_ALREADY_MERGED",
+            message=f"PR {repo.slug()}#{pr_number} is already merged.",
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number, "state": state},
+        )
+    if closed:
+        raise PullRequestMetadataError(
+            reason_code="PR_ALREADY_CLOSED",
+            message=f"PR {repo.slug()}#{pr_number} is closed.",
+            detail={"repo_slug": repo.slug(), "pr_number": pr_number, "state": state},
+        )
+
+    author_obj = payload.get("author")
+    author = author_obj.get("login") if isinstance(author_obj, dict) else None
+    head_sha = _optional_nonempty_str(payload.get("headRefOid"))
+    base_sha = _optional_nonempty_str(payload.get("baseRefOid"))
+    return PullRequestAdoptionMetadata(
+        number=number,
+        head_ref=head_ref,
+        base_ref=base_ref,
+        head_sha=head_sha,
+        base_sha=base_sha,
+        state=state,
+        is_draft=is_draft,
+        closed=closed,
+        merged=merged,
+        author=author,
+        url=url,
+        title=title,
+    )
+
+
+def _optional_nonempty_str(value: object) -> str | None:
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def _looks_like_missing_pr_error(stderr: str) -> bool:
+    lower = stderr.lower()
+    return (
+        "could not resolve to a pullrequest" in lower
+        or "not found" in lower
+        or "no pull requests found" in lower
+    )
 
 
 class GitHubClient:

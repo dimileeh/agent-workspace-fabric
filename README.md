@@ -116,7 +116,6 @@ See:
   for the local control-plane container UID/GID strategy and per-pillar
   analysis behind the root-by-default decision.
 
-
 ## Documentation
 
 - [Getting Started](docs/GETTING_STARTED.md) / [Start Here Quickstart](docs/QUICKSTART.md)
@@ -132,6 +131,13 @@ See:
 ## Supported Client Surfaces (v0.1)
 
 REST, CLI, and MCP are the supported client surfaces for v0.1. AWF does not currently ship with a supported Python SDK. Integrators should use one of the supported surfaces (e.g., the CLI for operator convenience or the REST API for control-plane programmatic access). Please do not import internal AWF modules (such as `awf.*` or other internal paths) to build custom API clients, as they are not part of the stable public contract and are subject to change without notice.
+
+## PR Monitor Adoption
+
+Existing GitHub pull requests can be adopted into AWF monitoring through the
+REST, CLI, and MCP surfaces. Adoption creates a monitor-owned workspace for the
+open PR without re-running the coding agent, then lets AWF apply the normal PR
+monitor loop for comments, checks, freshness, and merge policy.
 
 ## License
 

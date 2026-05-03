@@ -21,6 +21,8 @@ from awf.api.schemas import (
     OperationResponse,
     OwnedPathOverlapResponse,
     ProviderRecoveryStateResponse,
+    PullRequestMonitorAdoptionRequest,
+    PullRequestMonitorAdoptionResponse,
     RuntimeServiceResponse,
     ValidationFreshnessSummaryResponse,
     WorkspaceAppEndpointResponse,
@@ -82,6 +84,7 @@ from awf.service.coordination import (
     task_policy_with_coordination_warnings,
 )
 from awf.service.disk import DiskCheck
+from awf.service.pr_monitor_adoption import PullRequestMonitorAdoptionService
 from awf.service.profile_metadata import network_posture_from_profile_snapshot
 from awf.service.provider_readiness import (
     HttpGet,
@@ -360,6 +363,7 @@ class WorkspaceService:
         runtime_inspector: RuntimeInspection | None = None,
         project_stopper: ProjectStopper | None = None,
         cleaner_factory: CleanerFactory | None = None,
+        pr_adoption_metadata_fetcher: Any | None = None,
     ) -> None:
         self._factory = session_factory
         self._settings = settings
@@ -367,6 +371,7 @@ class WorkspaceService:
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._project_stopper = project_stopper or stop_project_containers
         self._cleaner_factory = cleaner_factory or default_cleaner
+        self._pr_adoption_metadata_fetcher = pr_adoption_metadata_fetcher
 
     @property
     def session_factory(self) -> async_sessionmaker[AsyncSession]:
@@ -414,6 +419,19 @@ class WorkspaceService:
             )
             await s.commit()
             return workspace_retry_response(result)
+
+    async def adopt_pull_request_monitor(
+        self,
+        req: PullRequestMonitorAdoptionRequest,
+    ) -> PullRequestMonitorAdoptionResponse:
+        async with self._factory() as s:
+            result = await PullRequestMonitorAdoptionService(
+                s,
+                metadata_fetcher=self._pr_adoption_metadata_fetcher,
+                settings=self._settings,
+            ).adopt(req)
+            await s.commit()
+            return result
 
     async def get(self, workspace_id: str) -> WorkspaceResponse | None:
         async with self._factory() as s:

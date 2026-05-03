@@ -419,23 +419,21 @@ class TestRunAwfIncompleteNoFailureReason:
 
 class TestAttachFeaturePrMain:
     @pytest.mark.unit
-    async def test_main_invokes_orchestrate_attach(
+    async def test_main_invokes_supported_adoption_flow_by_default(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Lines 218-219: ``_main`` is the argparse-bound entry. It
-        constructs a runner and delegates to orchestrate_attach. We
-        monkeypatch the delegatee and verify the delegation happens."""
+        """The legacy helper now delegates to the supported API adoption flow."""
         import argparse
 
         from scripts import attach_feature_pr_monitor as mod
 
         captured: dict[str, Any] = {}
 
-        async def _fake_orchestrate(**kwargs: Any) -> int:
+        async def _fake_adopt(**kwargs: Any) -> int:
             captured.update(kwargs)
             return 0
 
-        monkeypatch.setattr(mod, "orchestrate_attach", _fake_orchestrate)
+        monkeypatch.setattr(mod, "orchestrate_service_adoption", _fake_adopt)
 
         ns = argparse.Namespace(
             repo="git@github.com:dimileeh/aira-web.git",
@@ -444,9 +442,15 @@ class TestAttachFeaturePrMain:
             auto_merge=False,
             companions=None,
             work_dir=tmp_path,
+            base_url="http://awf.local",
+            api_token="secret",
+            legacy_detached=False,
+            pr_url=None,
         )
         rc = await mod._main(ns)
         assert rc == 0
         assert captured["repo_url"] == "git@github.com:dimileeh/aira-web.git"
         assert captured["pr_number"] == 277
         assert captured["agent"] == "codex"
+        assert captured["base_url"] == "http://awf.local"
+        assert captured["api_token"] == "secret"

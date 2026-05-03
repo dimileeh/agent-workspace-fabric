@@ -35,7 +35,7 @@ from awf.common.commands import AsyncioSubprocessRunner, FakeCommandRunner
 from awf.control.executor import ExecutorConfig, WorkspaceExecutor, _call_pr_monitor_factory
 from awf.db.base import Base
 from awf.db.enums import AgentRuntime, WorkspaceStatus
-from awf.db.models import Operation, TaskAttempt, Workspace, WorkspaceEvent
+from awf.db.models import MergeCandidate, Operation, TaskAttempt, Workspace, WorkspaceEvent
 from awf.db.repositories import (
     TaskAttemptRepository,
     TaskRepository,
@@ -2923,6 +2923,83 @@ class TestExecutorCoverageEdges:
             assert ws.failure_reason == "service_startup_failure"
             assert ws.failure_message == "profile setup failed: ./scripts/setup.sh"
             assert ws.events[-1].reason_code == "SERVICE_STARTUP_FAILURE"
+
+    @pytest.mark.unit
+    async def test_sync_feature_pr_skips_agent_validation_and_pr_creation(
+        self,
+        fake: FakeCommandRunner,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        monitor_calls: list[str] = []
+        validation = _RecordingValidation()
+
+        class _UnexpectedPrCreator:
+            async def push_and_open(self, **_kwargs: Any) -> PullRequestResult:
+                raise AssertionError("adopted PRs must not create a new PR")
+
+        class _Monitor:
+            async def run(
+                self, *, workspace_id: str, compose_project: str, compose_file: Path
+            ) -> None:
+                assert compose_project == "awf_x"
+                assert compose_file == tmp_path / "work" / "compose" / ws_id / "compose.yml"
+                monitor_calls.append(workspace_id)
+
+        ws_id = await _seed_ready(
+            factory,
+            task_kind="sync_feature_pr",
+            create_task_attempt=True,
+            task_policy={
+                "pr_adoption": {
+                    "repo_slug": "x/y",
+                    "pr_number": 42,
+                    "pr_url": "https://github.com/x/y/pull/42",
+                    "head_ref": "feature/existing",
+                    "base_ref": "development",
+                    "head_sha": "h" * 40,
+                    "base_sha": "b" * 40,
+                }
+            },
+        )
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            ws.branch_name = f"feature-sync/{ws_id}"
+            ws.remote_push_branch = "feature/existing"
+            ws.pr_url = "https://github.com/x/y/pull/42"
+            ws.pr_number = 42
+            await s.commit()
+
+        executor = _make_executor(
+            fake,
+            factory,
+            tmp_path,
+            validation=validation,
+            pr_creator=_UnexpectedPrCreator(),
+            pr_monitor_factory=lambda *_args, **_kwargs: _Monitor(),
+        )
+
+        await executor.execute(ws_id)
+
+        assert monitor_calls == [ws_id]
+        assert validation.calls == []
+        assert fake.calls == []
+        async with factory() as s:
+            ws = await WorkspaceRepository(s).get(ws_id)
+            assert ws is not None
+            assert ws.status == WorkspaceStatus.monitoring_pr.value
+            assert ws.monitor_last_commit_sha == "h" * 40
+            assert ws.base_commit == "b" * 40
+            candidate = (
+                await s.execute(
+                    select(MergeCandidate).where(MergeCandidate.workspace_id == ws_id)
+                )
+            ).scalar_one()
+            assert candidate.status == "open"
+            assert candidate.head_sha == "h" * 40
+            assert candidate.base_sha == "b" * 40
+            assert candidate.pr_url == "https://github.com/x/y/pull/42"
 
     @pytest.mark.unit
     async def test_transition_if_current_records_stale_skip_for_diverged_status(

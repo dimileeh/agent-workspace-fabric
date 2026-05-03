@@ -20,9 +20,11 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, s
 from fastapi.responses import JSONResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from awf.api.deps import get_db_session
+from awf.api.deps import get_db_session, require_api_token
 from awf.api.schemas import (
     ErrorResponse,
+    PullRequestMonitorAdoptionRequest,
+    PullRequestMonitorAdoptionResponse,
     StaleReasonListResponse,
     WorkspaceAcceptedResponse,
     WorkspaceCreateRequest,
@@ -47,6 +49,10 @@ from awf.db.repositories import (
 from awf.profiles.resolver import ProfileResolutionError
 from awf.service.bounded_list import InvalidBoundedListCursorError
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.pr_monitor_adoption import (
+    PRMonitorAdoptionError,
+    PullRequestMonitorAdoptionService,
+)
 from awf.service.secret_leases import SecretLeaseService
 from awf.service.validation_observability import (
     latest_merge_candidate,
@@ -380,6 +386,43 @@ async def list_workspace_stale_reasons(
             detail={"error_code": "NOT_FOUND", "message": f"No workspace with id {workspace_id}"},
         )
     return response
+
+
+@router.post(
+    "/adopt-pr",
+    response_model=PullRequestMonitorAdoptionResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    responses={
+        401: {"model": ErrorResponse},
+        404: {"model": ErrorResponse},
+        409: {"model": ErrorResponse},
+        422: {"model": ErrorResponse},
+        502: {"model": ErrorResponse},
+    },
+    dependencies=[Depends(require_api_token)],
+)
+async def adopt_pull_request_monitor(
+    payload: PullRequestMonitorAdoptionRequest,
+    request: Request,
+    settings: Settings = Depends(get_settings),
+    session: AsyncSession = Depends(get_db_session),
+) -> PullRequestMonitorAdoptionResponse | JSONResponse:
+    fetcher = getattr(request.app.state, "pr_adoption_metadata_fetcher", None)
+    try:
+        return await PullRequestMonitorAdoptionService(
+            session,
+            metadata_fetcher=fetcher,
+            settings=settings,
+        ).adopt(payload)
+    except PRMonitorAdoptionError as exc:
+        return JSONResponse(
+            status_code=exc.status_code,
+            content=ErrorResponse(
+                error_code=exc.error_code,
+                message=exc.message,
+                detail=exc.detail,
+            ).model_dump(),
+        )
 
 
 @router.post(

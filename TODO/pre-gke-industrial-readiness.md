@@ -574,7 +574,7 @@ coding agent in any project to use AWF for a feature.
   covers populated and empty REST-vs-MCP parity, structured error/null states,
   secret redaction, artifact metadata-only behavior, and route-handler bypass.
 - [ ] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics.
-- [ ] Add first-class AWF PR monitor adoption for existing GitHub PRs. Acceptance:
+- [x] Add first-class AWF PR monitor adoption for existing GitHub PRs. Acceptance:
   an operator can provide `repo_url`/repo slug plus PR number or URL, and AWF
   creates or attaches a service-managed workspace/merge candidate in
   `monitoring_pr` without rerunning the original coding agent. This must be
@@ -584,6 +584,14 @@ coding agent in any project to use AWF for a feature.
   PR URL, head/base refs, validation freshness state, and durable monitor logs;
   and must retire or wrap the legacy `scripts/attach_feature_pr_monitor.py`
   detached `run_awf.py` path so Core users have one supported adoption flow.
+  Evidence: implemented `POST /v1/workspaces/adopt-pr`,
+  `awf workspace adopt-pr`, and MCP tool `awf_adopt_pull_request_monitor`;
+  adoption persists task/attempt lineage, queue/resource records, an `adopt_pr`
+  operation, PR metadata, validation freshness, monitor log links, and
+  deterministic repo/PR idempotency; executor/provisioner tests cover
+  no-agent/no-new-PR monitor handoff for `sync_feature_pr`; the legacy attach
+  script now defaults to the supported adoption API with `--legacy-detached`
+  reserved for the old detached runner.
 - [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
