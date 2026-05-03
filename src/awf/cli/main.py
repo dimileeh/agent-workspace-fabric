@@ -767,7 +767,7 @@ def service_doctor(
 def service_readiness(
     fmt: OutputFormat = typer.Option(OutputFormat.json, "--format"),
     demo_path: Path = typer.Option(
-        Path("examples/awf-core-demo"),
+        Path(__file__).resolve().parents[3] / "examples" / "awf-core-demo",
         "--demo-path",
         help="Path to the maintained AWF Core golden-path demo project.",
     ),
@@ -1433,7 +1433,7 @@ def smoke_run(
         help="Run in mocked-local mode without live external services.",
     ),
     demo_path: Path = typer.Option(
-        Path("examples/awf-core-demo"),
+        Path(__file__).resolve().parents[3] / "examples" / "awf-core-demo",
         "--demo-path",
         help="Fallback project path when --project has no profile.",
     ),

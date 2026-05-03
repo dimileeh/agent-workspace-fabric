@@ -27,7 +27,7 @@ from awf.service.status import collect_service_status
 
 CoreReadinessStatus = Literal["ok", "warn", "fail"]
 
-DEFAULT_DEMO_PATH = Path("examples/awf-core-demo")
+DEFAULT_DEMO_PATH = Path(__file__).resolve().parents[3] / "examples" / "awf-core-demo"
 DEFAULT_FAILURE_WINDOW_HOURS = 24
 DEFAULT_SLO_WINDOW_HOURS = 168
 MIN_WORKSPACE_CREATION_SUCCESS_RATE = 0.98
