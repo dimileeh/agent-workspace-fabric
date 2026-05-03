@@ -12,7 +12,7 @@ surfaces and a backlog index for explicit parity gaps.
 - MCP is a first-class parity client for agent orchestrators that need typed
   tool calls instead of shelling out to curl, Docker, or the AWF CLI.
 
-**Note on SDKs (v0.1):** REST, CLI, and MCP are the supported client surfaces for v0.1. AWF does not ship with a supported Python SDK. Integrators must use one of the supported surfaces and must not import internal AWF modules to build custom API clients.
+**Note on SDKs (v0.1):** REST, CLI, and MCP are the supported client surfaces for v0.1. AWF does not ship with a supported Python SDK. Integrators must use one of the supported surfaces. Do not import internal AWF modules to build custom API clients.
 
 ## Status Vocabulary
 
