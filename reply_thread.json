@@ -1,7 +1,0 @@
-{
-  "query": "mutation($id: ID!, $body: String!) { addPullRequestReviewThreadReply(input: {pullRequestReviewThreadId: $id, body: $body}) { clientMutationId } }",
-  "variables": {
-    "id": "PRRT_kwDOSJAM6s5_OXUV",
-    "body": "Oops, actual commit is f3992b4b."
-  }
-}
