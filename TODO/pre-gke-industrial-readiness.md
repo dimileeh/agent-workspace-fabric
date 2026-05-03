@@ -75,6 +75,14 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_068773cee8f34463820c3d7d` | _pending_ | running | OpenCode/Ollama `glm-5.1:cloud` with AWF `xhigh`; retry of reschedule-required `ws_ea414c0722a74815bc474d13`. |
+| P1 Operator Console Completion | Live workspace activity signals | `ws_04048a6809004fa0ab3d8f79` | _pending_ | running | Gemini `gemini-3.1-pro-preview` with AWF `xhigh`; launched with provider-readiness override because agent runtime has Gemini CLI but control-plane probe image lacks it. Retry of `ws_451cc5007fa845ad85a0f7b3`. |
+| P1 Security, Secrets, And Egress Policy | Outbound egress audit evidence | `ws_02ae413a8c8341e089e0020a` | _pending_ | running | OpenCode/Ollama `deepseek-v4-pro:cloud` with AWF `xhigh`; Ollama cloud model manifest registered before launch. |
+| P1 Security, Secrets, And Egress Policy | Supply-chain guardrails for agent package installs | `ws_a1357eb1d1db498a9ed499ed` | _pending_ | running | Codex `gpt-5.5` with AWF `xhigh`; owns profile-selectable warn/block supply-chain policy. |
+| P1 MCP And Project Onboarding Client Parity | MCP safe operator action tools | `ws_1f89a8c10b1d497d9c912ccb` | _pending_ | running | OpenCode/Ollama `kimi-k2.6:cloud` with AWF `xhigh`; owns safe MCP control tools for existing API operations. |
+| P1 MCP And Project Onboarding Client Parity | PR monitor adoption for existing GitHub PRs | `ws_23dd9badf9fe4290a51113e7` | _pending_ | running | Codex `gpt-5.5` with AWF `xhigh`; owns first-class service-managed adoption flow for existing PRs. |
+| P1 MCP And Project Onboarding Client Parity | CLI command coverage alignment | `ws_e7365dffc3a243a2b8f7e775` | _pending_ | running | Codex `gpt-5.3-codex-spark` with AWF `xhigh`; owns CLI parity with canonical REST/MCP operations. |
+| P1 MCP And Project Onboarding Client Parity | REST CLI MCP contract alignment tests | `ws_7c04a361c7564bc28163baa0` | _pending_ | running | Claude Code `claude-opus-4-7` with AWF `xhigh` mapped to Claude `max`; launched with provider-readiness override because agent runtime has Claude Code but control-plane probe image lacks it. |
 
 ### Reschedule Required Slices
 
@@ -86,8 +94,6 @@ not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_ea414c0722a74815bc474d13` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. This was incorrectly marked `superseded`; it still needs a fresh retry after the active wave drains. |
-| P1 Operator Console Completion | Live workspace activity signals | `ws_451cc5007fa845ad85a0f7b3` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. This was incorrectly marked `superseded`; it still needs a fresh retry after the active wave drains. |
 
 ### Completed Slices
 
