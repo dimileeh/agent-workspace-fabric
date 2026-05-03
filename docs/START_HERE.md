@@ -47,7 +47,7 @@ Before running the commands below, ensure your system has the following installe
 
 - **Docker not running:** If `awf init` complains about the Docker daemon, verify that Docker is started and your user has permission to interact with it.
 - **Port collisions:** If containers fail to bind, check if you already have services running on port `8000` (API) or `5433` (Postgres) and stop them.
-- **Command not found:** If the `awf` command is unrecognized after step 2, ensure `uv`'s tool directory (usually `~/.local/bin` or `~/.cargo/bin`) is in your system `$PATH`.
+- **Command not found:** If the `awf` command is unrecognized after step 2, ensure `uv`'s tool directory (usually `~/.local/bin`) is in your system `$PATH`.
 
 ## Next Steps
 
