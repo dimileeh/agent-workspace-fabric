@@ -565,6 +565,16 @@ coding agent in any project to use AWF for a feature.
   only documents gaps without creating executable follow-up work.
 - [ ] Add MCP tools for merge queue, task attempts, validation provenance, stale reasons, artifacts, metrics, locks/overlap graph, and service health/status.
 - [ ] Add MCP tools for safe operator actions already present in the API: remonitor, refresh, validate, rebase, retry, cancel, stop, and destroy, with the same idempotency/concurrency semantics.
+- [ ] Add first-class AWF PR monitor adoption for existing GitHub PRs. Acceptance:
+  an operator can provide `repo_url`/repo slug plus PR number or URL, and AWF
+  creates or attaches a service-managed workspace/merge candidate in
+  `monitoring_pr` without rerunning the original coding agent. This must be
+  exposed through REST, CLI, and MCP; must be idempotent per repo/PR; must
+  reject closed/merged PRs with structured reason codes; must support
+  `auto_merge` versus manual monitor policy; must record task/attempt lineage,
+  PR URL, head/base refs, validation freshness state, and durable monitor logs;
+  and must retire or wrap the legacy `scripts/attach_feature_pr_monitor.py`
+  detached `run_awf.py` path so Core users have one supported adoption flow.
 - [ ] Align CLI command coverage with the canonical REST API and MCP surfaces:
   for each safe read/control operation, either expose the corresponding CLI
   command with the same auth/idempotency/concurrency/error semantics, or document
@@ -613,6 +623,10 @@ without reading the whole repo.
   and paired with copy-paste `curl` examples for create workspace, list status,
   read logs/events, request validation, remonitor, retry, and release
   readiness.
+- [ ] Document and demo PR monitor adoption for an already-open PR. Acceptance:
+  the quickstart and API/CLI/MCP docs show the supported command/API call,
+  required GitHub auth, idempotency behavior, monitor policy choice, and how to
+  inspect adopted monitor logs/events/merge-queue state from the console.
 - [ ] Decide the SDK stance before open-source Core release: either ship a
   minimal Python client for the stable operator flows or explicitly document
   that REST + CLI + MCP are the supported client surfaces for v0.1. Acceptance:
