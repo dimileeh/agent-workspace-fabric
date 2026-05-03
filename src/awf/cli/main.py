@@ -35,8 +35,7 @@ from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 _DX_FIRST_PATH_HELP = """
 For first-time users: the recommended first path is to run `awf init`
 to verify prerequisites and bootstrap your local service stack, followed by
-`awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md
-for more details.
+`awf init <path>` to prepare your project repository.
 
 Safety defaults & Dry-run: Commands that modify local state default to
 dry-runs or previews unless explicit write flags are passed.
