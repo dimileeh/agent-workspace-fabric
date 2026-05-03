@@ -65,7 +65,11 @@ from awf.service.workspace_observability import (
     list_workspace_stale_reasons_response,
 )
 from awf.service.workspace_runtime_health import WorkspaceRuntimeHealthSummary
-from awf.service.workspaces import WorkspaceService
+from awf.service.workspaces import (
+    WorkspaceProviderReadinessBlockedError,
+    WorkspaceRetryError,
+    WorkspaceService,
+)
 
 StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
 DiskCheckProvider = Callable[[Settings], DiskCheck | Awaitable[DiskCheck]]
@@ -231,6 +235,15 @@ def build_mcp_server(
             le=86400,
             description="Optional monitor grace override before auto-merge.",
         ),
+        provider_readiness_override: bool = Field(
+            default=False,
+            description="Explicitly admit launch when selected provider readiness is not ready.",
+        ),
+        provider_readiness_override_reason: str | None = Field(
+            default=None,
+            max_length=512,
+            description="Audit reason for provider_readiness_override.",
+        ),
     ) -> StructuredToolResult:
         """Create a new AWF workspace using the clean v2 contract."""
         req = WorkspaceCreateV2Request(
@@ -249,6 +262,10 @@ def build_mcp_server(
             },
             workspace={"profile_ref": profile_ref, "profile": profile},
             validation={"commands": validation_commands, "requested_tier": requested_tier},
+            preflight={
+                "provider_readiness_override": provider_readiness_override,
+                "provider_readiness_override_reason": provider_readiness_override_reason,
+            },
         )
         try:
             ws = await service.create_v2(req)
@@ -259,7 +276,35 @@ def build_mcp_server(
                 detail=exc.detail,
             )
             return _tool_result(error.model_dump(mode="json"), is_error=True)
+        except WorkspaceProviderReadinessBlockedError as exc:
+            return _provider_readiness_blocked_result(exc)
         return _tool_result(ws.model_dump(mode="json"))
+
+    @mcp.tool(name="awf_retry_workspace")
+    async def awf_retry_workspace(
+        workspace_id: str = Field(..., description="Failed or cancelled workspace ID to retry."),
+        provider_readiness_override: bool = Field(
+            default=False,
+            description="Explicitly admit retry when selected provider readiness is not ready.",
+        ),
+        provider_readiness_override_reason: str | None = Field(
+            default=None,
+            max_length=512,
+            description="Audit reason for provider_readiness_override.",
+        ),
+    ) -> StructuredToolResult:
+        """Retry a failed or cancelled workspace as a fresh attempt."""
+        try:
+            response = await service.retry_workspace(
+                workspace_id,
+                provider_readiness_override=provider_readiness_override,
+                provider_readiness_override_reason=provider_readiness_override_reason,
+            )
+        except WorkspaceProviderReadinessBlockedError as exc:
+            return _provider_readiness_blocked_result(exc)
+        except WorkspaceRetryError as exc:
+            return _workspace_retry_error_result(exc)
+        return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_workspace")
     async def awf_get_workspace(
@@ -921,6 +966,31 @@ def build_mcp_server(
 
 def _tool_error(exc: WorkspaceControlError) -> CallToolResult:
     error = ErrorResponse(error_code=exc.error_code, message=exc.message)
+    return _tool_result(error.model_dump(mode="json"), is_error=True)
+
+
+class _WorkspaceErrorSource(Protocol):
+    error_code: str
+    message: str
+    detail: dict[str, Any] | None
+
+
+def _workspace_retry_error_result(exc: WorkspaceRetryError) -> CallToolResult:
+    return _workspace_error_result(exc)
+
+
+def _provider_readiness_blocked_result(
+    exc: WorkspaceProviderReadinessBlockedError,
+) -> CallToolResult:
+    return _workspace_error_result(exc)
+
+
+def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
+    error = ErrorResponse(
+        error_code=exc.error_code,
+        message=exc.message,
+        detail=exc.detail,
+    )
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 

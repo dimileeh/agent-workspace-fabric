@@ -103,6 +103,10 @@ async def test_workspace_service_round_trips_policy_metadata(
         workspace={"profile_ref": "auto", "profile": None},
         validation={"commands": ["uv run pytest -q"], "requested_tier": 1},
         resources={},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "observability test fixture",
+        },
     )
 
     created = await service.create_v2(request)
@@ -477,7 +481,12 @@ async def test_retry_workspace_errors_and_missing_source_task_fallback(
             await retry_workspace_row(session, "ws_missing")
         with pytest.raises(WorkspaceRetryNotAllowedError):
             await retry_workspace_row(session, active_id)
-        result = await retry_workspace_row(session, failed_id)
+        result = await retry_workspace_row(
+            session,
+            failed_id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="observability test fixture",
+        )
         await session.commit()
 
     async with factory() as session:
@@ -677,6 +686,10 @@ def test_v2_task_policy_and_profile_tier_helpers_cover_noop_and_updates() -> Non
                 "mode": "block",
                 "allowlist_patterns": ["generated/**"],
             },
+        },
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "observability test fixture",
         },
     )
     profile = WorkspaceProfile(name="unit-profile")

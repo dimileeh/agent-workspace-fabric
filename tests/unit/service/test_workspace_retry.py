@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 
 import pytest
 from sqlalchemy import event, select
@@ -22,9 +24,12 @@ from awf.runtime.planning import (
     render_workspace_path,
 )
 from awf.service.workspaces import (
+    WorkspaceProviderReadinessBlockedError,
     WorkspaceRetryNotFoundError,
     WorkspaceRetryRequiresSalvageError,
     WorkspaceService,
+    create_workspace_v2_row,
+    retry_workspace_row,
 )
 
 pytestmark = pytest.mark.unit
@@ -41,10 +46,14 @@ async def factory() -> AsyncIterator[async_sessionmaker[AsyncSession]]:
         await engine.dispose()
 
 
-def _request(*, task_kind: str = "feature_branch_pr") -> WorkspaceCreateV2Request:
-    return WorkspaceCreateV2Request(
-        repo={"url": "git@github.com:example/retryable.git", "base_branch": "development"},
-        task={
+def _request(
+    *,
+    task_kind: str = "feature_branch_pr",
+    provider_readiness_override: bool = True,
+) -> WorkspaceCreateV2Request:
+    payload: dict[str, object] = {
+        "repo": {"url": "git@github.com:example/retryable.git", "base_branch": "development"},
+        "task": {
             "title": "Retry flaky validation",
             "prompt": "Fix the intermittent validation failure.",
             "agent": "codex",
@@ -55,16 +64,297 @@ def _request(*, task_kind: str = "feature_branch_pr") -> WorkspaceCreateV2Reques
             "auto_merge": False,
             "initial_review_grace_period_seconds": 30,
         },
-        workspace={"profile_ref": "python", "profile": None},
-        validation={"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
-        resources={},
+        "workspace": {"profile_ref": "python", "profile": None},
+        "validation": {"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
+        "resources": {},
+    }
+    if provider_readiness_override:
+        payload["preflight"] = {
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "retry service test fixture",
+        }
+    return WorkspaceCreateV2Request.model_validate(payload)
+
+
+def _request_with_preflight_override(
+    *,
+    reason: str = "operator verified provider readiness manually",
+) -> WorkspaceCreateV2Request:
+    payload = _request().model_dump(mode="json")
+    payload["preflight"] = {
+        "provider_readiness_override": True,
+        "provider_readiness_override_reason": reason,
+    }
+    return WorkspaceCreateV2Request.model_validate(payload)
+
+
+def _opencode_request() -> WorkspaceCreateV2Request:
+    payload = _request(provider_readiness_override=False).model_dump(mode="python")
+    payload["task"]["agent"] = "opencode"
+    payload["task"]["model"] = "ollama/kimi-k2.6:cloud"
+    return WorkspaceCreateV2Request.model_validate(payload)
+
+
+def _settings_with_host_home(tmp_path) -> Settings:  # type: ignore[no-untyped-def]
+    return Settings(
+        _env_file=None,
+        host_home=str(tmp_path / "home"),
+        docker_host="",
     )
+
+
+def _ollama_provider_environ() -> dict[str, str]:
+    return {
+        "OLLAMA_API_KEY": "ollama_secret",
+        "AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1",
+    }
+
+
+def _ollama_ok(url: str, *, timeout: float) -> SimpleNamespace:
+    text = (
+        '{"models":[{"name":"kimi-k2.6:cloud"}]}'
+        if url.endswith("/api/tags")
+        else "{}"
+    )
+    return SimpleNamespace(status_code=200, text=text)
+
+
+def _ollama_ok_requiring_worker_thread(
+    url: str,
+    *,
+    timeout: float,
+) -> SimpleNamespace:
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        pass
+    else:
+        raise AssertionError("provider preflight probe ran on the event-loop thread")
+    return _ollama_ok(url, timeout=timeout)
+
+
+async def _retry_with_preflight_override(
+    service: WorkspaceService,
+    workspace_id: str,
+) -> object:
+    return await service.retry_workspace(
+        workspace_id,
+        provider_readiness_override=True,
+        provider_readiness_override_reason="retry service test fixture",
+    )
+
 
 def test_retry_not_found_error_has_instance_detail() -> None:
     error = WorkspaceRetryNotFoundError("ws_missing")
 
     assert error.detail is None
     assert error.__dict__["detail"] is None
+
+
+@pytest.mark.unit
+async def test_create_v2_blocks_provider_readiness_before_rows(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceProviderReadinessBlockedError) as exc_info:
+            await create_workspace_v2_row(
+                session,
+                _request(provider_readiness_override=False),
+                settings=settings,
+            )
+
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        attempts = list((await session.execute(select(TaskAttempt))).scalars())
+
+    preflight = exc_info.value.detail["provider_readiness_preflight"]
+    assert preflight["provider"] == "codex"
+    assert preflight["model"] == "gpt-5.5"
+    assert preflight["reason_code"] == "CODEX_AUTH_MISSING"
+    assert preflight["blocks_launch"] is True
+    assert workspaces == []
+    assert attempts == []
+
+
+@pytest.mark.unit
+async def test_create_v2_runs_provider_preflight_probe_off_event_loop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+
+    async with factory() as session:
+        workspace = await create_workspace_v2_row(
+            session,
+            _opencode_request(),
+            settings=settings,
+            provider_environ=_ollama_provider_environ(),
+            http_get=_ollama_ok_requiring_worker_thread,
+        )
+
+    preflight = workspace.task_policy["provider_readiness_preflight"]
+    assert preflight["provider"] == "opencode"
+    assert preflight["readiness_status"] == "ready"
+
+
+@pytest.mark.unit
+async def test_create_v2_with_provider_readiness_override_records_policy_and_event(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+
+    async with factory() as session:
+        workspace = await create_workspace_v2_row(
+            session,
+            _request_with_preflight_override(reason="manual local token refresh"),
+            settings=settings,
+        )
+        events = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == workspace.id,
+                        WorkspaceEvent.event_type == "workspace.provider_readiness_preflight",
+                    )
+                )
+            ).scalars()
+        )
+
+    preflight = workspace.task_policy["provider_readiness_preflight"]
+    assert preflight["readiness_status"] == "admitted_with_override"
+    assert preflight["override_used"] is True
+    assert preflight["override_reason"] == "manual local token refresh"
+    assert preflight["reason_code"] == "CODEX_AUTH_MISSING"
+    assert events[0].reason_code == "PROVIDER_READINESS_OVERRIDE_USED"
+    assert events[0].payload["provider_readiness_preflight"] == preflight
+
+
+@pytest.mark.unit
+async def test_create_v2_successful_provider_preflight_emits_event(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    home = tmp_path / "home"
+    (home / ".codex").mkdir(parents=True)
+    (home / ".codex" / "auth.json").write_text('{"token":"codex_file_secret"}')
+    settings = _settings_with_host_home(tmp_path)
+
+    async with factory() as session:
+        workspace = await create_workspace_v2_row(
+            session,
+            _request(provider_readiness_override=False),
+            settings=settings,
+        )
+        events = list(
+            (
+                await session.execute(
+                    select(WorkspaceEvent).where(
+                        WorkspaceEvent.workspace_id == workspace.id,
+                        WorkspaceEvent.event_type == "workspace.provider_readiness_preflight",
+                    )
+                )
+            ).scalars()
+        )
+
+    preflight = workspace.task_policy["provider_readiness_preflight"]
+    assert preflight["readiness_status"] == "ready"
+    assert preflight["override_used"] is False
+    assert events[0].reason_code == "PROVIDER_READINESS_READY"
+
+
+@pytest.mark.unit
+async def test_retry_blocks_provider_readiness_before_new_attempt(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_v2_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+        )
+        await session.commit()
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        with pytest.raises(WorkspaceProviderReadinessBlockedError):
+            await retry_workspace_row(session, first.id, settings=settings)
+
+        workspaces = list((await session.execute(select(Workspace))).scalars())
+        attempts = list((await session.execute(select(TaskAttempt))).scalars())
+
+    assert [workspace.id for workspace in workspaces] == [first.id]
+    assert [attempt.workspace_id for attempt in attempts] == [first.id]
+
+
+@pytest.mark.unit
+async def test_retry_runs_provider_preflight_probe_off_event_loop(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    provider_environ = _ollama_provider_environ()
+    async with factory() as session:
+        first = await create_workspace_v2_row(
+            session,
+            _opencode_request(),
+            settings=settings,
+            provider_environ=provider_environ,
+            http_get=_ollama_ok,
+        )
+        await session.commit()
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            settings=settings,
+            provider_environ=provider_environ,
+            http_get=_ollama_ok_requiring_worker_thread,
+        )
+
+    preflight = retry.new_workspace.task_policy["provider_readiness_preflight"]
+    assert preflight["source_workspace_id"] == first.id
+    assert preflight["readiness_status"] == "ready"
+
+
+@pytest.mark.unit
+async def test_retry_with_provider_readiness_override_records_source_and_target(
+    factory: async_sessionmaker[AsyncSession],
+    tmp_path,
+) -> None:  # type: ignore[no-untyped-def]
+    settings = _settings_with_host_home(tmp_path)
+    async with factory() as session:
+        first = await create_workspace_v2_row(
+            session,
+            _request_with_preflight_override(),
+            settings=settings,
+        )
+        await session.commit()
+    await _mark_failed(factory, first.id)
+
+    async with factory() as session:
+        retry = await retry_workspace_row(
+            session,
+            first.id,
+            provider_readiness_override=True,
+            provider_readiness_override_reason="retry after local auth repair",
+            settings=settings,
+        )
+        retried = await WorkspaceRepository(session).get(retry.new_workspace.id)
+
+    assert retried is not None
+    preflight = retried.task_policy["provider_readiness_preflight"]
+    assert preflight["source_workspace_id"] == first.id
+    assert preflight["provider"] == "codex"
+    assert preflight["model"] == "gpt-5.5"
+    assert preflight["override_used"] is True
+    assert preflight["override_reason"] == "retry after local auth repair"
 
 
 async def _mark_failed(
@@ -236,7 +526,7 @@ async def test_retry_failed_workspace_clones_v2_metadata_and_increments_attempt(
     first = await service.create_v2(_request())
     frozen_profile = await _mark_failed(factory, first.id)
 
-    retry = await service.retry_workspace(first.id)
+    retry = await _retry_with_preflight_override(service, first.id)
 
     async with factory() as session:
         original = await WorkspaceRepository(session).get(first.id)
@@ -346,7 +636,7 @@ async def test_retry_recomputes_resource_reservation_from_current_defaults(
         source_reservation.peak_memory_gb = 7.0
         await session.commit()
 
-    retry = await service.retry_workspace(first.id)
+    retry = await _retry_with_preflight_override(service, first.id)
 
     async with factory() as session:
         retried_reservation = (
@@ -360,6 +650,8 @@ async def test_retry_recomputes_resource_reservation_from_current_defaults(
     assert retried_reservation.peak_cpu == 6.0
     assert retried_reservation.peak_memory_gb == 16.0
 
+
+@pytest.mark.unit
 async def test_retry_conformance_unsatisfied_requires_salvage(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -446,7 +738,7 @@ async def test_retry_planning_scope_violation_discards_premature_work_and_replan
     first = await service.create_v2(_request())
     await _mark_planning_scope_failed(factory, first.id)
 
-    retry = await service.retry_workspace(first.id)
+    retry = await _retry_with_preflight_override(service, first.id)
 
     async with factory() as session:
         original = await WorkspaceRepository(session).get(first.id)
@@ -551,7 +843,7 @@ async def test_retry_planning_scope_violation_preserves_monitor_and_sync_remote_
         remote_push_branch=remote_push_branch,
     )
 
-    retry = await service.retry_workspace(first.id)
+    retry = await _retry_with_preflight_override(service, first.id)
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -581,7 +873,7 @@ async def test_retry_planning_scope_violation_applies_only_approved_fallback_mod
         approved_fallback_model="gpt-5.5",
     )
 
-    retry = await service.retry_workspace(first.id)
+    retry = await _retry_with_preflight_override(service, first.id)
 
     async with factory() as session:
         retried = await WorkspaceRepository(session).get(retry.new_workspace_id)
@@ -641,8 +933,8 @@ async def test_retry_legacy_workspace_without_attempt_reuses_fallback_task(
         source_id = source.id
 
     service = WorkspaceService(factory)
-    first_retry = await service.retry_workspace(source_id)
-    second_retry = await service.retry_workspace(source_id)
+    first_retry = await _retry_with_preflight_override(service, source_id)
+    second_retry = await _retry_with_preflight_override(service, source_id)
 
     async with factory() as session:
         tasks = list((await session.execute(select(Task))).scalars())
@@ -677,7 +969,7 @@ async def test_retry_preserves_remote_push_branch_for_sync_workspace(
         remote_push_branch="development",
     )
 
-    retry = await service.retry_workspace(first.id)
+    retry = await _retry_with_preflight_override(service, first.id)
 
     async with factory() as session:
         repo = WorkspaceRepository(session)
@@ -721,7 +1013,7 @@ async def test_retry_persists_task_kind_without_post_insert_update() -> None:
 
     event.listen(engine.sync_engine, "before_cursor_execute", record_sql)
     try:
-        await service.retry_workspace(first.id)
+        await _retry_with_preflight_override(service, first.id)
     finally:
         event.remove(engine.sync_engine, "before_cursor_execute", record_sql)
         await engine.dispose()

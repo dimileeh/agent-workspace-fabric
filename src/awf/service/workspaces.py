@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import builtins
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
@@ -37,7 +38,7 @@ from awf.api.schemas import (
 from awf.common.config import Settings, get_settings
 from awf.common.logging import get_logger
 from awf.common.redaction import redact_secrets
-from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
+from awf.db.enums import AgentRuntime, OperationStatus, OperationType, WorkspaceStatus
 from awf.db.models import Operation, Task, TaskAttempt, Workspace, WorkspaceSecretLease
 from awf.db.repositories import (
     OperationRepository,
@@ -61,6 +62,7 @@ from awf.runtime.planning import (
     PLAN_CONFORMANCE_UNSATISFIED,
     build_planning_scope_retry_prompt,
 )
+from awf.service.config import resolve_service_settings
 from awf.service.controls import (
     CleanerFactory,
     ProjectStopper,
@@ -75,6 +77,12 @@ from awf.service.coordination import (
 )
 from awf.service.disk import DiskCheck
 from awf.service.profile_metadata import network_posture_from_profile_snapshot
+from awf.service.provider_readiness import (
+    HttpGet,
+    SubprocessRun,
+    provider_readiness_preflight_from_task_policy,
+    selected_provider_readiness_preflight,
+)
 from awf.service.provider_recovery import (
     provider_recovery_metadata_from_failure,
     provider_recovery_state_for_workspace,
@@ -123,6 +131,9 @@ OWNED_PATH_OVERLAP_PAYLOAD_FIELDS = (
     "existing_path",
     "requested_path",
 )
+PROVIDER_READINESS_PREFLIGHT_EVENT_TYPE = "workspace.provider_readiness_preflight"
+PROVIDER_READINESS_READY_REASON = "PROVIDER_READINESS_READY"
+PROVIDER_READINESS_OVERRIDE_REASON = "PROVIDER_READINESS_OVERRIDE_USED"
 QUEUE_DECISION_ADMITTED = "admitted"
 QUEUE_DECISION_ADMITTED_LOCAL_REASON = "ADMITTED_LOCAL"
 RESOURCE_RESERVATION_PHASE_WORKSPACE = "workspace_lifecycle"
@@ -226,6 +237,16 @@ class WorkspaceRetryRequiresSalvageError(WorkspaceRetryError):
         )
 
 
+class WorkspaceProviderReadinessBlockedError(WorkspaceRetryError):
+    error_code = "PROVIDER_READINESS_PRECHECK_FAILED"
+
+    def __init__(self, preflight: Mapping[str, Any]) -> None:
+        super().__init__(
+            "Selected provider readiness blocked workspace launch.",
+            detail={"provider_readiness_preflight": dict(preflight)},
+        )
+
+
 @dataclass(frozen=True)
 class WorkspaceRetryResult:
     source_workspace_id: str
@@ -316,12 +337,14 @@ class WorkspaceService:
         self,
         session_factory: async_sessionmaker[AsyncSession],
         *,
+        settings: Settings | None = None,
         log_root: Path | str | None = None,
         runtime_inspector: RuntimeInspection | None = None,
         project_stopper: ProjectStopper | None = None,
         cleaner_factory: CleanerFactory | None = None,
     ) -> None:
         self._factory = session_factory
+        self._settings = settings
         self._log_root = Path(log_root).resolve() if log_root is not None else None
         self._runtime_inspector = runtime_inspector or RuntimeInspector()
         self._project_stopper = project_stopper or stop_project_containers
@@ -352,13 +375,25 @@ class WorkspaceService:
 
     async def create_v2(self, req: WorkspaceCreateV2Request) -> WorkspaceResponse:
         async with self._factory() as s:
-            ws = await create_workspace_v2_row(s, req)
+            ws = await create_workspace_v2_row(s, req, settings=self._settings)
             await s.commit()
             return workspace_response(ws)
 
-    async def retry_workspace(self, workspace_id: str) -> WorkspaceRetryResponse:
+    async def retry_workspace(
+        self,
+        workspace_id: str,
+        *,
+        provider_readiness_override: bool = False,
+        provider_readiness_override_reason: str | None = None,
+    ) -> WorkspaceRetryResponse:
         async with self._factory() as s:
-            result = await retry_workspace_row(s, workspace_id)
+            result = await retry_workspace_row(
+                s,
+                workspace_id,
+                provider_readiness_override=provider_readiness_override,
+                provider_readiness_override_reason=provider_readiness_override_reason,
+                settings=self._settings,
+            )
             await s.commit()
             return workspace_retry_response(result)
 
@@ -636,21 +671,39 @@ async def create_workspace_v2_row(
     idempotency_key: str | None = None,
     settings: Settings | None = None,
     disk_check: DiskCheck | None = None,
+    provider_environ: Mapping[str, str] | None = None,
+    run_subprocess: SubprocessRun | None = None,
+    http_get: HttpGet | None = None,
 ) -> Workspace:
     """Persist one v2 workspace request without committing the session."""
     resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
+    base_task_policy = v2_task_policy_snapshot(payload)
+    requested_profile, resolved_profile = v2_profile_snapshots(payload)
+    preflight = await _selected_provider_preflight_for_task_async(
+        resolved_settings,
+        agent=payload.task.agent,
+        task_policy=base_task_policy,
+        override=payload.preflight.provider_readiness_override,
+        override_reason=payload.preflight.provider_readiness_override_reason,
+        provider_environ=provider_environ,
+        run_subprocess=run_subprocess,
+        http_get=http_get,
+    )
+    _raise_if_provider_preflight_blocks(preflight)
     overlaps = await repo.find_active_owned_path_overlaps(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,
         owned_paths=payload.task.owned_paths,
     )
     task_policy = task_policy_with_coordination_warnings(
-        v2_task_policy_snapshot(payload),
+        {
+            **base_task_policy,
+            "provider_readiness_preflight": preflight,
+        },
         owned_path_overlap_coordination_warnings(overlaps),
     )
 
-    requested_profile, resolved_profile = v2_profile_snapshots(payload)
     ws = await repo.create(
         repo_url=payload.repo.url,
         branch_base=payload.repo.base_branch,
@@ -723,6 +776,7 @@ async def create_workspace_v2_row(
         overlap_risk_summary=overlap_risk_summary(overlaps),
         score_summary=scheduler_score.score_summary,
     )
+    await _record_provider_readiness_preflight(repo, ws, preflight)
     await _record_owned_path_overlap_risk(repo, ws, overlaps)
     await session.flush()
     return ws
@@ -731,9 +785,16 @@ async def create_workspace_v2_row(
 async def retry_workspace_row(
     session: AsyncSession,
     workspace_id: str,
+    *,
+    provider_readiness_override: bool = False,
+    provider_readiness_override_reason: str | None = None,
+    settings: Settings | None = None,
+    provider_environ: Mapping[str, str] | None = None,
+    run_subprocess: SubprocessRun | None = None,
+    http_get: HttpGet | None = None,
 ) -> WorkspaceRetryResult:
     """Create a fresh requested workspace cloned from a failed/cancelled attempt."""
-    resolved_settings = get_settings()
+    resolved_settings = settings or get_settings()
     repo = WorkspaceRepository(session)
     source = await repo.get_for_update(workspace_id)
     if source is None:
@@ -765,6 +826,27 @@ async def retry_workspace_row(
         branch_base=source.branch_base,
         owned_paths=list(source.owned_paths),
     )
+    retried_task_policy = _retry_task_policy(
+        source,
+        owned_path_overlap_coordination_warnings(overlaps),
+        planning_scope_context=planning_scope_context,
+    )
+    preflight = await _selected_provider_preflight_for_task_async(
+        resolved_settings,
+        agent=source.agent,
+        task_policy=retried_task_policy,
+        override=provider_readiness_override,
+        override_reason=provider_readiness_override_reason,
+        provider_environ=provider_environ,
+        run_subprocess=run_subprocess,
+        http_get=http_get,
+    )
+    preflight = {**preflight, "source_workspace_id": source.id}
+    _raise_if_provider_preflight_blocks(preflight)
+    retried_task_policy = {
+        **retried_task_policy,
+        "provider_readiness_preflight": preflight,
+    }
 
     retried = await repo.create(
         repo_url=source.repo_url,
@@ -774,11 +856,7 @@ async def retry_workspace_row(
         task_external_id=source.task_external_id,
         task_class=source.task_class,
         owned_paths=list(source.owned_paths),
-        task_policy=_retry_task_policy(
-            source,
-            owned_path_overlap_coordination_warnings(overlaps),
-            planning_scope_context=planning_scope_context,
-        ),
+        task_policy=retried_task_policy,
         auto_merge=source.auto_merge,
         initial_review_grace_period_seconds=(
             source.initial_review_grace_period_seconds
@@ -877,6 +955,7 @@ async def retry_workspace_row(
         "source_workspace_id": source.id,
         "new_workspace_id": retried.id,
         "attempt_number": attempt.attempt_number,
+        "provider_readiness_preflight": preflight,
     }
     if planning_scope_context is not None:
         event_payload.update(_planning_scope_recovery_payload(planning_scope_context))
@@ -892,6 +971,7 @@ async def retry_workspace_row(
         reason_code="RETRY_CREATED",
         payload=event_payload,
     )
+    await _record_provider_readiness_preflight(repo, retried, preflight)
     await _record_owned_path_overlap_risk(repo, retried, overlaps)
     await operation_repo.finish(
         operation,
@@ -989,6 +1069,81 @@ async def _retry_task_for_source(
     )
 
 
+def _selected_provider_preflight_for_task(
+    settings: Settings,
+    *,
+    agent: AgentRuntime | str,
+    task_policy: Mapping[str, object] | None,
+    override: bool,
+    override_reason: str | None,
+    provider_environ: Mapping[str, str] | None,
+    run_subprocess: SubprocessRun | None,
+    http_get: HttpGet | None,
+) -> dict[str, Any]:
+    return selected_provider_readiness_preflight(
+        resolve_service_settings(settings),
+        agent=agent,
+        task_policy=task_policy,
+        override=override,
+        override_reason=override_reason,
+        environ=provider_environ,
+        run_subprocess=run_subprocess,
+        http_get=http_get,
+    )
+
+
+async def _selected_provider_preflight_for_task_async(
+    settings: Settings,
+    *,
+    agent: AgentRuntime | str,
+    task_policy: Mapping[str, object] | None,
+    override: bool,
+    override_reason: str | None,
+    provider_environ: Mapping[str, str] | None,
+    run_subprocess: SubprocessRun | None,
+    http_get: HttpGet | None,
+) -> dict[str, Any]:
+    return await asyncio.to_thread(
+        _selected_provider_preflight_for_task,
+        settings,
+        agent=agent,
+        task_policy=task_policy,
+        override=override,
+        override_reason=override_reason,
+        provider_environ=provider_environ,
+        run_subprocess=run_subprocess,
+        http_get=http_get,
+    )
+
+
+def _raise_if_provider_preflight_blocks(preflight: Mapping[str, Any]) -> None:
+    if preflight.get("blocks_launch") is True:
+        raise WorkspaceProviderReadinessBlockedError(preflight)
+
+
+async def _record_provider_readiness_preflight(
+    repo: WorkspaceRepository,
+    workspace: Workspace,
+    preflight: Mapping[str, Any],
+) -> None:
+    await repo.add_event(
+        workspace,
+        event_type=PROVIDER_READINESS_PREFLIGHT_EVENT_TYPE,
+        reason_code=(
+            PROVIDER_READINESS_OVERRIDE_REASON
+            if preflight.get("override_used") is True
+            else PROVIDER_READINESS_READY_REASON
+        ),
+        payload={"provider_readiness_preflight": dict(preflight)},
+    )
+
+
+def workspace_provider_readiness_preflight(
+    workspace: Workspace,
+) -> dict[str, Any] | None:
+    return provider_readiness_preflight_from_task_policy(workspace.task_policy)
+
+
 def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResponse:
     new_workspace_id = result.new_workspace.id
     return WorkspaceRetryResponse(
@@ -999,6 +1154,9 @@ def workspace_retry_response(result: WorkspaceRetryResult) -> WorkspaceRetryResp
         attempt_number=result.attempt_number,
         status_url=f"/v1/workspaces/{new_workspace_id}",
         events_url=f"/v1/workspaces/{new_workspace_id}/events",
+        provider_readiness_preflight=workspace_provider_readiness_preflight(
+            result.new_workspace
+        ),
     )
 
 
@@ -1062,6 +1220,9 @@ def workspace_response(
         getattr(workspace, "resolved_profile", None)
     )
     computed_fields["provider_recovery_state"] = _provider_recovery_state_response(workspace)
+    computed_fields["provider_readiness_preflight"] = (
+        workspace_provider_readiness_preflight(workspace)
+    )
     return WorkspaceResponse.model_validate(
         _WorkspaceResponseSource(workspace, computed_fields)
     )

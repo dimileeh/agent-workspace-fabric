@@ -216,6 +216,23 @@ class TestPostgresAdvisoryMergeCoordinator:
         assert -(2**63) <= key <= 2**63 - 1
 
     @pytest.mark.unit
+    async def test_connect_asyncpg_delegates_to_asyncpg_connect(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        connection = SimpleNamespace()
+
+        async def _connect(*, dsn: str) -> object:
+            assert dsn == "postgresql://awf@db/awf"
+            return connection
+
+        monkeypatch.setattr(merge_coordinator_mod.asyncpg, "connect", _connect)
+
+        assert await merge_coordinator_mod._connect_asyncpg(  # noqa: SLF001
+            "postgresql://awf@db/awf"
+        ) is connection
+
+    @pytest.mark.unit
     async def test_context_manager_acquires_before_body_and_releases_after_body(self) -> None:
         calls: list[object] = []
         coordinator = merge_coordinator_mod.PostgresAdvisoryMergeCoordinator(

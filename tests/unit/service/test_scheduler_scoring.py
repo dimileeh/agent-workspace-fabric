@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
+import awf.service.scheduler as scheduler
 from awf.db.enums import FailureReason, TaskClass
 from awf.service.scheduler import (
     HUMAN_BOOST_MAX,
@@ -160,6 +161,72 @@ def test_retry_backoff_context_is_explained_without_score_advantage() -> None:
         "reason_code": "PROVIDER_RECOVERY_NOT_BEFORE",
         "not_before": "2026-05-02T12:20:00+00:00",
     }
+
+
+@pytest.mark.unit
+def test_scheduler_workspace_policy_parsing_ignores_unsafe_priority_shapes() -> None:
+    queued_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_policy_shapes",
+        task_class=TaskClass.test_task.value,
+        created_at=queued_at,
+        task_policy={
+            "priority": 7,
+            "human_boost": 2,
+            "scheduler": {
+                "base_priority": True,
+                "human_escalation_boost": 3.0,
+                "retry_attempt_number": "not-an-int",
+            },
+            "provider_recovery_state": {
+                "parent_failure_reason": " infrastructure_failure ",
+                "retry_attempt_number": 4.0,
+                "not_before": "not-a-date",
+            },
+        },
+    )
+
+    score_input = scheduler_score_input_from_workspace(workspace)
+
+    assert score_input.base_priority == 7
+    assert score_input.human_boost == 3
+    assert score_input.parent_failure_reason == "infrastructure_failure"
+    assert score_input.retry_attempt_number == 4
+    assert score_input.provider_not_before is None
+
+
+@pytest.mark.unit
+def test_scheduler_past_provider_backoff_does_not_suppress_dispatch() -> None:
+    queued_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    score = compute_scheduler_score(
+        SchedulerScoreInput(
+            workspace_id="ws_backoff_elapsed",
+            task_class=TaskClass.refactor_task.value,
+            base_priority=10,
+            queued_at=queued_at,
+            provider_not_before=queued_at - timedelta(minutes=5),
+        ),
+        now=queued_at,
+    )
+
+    assert score.score_summary["suppression"] == {"suppressed": False}
+    assert score_summary_with_suppression(
+        score,
+        reason_code="MANUAL_SUPPRESSION",
+        detail={"operator": "test"},
+    )["suppression"] == {
+        "suppressed": True,
+        "reason_code": "MANUAL_SUPPRESSION",
+        "operator": "test",
+    }
+    assert score_summary_with_suppression(
+        score,
+        reason_code="EMPTY_DETAIL_SUPPRESSION",
+    )["suppression"] == {
+        "suppressed": True,
+        "reason_code": "EMPTY_DETAIL_SUPPRESSION",
+    }
+    assert scheduler._parse_datetime("not-a-date") is None
 
 
 @pytest.mark.unit

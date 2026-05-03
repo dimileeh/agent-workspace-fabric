@@ -647,6 +647,10 @@ async def test_create_attempt_returns_none_when_no_recovery_metadata(
         workspace={"profile_ref": "python", "profile": None},
         validation={"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
         resources={},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "provider recovery coverage fixture",
+        },
     )
     service = WorkspaceService(factory)
     response = await service.create_v2(request)
@@ -692,6 +696,10 @@ async def test_create_attempt_records_terminal_event_when_attempts_exhausted(
         workspace={"profile_ref": "python", "profile": None},
         validation={"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
         resources={},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "provider recovery coverage fixture",
+        },
     )
     service = WorkspaceService(factory)
     response = await service.create_v2(request)
@@ -775,6 +783,10 @@ async def test_retry_task_for_source_creates_task_when_attempt_missing(
         workspace={"profile_ref": "python", "profile": None},
         validation={"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
         resources={},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "provider recovery coverage fixture",
+        },
     )
     service = WorkspaceService(factory)
     response = await service.create_v2(request)
@@ -834,6 +846,10 @@ async def test_create_attempt_short_circuits_on_existing_recovery_event(
         workspace={"profile_ref": "python", "profile": None},
         validation={"commands": ["uv run pytest tests/unit -q"], "requested_tier": 2},
         resources={},
+        preflight={
+            "provider_readiness_override": True,
+            "provider_readiness_override_reason": "provider recovery coverage fixture",
+        },
     )
     service = WorkspaceService(factory)
     response = await service.create_v2(request)

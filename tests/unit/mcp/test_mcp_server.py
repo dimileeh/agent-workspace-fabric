@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from awf.api.schemas import OperationResponse, WorkspaceControlResponse
 from awf.common.config import Settings
 from awf.db.base import Base
-from awf.db.enums import OperationStatus, OperationType
+from awf.db.enums import OperationStatus, OperationType, WorkspaceStatus
 from awf.db.repositories import OperationRepository, WorkspaceRepository
 from awf.db.session import make_engine, make_session_factory
 from awf.mcp import server as mcp_server
@@ -223,6 +223,15 @@ class TestToolRegistration:
             "minLength": 1,
             "type": "string",
         }
+        assert create_v2.inputSchema["properties"]["provider_readiness_override"][
+            "default"
+        ] is False
+        assert (
+            create_v2.inputSchema["properties"]["provider_readiness_override_reason"][
+                "default"
+            ]
+            is None
+        )
 
     @pytest.mark.unit
     async def test_operator_parity_tool_argument_contracts(self, mcp) -> None:  # type: ignore[no-untyped-def]
@@ -283,6 +292,13 @@ class TestToolRegistration:
         readiness_required = tools["awf_get_service_readiness"].inputSchema.get("required", [])
         assert "providers" not in readiness_required
         assert "limit" not in tools["awf_get_service_health"].inputSchema.get("properties", {})
+
+        retry_props = tools["awf_retry_workspace"].inputSchema["properties"]
+        assert "workspace_id" in retry_props
+        retry_required = tools["awf_retry_workspace"].inputSchema.get("required", [])
+        assert "workspace_id" in retry_required
+        assert retry_props["provider_readiness_override"]["default"] is False
+        assert retry_props["provider_readiness_override_reason"]["default"] is None
 
         remonitor_props = tools["awf_remonitor_workspace"].inputSchema["properties"]
         assert "workspace_id" in remonitor_props
@@ -717,6 +733,8 @@ class TestCreateWorkspaceV2:
                 "requested_tier": 2,
                 "auto_merge": False,
                 "initial_review_grace_period_seconds": 12.5,
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp test override",
             },
         )
 
@@ -734,6 +752,7 @@ class TestCreateWorkspaceV2:
         assert ws.task_kind == "refactor_task"
         assert ws.agent == "claude_code"
         assert ws.task_policy["agent_model"] == "claude-opus-4-7"
+        assert ws.task_policy["provider_readiness_preflight"]["provider"] == "claude_code"
         assert ws.profile_ref == "python"
         assert ws.requested_profile is not None
         assert ws.requested_profile["name"] == "inline-python"
@@ -762,6 +781,8 @@ class TestCreateWorkspaceV2:
                 "task_kind": "feature_branch_pr",
                 "task_class": "docs_task",
                 "owned_paths": ["README.md", "docs/**"],
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "mcp metadata test fixture",
             },
         )
 
@@ -778,6 +799,147 @@ class TestCreateWorkspaceV2:
         assert isinstance(listed, list)
         assert listed[0]["task_class"] == "docs_task"
         assert listed[0]["owned_paths"] == ["README.md", "docs/**"]
+
+    @pytest.mark.unit
+    async def test_create_workspace_v2_returns_structured_provider_preflight_error(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        service = WorkspaceService(
+            factory,
+            settings=Settings(
+                _env_file=None,
+                host_home=str(tmp_path / "home"),
+                docker_host="",
+            ),
+        )
+        mcp = build_mcp_server(service=service)
+
+        result = await mcp.call_tool(
+            "awf_create_workspace_v2",
+            {
+                "repo_url": "git@github.com:example/docs.git",
+                "base_branch": "main",
+                "task_title": "Document provider preflight",
+                "task_prompt": "Update the docs.",
+            },
+        )
+
+        assert isinstance(result, CallToolResult)
+        assert result.isError is True
+        assert result.structuredContent is not None
+        assert (
+            result.structuredContent["error_code"]
+            == "PROVIDER_READINESS_PRECHECK_FAILED"
+        )
+        preflight = result.structuredContent["detail"]["provider_readiness_preflight"]
+        assert preflight["provider"] == "codex"
+        assert preflight["model"] == "gpt-5.5"
+        assert preflight["blocks_launch"] is True
+
+    @pytest.mark.unit
+    async def test_create_workspace_v2_override_returns_preflight_summary(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        service = WorkspaceService(
+            factory,
+            settings=Settings(
+                _env_file=None,
+                host_home=str(tmp_path / "home"),
+                docker_host="",
+            ),
+        )
+        mcp = build_mcp_server(service=service)
+
+        payload = await _call(
+            mcp,
+            "awf_create_workspace_v2",
+            {
+                "repo_url": "git@github.com:example/docs.git",
+                "base_branch": "main",
+                "task_title": "Document provider preflight override",
+                "task_prompt": "Update the docs.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "operator verified local auth",
+            },
+        )
+
+        assert isinstance(payload, dict)
+        preflight = payload["provider_readiness_preflight"]
+        assert preflight["provider"] == "codex"
+        assert preflight["override_used"] is True
+        assert preflight["override_reason"] == "operator verified local auth"
+
+    @pytest.mark.unit
+    async def test_retry_workspace_provider_preflight_error_and_override(
+        self,
+        factory: async_sessionmaker[AsyncSession],
+        tmp_path: Path,
+    ) -> None:
+        service = WorkspaceService(
+            factory,
+            settings=Settings(
+                _env_file=None,
+                host_home=str(tmp_path / "home"),
+                docker_host="",
+            ),
+        )
+        mcp = build_mcp_server(service=service)
+        created = await _call(
+            mcp,
+            "awf_create_workspace_v2",
+            {
+                "repo_url": "git@github.com:example/retry.git",
+                "base_branch": "main",
+                "task_title": "Retry with provider preflight",
+                "task_prompt": "Update the docs.",
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "initial override",
+            },
+        )
+        assert isinstance(created, dict)
+        workspace_id = str(created["id"])
+        async with factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            assert workspace is not None
+            await repo.transition(workspace, to=WorkspaceStatus.provisioning, reason_code="TEST")
+            await repo.transition(workspace, to=WorkspaceStatus.failed, reason_code="TEST_FAIL")
+            await session.commit()
+
+        blocked = await mcp.call_tool(
+            "awf_retry_workspace",
+            {"workspace_id": workspace_id},
+        )
+        assert isinstance(blocked, CallToolResult)
+        assert blocked.isError is True
+        assert blocked.structuredContent is not None
+        assert (
+            blocked.structuredContent["error_code"]
+            == "PROVIDER_READINESS_PRECHECK_FAILED"
+        )
+        blocked_preflight = blocked.structuredContent["detail"]["provider_readiness_preflight"]
+        assert blocked_preflight["provider"] == "codex"
+        assert blocked_preflight["source_workspace_id"] == workspace_id
+
+        retried = await _call(
+            mcp,
+            "awf_retry_workspace",
+            {
+                "workspace_id": workspace_id,
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "retry override",
+            },
+        )
+
+        assert isinstance(retried, dict)
+        preflight = retried["provider_readiness_preflight"]
+        assert preflight["source_workspace_id"] == workspace_id
+        assert preflight["override_used"] is True
+        assert preflight["override_reason"] == "retry override"
 
     @pytest.mark.unit
     async def test_unknown_profile_ref_returns_structured_invalid_profile_error(

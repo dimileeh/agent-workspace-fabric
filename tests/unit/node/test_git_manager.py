@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 
+import awf.node.git_manager as git_manager
 from awf.node import git_manager as git_module
 from awf.node.git_manager import (
     GitManager,
@@ -262,6 +263,128 @@ class TestAddWorktree:
         assert layout.worktree_path in chowned
         assert mirror / "objects" in chowned
         assert protected_object not in chowned
+
+    @pytest.mark.unit
+    async def test_agent_owner_preparation_skips_when_owner_or_root_is_absent(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def fail_chown(*_args: object, **_kwargs: object) -> None:
+            raise AssertionError("chown should not run")
+
+        monkeypatch.setattr(git_manager, "_chown_targets", fail_chown)
+        without_owner = GitManager(tmp_path / "no-owner")
+        await without_owner._prepare_agent_writable_worktree(  # noqa: SLF001
+            layout_mirror=tmp_path / "mirror.git",
+            worktree_path=tmp_path / "worktree",
+        )
+
+        monkeypatch.setattr(os, "geteuid", lambda: 1000)
+        non_root = GitManager(
+            tmp_path / "non-root",
+            worktree_owner_uid=1000,
+            worktree_owner_gid=1000,
+        )
+        await non_root._prepare_agent_writable_worktree(  # noqa: SLF001
+            layout_mirror=tmp_path / "mirror.git",
+            worktree_path=tmp_path / "worktree",
+        )
+
+
+@pytest.mark.unit
+def test_agent_writable_git_targets_handle_missing_optional_paths(tmp_path: Path) -> None:
+    mirror = tmp_path / "mirror.git"
+    worktree = tmp_path / "worktree"
+    mirror.mkdir()
+    worktree.mkdir()
+
+    targets = git_manager._agent_writable_git_targets(  # noqa: SLF001
+        layout_mirror=mirror,
+        worktree_path=worktree,
+    )
+
+    assert targets == (
+        git_manager._ChownTarget(worktree, recursive=True),  # noqa: SLF001
+        git_manager._ChownTarget(mirror, recursive=False),  # noqa: SLF001
+    )
+
+
+@pytest.mark.unit
+def test_linked_worktree_git_dir_handles_invalid_relative_and_unreadable_gitfiles(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    worktree = tmp_path / "worktree"
+    worktree.mkdir()
+
+    assert git_manager._linked_worktree_git_dir(worktree) is None  # noqa: SLF001
+
+    git_file = worktree / ".git"
+    git_file.write_text("not-a-gitdir")
+    assert git_manager._linked_worktree_git_dir(worktree) is None  # noqa: SLF001
+
+    git_file.write_text("gitdir: ../mirror.git/worktrees/ws")
+    assert git_manager._linked_worktree_git_dir(worktree) == (  # noqa: SLF001
+        worktree / "../mirror.git/worktrees/ws"
+    ).resolve()
+
+    original_read_text = Path.read_text
+
+    def _raise_for_git_file(path: Path, *args: object, **kwargs: object) -> str:
+        if path == git_file:
+            raise OSError("unreadable")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", _raise_for_git_file)
+    assert git_manager._linked_worktree_git_dir(worktree) is None  # noqa: SLF001
+
+
+@pytest.mark.unit
+def test_chown_targets_skips_duplicates_and_missing_paths(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    existing = tmp_path / "existing"
+    existing.write_text("ok")
+    missing = tmp_path / "missing"
+    chowned: list[Path] = []
+
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, _uid, _gid: chowned.append(Path(path)),
+    )
+
+    git_manager._chown_targets(  # noqa: SLF001
+        (
+            git_manager._ChownTarget(existing, recursive=False),  # noqa: SLF001
+            git_manager._ChownTarget(existing, recursive=False),  # noqa: SLF001
+            git_manager._ChownTarget(missing, recursive=False),  # noqa: SLF001
+        ),
+        1000,
+        1000,
+    )
+
+    assert chowned == [existing]
+
+
+@pytest.mark.unit
+def test_chown_tree_returns_after_chowning_plain_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    file_path = tmp_path / "plain-file"
+    file_path.write_text("ok")
+    chowned: list[Path] = []
+
+    monkeypatch.setattr(
+        os,
+        "chown",
+        lambda path, _uid, _gid: chowned.append(Path(path)),
+    )
+
+    git_manager._chown_tree(file_path, 1000, 1000)  # noqa: SLF001
+
+    assert chowned == [file_path]
 
 
 class TestAgentWorktreeWritable:
