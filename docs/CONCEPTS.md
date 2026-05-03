@@ -583,7 +583,7 @@ uv run --python 3.12 --extra dev awf service logs --service migrate --tail 200
 ```
 
 Then use the restore flow in
-`Control-Plane Postgres Backup And Restore` and restart through
+[Control-Plane Postgres Backup And Restore](#control-plane-postgres-backup-and-restore) and restart through
 `awf service bootstrap`.
 
 ### Local Disaster Recovery
