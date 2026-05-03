@@ -441,7 +441,7 @@ async def test_validation_provenance_groups_streams_and_resolves_profile_command
     body = response.json()
     assert body["next_cursor"] is None
     assert body["has_more"] is False
-    assert body["limit"] == len(body["items"])
+    assert body["limit"] == validation_service.DEFAULT_VALIDATION_PROVENANCE_LIMIT
     assert body["cursor"] is None
     assert [(item["phase"], item["command_index"], item["command"]) for item in body["items"]] == [
         ("setup", 1, "uv sync"),
@@ -524,7 +524,7 @@ async def test_validation_provenance_prefers_persisted_validation_runs(
     assert response.status_code == 200
     body = response.json()
     assert len(body["items"]) == 1
-    assert body["limit"] == len(body["items"])
+    assert body["limit"] == validation_service.DEFAULT_VALIDATION_PROVENANCE_LIMIT
     item = body["items"][0]
     assert item["validation_run_id"] == "vr_111111111111111111111111"
     assert item["tier"] == 2
@@ -1270,7 +1270,7 @@ async def test_validation_provenance_empty_when_workspace_has_no_validation_logs
         "items": [],
         "next_cursor": None,
         "has_more": False,
-        "limit": 0,
+        "limit": validation_service.DEFAULT_VALIDATION_PROVENANCE_LIMIT,
         "cursor": None,
     }
 
@@ -1328,7 +1328,7 @@ async def test_validation_route_function_returns_stream_derived_items(
     ]
     assert response.next_cursor is None
     assert response.has_more is False
-    assert response.limit == len(response.items)
+    assert response.limit == validation_service.DEFAULT_VALIDATION_PROVENANCE_LIMIT
     assert response.cursor is None
 
 

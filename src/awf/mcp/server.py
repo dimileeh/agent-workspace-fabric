@@ -37,7 +37,11 @@ from awf.api.schemas import (
 from awf.common.config import Settings, get_settings
 from awf.db.enums import AgentRuntime, OperationStatus, OperationType, TaskClass, WorkspaceStatus
 from awf.profiles.resolver import ProfileResolutionError
-from awf.service.artifacts import list_workspace_artifacts_metadata
+from awf.service.artifacts import (
+    DEFAULT_ARTIFACT_LIST_LIMIT,
+    MAX_ARTIFACT_LIST_LIMIT,
+    list_workspace_artifacts_metadata,
+)
 from awf.service.controls import WorkspaceControlError
 from awf.service.disk import DiskCheck
 from awf.service.locks import InvalidWorkspaceLockCursorError, list_workspace_lock_page_for_session
@@ -58,8 +62,14 @@ from awf.service.orphan_resources import OrphanResourceSummary
 from awf.service.overlap_graph import OverlapGraphQueueState, build_workspace_overlap_graph
 from awf.service.provider_readiness import ProviderName
 from awf.service.tasks import build_task_attempt_list_response, build_task_list_response
-from awf.service.validation_provenance import list_validation_provenance_response
+from awf.service.validation_provenance import (
+    DEFAULT_VALIDATION_PROVENANCE_LIMIT,
+    MAX_VALIDATION_PROVENANCE_LIMIT,
+    list_validation_provenance_response,
+)
 from awf.service.workspace_observability import (
+    DEFAULT_STALE_REASON_LIMIT,
+    MAX_STALE_REASON_LIMIT,
     InvalidWorkspaceOverviewCursorError,
     list_workspace_overview_response,
     list_workspace_stale_reasons_response,
@@ -92,6 +102,7 @@ HealthProvider = Callable[
     [],
     dict[str, Any] | Awaitable[dict[str, Any]],
 ]
+ProviderFilter = Annotated[str, Field(min_length=1, max_length=64)]
 
 
 def _resolve_settings(settings: Settings | None) -> Settings:
@@ -131,6 +142,10 @@ def build_mcp_server(
         ),
     )
     settings_value = _resolve_settings(settings)
+
+    def _safe_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:
+        redacted = _redact_sensitive_payload(payload, settings_value)
+        return _tool_result(redacted, is_error=is_error)
 
     @mcp.tool(name="awf_create_workspace")
     async def awf_create_workspace(
@@ -535,12 +550,19 @@ def build_mcp_server(
     @mcp.tool(name="awf_list_workspace_validation")
     async def awf_list_workspace_validation(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
+        limit: int = Field(
+            default=DEFAULT_VALIDATION_PROVENANCE_LIMIT,
+            ge=1,
+            le=MAX_VALIDATION_PROVENANCE_LIMIT,
+            description="Maximum validation provenance records to return.",
+        ),
     ) -> CallToolResult:
         """Read-only operator observability: list validation provenance for a workspace."""
         async with service.session_factory() as session:
             response = await list_validation_provenance_response(
                 session,
                 workspace_id=workspace_id,
+                limit=limit,
             )
             if response is None:
                 return _null_tool_result()
@@ -550,6 +572,12 @@ def build_mcp_server(
     async def awf_list_workspace_stale_reasons(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
         include_resolved: bool = Field(default=False),
+        limit: int = Field(
+            default=DEFAULT_STALE_REASON_LIMIT,
+            ge=1,
+            le=MAX_STALE_REASON_LIMIT,
+            description="Maximum stale reason records to return.",
+        ),
     ) -> CallToolResult:
         """Read-only operator observability: list structured workspace stale reasons."""
         async with service.session_factory() as session:
@@ -557,6 +585,7 @@ def build_mcp_server(
                 session,
                 workspace_id=workspace_id,
                 include_resolved=include_resolved,
+                limit=limit,
             )
             if response is None:
                 return _null_tool_result()
@@ -565,6 +594,12 @@ def build_mcp_server(
     @mcp.tool(name="awf_list_workspace_artifacts")
     async def awf_list_workspace_artifacts(
         workspace_id: str = Field(..., description="Workspace ID to inspect."),
+        limit: int = Field(
+            default=DEFAULT_ARTIFACT_LIST_LIMIT,
+            ge=1,
+            le=MAX_ARTIFACT_LIST_LIMIT,
+            description="Maximum artifact metadata records to return.",
+        ),
     ) -> CallToolResult:
         """Read-only operator observability: list workspace artifact metadata only."""
         async with service.session_factory() as session:
@@ -572,6 +607,7 @@ def build_mcp_server(
                 session,
                 workspace_id=workspace_id,
                 work_dir=settings_value.work_dir,
+                limit=limit,
             )
             if response is None:
                 return _null_tool_result()
@@ -645,7 +681,7 @@ def build_mcp_server(
                 runtime_health=runtime_health,
             )
         response = metrics_routes.ResourceSaturationSummaryResponse.model_validate(summary)
-        return _tool_result(response.model_dump(mode="json"))
+        return _safe_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_slo_metrics_summary")
     async def awf_get_slo_metrics_summary(
@@ -824,8 +860,9 @@ def build_mcp_server(
 
     @mcp.tool(name="awf_get_service_readiness")
     async def awf_get_service_readiness(
-        providers: list[str] | None = Field(
+        providers: list[ProviderFilter] | None = Field(
             default=None,
+            max_length=16,
             description="Optional list of provider names to restrict readiness checks to (e.g. 'github', 'codex', 'claude_code', 'gemini', 'opencode', 'docker'). When set, only these providers affect the overall readiness outcome.",
         ),
     ) -> StructuredToolResult:
@@ -844,12 +881,13 @@ def build_mcp_server(
             session_factory=service.session_factory,
             validated_strict_providers=validated_strict_providers,
         )
-        return _tool_result(payload)
+        return _safe_result(payload)
 
     @mcp.tool(name="awf_get_core_release_readiness")
     async def awf_get_core_release_readiness(
-        providers: list[str] | None = Field(
+        providers: list[ProviderFilter] | None = Field(
             default=None,
+            max_length=16,
             description="Optional strict provider names for the release scorecard.",
         ),
         failure_window_hours: int = Field(
@@ -892,7 +930,7 @@ def build_mcp_server(
             allow_generic_failures=allow_generic_failures,
             allow_slo_breach=allow_slo_breach,
         )
-        return _tool_result(report.to_dict())
+        return _safe_result(report.to_dict())
 
     @mcp.tool(name="awf_get_service_health")
     async def awf_get_service_health() -> StructuredToolResult:
@@ -900,7 +938,7 @@ def build_mcp_server(
         payload = await _provided_health(
             health_provider=health_provider,
         )
-        return _tool_result(payload)
+        return _safe_result(payload)
 
     @mcp.tool(name="awf_remonitor_workspace")
     async def awf_remonitor_workspace(
@@ -1194,6 +1232,36 @@ async def _provided_health(
 
     response = HealthResponse(status="ok", service="awf", version=__version__)
     return response.model_dump(mode="json")
+
+
+def _redact_sensitive_payload(payload: dict[str, Any], settings: Settings) -> dict[str, Any]:
+    redacted = _redact_sensitive_value(payload, settings)
+    return redacted if isinstance(redacted, dict) else {}
+
+
+def _redact_sensitive_value(value: Any, settings: Settings) -> Any:
+    if isinstance(value, str):
+        return _redact_sensitive_text(value, settings)
+    if isinstance(value, list):
+        return [_redact_sensitive_value(item, settings) for item in value]
+    if isinstance(value, dict):
+        return {
+            _redact_sensitive_text(key, settings) if isinstance(key, str) else key:
+            _redact_sensitive_value(item, settings)
+            for key, item in value.items()
+        }
+    return value
+
+
+def _redact_sensitive_text(value: str, settings: Settings) -> str:
+    from awf.service.config import resolve_service_settings
+    from awf.service.provider_readiness import redact_launch_preflight_text
+
+    redacted = value
+    for secret in (settings.api_token, settings.github_token):
+        if secret and len(secret) >= 4:
+            redacted = redacted.replace(secret, "<redacted>")
+    return redact_launch_preflight_text(resolve_service_settings(settings), redacted)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:

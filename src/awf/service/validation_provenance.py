@@ -58,6 +58,8 @@ _VALIDATION_FAILURE_REASONS = {
     FailureReason.health_check_failure.value,
     FailureReason.service_startup_failure.value,
 }
+DEFAULT_VALIDATION_PROVENANCE_LIMIT = 50
+MAX_VALIDATION_PROVENANCE_LIMIT = 500
 
 
 
@@ -65,6 +67,7 @@ async def list_validation_provenance_response(
     session: AsyncSession,
     *,
     workspace_id: str,
+    limit: int = DEFAULT_VALIDATION_PROVENANCE_LIMIT,
 ) -> ValidationProvenanceListResponse | None:
     workspace = await WorkspaceRepository(session).get(workspace_id)
     if workspace is None:
@@ -81,11 +84,19 @@ async def list_validation_provenance_response(
         )
     else:
         items = _build_validation_items(workspace, streams)
+    bounded_limit = _bounded_limit(limit)
+    page_items = items[:bounded_limit]
     return ValidationProvenanceListResponse(
-        items=items,
-        limit=len(items),
+        items=page_items,
+        next_cursor=None,
+        has_more=len(items) > bounded_limit,
+        limit=bounded_limit,
         cursor=None,
     )
+
+
+def _bounded_limit(limit: int) -> int:
+    return max(1, min(limit, MAX_VALIDATION_PROVENANCE_LIMIT))
 
 
 @dataclass

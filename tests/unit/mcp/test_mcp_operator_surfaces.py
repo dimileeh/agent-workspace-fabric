@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -75,6 +76,46 @@ NEW_OPERATOR_TOOLS = {
     "awf_list_locks",
     "awf_get_service_readiness",
     "awf_get_service_health",
+}
+
+BOUNDED_READ_ONLY_LIST_TOOLS = {
+    "awf_list_merge_queue",
+    "awf_list_workspace_overview",
+    "awf_list_workspace_validation",
+    "awf_list_workspace_stale_reasons",
+    "awf_list_workspace_artifacts",
+    "awf_get_failure_analysis_summary",
+    "awf_list_operations",
+    "awf_get_overlap_graph",
+    "awf_list_tasks",
+    "awf_list_task_attempts",
+    "awf_list_locks",
+}
+
+FORBIDDEN_OPERATOR_TOOL_PREFIXES = (
+    "awf_shell",
+    "awf_exec",
+    "awf_run_command",
+    "awf_run_shell",
+    "awf_docker_exec",
+    "awf_container_exec",
+    "awf_read_file",
+    "awf_list_files",
+    "awf_read_secret",
+    "awf_list_secret",
+    "awf_read_workspace_artifact",
+    "awf_download_workspace_artifact",
+)
+
+FORBIDDEN_READ_ONLY_INPUTS = {
+    "artifact_path",
+    "command",
+    "container_id",
+    "docker_command",
+    "host_path",
+    "path",
+    "secret_name",
+    "shell",
 }
 
 
@@ -524,6 +565,24 @@ def _normalize_metric_payload(payload: dict[str, Any]) -> dict[str, Any]:
     return normalized
 
 
+def _string_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    if schema.get("type") == "string":
+        return schema
+    for candidate in schema.get("anyOf", []):
+        if candidate.get("type") == "string":
+            return candidate
+    raise AssertionError(f"No string schema in {schema!r}")
+
+
+def _array_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    if schema.get("type") == "array":
+        return schema
+    for candidate in schema.get("anyOf", []):
+        if candidate.get("type") == "array":
+            return candidate
+    raise AssertionError(f"No array schema in {schema!r}")
+
+
 class TestMcpOperatorSurfaceRegistration:
     @pytest.mark.unit
     async def test_operator_parity_tools_registered(self, operator_stack: OperatorStack) -> None:
@@ -537,6 +596,40 @@ class TestMcpOperatorSurfaceRegistration:
             assert "operator" in description
             assert "shell" not in description
             assert "docker exec" not in description
+
+    @pytest.mark.unit
+    async def test_read_only_operator_tool_schemas_are_bounded_and_non_executing(
+        self,
+        operator_stack: OperatorStack,
+    ) -> None:
+        tools = {tool.name: tool for tool in await operator_stack.mcp.list_tools()}
+
+        forbidden_names = [
+            name
+            for name in tools
+            if name.startswith(FORBIDDEN_OPERATOR_TOOL_PREFIXES)
+            or name == "awf_list_workspace_secret_leases"
+        ]
+        assert forbidden_names == []
+
+        for name in NEW_OPERATOR_TOOLS:
+            props = tools[name].inputSchema.get("properties", {})
+            assert FORBIDDEN_READ_ONLY_INPUTS.isdisjoint(props), name
+            if "cursor" in props:
+                assert _string_schema(props["cursor"])["maxLength"] <= 256
+
+        for name in BOUNDED_READ_ONLY_LIST_TOOLS:
+            props = tools[name].inputSchema.get("properties", {})
+            assert "limit" in props, name
+            assert props["limit"]["minimum"] == 1
+            assert props["limit"]["maximum"] <= 500
+
+        readiness_props = tools["awf_get_service_readiness"].inputSchema["properties"]
+        providers_schema = _array_schema(readiness_props["providers"])
+        assert providers_schema["maxItems"] <= 16
+        provider_item_schema = providers_schema["items"]
+        assert provider_item_schema["minLength"] == 1
+        assert provider_item_schema["maxLength"] <= 64
 
 
 class TestMcpOperatorSurfaceParity:
@@ -595,6 +688,209 @@ class TestMcpOperatorSurfaceParity:
             result = await _call_result(operator_stack.mcp, tool_name, args)
             assert result.isError is False
             assert result.structuredContent is None
+
+    @pytest.mark.unit
+    async def test_empty_read_only_operator_surfaces_match_rest_payloads(
+        self,
+        resource_stack: OperatorStack,
+    ) -> None:
+        list_cases: list[tuple[str, str, dict[str, Any], str, dict[str, Any]]] = [
+            ("merge_queue", "/v1/merge-queue", {"limit": 10}, "awf_list_merge_queue", {"limit": 10}),
+            (
+                "workspace_overview",
+                "/v1/workspaces/overview",
+                {"limit": 10},
+                "awf_list_workspace_overview",
+                {"limit": 10},
+            ),
+            ("tasks", "/v1/tasks", {"limit": 10}, "awf_list_tasks", {"limit": 10}),
+            ("locks", "/v1/locks", {"limit": 10}, "awf_list_locks", {"limit": 10}),
+        ]
+        empty_payloads: dict[str, dict[str, Any]] = {}
+
+        for label, path, params, tool_name, args in list_cases:
+            response = await resource_stack.client.get(
+                path,
+                params=params,
+                headers=resource_stack.auth_headers,
+            )
+            assert response.status_code == 200
+            rest = response.json()
+            mcp = await _call(resource_stack.mcp, tool_name, args)
+
+            assert mcp == rest
+            assert rest["items"] == []
+            empty_payloads[label] = rest
+
+        overlap_response = await resource_stack.client.get(
+            "/v1/locks/overlap-graph",
+            params={"limit": 10},
+            headers=resource_stack.auth_headers,
+        )
+        assert overlap_response.status_code == 200
+        overlap_rest = overlap_response.json()
+        overlap_mcp = await _call(
+            resource_stack.mcp,
+            "awf_get_overlap_graph",
+            {"limit": 10},
+        )
+        assert overlap_mcp == overlap_rest
+        assert overlap_rest["nodes"] == []
+        assert overlap_rest["edges"] == []
+
+        metric_cases: list[tuple[str, str, dict[str, Any], str, dict[str, Any]]] = [
+            (
+                "failures",
+                "/v1/metrics/failures/summary",
+                {"since_hours": 2, "limit": 5},
+                "awf_get_failure_analysis_summary",
+                {"since_hours": 2, "limit": 5},
+            ),
+            (
+                "reliability",
+                "/v1/metrics/workspaces/summary",
+                {"since_hours": 2},
+                "awf_get_workspace_reliability_summary",
+                {"since_hours": 2},
+            ),
+            (
+                "resources",
+                "/v1/metrics/resources/saturation",
+                {},
+                "awf_get_resource_saturation_summary",
+                {},
+            ),
+            (
+                "slo",
+                "/v1/metrics/slo",
+                {"since_hours": 2},
+                "awf_get_slo_metrics_summary",
+                {"since_hours": 2},
+            ),
+        ]
+        metric_payloads: dict[str, dict[str, Any]] = {}
+
+        for label, path, params, tool_name, args in metric_cases:
+            response = await resource_stack.client.get(
+                path,
+                params=params,
+                headers=resource_stack.auth_headers,
+            )
+            assert response.status_code == 200
+            rest = response.json()
+            mcp = await _call(resource_stack.mcp, tool_name, args)
+            assert isinstance(mcp, dict)
+
+            assert _normalize_metric_payload(mcp) == _normalize_metric_payload(rest)
+            metric_payloads[label] = rest
+
+        assert empty_payloads["merge_queue"]["has_more"] is False
+        assert empty_payloads["workspace_overview"]["has_more"] is False
+        assert empty_payloads["tasks"]["has_more"] is False
+        assert empty_payloads["locks"]["has_more"] is False
+        assert metric_payloads["failures"]["total_failed_workspaces"] == 0
+        assert metric_payloads["failures"]["failure_groups"] == []
+        assert metric_payloads["failures"]["latest_examples"] == []
+        assert metric_payloads["reliability"]["active_count"] == 0
+        assert metric_payloads["reliability"]["failed_count"] == 0
+        assert metric_payloads["resources"]["workspace_counts"]["active_total"] == 0
+        assert metric_payloads["resources"]["reserved_resources"]["active_workspace_count"] == 0
+        assert metric_payloads["slo"]["creation_total"] == 0
+        assert metric_payloads["slo"]["cleanup_total"] == 0
+
+    @pytest.mark.unit
+    async def test_service_operator_surfaces_redact_token_values(
+        self,
+        engine: AsyncEngine,
+        tmp_path: Path,
+    ) -> None:
+        api_secret = "api-secret-do-not-leak-12345"
+        provider_secret = "ghp_providerSecretDoNotLeak12345"
+        work_dir = tmp_path / "redacted-awf-state"
+        factory = make_session_factory(engine)
+        settings = Settings(
+            _env_file=None,
+            api_token=api_secret,
+            github_token=provider_secret,
+            work_dir=str(work_dir),
+            min_free_disk_bytes=700,
+            worker_max_concurrent_provisions=5,
+            worker_max_concurrent_executions=2,
+        )
+
+        def leaky_readiness(
+            _settings: Settings,
+            *,
+            validated_strict_providers: set[Any] | None = None,
+        ) -> dict[str, Any]:
+            return {
+                "service": "awf",
+                "version": "test",
+                "status": "ok",
+                "checks": {
+                    "db": {
+                        "ok": True,
+                        "status": "ok",
+                        "reason": None,
+                        "detail": api_secret,
+                    }
+                },
+                "agent_readiness": {
+                    "status": "ok",
+                    "providers": {
+                        "github": {
+                            "status": "ok",
+                            "detail": provider_secret,
+                        }
+                    },
+                    "strict_providers": sorted(validated_strict_providers or ()),
+                },
+            }
+
+        def leaky_health() -> dict[str, Any]:
+            return {
+                "status": "ok",
+                "service": "awf",
+                "version": f"test {api_secret}",
+            }
+
+        def leaky_disk(current_settings: Settings) -> DiskCheck:
+            base = _ok_disk_check(current_settings)
+            return DiskCheck(
+                path=base.path,
+                checked_path=base.checked_path,
+                total_bytes=base.total_bytes,
+                used_bytes=base.used_bytes,
+                free_bytes=base.free_bytes,
+                percent_free=base.percent_free,
+                threshold_bytes=base.threshold_bytes,
+                ok=base.ok,
+                status=base.status,
+                reason=base.reason,
+                detail=provider_secret,
+            )
+
+        mcp = build_mcp_server(
+            service=WorkspaceService(factory, settings=settings),
+            settings=settings,
+            disk_check_provider=leaky_disk,
+            orphan_resource_summary_provider=_no_orphan_summary,
+            runtime_health_summary_provider=_empty_runtime_health_summary,
+            readiness_provider=leaky_readiness,
+            health_provider=leaky_health,
+        )
+
+        for tool_name in (
+            "awf_get_service_readiness",
+            "awf_get_service_health",
+            "awf_get_resource_saturation_summary",
+        ):
+            payload = await _call(mcp, tool_name, {})
+            rendered = json.dumps(payload, sort_keys=True)
+
+            assert api_secret not in rendered
+            assert provider_secret not in rendered
+            assert "<redacted>" in rendered
 
     @pytest.mark.unit
     async def test_resource_provider_helpers_support_async_and_absent_providers(
@@ -1029,6 +1325,20 @@ class TestMcpOperatorSurfaceParity:
             "stderr": "validation.01_validate.stderr",
         }
 
+        limited_response = await operator_stack.client.get(
+            f"/v1/workspaces/{workspace_id}/validation",
+            params={"limit": 1},
+        )
+        limited_mcp = await _call(
+            operator_stack.mcp,
+            "awf_list_workspace_validation",
+            {"workspace_id": workspace_id, "limit": 1},
+        )
+
+        assert limited_response.status_code == 200
+        assert limited_mcp == limited_response.json()
+        assert limited_response.json()["limit"] == 1
+
     @pytest.mark.unit
     async def test_stale_reasons_tool_matches_rest_active_and_resolved_payloads(
         self,
@@ -1064,6 +1374,21 @@ class TestMcpOperatorSurfaceParity:
             "active",
             "resolved",
         }
+
+        limited_response = await operator_stack.client.get(
+            f"/v1/workspaces/{workspace_id}/stale-reasons",
+            params={"include_resolved": "true", "limit": 1},
+        )
+        limited_mcp = await _call(
+            operator_stack.mcp,
+            "awf_list_workspace_stale_reasons",
+            {"workspace_id": workspace_id, "include_resolved": True, "limit": 1},
+        )
+
+        assert limited_response.status_code == 200
+        assert limited_mcp == limited_response.json()
+        assert len(limited_response.json()["items"]) == 1
+        assert limited_response.json()["has_more"] is True
 
     @pytest.mark.unit
     async def test_artifacts_tool_matches_rest_metadata_payload(
@@ -1101,6 +1426,22 @@ class TestMcpOperatorSurfaceParity:
         ]
         assert "data" not in rest["items"][0]
         assert "content" not in rest["items"][0]
+
+        limited_response = await operator_stack.client.get(
+            f"/v1/workspaces/{workspace_id}/artifacts",
+            params={"limit": 1},
+            headers=operator_stack.auth_headers,
+        )
+        limited_mcp = await _call(
+            operator_stack.mcp,
+            "awf_list_workspace_artifacts",
+            {"workspace_id": workspace_id, "limit": 1},
+        )
+
+        assert limited_response.status_code == 200
+        assert limited_mcp == limited_response.json()
+        assert len(limited_response.json()["items"]) == 1
+        assert limited_response.json()["has_more"] is True
 
     @pytest.mark.unit
     async def test_failure_analysis_metrics_tool_matches_rest_payload(

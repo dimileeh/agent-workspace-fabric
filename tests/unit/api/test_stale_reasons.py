@@ -25,6 +25,7 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.db.session import make_session_factory
+from awf.service.workspace_observability import DEFAULT_STALE_REASON_LIMIT
 
 
 @pytest.fixture
@@ -297,7 +298,7 @@ class TestWorkspaceStaleReasonsEndpoint:
         assert body["has_more"] is False
         assert body["cursor"] is None
         items = body["items"]
-        assert body["limit"] == len(items)
+        assert body["limit"] == DEFAULT_STALE_REASON_LIMIT
         assert len(items) == 1
         assert set(items[0]) == {
             "id",
@@ -362,7 +363,7 @@ class TestWorkspaceStaleReasonsEndpoint:
         assert "items" in body
         assert body["next_cursor"] is None
         assert body["has_more"] is False
-        assert body["limit"] == len(body["items"])
+        assert body["limit"] == DEFAULT_STALE_REASON_LIMIT
         assert body["cursor"] is None
         assert any(r["status"] == "active" for r in body["items"])
         assert all(r["workspace_id"] == workspace_id for r in body["items"])

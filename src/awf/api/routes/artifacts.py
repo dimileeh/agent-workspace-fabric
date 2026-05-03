@@ -14,6 +14,7 @@ from awf.api.schemas import WorkspaceArtifactListResponse, WorkspaceArtifactResp
 from awf.db.repositories import WorkspaceRepository
 from awf.service.artifacts import (
     DEFAULT_ARTIFACT_LIST_LIMIT,
+    MAX_ARTIFACT_LIST_LIMIT,
     ArtifactNotFoundError,
     ArtifactPathError,
     _artifact_id,
@@ -47,11 +48,20 @@ __all__ = [
 )
 async def list_workspace_artifacts(
     workspace_id: str,
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=MAX_ARTIFACT_LIST_LIMIT,
+            description="Maximum artifact metadata records to return.",
+        ),
+    ] = DEFAULT_ARTIFACT_LIST_LIMIT,
     session: AsyncSession = Depends(get_db_session),
 ) -> WorkspaceArtifactListResponse:
     response = await list_workspace_artifacts_metadata(
         session,
         workspace_id=workspace_id,
+        limit=limit,
     )
     if response is None:
         raise _workspace_not_found(workspace_id)

@@ -52,6 +52,8 @@ from awf.service.validation_observability import (
     validation_freshness_summary,
 )
 from awf.service.workspace_observability import (
+    DEFAULT_STALE_REASON_LIMIT,
+    MAX_STALE_REASON_LIMIT,
     InvalidWorkspaceOverviewCursorError,
     _decode_overview_cursor,
     _encode_overview_cursor,
@@ -344,12 +346,21 @@ async def list_workspace_events(
 async def list_workspace_stale_reasons(
     workspace_id: str,
     include_resolved: Annotated[bool, Query()] = False,
+    limit: Annotated[
+        int,
+        Query(
+            ge=1,
+            le=MAX_STALE_REASON_LIMIT,
+            description="Maximum stale reason records to return.",
+        ),
+    ] = DEFAULT_STALE_REASON_LIMIT,
     session: AsyncSession = Depends(get_db_session),
 ) -> StaleReasonListResponse:
     response = await list_workspace_stale_reasons_response(
         session,
         workspace_id=workspace_id,
         include_resolved=include_resolved,
+        limit=limit,
     )
     if response is None:
         raise HTTPException(

@@ -33,6 +33,8 @@ from awf.service.provider_recovery import (
 AgentIdentitySource = Literal["task_policy", "default", "unavailable"]
 LifecycleStageStatus = Literal["pending", "active", "completed", "terminal_skipped"]
 LlmUsageStatus = Literal["available", "unavailable"]
+DEFAULT_STALE_REASON_LIMIT = 50
+MAX_STALE_REASON_LIMIT = 500
 
 LIFECYCLE_STAGES: tuple[WorkspaceStatus, ...] = (
     WorkspaceStatus.requested,
@@ -247,6 +249,7 @@ async def list_workspace_stale_reasons_response(
     *,
     workspace_id: str,
     include_resolved: bool = False,
+    limit: int = DEFAULT_STALE_REASON_LIMIT,
 ) -> StaleReasonListResponse | None:
     if not await WorkspaceRepository(session).exists(workspace_id):
         return None
@@ -256,11 +259,19 @@ async def list_workspace_stale_reasons_response(
         if include_resolved
         else await stale_repo.list_active_for_workspace(workspace_id)
     )
+    bounded_limit = _bounded_stale_reason_limit(limit)
+    page_rows = rows[:bounded_limit]
     return StaleReasonListResponse(
-        items=[StaleReasonResponse.model_validate(row) for row in rows],
-        limit=len(rows),
+        items=[StaleReasonResponse.model_validate(row) for row in page_rows],
+        next_cursor=None,
+        has_more=len(rows) > bounded_limit,
+        limit=bounded_limit,
         cursor=None,
     )
+
+
+def _bounded_stale_reason_limit(limit: int) -> int:
+    return max(1, min(limit, MAX_STALE_REASON_LIMIT))
 
 
 def _workspace_overview_item(ws: Workspace) -> WorkspaceOverviewResponse:

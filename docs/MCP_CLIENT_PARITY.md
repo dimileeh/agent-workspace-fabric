@@ -1,8 +1,8 @@
 # AWF API, CLI, and MCP Client Parity
 
 This document is the client-surface inventory for AWF operator and agent
-orchestrator access. It is a contract and backlog index only; this slice does
-not add MCP tools.
+orchestrator access. It is both an implementation contract for shipped client
+surfaces and a backlog index for explicit parity gaps.
 
 ## Role Contract
 
@@ -56,7 +56,7 @@ not add MCP tools.
 | Request validation | `POST /v1/workspaces/{workspace_id}/validate` | CLI absent | `awf_request_workspace_validation` | `OperationResponse`; NOT_FOUND, WORKSPACE_PR_URL_REQUIRED, WORKSPACE_STATE_NOT_VALIDATABLE, VERSION_CONFLICT, IDEMPOTENCY_CONFLICT | `require_api_token`; MCP: no shell, no exec, no credential dump | MCP partial | TODO§P1-if-match-parity |
 | Refresh workspace | `POST /v1/workspaces/{workspace_id}/refresh` | CLI absent | No `awf_refresh_workspace` | `OperationResponse`; NOT_FOUND, WORKSPACE_STATE_NOT_REFRESHABLE, VERSION_CONFLICT, IDEMPOTENCY_CONFLICT | `require_api_token`; MCP: audited control-plane operation, not shell access | MCP missing/backlog | TODO§P1-mcp-refresh |
 | Rebase workspace | `POST /v1/workspaces/{workspace_id}/rebase` | CLI absent | No `awf_rebase_workspace` | `OperationResponse`; NOT_FOUND, WORKSPACE_STATE_NOT_REBASEABLE, MERGE_CANDIDATE_NOT_FOUND, WORKSPACE_REBASE_CONFLICT, WORKSPACE_OPERATION_CONFLICT, VERSION_CONFLICT, IDEMPOTENCY_CONFLICT | `require_api_token`; MCP: audited control-plane operation, preserves validation provenance | MCP missing/backlog | TODO§P1-mcp-rebase |
-| Retry workspace | `POST /v1/workspaces/{workspace_id}/retry` | `awf workspace retry` | No `awf_retry_workspace` | `WorkspaceRetryResponse`; NOT_FOUND, VERSION_CONFLICT, IDEMPOTENCY_CONFLICT | `require_api_token`; MCP: must preserve lineage and policy | MCP missing/backlog | TODO§P1-mcp-retry |
+| Retry workspace | `POST /v1/workspaces/{workspace_id}/retry` | `awf workspace retry` | `awf_retry_workspace` | `WorkspaceRetryResponse`; WORKSPACE_NOT_FOUND, WORKSPACE_NOT_RETRYABLE, WORKSPACE_RETRY_EXHAUSTED, WORKSPACE_RETRY_SALVAGE_UNAVAILABLE, PROVIDER_READINESS_PRECHECK_FAILED | `require_api_token`; MCP: preserves retry lineage and provider-readiness policy without shell access | MCP implemented | — |
 | Optimistic concurrency on controls | `If-Match` header on REST cancel, stop, destroy, remonitor, refresh, validate, and rebase | `awf workspace remonitor --if-match` | No common expected-version argument on MCP controls | `WorkspaceControlResponse`; VERSION_CONFLICT | `require_api_token`; MCP: no shell, no exec, no credential dump | MCP partial | TODO§P1-if-match-parity |
 | Live workspace stream | `WebSocket /v1/workspaces/{workspace_id}/ws` | CLI absent | No streaming MCP tool | N/A (out of scope) | WebSocket excluded: MCP prefers bounded snapshots over streaming transport | Out of scope | — |
 | Secret lease status | `GET /v1/workspaces/{workspace_id}/secret-leases` | CLI absent | No MCP tool | `WorkspaceSecretLeaseListResponse` | Secret and credential material must not flow through MCP responses | Out of scope | — |
