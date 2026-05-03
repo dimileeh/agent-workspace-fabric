@@ -40,7 +40,9 @@ for more details.
 
 Safety defaults & Dry-run: Commands that modify local state default to
 dry-runs or previews unless explicit write flags are passed.
+"""
 
+_MUTATES_GLOBAL_HELP = """
 Mutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub
 via the async worker.
 """
@@ -59,7 +61,7 @@ _PROVIDER_HELP_PASSTHROUGH = (
 
 app = typer.Typer(
     name="awf",
-    help=f"Aira Agent Workspace Fabric — CLI operator surface.\n{_DX_FIRST_PATH_HELP}",
+    help=f"Aira Agent Workspace Fabric — CLI operator surface.\n{_DX_FIRST_PATH_HELP}{_MUTATES_GLOBAL_HELP}",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
