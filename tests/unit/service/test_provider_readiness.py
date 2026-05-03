@@ -121,6 +121,29 @@ def test_selected_provider_preflight_blocks_missing_strict_auth(tmp_path: Path) 
 
 
 @pytest.mark.unit
+def test_selected_provider_preflight_blocks_unsupported_runtime(tmp_path: Path) -> None:
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="unknown-agent",
+        task_policy=None,
+        environ={},
+        run_subprocess=_unexpected_subprocess,
+    )
+
+    assert result["provider"] == "unknown"
+    assert result["agent"] == "unknown-agent"
+    assert result["model"] is None
+    assert result["model_source"] == "unavailable"
+    assert result["readiness_status"] == "blocked"
+    assert result["auth_status"] == "unknown"
+    assert result["auth_source"] == "not_observed"
+    assert result["probe_status"] == "skipped"
+    assert result["reason_code"] == "UNSUPPORTED_AGENT_RUNTIME"
+    assert result["blocks_launch"] is True
+    assert provider_readiness.provider_readiness_preflight_from_task_policy(None) is None
+
+
+@pytest.mark.unit
 def test_selected_provider_preflight_override_preserves_original_reason(
     tmp_path: Path,
 ) -> None:
@@ -260,6 +283,58 @@ def test_selected_claude_preflight_requires_usable_non_secret_probe(
 
 
 @pytest.mark.unit
+def test_cli_auth_probe_failure_modes_are_structured_and_redacted() -> None:
+    def _missing(_args: list[str], **_kwargs: object) -> Any:
+        raise FileNotFoundError("missing-cli")
+
+    def _timeout(args: list[str], **_kwargs: object) -> Any:
+        raise subprocess.TimeoutExpired(args, timeout=0.1)
+
+    def _unexpected(_args: list[str], **_kwargs: object) -> Any:
+        raise RuntimeError("transport leaked sk-ant-probe-secret")
+
+    missing = provider_readiness._probe_cli_auth_status(
+        provider_label="Probe",
+        args=["probe", "auth", "status"],
+        failure_reason="PROBE_AUTH_FAILED",
+        timeout_reason="PROBE_AUTH_TIMEOUT",
+        missing_reason="PROBE_CLI_NOT_FOUND",
+        error_reason="PROBE_AUTH_ERROR",
+        environ={},
+        run_subprocess=_missing,
+        secrets=frozenset(),
+    )
+    timeout = provider_readiness._probe_cli_auth_status(
+        provider_label="Probe",
+        args=["probe", "auth", "status"],
+        failure_reason="PROBE_AUTH_FAILED",
+        timeout_reason="PROBE_AUTH_TIMEOUT",
+        missing_reason="PROBE_CLI_NOT_FOUND",
+        error_reason="PROBE_AUTH_ERROR",
+        environ={},
+        run_subprocess=_timeout,
+        secrets=frozenset(),
+    )
+    unexpected = provider_readiness._probe_cli_auth_status(
+        provider_label="Probe",
+        args=["probe", "auth", "status"],
+        failure_reason="PROBE_AUTH_FAILED",
+        timeout_reason="PROBE_AUTH_TIMEOUT",
+        missing_reason="PROBE_CLI_NOT_FOUND",
+        error_reason="PROBE_AUTH_ERROR",
+        environ={},
+        run_subprocess=_unexpected,
+        secrets=frozenset({"sk-ant-probe-secret"}),
+    )
+
+    assert missing["reason_code"] == "PROBE_CLI_NOT_FOUND"
+    assert timeout["reason_code"] == "PROBE_AUTH_TIMEOUT"
+    assert unexpected["reason_code"] == "PROBE_AUTH_ERROR"
+    assert "sk-ant-probe-secret" not in json.dumps(unexpected, sort_keys=True)
+    assert "<redacted>" in unexpected["detail"]
+
+
+@pytest.mark.unit
 def test_selected_gemini_preflight_requires_usable_non_secret_probe(
     tmp_path: Path,
 ) -> None:
@@ -289,6 +364,72 @@ def test_selected_gemini_preflight_requires_usable_non_secret_probe(
     assert token not in serialized
     assert "gemini_file_secret" not in serialized
     assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
+def test_preflight_payload_filters_sparse_provider_metadata() -> None:
+    provider_result = {
+        "ok": True,
+        "status": "ok",
+        "credential_scope": "fallback_scope",
+        "credential_sources": [
+            "ignored",
+            {},
+            {"type": "env", "signal": 42, "credential_scope": "static_env_token"},
+            {"signal": "VISIBLE_SIGNAL", "isolation": "service_env"},
+        ],
+        "warnings": [
+            {"reason": "STATIC_TOKEN_FALLBACK", "message": "uses env", "severity": "warning"},
+            "ignored",
+        ],
+    }
+
+    payload = provider_readiness._launch_preflight_payload(
+        agent="codex",
+        provider="codex",
+        model="gpt-5.5",
+        model_source="default",
+        provider_result=provider_result,
+        probe={"status": "unavailable"},
+        reason_code="PROVIDER_READY",
+        message="ready",
+        override=False,
+        override_reason=None,
+        checked_at=provider_readiness.datetime(2026, 5, 3, tzinfo=provider_readiness.UTC),
+        secrets=frozenset(),
+    )
+
+    assert payload["readiness_status"] == "ready"
+    assert payload["probe_status"] == "unavailable"
+    assert payload["auth_source"] == "fallback_scope"
+    assert payload["credential_sources"] == [
+        {"type": "env", "credential_scope": "static_env_token"},
+        {"signal": "VISIBLE_SIGNAL", "isolation": "service_env"},
+    ]
+    assert payload["warnings"] == [
+        {"reason": "STATIC_TOKEN_FALLBACK", "message": "uses env", "severity": "warning"}
+    ]
+    assert provider_readiness._credential_sources({"credential_sources": "bad-shape"}) == []
+
+
+@pytest.mark.unit
+def test_preflight_reason_and_message_report_missing_model() -> None:
+    provider_result = {"ok": True, "status": "ok"}
+    probe = {"status": "ok"}
+
+    assert (
+        provider_readiness._preflight_reason_code(
+            provider_result=provider_result,
+            probe=probe,
+            model=None,
+        )
+        == "MODEL_NOT_SELECTED"
+    )
+    assert provider_readiness._preflight_message(
+        provider_result=provider_result,
+        probe=probe,
+        model=None,
+    ) == "No effective model was selected for the workspace agent."
 
 
 @pytest.mark.unit
@@ -1253,6 +1394,19 @@ def test_provider_readiness_opencode_default_host_gateway_falls_back_to_localhos
 
 
 @pytest.mark.unit
+def test_ollama_url_helpers_normalize_v1_and_host_gateway() -> None:
+    env = {"OLLAMA_HOST": "host.docker.internal:11434/v1"}
+
+    assert provider_readiness._ollama_version_url(env) == (
+        "http://host.docker.internal:11434/api/version"
+    )
+    assert provider_readiness._ollama_tags_urls(env) == (
+        "http://host.docker.internal:11434/api/tags",
+        "http://localhost:11434/api/tags",
+    )
+
+
+@pytest.mark.unit
 def test_provider_readiness_opencode_env_only_reason_when_ollama_reachable(
     tmp_path: Path,
 ) -> None:
@@ -1292,6 +1446,89 @@ def test_provider_readiness_opencode_http_error_detail_is_redacted(tmp_path: Pat
     serialized = json.dumps(payload, sort_keys=True)
     assert "ghp_ollama_secret" not in serialized
     assert "<redacted>" in serialized
+
+
+@pytest.mark.unit
+def test_ollama_model_probe_reports_missing_model_and_transport_failures() -> None:
+    calls: list[str] = []
+
+    assert provider_readiness._probe_ollama_model(
+        ("http://ollama.local:11434/api/tags",),
+        model=None,
+        http_get=lambda _url, *, timeout: _ollama_ok("http://ollama.local:11434/api/tags", timeout=timeout),
+        secrets=frozenset(),
+    ) == {
+        "status": "fail",
+        "reason_code": "MODEL_NOT_SELECTED",
+        "message": "No OpenCode/Ollama model was selected for launch.",
+    }
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        calls.append(url)
+        if url == "http://primary.local/api/tags":
+            raise RuntimeError("connect failed")
+        return SimpleNamespace(status_code=503, text="busy sk-proj-ollama-secret")
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://primary.local/api/tags", "http://secondary.local/api/tags"),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset({"sk-proj-ollama-secret"}),
+    )
+
+    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
+    assert calls == ["http://primary.local/api/tags", "http://secondary.local/api/tags"]
+    assert "sk-proj-ollama-secret" not in json.dumps(result, sort_keys=True)
+    assert "<redacted>" in result["detail"]
+
+
+@pytest.mark.unit
+def test_ollama_model_probe_rejects_invalid_json() -> None:
+    def _http_get(_url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        return SimpleNamespace(status_code=200, text="{not-json")
+
+    result = provider_readiness._probe_ollama_model(
+        ("http://ollama.local/api/tags",),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset(),
+    )
+
+    assert result["status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_PROBE_FAILED"
+    assert "invalid JSON from Ollama /api/tags" in result["detail"]
+
+
+@pytest.mark.unit
+def test_ollama_model_candidate_and_name_helpers_handle_sparse_shapes() -> None:
+    assert provider_readiness._ollama_model_candidates(None) == set()
+    assert provider_readiness._ollama_model_candidates("   ") == set()
+    assert provider_readiness._ollama_model_candidates("openai/gpt-oss") == {
+        "openai/gpt-oss",
+        "openai/gpt-oss:latest",
+    }
+    assert provider_readiness._ollama_model_candidates("ollama/") == {
+        "ollama/",
+        "ollama/:latest",
+    }
+    assert provider_readiness._ollama_model_candidates("llama3:8b") == {"llama3:8b"}
+
+    assert provider_readiness._ollama_model_names(None) == set()
+    assert provider_readiness._ollama_model_names({"models": "bad-shape"}) == set()
+    assert provider_readiness._ollama_model_names(
+        {
+            "models": [
+                "llama3:latest",
+                "",
+                42,
+                {},
+                {"model": "mistral:7b"},
+                {"name": "qwen:14b"},
+            ]
+        }
+    ) == {"llama3:latest", "mistral:7b", "qwen:14b"}
 
 
 @pytest.mark.unit

@@ -223,6 +223,40 @@ async def test_terminate_process_kills_when_terminate_grace_expires(
 
 
 @pytest.mark.unit
+async def test_terminate_process_skips_kill_when_process_exits_after_grace_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _SlowExitProcess:
+        def __init__(self) -> None:
+            self.returncode: int | None = None
+            self.terminated = False
+            self.killed = False
+
+        def terminate(self) -> None:
+            self.terminated = True
+            self.returncode = -15
+
+        def kill(self) -> None:
+            self.killed = True
+            self.returncode = -9
+
+        async def wait(self) -> int:
+            await asyncio.sleep(0.02)
+            assert self.returncode is not None
+            return self.returncode
+
+    proc = _SlowExitProcess()
+    wait_task = asyncio.create_task(proc.wait())
+    monkeypatch.setattr(commands, "_TERMINATE_GRACE_SECONDS", 0.01)
+
+    await _terminate_process(proc, wait_task)  # type: ignore[arg-type]
+
+    assert proc.terminated is True
+    assert proc.killed is False
+    assert await wait_task == -15
+
+
+@pytest.mark.unit
 def test_timeout_diagnostic_formats_unknown_wall_timeout() -> None:
     assert _format_seconds(None) == "unknown"
     assert (

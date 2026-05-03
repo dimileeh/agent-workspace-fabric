@@ -138,6 +138,38 @@ def _v2_body(
     }
 
 
+@pytest.mark.unit
+def test_v2_replay_helpers_preserve_provider_recovery_and_missing_preflight() -> None:
+    body = json.loads(json.dumps(_V2_MINIMAL_BODY))
+    body["task"]["provider_recovery"] = {
+        "fallbacks": [
+            {
+                "agent": "opencode",
+                "provider": "ollama",
+                "model": "ollama/kimi-k2.6:cloud",
+            }
+        ],
+        "max_fallback_attempts": 1,
+    }
+    payload = WorkspaceCreateV2Request.model_validate(body)
+    existing = SimpleNamespace(task_policy={})
+
+    assert workspaces_route._requested_task_provider_recovery_policy(payload) == {
+        "fallbacks": [
+            {
+                "agent": "opencode",
+                "provider": "ollama",
+                "model": "ollama/kimi-k2.6:cloud",
+            }
+        ],
+        "max_fallback_attempts": 1,
+    }
+    assert workspaces_route._stored_task_provider_readiness_override(existing) == (
+        False,
+        None,
+    )
+
+
 async def _create_workspace(client: AsyncClient, **overrides: object) -> str:
     body = {**_MINIMAL_BODY, **overrides}
     response = await client.post("/v1/workspaces", json=body)
