@@ -355,7 +355,6 @@ class TaskRepository:
                     existing,
                     repo_url=repo_url,
                     base_branch=base_branch,
-                    title=title,
                     task_class=task_class,
                     owned_paths=owned_paths,
                 )
@@ -417,14 +416,12 @@ def _task_scope_matches(
     *,
     repo_url: str,
     base_branch: str,
-    title: str,
     task_class: str | None,
     owned_paths: list[str],
 ) -> bool:
     return (
         task.repo_url == repo_url
         and task.base_branch == base_branch
-        and task.title == title
         and task.task_class == task_class
         and list(task.owned_paths) == list(owned_paths)
     )
