@@ -45,6 +45,8 @@ Mutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub
 via the async worker.
 """
 
+_DX_HELP = "DX smoke proof: validate local service, profile, and PR path."
+
 app = typer.Typer(
     name="awf",
     help=f"Aira Agent Workspace Fabric — CLI operator surface.\n{_COMMON_HELP_TEXT}",
@@ -58,7 +60,7 @@ workspace_app = typer.Typer(
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
 locks_app = typer.Typer(help="Owned-path reservation and overlap-risk visibility.")
-smoke_app = typer.Typer(help="DX smoke proof: validate local service, profile, PR path.")
+smoke_app = typer.Typer(help=_DX_HELP)
 app.add_typer(workspace_app, name="workspace")
 app.add_typer(profile_app, name="profile")
 app.add_typer(service_app, name="service")
@@ -1466,7 +1468,7 @@ def profile_init(
     _emit(payload, fmt)
 
 
-@smoke_app.command("run")
+@smoke_app.command("run", help=_DX_HELP)
 def smoke_run(
     project: Path = typer.Option(
         Path(),
@@ -1485,7 +1487,6 @@ def smoke_run(
         help="Fallback project path when --project has no profile.",
     ),
 ) -> None:
-    """Run a DX smoke proof validating local service, profile, and PR path."""
     from awf.service.config import resolve_service_settings
     from awf.service.smoke import collect_smoke_report
 
