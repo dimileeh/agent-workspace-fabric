@@ -1199,7 +1199,7 @@ async def _selected_provider_preflight_for_task_async(
 
 def _raise_if_provider_preflight_blocks(preflight: Mapping[str, Any]) -> None:
     if preflight.get("blocks_launch") is True:
-        print(preflight); raise WorkspaceProviderReadinessBlockedError(preflight)
+        raise WorkspaceProviderReadinessBlockedError(preflight)
 
 
 async def _record_provider_readiness_preflight(
