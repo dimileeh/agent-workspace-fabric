@@ -567,11 +567,11 @@ def _requested_provider_readiness_override(
     settings: Settings,
 ) -> tuple[bool, str | None]:
     reason = payload.preflight.provider_readiness_override_reason
+    if not reason:
+        return (payload.preflight.provider_readiness_override, None)
     return (
         payload.preflight.provider_readiness_override,
-        redact_launch_preflight_text(resolve_service_settings(settings), reason)
-        if reason is not None
-        else None,
+        redact_launch_preflight_text(resolve_service_settings(settings), reason),
     )
 
 

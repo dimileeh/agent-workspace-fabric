@@ -795,6 +795,33 @@ class TestWorkspaceCreateProviderReadinessPreflight:
         assert preflight["override_reason"] == "operator verified local auth"
 
     @pytest.mark.unit
+    async def test_idempotent_replay_normalizes_blank_override_reason(
+        self,
+        disk_app_and_client: tuple[Any, AsyncClient],
+        tmp_path: Any,
+    ) -> None:
+        app, client = disk_app_and_client
+        app.dependency_overrides[get_settings] = lambda: _provider_preflight_settings(
+            tmp_path
+        )
+        payload = {
+            **_V2_MINIMAL_BODY,
+            "preflight": {
+                "provider_readiness_override": True,
+                "provider_readiness_override_reason": "   ",
+            },
+        }
+        headers = {"Idempotency-Key": "provider-readiness-blank-reason-replay"}
+
+        first = await client.post("/v2/workspaces", json=payload, headers=headers)
+        replay = await client.post("/v2/workspaces", json=payload, headers=headers)
+
+        assert first.status_code == 202
+        assert replay.status_code == 202
+        assert replay.json()["workspace_id"] == first.json()["workspace_id"]
+        assert replay.json()["provider_readiness_preflight"]["override_reason"] is None
+
+    @pytest.mark.unit
     async def test_idempotent_replay_returns_existing_preflight_without_rerun(
         self,
         disk_app_and_client: tuple[Any, AsyncClient],
