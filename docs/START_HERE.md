@@ -31,13 +31,16 @@ Before running the commands below, ensure your system has the following installe
    ```
    *Expected Output Snippet:*
    ```text
-   [+] Running 4/4
-    ✔ Network compose_awf_net     Created
-    ✔ Container awf-postgres-1    Started
-    ✔ Container awf-migrate-1     Started
-    ✔ Container awf-api-1         Started
-    ✔ Container awf-worker-1      Started
-   AWF bootstrap complete. Local control plane is healthy.
+   AWF init: local service bootstrap
+     state directory: /home/user/.local/state/awf
+     created: false
+     kept existing .env
+     bootstrap status: ok
+
+   Next steps:
+     - export AWF_GITHUB_TOKEN="$(gh auth token)" so the worker can create PRs.
+     - Run `awf service status --format pretty` to verify readiness.
+     - Run `awf init <path>` to onboard a project repository.
    ```
 
 ## Failure Next-Actions
