@@ -1620,6 +1620,8 @@ def _probe_ollama_model(
         }
 
     failures: list[str] = []
+    available_models: set[str] = set()
+    saw_model_response = False
     for url in urls:
         try:
             response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
@@ -1650,14 +1652,19 @@ def _probe_ollama_model(
         available = _ollama_model_names(payload)
         if candidates & available:
             return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+        saw_model_response = True
+        available_models.update(available)
+
+    if saw_model_response:
+        detail = f"selected={model}; available_count={len(available_models)}"
+        if failures:
+            detail = f"{detail}; probe_failures={'; '.join(failures)}"
         return {
             "status": "fail",
             "reason_code": "OLLAMA_MODEL_NOT_AVAILABLE",
             "message": "Selected OpenCode/Ollama model is not available from Ollama /api/tags.",
             "detail": _redact(
-                _truncate(
-                    f"selected={model}; available_count={len(available)}"
-                ),
+                _truncate(detail),
                 secrets,
             ),
         }

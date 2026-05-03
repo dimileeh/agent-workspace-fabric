@@ -1556,6 +1556,42 @@ def test_ollama_model_probe_reports_missing_model_and_transport_failures() -> No
 
 
 @pytest.mark.unit
+def test_ollama_model_probe_checks_fallback_tags_urls_before_missing() -> None:
+    calls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        calls.append(url)
+        if url == "http://host.docker.internal:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"other-model:latest"}]}',
+            )
+        if url == "http://localhost:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"llama3:latest"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama tags URL: {url}")
+
+    result = provider_readiness._probe_ollama_model(
+        (
+            "http://host.docker.internal:11434/api/tags",
+            "http://localhost:11434/api/tags",
+        ),
+        model="llama3",
+        http_get=_http_get,
+        secrets=frozenset(),
+    )
+
+    assert result == {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+    assert calls == [
+        "http://host.docker.internal:11434/api/tags",
+        "http://localhost:11434/api/tags",
+    ]
+
+
+@pytest.mark.unit
 def test_ollama_model_probe_rejects_invalid_json() -> None:
     def _http_get(_url: str, *, timeout: float) -> Any:
         assert timeout > 0
