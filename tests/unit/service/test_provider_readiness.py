@@ -1453,6 +1453,16 @@ def test_ollama_url_helpers_normalize_v1_and_host_gateway() -> None:
 
 
 @pytest.mark.unit
+def test_ollama_url_helpers_preserve_host_gateway_fallback_port() -> None:
+    env = {"AWF_OPENCODE_OLLAMA_BASE_URL": "http://host.docker.internal:23456/v1"}
+
+    assert provider_readiness._ollama_version_urls(env) == (
+        "http://host.docker.internal:23456/api/version",
+        "http://localhost:23456/api/version",
+    )
+
+
+@pytest.mark.unit
 def test_provider_readiness_opencode_env_only_reason_when_ollama_reachable(
     tmp_path: Path,
 ) -> None:

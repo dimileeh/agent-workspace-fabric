@@ -1721,7 +1721,8 @@ def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ..
     path = f"{path}{suffix}" if path else suffix
     primary = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
     if parts.hostname == "host.docker.internal":
-        fallback = urlunsplit((parts.scheme, "localhost:11434", path, "", ""))
+        fallback_port = parts.port or 11434
+        fallback = urlunsplit((parts.scheme, f"localhost:{fallback_port}", path, "", ""))
         return (primary, fallback)
     return (primary,)
 
