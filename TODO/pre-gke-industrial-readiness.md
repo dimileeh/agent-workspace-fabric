@@ -75,7 +75,7 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_f59bc95ca0d24c4c8d9144ab` | _pending_ | running | Codex `gpt-5.5` with default `xhigh` effort; single-workspace Linux dogfood retry of failed `ws_b438a31ffd7d4433aa0cdcac` after provider/readiness cleanup. |
+| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_f59bc95ca0d24c4c8d9144ab` | _none_ | failed | Destroyed and replaced before implementation because the base branch baseline had stale PR-monitor active-recovery test expectations; fixed on `codex/awf-post-merge-fixes` in `20bb479`. |
 
 ### Reschedule Required Slices
 
@@ -87,7 +87,7 @@ not listed here.
 
 | TODO area | Slice | Failed workspace(s) | PR / branch | Status | Reschedule note |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_b438a31ffd7d4433aa0cdcac` | _none_ | requested | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. Fresh retry launched as `ws_f59bc95ca0d24c4c8d9144ab`; do not schedule another copy while that workspace is active. |
+| P1 MCP And Project Onboarding Client Parity | MCP read tools for operator surfaces | `ws_b438a31ffd7d4433aa0cdcac`, `ws_f59bc95ca0d24c4c8d9144ab` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03 produced no PR or useful work. The first single-workspace retry `ws_f59bc95ca0d24c4c8d9144ab` was destroyed before implementation because the base branch baseline was red; relaunch from fixed base `20bb479`. |
 | P1 Developer Experience And Public Core Surface | Stable OpenAPI artifact and API examples | `ws_ea414c0722a74815bc474d13` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. This was incorrectly marked `superseded`; it still needs a fresh retry after the active wave drains. |
 | P1 Operator Console Completion | Live workspace activity signals | `ws_451cc5007fa845ad85a0f7b3` | _none_ | reschedule_required | Latest no-work mirror permission failure from 2026-05-03; no PR or useful work produced. This was incorrectly marked `superseded`; it still needs a fresh retry after the active wave drains. |
 
