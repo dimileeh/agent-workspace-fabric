@@ -17,6 +17,8 @@ PROTECTED_QUALITY_GATE_PATHS: Final[tuple[str, ...]] = (
     "setup.py",
     "tox.ini",
 )
+INTERNAL_PLAN_ARTIFACT_PREFIX: Final[str] = "docs/awf-plans/"
+PLAN_ONLY_OUTPUT_REASON_CODE: Final[str] = "PLAN_ONLY_OUTPUT"
 
 
 @dataclass(frozen=True)
@@ -63,6 +65,29 @@ def quality_gate_violation_message(violations: list[QualityGateViolation]) -> st
         "test, or CI policy as a validation fix; add meaningful tests or declare "
         "explicit ownership of the policy file."
     )
+
+
+def changed_paths_are_only_internal_plan_artifacts(
+    changed_paths: list[str] | tuple[str, ...],
+) -> bool:
+    normalized = [_normalize_path(path) for path in changed_paths]
+    paths = [path for path in normalized if path]
+    return bool(paths) and all(_is_internal_plan_artifact_path(path) for path in paths)
+
+
+def plan_only_output_message(changed_paths: list[str] | tuple[str, ...]) -> str:
+    paths = [_normalize_path(path) for path in changed_paths if _normalize_path(path)]
+    preview = ", ".join(paths[:8])
+    suffix = "" if len(paths) <= 8 else f", and {len(paths) - 8} more"
+    return (
+        "agent produced only AWF plan/conformance artifact changes "
+        f"({preview}{suffix}). AWF will not open a PR until the branch contains "
+        "implementation, test, or user-facing documentation output for the task."
+    )
+
+
+def _is_internal_plan_artifact_path(path: str) -> bool:
+    return path.startswith(INTERNAL_PLAN_ARTIFACT_PREFIX)
 
 
 def _matched_protected_pattern(path: str) -> str | None:

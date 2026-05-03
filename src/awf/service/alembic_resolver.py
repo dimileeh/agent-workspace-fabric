@@ -227,6 +227,7 @@ def _load_script_directory(
         return None
 
     config = Config(str(config_file))
+    _ensure_alembic_path_separator(config)
     resolved_script_location = script_location or config.get_main_option("script_location")
     if not resolved_script_location:
         return None
@@ -243,6 +244,11 @@ def _load_script_directory(
     if ensure_version_dir:
         version_dir.mkdir(parents=True, exist_ok=True)
     return script, version_dir
+
+
+def _ensure_alembic_path_separator(config: Config) -> None:
+    if config.get_main_option("path_separator") is None:
+        config.set_main_option("path_separator", "os")
 
 
 def _safe_heads(script: ScriptDirectory) -> tuple[str, ...] | AlembicResolveResult:

@@ -53,15 +53,17 @@ def test_local_egress_plan_restricted_is_conservative_local_internal_network() -
 
 
 @pytest.mark.unit
-def test_local_egress_policy_error_exposes_structured_metadata() -> None:
+def test_local_egress_policy_error_carries_operator_context() -> None:
     error = LocalEgressPolicyError(
         reason_code="LOCAL_EGRESS_MODE_UNSUPPORTED",
         mode=EgressMode.restricted,
-        message="unsupported in test",
+        message="restricted egress is unsupported by this backend",
         details={"network_posture": "restricted"},
     )
 
     assert error.reason_code == "LOCAL_EGRESS_MODE_UNSUPPORTED"
     assert error.mode == "restricted"
     assert error.details == {"network_posture": "restricted"}
-    assert str(error) == "LOCAL_EGRESS_MODE_UNSUPPORTED: unsupported in test"
+    assert str(error) == (
+        "LOCAL_EGRESS_MODE_UNSUPPORTED: restricted egress is unsupported by this backend"
+    )

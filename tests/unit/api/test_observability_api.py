@@ -499,7 +499,7 @@ class TestWorkspaceWebSocket:
         with _temporary_api_token("secret"):
             client = TestClient(app)
             with (
-                pytest.raises(WebSocketDisconnect) as exc_info,
+                client, pytest.raises(WebSocketDisconnect) as exc_info,
                 client.websocket_connect(
                     "/v1/workspaces/ws_missing/ws",
                     headers={"Authorization": "Bearer secret"},
@@ -514,7 +514,7 @@ class TestWorkspaceWebSocket:
         with _temporary_api_token("secret"):
             client, engine = _make_empty_sync_test_client(tmp_path)
             try:
-                with client.websocket_connect(
+                with client, client.websocket_connect(
                     "/v1/workspaces/ws_missing/ws",
                     headers={"Authorization": "Bearer secret"},
                 ) as websocket:
@@ -538,7 +538,7 @@ class TestWorkspaceWebSocket:
         with _temporary_api_token("secret"):
             client, engine = _make_empty_sync_test_client(tmp_path)
             try:
-                with client.websocket_connect(
+                with client, client.websocket_connect(
                     "/v1/workspaces/ws_missing/ws?channels=agent",
                     headers={"Authorization": "Bearer secret"},
                 ) as websocket:
@@ -563,7 +563,7 @@ class TestWorkspaceWebSocket:
         workspace_id, client, engine = _make_sync_test_client(monkeypatch, tmp_path)
         try:
             with (
-                pytest.raises(WebSocketDenialResponse) as exc_info,
+                client, pytest.raises(WebSocketDenialResponse) as exc_info,
                 client.websocket_connect(f"/v1/workspaces/{workspace_id}/ws"),
             ):
                 pass
@@ -585,7 +585,7 @@ class TestWorkspaceWebSocket:
         )
         try:
             with (
-                pytest.raises(WebSocketDenialResponse) as exc_info,
+                client, pytest.raises(WebSocketDenialResponse) as exc_info,
                 client.websocket_connect(f"/v1/workspaces/{workspace_id}/ws"),
             ):
                 pass
@@ -602,7 +602,7 @@ class TestWorkspaceWebSocket:
     ) -> None:
         workspace_id, client, engine = _make_sync_test_client(monkeypatch, tmp_path)
         try:
-            with client.websocket_connect(
+            with client, client.websocket_connect(
                 f"/v1/workspaces/{workspace_id}/ws?channels=events,agent&tail_bytes=20",
                 headers={"Authorization": "Bearer secret"},
             ) as websocket:
@@ -629,7 +629,7 @@ class TestWorkspaceWebSocket:
             client, engine = _make_empty_sync_test_client(tmp_path)
             try:
                 workspace_id = asyncio.run(_seed_websocket_workspace(engine, tmp_path))
-                with client.websocket_connect(
+                with client, client.websocket_connect(
                     f"/v1/workspaces/{workspace_id}/ws?channels=agent&tail_bytes=100",
                     headers={"Authorization": "Bearer secret"},
                 ) as websocket:
@@ -1192,7 +1192,7 @@ class TestWorkspaceWebSocket:
                         return ws.id
                 ws_id = asyncio.run(setup())
 
-                with sync_client.websocket_connect(
+                with sync_client, sync_client.websocket_connect(
                     f"/v1/workspaces/{ws_id}/ws?channels=monitor,recovery&tail_bytes=100",
                     headers={"Authorization": "Bearer secret"},
                 ) as websocket:

@@ -135,6 +135,7 @@ def test_service_readiness_emits_json_scorecard(
 
     monkeypatch.setattr(readiness_module, "collect_core_readiness_report", _collect)
     monkeypatch.setattr(config_module, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(config_module, "local_service_environ", lambda: os.environ)
 
     result = _runner.invoke(
         app,
@@ -1050,9 +1051,12 @@ def test_service_config_carries_host_home_for_service_auth_mounts(tmp_path: Path
 
 
 @pytest.mark.unit
-def test_service_mode_uses_postgres_when_database_env_unset() -> None:
+def test_service_mode_uses_postgres_when_database_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     from awf.service.config import DEFAULT_LOCAL_SERVICE_DATABASE_URL, resolve_service_settings
 
+    monkeypatch.delenv("AWF_DATABASE_URL", raising=False)
     base = Settings(_env_file=None)
 
     service_settings = resolve_service_settings(base, environ={})
@@ -1332,6 +1336,7 @@ def test_service_status_pretty_output_includes_disk_check(
 
     settings = object()
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(config_mod, "local_service_environ", lambda: os.environ)
 
     async def _collect(received: object, **_kwargs: object) -> dict[str, object]:
         assert received is settings
@@ -1451,11 +1456,14 @@ def test_service_status_provider_option_requests_strict_provider(
     from awf.service import status as status_mod
 
     settings = object()
+    service_env = {"AWF_GITHUB_TOKEN": "ghp_compose_token"}
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(config_mod, "local_service_environ", lambda: service_env)
 
     async def _collect(received: object, **kwargs: object) -> dict[str, object]:
         assert received is settings
         assert kwargs["strict_providers"] == {"github"}
+        assert kwargs["provider_environ"] is service_env
         return {
             "service": "awf",
             "status": "fail",
@@ -1542,6 +1550,7 @@ def test_service_doctor_defaults_to_pretty_output_and_zero_exit(
 
     settings = object()
     monkeypatch.setattr(config_mod, "resolve_service_settings", lambda: settings)
+    monkeypatch.setattr(config_mod, "local_service_environ", lambda: os.environ)
 
     report = SimpleNamespace(
         status="ok",
@@ -1851,15 +1860,17 @@ def test_worker_entrypoint_wires_control_worker_dependencies(
         def __init__(
             self,
             *,
-            session_factory: object,
-            provisioner: object,
-            executor: object,
-            config: object,
-        ) -> None:
-            created["worker_session_factory"] = session_factory
-            created["worker_provisioner"] = provisioner
-            created["worker_executor"] = executor
-            created["worker_config"] = config
+                session_factory: object,
+                provisioner: object,
+                executor: object,
+                runtime_cleaner: object,
+                config: object,
+            ) -> None:
+                created["worker_session_factory"] = session_factory
+                created["worker_provisioner"] = provisioner
+                created["worker_executor"] = executor
+                created["worker_runtime_cleaner"] = runtime_cleaner
+                created["worker_config"] = config
 
         async def run_once(self) -> int:
             created["run_once"] = True

@@ -37,6 +37,7 @@ def _write_alembic_ini(repo: Path) -> None:
         "[alembic]\n"
         "script_location = migrations\n"
         "prepend_sys_path = ./src\n"
+        "path_separator = os\n"
         "version_path_separator = os\n",
         encoding="utf-8",
     )
@@ -71,6 +72,7 @@ def _write_revision(
 
 def _heads(repo: Path) -> list[str]:
     config = Config(str(repo / "alembic.ini"))
+    config.set_main_option("path_separator", "os")
     config.set_main_option("script_location", str(repo / "migrations"))
     return sorted(ScriptDirectory.from_config(config).get_heads())
 
@@ -244,6 +246,7 @@ def test_alembic_graph_validation_accepts_absolute_config_and_script_override(
     config_path.write_text(
         "[alembic]\n"
         "script_location = ignored\n"
+        "path_separator = os\n"
         "version_path_separator = os\n",
         encoding="utf-8",
     )
@@ -356,6 +359,7 @@ def test_resolver_accepts_absolute_script_location_and_default_revision_id(
         "[alembic]\n"
         f"script_location = {migrations}\n"
         "prepend_sys_path = ./src\n"
+        "path_separator = os\n"
         "version_path_separator = os\n",
         encoding="utf-8",
     )
@@ -680,6 +684,7 @@ def test_safe_heads_returns_heads_for_clean_graph(tmp_path: Path) -> None:
     _write_revision(tmp_path, "base001", None)
     _write_revision(tmp_path, "head001", "base001")
     config = Config(str(tmp_path / "alembic.ini"))
+    config.set_main_option("path_separator", "os")
     config.set_main_option("script_location", str(tmp_path / "migrations"))
     script = ScriptDirectory.from_config(config)
 

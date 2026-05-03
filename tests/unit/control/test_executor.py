@@ -1564,6 +1564,7 @@ class TestHappyPath:
         ws_id = await _seed_ready_workspace(factory)
         # Same 8-step sequence as the happy-path test.
         fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit
@@ -1855,6 +1856,7 @@ class TestFailurePaths:
         # AWF must capture that work rather than throwing it away.
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=137, stderr="")  # adapter killed mid-session
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add -A
         fake.queue_result(
             returncode=0, stdout="tests/e2e/bff/tasks.spec.ts\n"
@@ -1912,6 +1914,7 @@ class TestFailurePaths:
         )
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)  # adapter ok
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached (non-empty)
         fake.queue_result(returncode=0)  # git commit
@@ -2201,6 +2204,7 @@ class TestFailurePaths:
     ) -> None:
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)  # adapter ok
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit
@@ -2355,6 +2359,7 @@ class TestFailurePaths:
         # squashes the entire orphan chain into one commit on top of base.
         ws_id = await _seed_ready_workspace(factory)
         fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit
@@ -2491,6 +2496,7 @@ class TestMonitorHandoff:
         )
         # 9-step sequence (same as happy path).
         fake.queue_result(returncode=0)  # adapter
+        fake.queue_result(returncode=0, stdout=f"awf/{ws_id}\n")  # current branch
         fake.queue_result(returncode=0)  # git add
         fake.queue_result(returncode=0, stdout="f\n")  # diff --cached
         fake.queue_result(returncode=0)  # git commit

@@ -1808,10 +1808,16 @@ def test_classify_workspace_completed_retention_expired():
     assert isinstance(res2, WorkspaceGCCandidate)
     assert res2.reason_code == TERMINAL_WORKSPACE_RETENTION_EXPIRED
 
-def test_failed_terminal_workspace_has_no_work_exception():
+def test_failed_terminal_workspace_has_no_work_exception(monkeypatch: pytest.MonkeyPatch):
+    class _RaisingRuntimeInspector:
+        async def inspect(self, compose_project_name: str) -> RuntimeSnapshot:
+            assert compose_project_name == "proj"
+            raise RuntimeError("mocked err")
+
     ws = Workspace(id="ws_1", compose_project_name="proj")
-    with patch("awf.service.gc.asyncio.run", side_effect=Exception("mocked err")):
-        assert _failed_terminal_workspace_has_no_work(ws) is False
+    monkeypatch.setattr(gc, "_RUNTIME_INSPECTOR", _RaisingRuntimeInspector())
+
+    assert _failed_terminal_workspace_has_no_work(ws) is False
 
 def test_classify_workspace_failed_no_work_but_within_retention():
     ws = Workspace(

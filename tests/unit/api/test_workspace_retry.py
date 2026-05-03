@@ -162,7 +162,7 @@ async def test_retry_endpoint_creates_new_requested_workspace(
 
 
 @pytest.mark.unit
-async def test_retry_endpoint_enriches_prompt_for_conformance_unsatisfied(
+async def test_retry_endpoint_reports_unrecoverable_conformance_salvage_failure(
     client: AsyncClient,
     engine: AsyncEngine,
 ) -> None:
@@ -170,13 +170,15 @@ async def test_retry_endpoint_enriches_prompt_for_conformance_unsatisfied(
 
     response = await client.post(f"/v1/workspaces/{original_id}/retry")
 
-    assert response.status_code == 202
-    retried = await client.get(f"/v1/workspaces/{response.json()['new_workspace_id']}")
-    assert retried.status_code == 200
-    body = retried.json()
-    assert _V2_RETRY_BODY["task"]["prompt"] in body["task_prompt"]
-    assert "finish the remaining plan-conformance gaps" in body["task_prompt"]
-    assert "Add retry API regression test" in body["task_prompt"]
+    assert response.status_code == 409
+    body = response.json()
+    assert body["error_code"] == "WORKSPACE_RETRY_SALVAGE_UNAVAILABLE"
+    assert body["detail"]["source_workspace_id"] == original_id
+    assert body["detail"]["reason_code"] == "SALVAGE_BASE_UNAVAILABLE"
+    assert body["detail"]["source_reason_code"] == PLAN_CONFORMANCE_UNSATISFIED
+    assert body["detail"]["gaps"] == ["Add retry API regression test"]
+    assert body["detail"]["plan_path"] == "docs/awf-plans/ws_old.md"
+    assert body["detail"]["report_path"] == "docs/awf-plans/ws_old.conformance.json"
 
 
 @pytest.mark.unit

@@ -46,7 +46,10 @@ from awf.common.compose_exec import (
 from awf.common.git_identity import git_identity_config_args, git_safe_directory_config_args
 from awf.common.logging import get_logger
 from awf.control.quality_gates import (
+    PLAN_ONLY_OUTPUT_REASON_CODE,
+    changed_paths_are_only_internal_plan_artifacts,
     find_protected_quality_gate_changes,
+    plan_only_output_message,
     quality_gate_violation_message,
 )
 from awf.control.state_machine import WorkspaceStateMachine
@@ -124,6 +127,17 @@ from awf.runtime.validation_identity import (
     environment_identity_digest,
     environment_identity_inputs,
     resolved_profile_digest,
+)
+from awf.service.conformance_salvage import (
+    CONFORMANCE_SALVAGE_APPLIED_EVENT_TYPE,
+    CONFORMANCE_SALVAGE_APPLIED_REASON,
+    CONFORMANCE_SALVAGE_CONFLICT_EVENT_TYPE,
+    CONFORMANCE_SALVAGE_CONFLICT_REASON,
+    SALVAGE_PATCH_APPLY_FAILED,
+    SALVAGE_PATCH_DIGEST_MISMATCH,
+    SALVAGE_PATCH_UNAVAILABLE,
+    build_conformance_salvage_conflict_prompt,
+    conformance_salvage_from_task_policy,
 )
 from awf.service.coordination import coordination_warnings_from_task_policy
 from awf.service.provider_recovery import create_provider_recovery_attempt_row
@@ -380,6 +394,12 @@ class ExecutorConfig:
     planning.max_iterations. Explicit profile values win."""
 
 
+@dataclass(frozen=True)
+class _ConformanceSalvageExecutionResult:
+    status: str
+    prompt_override: str | None = None
+
+
 class WorkspaceExecutor:
     """Drives a single workspace through run → validate → push → completed."""
 
@@ -510,6 +530,192 @@ class WorkspaceExecutor:
             evidence=evidence,
         )
 
+    async def _prepare_conformance_salvage_for_execution(
+        self,
+        *,
+        workspace_id: str,
+        workspace: Workspace,
+        worktree_path: Path,
+    ) -> _ConformanceSalvageExecutionResult | None:
+        salvage = conformance_salvage_from_task_policy(workspace.task_policy)
+        if salvage is None:
+            return None
+
+        patch_path_value = salvage.get("patch_path")
+        expected_sha = salvage.get("patch_sha256")
+        if not isinstance(patch_path_value, str) or not patch_path_value.strip():
+            return await self._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_UNAVAILABLE,
+                message="conformance salvage patch path is missing",
+                salvage=salvage,
+            )
+        if not isinstance(expected_sha, str) or not expected_sha.strip():
+            return await self._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_DIGEST_MISMATCH,
+                message="conformance salvage patch digest is missing",
+                salvage=salvage,
+            )
+
+        patch_path = Path(patch_path_value)
+        if not patch_path.is_file():
+            return await self._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_UNAVAILABLE,
+                message=f"conformance salvage patch is unavailable: {patch_path}",
+                salvage=salvage,
+            )
+
+        patch_bytes = patch_path.read_bytes()
+        actual_sha = hashlib.sha256(patch_bytes).hexdigest()
+        if actual_sha != expected_sha:
+            return await self._fail_conformance_salvage_execution(
+                workspace_id=workspace_id,
+                reason_code=SALVAGE_PATCH_DIGEST_MISMATCH,
+                message=(
+                    "conformance salvage patch digest mismatch "
+                    f"(expected={expected_sha}, actual={actual_sha})"
+                ),
+                salvage=salvage,
+            )
+
+        async def git(args: list[str]) -> CommandResult:
+            return await self._runner.run(
+                [
+                    "git",
+                    *git_safe_directory_config_args(worktree_path),
+                    "-C",
+                    str(worktree_path),
+                    *args,
+                ]
+            )
+
+        check = await git(["apply", "--check", str(patch_path)])
+        if check.ok:
+            applied = await git(["apply", str(patch_path)])
+            if not applied.ok:
+                return await self._fail_conformance_salvage_execution(
+                    workspace_id=workspace_id,
+                    reason_code=SALVAGE_PATCH_APPLY_FAILED,
+                    message=(
+                        "conformance salvage patch passed preflight but failed to apply: "
+                        f"{applied.stderr or applied.stdout}"
+                    )[:2000],
+                    salvage=salvage,
+                )
+            await self._record_conformance_salvage_event(
+                workspace_id=workspace_id,
+                event_type=CONFORMANCE_SALVAGE_APPLIED_EVENT_TYPE,
+                reason_code=CONFORMANCE_SALVAGE_APPLIED_REASON,
+                payload={
+                    "conformance_salvage": salvage,
+                    "patch_sha256": actual_sha,
+                    "implementation_paths": salvage.get("implementation_paths", []),
+                },
+            )
+            return _ConformanceSalvageExecutionResult(status="applied")
+
+        agent_patch_path = self._materialize_salvage_patch_for_agent(
+            worktree_path=worktree_path,
+            patch_path=patch_path,
+            patch_bytes=patch_bytes,
+        )
+        apply_error = (check.stderr or check.stdout or "git apply --check failed").strip()
+        await self._record_conformance_salvage_event(
+            workspace_id=workspace_id,
+            event_type=CONFORMANCE_SALVAGE_CONFLICT_EVENT_TYPE,
+            reason_code=CONFORMANCE_SALVAGE_CONFLICT_REASON,
+            payload={
+                "conformance_salvage": salvage,
+                "agent_patch_path": agent_patch_path,
+                "apply_error": apply_error[:2000],
+            },
+        )
+        return _ConformanceSalvageExecutionResult(
+            status="conflict",
+            prompt_override=build_conformance_salvage_conflict_prompt(
+                task_prompt=workspace.task_prompt,
+                salvage=salvage,
+                agent_patch_path=agent_patch_path,
+                apply_error=apply_error,
+            ),
+        )
+
+    async def _fail_conformance_salvage_execution(
+        self,
+        *,
+        workspace_id: str,
+        reason_code: str,
+        message: str,
+        salvage: Mapping[str, Any],
+    ) -> _ConformanceSalvageExecutionResult:
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=WorkspaceStatus.running,
+            failure_reason=FailureReason.infrastructure_failure,
+            message=f"{reason_code}: {message}"[:2000],
+            reason_code=reason_code,
+            details={
+                "reason_code": reason_code,
+                "conformance_salvage": dict(salvage),
+            },
+        )
+        return _ConformanceSalvageExecutionResult(status="failed")
+
+    async def _record_conformance_salvage_event(
+        self,
+        *,
+        workspace_id: str,
+        event_type: str,
+        reason_code: str,
+        payload: dict[str, Any],
+    ) -> None:
+        async with self._session_factory() as session:
+            repo = WorkspaceRepository(session)
+            workspace = await repo.get(workspace_id)
+            if workspace is None:  # pragma: no cover - destroyed mid-flight
+                return
+            await repo.add_event(
+                workspace,
+                event_type=event_type,
+                reason_code=reason_code,
+                payload=payload,
+            )
+            await session.commit()
+
+    def _materialize_salvage_patch_for_agent(
+        self,
+        *,
+        worktree_path: Path,
+        patch_path: Path,
+        patch_bytes: bytes,
+    ) -> str:
+        relative_path = Path(".awf") / "salvage" / patch_path.name
+        agent_patch_path = worktree_path / relative_path
+        agent_patch_path.parent.mkdir(parents=True, exist_ok=True)
+        agent_patch_path.write_bytes(patch_bytes)
+        self._exclude_agent_salvage_artifacts(worktree_path)
+        return relative_path.as_posix()
+
+    def _exclude_agent_salvage_artifacts(self, worktree_path: Path) -> None:
+        git_dir_file = worktree_path / ".git"
+        exclude_path = worktree_path / ".git" / "info" / "exclude"
+        if git_dir_file.is_file():
+            content = git_dir_file.read_text(encoding="utf-8", errors="replace").strip()
+            prefix = "gitdir:"
+            if content.startswith(prefix):
+                git_dir = Path(content[len(prefix) :].strip())
+                if not git_dir.is_absolute():
+                    git_dir = (worktree_path / git_dir).resolve()
+                exclude_path = git_dir / "info" / "exclude"
+        exclude_path.parent.mkdir(parents=True, exist_ok=True)
+        existing = exclude_path.read_text(encoding="utf-8") if exclude_path.exists() else ""
+        pattern = "/.awf/salvage/"
+        if pattern not in existing.splitlines():
+            suffix = "" if existing.endswith("\n") or not existing else "\n"
+            exclude_path.write_text(f"{existing}{suffix}{pattern}\n", encoding="utf-8")
+
     async def execute(
         self,
         workspace_id: str,
@@ -559,6 +765,17 @@ class WorkspaceExecutor:
             if guard_result.blocked:
                 return
             recovery = guard_result.recovery
+        if recovery is None:
+            salvage_result = await self._prepare_conformance_salvage_for_execution(
+                workspace_id=workspace_id,
+                workspace=ws,
+                worktree_path=worktree_path,
+            )
+            if salvage_result is not None:
+                if salvage_result.status == "failed":
+                    return
+                if salvage_result.prompt_override is not None:
+                    ws.task_prompt = salvage_result.prompt_override
         rebase_recovery_result: _RebaseRecoveryResult | None = None
         baseline_coverage: ValidationCoverageResult | None = None
         try:
@@ -790,6 +1007,7 @@ class WorkspaceExecutor:
             )
 
         expected_branch = ws.branch_name or f"awf/{workspace_id}"
+        has_known_non_plan_output = False
 
         try:
             if recovery is None:
@@ -935,8 +1153,16 @@ class WorkspaceExecutor:
                 await _git_in_worktree(["add", "-A"])
                 cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
                 if cached.stdout.strip():
+                    staged_paths = _git_name_lines(cached.stdout)
+                    if await self._fail_if_plan_only_paths(
+                        workspace_id=workspace_id,
+                        changed_paths=staged_paths,
+                        expected_status=WorkspaceStatus.running,
+                    ):
+                        return
+                    has_known_non_plan_output = True
                     violations = find_protected_quality_gate_changes(
-                        changed_paths=_git_name_lines(cached.stdout),
+                        changed_paths=staged_paths,
                         owned_paths=list(ws.owned_paths),
                     )
                     if violations:
@@ -1462,8 +1688,28 @@ class WorkspaceExecutor:
                 return
             fix_cached = await _git_in_worktree(["diff", "--cached", "--name-only"])
             if fix_cached.stdout.strip():
+                fix_staged_paths = _git_name_lines(fix_cached.stdout)
+                if await self._fail_if_plan_only_paths(
+                    workspace_id=workspace_id,
+                    changed_paths=fix_staged_paths,
+                    expected_status=WorkspaceStatus.validating,
+                ):
+                    await self._finish_pending_validate_operations(
+                        workspace_id=workspace_id,
+                        status=OperationStatus.failed,
+                        validation_run_id=validation_run_id,
+                        requested_tier=validation_tier,
+                        reason_code=PLAN_ONLY_OUTPUT_REASON_CODE,
+                        coverage=_validation_run_coverage_metadata(
+                            val_result,
+                            baseline_coverage=baseline_coverage,
+                        ),
+                        error_message=plan_only_output_message(fix_staged_paths),
+                    )
+                    return
+                has_known_non_plan_output = True
                 violations = find_protected_quality_gate_changes(
-                    changed_paths=_git_name_lines(fix_cached.stdout),
+                    changed_paths=fix_staged_paths,
                     owned_paths=list(ws.owned_paths),
                 )
                 if violations:
@@ -1624,6 +1870,24 @@ class WorkspaceExecutor:
                 source_head_sha=recovery.get("source_head_sha"),
                 validated_workspace_head_sha=successful_validation_workspace_head_sha,
             )
+
+        try:
+            if not has_known_non_plan_output and await self._fail_if_plan_only_committed_output(
+                workspace_id=workspace_id,
+                worktree_path=worktree_path,
+                base_commit=base_commit,
+                expected_status=WorkspaceStatus.validating,
+            ):
+                return
+        except Exception as exc:
+            _log.exception("executor.plan_only_output_check_failed", workspace_id=workspace_id)
+            await self._mark_failed(
+                workspace_id=workspace_id,
+                from_status=WorkspaceStatus.validating,
+                failure_reason=FailureReason.infrastructure_failure,
+                message=f"plan-only output check failed: {exc!r}"[:2000],
+            )
+            return
 
         # ── Step 3: push + open PR ──────────────────────────────────────────
         if not await self._transition_if_current(
@@ -2755,6 +3019,46 @@ class WorkspaceExecutor:
                 f"git diff --name-only failed while checking committed paths: {result.stderr}"
             )
         return {Path(line.strip()) for line in result.stdout.splitlines() if line.strip()}
+
+    async def _fail_if_plan_only_paths(
+        self,
+        *,
+        workspace_id: str,
+        changed_paths: list[str] | tuple[str, ...],
+        expected_status: WorkspaceStatus,
+    ) -> bool:
+        if not changed_paths_are_only_internal_plan_artifacts(changed_paths):
+            return False
+        await self._mark_failed(
+            workspace_id=workspace_id,
+            from_status=expected_status,
+            failure_reason=FailureReason.agent_failure,
+            message=plan_only_output_message(changed_paths)[:2000],
+            reason_code=PLAN_ONLY_OUTPUT_REASON_CODE,
+            details={
+                "changed_paths": list(changed_paths),
+                "reason_code": PLAN_ONLY_OUTPUT_REASON_CODE,
+            },
+        )
+        return True
+
+    async def _fail_if_plan_only_committed_output(
+        self,
+        *,
+        workspace_id: str,
+        worktree_path: Path,
+        base_commit: str,
+        expected_status: WorkspaceStatus,
+    ) -> bool:
+        changed_paths = sorted(
+            path.as_posix()
+            for path in await self._committed_paths_since(worktree_path, base_commit)
+        )
+        return await self._fail_if_plan_only_paths(
+            workspace_id=workspace_id,
+            changed_paths=changed_paths,
+            expected_status=expected_status,
+        )
 
     async def _claim_ready(
         self,

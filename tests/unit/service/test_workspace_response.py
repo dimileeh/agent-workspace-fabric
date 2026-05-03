@@ -1007,6 +1007,38 @@ def test_failure_detail_compactors_reject_malformed_values() -> None:
 
 
 @pytest.mark.unit
+def test_retry_recovery_payload_helpers_preserve_salvage_context() -> None:
+    planning_context = workspaces_service._PlanningScopeRetryContext(
+        reason_code=AGENT_PLAN_PHASE_SCOPE_VIOLATION,
+        evidence={"summary": "scope drift"},
+        evidence_ref={"source_workspace_id": "ws_old"},
+        recovery_strategy="salvage_and_replan",
+        salvage_policy="carry_original_diff",
+        salvage={"branch_name": "awf/ws_old"},
+        fallback_model={"agent": "codex", "model": "gpt-5.5"},
+    )
+
+    planning_payload = workspaces_service._planning_scope_recovery_payload(planning_context)
+    conformance_payload = workspaces_service._conformance_salvage_recovery_payload(
+        conformance_context=None,
+        salvage={
+            "remaining_gaps": ["add regression test"],
+            "conformance_evidence_ref": {"source_workspace_id": "ws_failed"},
+        },
+    )
+
+    assert planning_payload["salvage"] == {"branch_name": "awf/ws_old"}
+    assert planning_payload["fallback_model"] == {"agent": "codex", "model": "gpt-5.5"}
+    assert conformance_payload["remaining_gaps"] == ["add regression test"]
+    assert conformance_payload["conformance_evidence_ref"] == {
+        "source_workspace_id": "ws_failed"
+    }
+    assert workspaces_service._retry_evidence_gaps({"gaps": " close gap "}) == ["close gap"]
+    assert workspaces_service._retry_evidence_gaps({"gaps": object()}) == []
+    assert workspaces_service._optional_retry_evidence_str(123) is None
+
+
+@pytest.mark.unit
 def test_failure_details_omit_empty_payload_and_compact_malformed_conformance() -> None:
     empty_workspace = SimpleNamespace(
         failure_message=None,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import os
 import subprocess
 import time
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
@@ -11,7 +10,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Literal, Protocol
 
-from awf.service.config import ServiceSettings
+from awf.service.config import ServiceSettings, local_service_environ
 from awf.service.logs import LOCAL_SERVICE_COMPOSE_FILE
 from awf.service.status import collect_service_status
 
@@ -185,7 +184,9 @@ async def run_service_bootstrap(
         status_collector=collector,
         sleep=sleep,
         monotonic=monotonic,
-        provider_environ=os.environ if provider_environ is None else provider_environ,
+        provider_environ=local_service_environ()
+        if provider_environ is None
+        else provider_environ,
     )
     return ServiceBootstrapResult(
         stages=tuple(completed),

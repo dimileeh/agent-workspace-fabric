@@ -77,136 +77,138 @@ async def _main(
     engine = create_async_engine(f"sqlite+aiosqlite:///{db_path}")
     factory = make_session_factory(engine)
 
-    async with factory() as s:
-        repo = WorkspaceRepository(s)
-        ws = await repo.get(workspace_id)
-        if ws is None:
-            print(f"No workspace {workspace_id}", file=sys.stderr)
-            return 2
-        print(
-            f"Remonitor target: {workspace_id}\n"
-            f"  status now:   {ws.status}\n"
-            f"  agent:        {ws.agent}\n"
-            f"  branch:       {ws.branch_name}\n"
-            f"  pr_url:       {ws.pr_url}\n"
-            f"  pr_number:    {ws.pr_number}\n"
-            f"  threads:      {len(ws.monitor_threads_addressed or {})} already addressed",
-            flush=True,
-        )
-        if ws.pr_number is None:
-            print("Workspace has no pr_number; nothing to re-monitor.", file=sys.stderr)
-            return 2
-        # Bypass state-machine: we're deliberately re-entering the monitor
-        # phase after a premature completion. Reset iter_count AND
-        # ``monitor_started_at`` so the wall-clock budget starts fresh
-        # from this remonitor call — otherwise ``decide()`` keeps
-        # comparing ``now()`` against the original entry timestamp and
-        # an old workspace re-entered after its wall-clock cap has
-        # already elapsed aborts on the first tick. KEEP
-        # ``monitor_threads_addressed`` so we don't re-poke CodeRabbit
-        # threads we already resolved. Review feedback on PR #2
-        # (CodeRabbit): flag the wall-clock-cap reset pattern.
-        #
-        # We append a ``WorkspaceEvent`` by hand because the state-machine
-        # assert_transition refuses ``completed → monitoring_pr``. Without
-        # this, the workspace_events log has a gap between the original
-        # MONITOR_DONE entry and whatever the re-attached monitor emits
-        # next — operators auditing lifecycle would not see the reset.
-        old_state = ws.status
-        ws.status = WorkspaceStatus.monitoring_pr.value
-        ws.failure_reason = None
-        ws.failure_message = None
-        ws.monitor_iter_count = 0
-        ws.monitor_threads_addressed = _preserve_initial_review_grace_state(
-            ws.monitor_threads_addressed,
-            pr_number=ws.pr_number,
-            monitor_started_at=ws.monitor_started_at,
-        )
-        ws.monitor_started_at = None
-        ws.events.append(
-            WorkspaceEvent(
-                id=new_event_id(),
-                event_type="workspace.remonitor_reset",
-                old_state=old_state,
-                new_state=WorkspaceStatus.monitoring_pr.value,
-                reason_code="OPERATOR_REMONITOR",
-            )
-        )
-        await s.commit()
-        agent_runtime = AgentRuntime(ws.agent)
-        compose_project = ws.compose_project_name or f"awf_{workspace_id}"
-        remote_push_branch = ws.remote_push_branch or ws.branch_name
-        if not remote_push_branch:
+    try:
+        async with factory() as s:
+            repo = WorkspaceRepository(s)
+            ws = await repo.get(workspace_id)
+            if ws is None:
+                print(f"No workspace {workspace_id}", file=sys.stderr)
+                return 2
             print(
-                "Workspace has no remote_push_branch or branch_name; nothing safe to push.",
+                f"Remonitor target: {workspace_id}\n"
+                f"  status now:   {ws.status}\n"
+                f"  agent:        {ws.agent}\n"
+                f"  branch:       {ws.branch_name}\n"
+                f"  pr_url:       {ws.pr_url}\n"
+                f"  pr_number:    {ws.pr_number}\n"
+                f"  threads:      {len(ws.monitor_threads_addressed or {})} already addressed",
+                flush=True,
+            )
+            if ws.pr_number is None:
+                print("Workspace has no pr_number; nothing to re-monitor.", file=sys.stderr)
+                return 2
+            # Bypass state-machine: we're deliberately re-entering the monitor
+            # phase after a premature completion. Reset iter_count AND
+            # ``monitor_started_at`` so the wall-clock budget starts fresh
+            # from this remonitor call — otherwise ``decide()`` keeps
+            # comparing ``now()`` against the original entry timestamp and
+            # an old workspace re-entered after its wall-clock cap has
+            # already elapsed aborts on the first tick. KEEP
+            # ``monitor_threads_addressed`` so we don't re-poke CodeRabbit
+            # threads we already resolved. Review feedback on PR #2
+            # (CodeRabbit): flag the wall-clock-cap reset pattern.
+            #
+            # We append a ``WorkspaceEvent`` by hand because the state-machine
+            # assert_transition refuses ``completed → monitoring_pr``. Without
+            # this, the workspace_events log has a gap between the original
+            # MONITOR_DONE entry and whatever the re-attached monitor emits
+            # next — operators auditing lifecycle would not see the reset.
+            old_state = ws.status
+            ws.status = WorkspaceStatus.monitoring_pr.value
+            ws.failure_reason = None
+            ws.failure_message = None
+            ws.monitor_iter_count = 0
+            ws.monitor_threads_addressed = _preserve_initial_review_grace_state(
+                ws.monitor_threads_addressed,
+                pr_number=ws.pr_number,
+                monitor_started_at=ws.monitor_started_at,
+            )
+            ws.monitor_started_at = None
+            ws.events.append(
+                WorkspaceEvent(
+                    id=new_event_id(),
+                    event_type="workspace.remonitor_reset",
+                    old_state=old_state,
+                    new_state=WorkspaceStatus.monitoring_pr.value,
+                    reason_code="OPERATOR_REMONITOR",
+                )
+            )
+            await s.commit()
+            agent_runtime = AgentRuntime(ws.agent)
+            compose_project = ws.compose_project_name or f"awf_{workspace_id}"
+            remote_push_branch = ws.remote_push_branch or ws.branch_name
+            if not remote_push_branch:
+                print(
+                    "Workspace has no remote_push_branch or branch_name; nothing safe to push.",
+                    file=sys.stderr,
+                )
+                return 2
+
+        # Re-use the container + worktree that the original run set up.
+        compose_file = (
+            Path(ws.compose_file_path)
+            if ws.compose_file_path
+            else work_dir / "compose" / "compose" / workspace_id / "compose.yml"
+        )
+        worktrees_root = work_dir / "git" / "worktrees"
+        if not compose_file.exists():
+            print(
+                f"Compose file missing at {compose_file} — the workspace's "
+                "containers may have been torn down. Abort.",
                 file=sys.stderr,
             )
             return 2
 
-    # Re-use the container + worktree that the original run set up.
-    compose_file = (
-        Path(ws.compose_file_path)
-        if ws.compose_file_path
-        else work_dir / "compose" / "compose" / workspace_id / "compose.yml"
-    )
-    worktrees_root = work_dir / "git" / "worktrees"
-    if not compose_file.exists():
-        print(
-            f"Compose file missing at {compose_file} — the workspace's "
-            "containers may have been torn down. Abort.",
-            file=sys.stderr,
-        )
-        return 2
-
-    runner = AsyncioSubprocessRunner()
-    log_store = LogStore(root=work_dir / "logs", session_factory=factory)
-    if push_pending:
-        await _push_pending_head(
+        runner = AsyncioSubprocessRunner()
+        log_store = LogStore(root=work_dir / "logs", session_factory=factory)
+        if push_pending:
+            await _push_pending_head(
+                runner=runner,
+                factory=factory,
+                workspace_id=workspace_id,
+                worktree_path=worktrees_root / workspace_id,
+                remote_push_branch=remote_push_branch,
+            )
+        adapter = get_adapter(
+            agent_runtime,
             runner=runner,
-            factory=factory,
+            defaults=DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
+            log_store=log_store,
+        )
+        gh = GitHubClient(runner)
+        monitor_builder = build_feature_pr_monitor if auto_merge else build_release_pr_monitor
+        monitor = monitor_builder(
+            session_factory=factory,
+            runner=runner,
+            adapter=adapter,
+            gh=gh,
+            worktrees_root=worktrees_root,
+            artifacts_root=work_dir / "artifacts",
+            log_store=log_store,
+        )
+
+        print("[remonitor] entering monitor loop ...", flush=True)
+        await monitor.run(
             workspace_id=workspace_id,
-            worktree_path=worktrees_root / workspace_id,
-            remote_push_branch=remote_push_branch,
+            compose_project=compose_project,
+            compose_file=compose_file,
         )
-    adapter = get_adapter(
-        agent_runtime,
-        runner=runner,
-        defaults=DEFAULT_AGENT_DEFAULTS.get(agent_runtime),
-        log_store=log_store,
-    )
-    gh = GitHubClient(runner)
-    monitor_builder = build_feature_pr_monitor if auto_merge else build_release_pr_monitor
-    monitor = monitor_builder(
-        session_factory=factory,
-        runner=runner,
-        adapter=adapter,
-        gh=gh,
-        worktrees_root=worktrees_root,
-        artifacts_root=work_dir / "artifacts",
-        log_store=log_store,
-    )
 
-    print("[remonitor] entering monitor loop ...", flush=True)
-    await monitor.run(
-        workspace_id=workspace_id,
-        compose_project=compose_project,
-        compose_file=compose_file,
-    )
-
-    async with factory() as s:
-        final = await WorkspaceRepository(s).get(workspace_id)
-        assert final is not None
-        print(
-            f"[remonitor] done.\n"
-            f"  status:         {final.status}\n"
-            f"  pr_url:         {final.pr_url}\n"
-            f"  pr_merge_sha:   {final.pr_merge_sha}\n"
-            f"  failure_reason: {final.failure_reason}\n"
-            f"  message:        {final.failure_message}",
-            flush=True,
-        )
-    await engine.dispose()
-    return 0 if final.status == WorkspaceStatus.completed.value else 1
+        async with factory() as s:
+            final = await WorkspaceRepository(s).get(workspace_id)
+            assert final is not None
+            print(
+                f"[remonitor] done.\n"
+                f"  status:         {final.status}\n"
+                f"  pr_url:         {final.pr_url}\n"
+                f"  pr_merge_sha:   {final.pr_merge_sha}\n"
+                f"  failure_reason: {final.failure_reason}\n"
+                f"  message:        {final.failure_message}",
+                flush=True,
+            )
+        return 0 if final.status == WorkspaceStatus.completed.value else 1
+    finally:
+        await engine.dispose()
 
 
 def _preserve_initial_review_grace_state(

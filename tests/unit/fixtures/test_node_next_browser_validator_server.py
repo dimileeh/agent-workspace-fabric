@@ -235,7 +235,7 @@ def test_validator_server_reuses_browser_for_concurrent_validation_requests(
     finally:
         process.terminate()
         try:
-            process.wait(timeout=5)
+            process.communicate(timeout=5)
         except subprocess.TimeoutExpired:
             process.kill()
-            process.wait(timeout=5)
+            process.communicate(timeout=5)

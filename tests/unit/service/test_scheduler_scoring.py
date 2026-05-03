@@ -14,6 +14,9 @@ from awf.service.scheduler import (
     SchedulerScoreInput,
     compute_scheduler_score,
     scheduler_order_key,
+    scheduler_policy_snapshot,
+    scheduler_retry_policy_context,
+    scheduler_score_from_workspace,
     scheduler_score_input_from_workspace,
     score_summary_with_suppression,
     task_class_bias,
@@ -292,4 +295,145 @@ def test_scheduler_order_key_is_deterministic() -> None:
         "effective_score": 15,
         "queued_at": "2026-05-02T12:00:00+00:00",
         "workspace_id": "ws_migration",
+    }
+
+
+@pytest.mark.unit
+def test_scheduler_order_key_tuple_contract_is_explicit() -> None:
+    queued_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    score = compute_scheduler_score(
+        SchedulerScoreInput(
+            workspace_id="ws_tuple",
+            task_class=TaskClass.dependency_task.value,
+            base_priority=50,
+            queued_at=queued_at,
+        ),
+        now=queued_at,
+    )
+
+    assert scheduler_order_key(score) == (-4, -62, queued_at, "ws_tuple")
+
+
+@pytest.mark.unit
+def test_scheduler_score_from_workspace_parses_policy_fallbacks_and_recovery_state() -> None:
+    queued_at = datetime(2026, 5, 2, 12, 0)
+    workspace = SimpleNamespace(
+        id="ws_policy",
+        task_class=TaskClass.refactor_task.value,
+        created_at=queued_at,
+        task_policy={
+            "priority": 7.0,
+            "human_boost": 2,
+            "scheduler": {
+                "human_boost": True,
+                "human_escalation_boost": "4",
+                "parent_failure_reason": " infrastructure_failure ",
+                "retry_attempt_number": "2",
+            },
+            "provider_recovery_state": {
+                "not_before": "2026-05-02T11:59:00+00:00",
+            },
+        },
+    )
+
+    score_input = scheduler_score_input_from_workspace(workspace)
+    score = scheduler_score_from_workspace(workspace, now=queued_at.replace(tzinfo=UTC))
+
+    assert score_input.base_priority == 7
+    assert score_input.human_boost == 4
+    assert score_input.parent_failure_reason == FailureReason.infrastructure_failure.value
+    assert score_input.retry_attempt_number == 2
+    assert score_input.provider_not_before == datetime(2026, 5, 2, 11, 59, tzinfo=UTC)
+    assert score.retry_bonus == 3
+    assert score.human_boost == 4
+    assert score.score_summary["suppression"] == {"suppressed": False}
+
+
+@pytest.mark.unit
+def test_scheduler_policy_parsing_rejects_invalid_scalar_values() -> None:
+    queued_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    workspace = SimpleNamespace(
+        id="ws_invalid_policy",
+        task_class=TaskClass.test_task.value,
+        created_at=queued_at,
+        task_policy={
+            "priority": "not-an-int",
+            "scheduler": {
+                "base_priority": "also-not-an-int",
+                "retry_attempt_number": "not-an-int",
+            },
+            "provider_recovery_state": {"not_before": "not-a-datetime"},
+        },
+    )
+
+    score_input = scheduler_score_input_from_workspace(workspace)
+
+    assert score_input.base_priority == 0
+    assert score_input.retry_attempt_number == 0
+    assert score_input.provider_not_before is None
+
+
+@pytest.mark.unit
+def test_scheduler_policy_helpers_preserve_retry_context_and_bound_boosts() -> None:
+    policy = scheduler_retry_policy_context(
+        {"scheduler": {"base_priority": 10}},
+        source_workspace_id="ws_parent",
+        parent_failure_reason=FailureReason.infrastructure_failure.value,
+    )
+    snapshot = scheduler_policy_snapshot(base_priority=500, human_boost=500)
+
+    assert policy == {
+        "scheduler": {
+            "base_priority": 10,
+            "source_workspace_id": "ws_parent",
+            "parent_failure_reason": FailureReason.infrastructure_failure.value,
+        }
+    }
+    assert snapshot == {"base_priority": 100, "human_boost": HUMAN_BOOST_MAX}
+
+
+@pytest.mark.unit
+def test_score_summary_with_suppression_merges_operator_detail() -> None:
+    queued_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    score = compute_scheduler_score(
+        SchedulerScoreInput(
+            workspace_id="ws_suppressed",
+            task_class=TaskClass.refactor_task.value,
+            base_priority=10,
+            queued_at=queued_at,
+        ),
+        now=queued_at,
+    )
+
+    summary = score_summary_with_suppression(
+        score,
+        reason_code="PROVIDER_MODEL_CIRCUIT_OPEN",
+        detail={"cooldown_until": "2026-05-02T12:30:00+00:00"},
+    )
+
+    assert summary["suppression"] == {
+        "suppressed": True,
+        "reason_code": "PROVIDER_MODEL_CIRCUIT_OPEN",
+        "cooldown_until": "2026-05-02T12:30:00+00:00",
+    }
+
+
+@pytest.mark.unit
+def test_score_summary_with_suppression_works_without_detail() -> None:
+    queued_at = datetime(2026, 5, 2, 12, 0, tzinfo=UTC)
+    score = compute_scheduler_score(
+        SchedulerScoreInput(
+            workspace_id="ws_suppressed_without_detail",
+            task_class=TaskClass.refactor_task.value,
+            base_priority=10,
+            queued_at=queued_at,
+        ),
+        now=queued_at,
+    )
+
+    summary = score_summary_with_suppression(score, reason_code="MANUAL_DEFER")
+
+    assert summary["suppression"] == {
+        "suppressed": True,
+        "reason_code": "MANUAL_DEFER",
     }

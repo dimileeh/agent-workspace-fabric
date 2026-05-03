@@ -23,6 +23,7 @@ from awf.control.worker import ControlWorker, WorkerConfig
 from awf.db.models import Workspace
 from awf.db.session import make_engine, make_session_factory
 from awf.node.auth_mounts import ServiceAuthMountResolver
+from awf.node.cleanup import WorkspaceCleaner
 from awf.node.compose_manager import ComposeManager
 from awf.node.git_manager import GitManager
 from awf.node.provisioner import Provisioner, ProvisionerConfig
@@ -74,6 +75,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         worktree_owner_gid=_AGENT_RUNTIME_GID,
     )
     compose = ComposeManager(work_dir=work_dir, template_path=template)
+    runtime_cleaner = WorkspaceCleaner(git=git, compose=compose)
     runner = AsyncioSubprocessRunner()
     log_store = LogStore(root=work_dir / "logs", session_factory=session_factory)
     merge_coordinator = _merge_coordinator_for_database_url(settings.database_url, engine=engine)
@@ -199,6 +201,7 @@ def build_worker_runtime(settings: ServiceSettings) -> WorkerRuntime:
         session_factory=session_factory,
         provisioner=provisioner,
         executor=executor,
+        runtime_cleaner=runtime_cleaner,
         config=WorkerConfig(
             poll_interval_seconds=settings.worker_poll_interval_seconds,
             max_concurrent_provisions=settings.worker_max_concurrent_provisions,

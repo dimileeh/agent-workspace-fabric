@@ -133,20 +133,21 @@ async def _main(
         # all break that assumption. Review feedback on PR #2
         # (CodeRabbit): "use the current interpreter".
         run_awf = _ROOT / "scripts" / "run_awf.py"
-        subprocess.Popen(  # noqa: S603 - deliberately spawning a long-running child
-            [
-                sys.executable,
-                str(run_awf),
-                "--config",
-                str(spec_path),
-                "--work-dir",
-                str(work_dir),
-                "--keep-state",
-            ],
-            stdout=log_path.open("a"),
-            stderr=subprocess.STDOUT,
-            start_new_session=True,  # detach so scheduler can exit cleanly
-        )
+        with log_path.open("a") as log_file:
+            subprocess.Popen(  # noqa: S603 - deliberately spawning a long-running child
+                [
+                    sys.executable,
+                    str(run_awf),
+                    "--config",
+                    str(spec_path),
+                    "--work-dir",
+                    str(work_dir),
+                    "--keep-state",
+                ],
+                stdout=log_file,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,  # detach so scheduler can exit cleanly
+            )
         print(f"  monitor launched; log: {log_path}")
     return 0
 

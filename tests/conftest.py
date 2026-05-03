@@ -8,7 +8,9 @@ tests/unit/db/test_workspace_repository.py) which uses the same pattern.
 
 from __future__ import annotations
 
-from collections.abc import AsyncIterator
+import asyncio
+from collections.abc import AsyncIterator, Iterator
+from contextlib import suppress
 
 import pytest
 from httpx import ASGITransport, AsyncClient
@@ -36,6 +38,30 @@ def _ok_workspace_admission_disk_check(settings: Settings) -> DiskCheck:
         status="ok",
         reason="SUFFICIENT_DISK",
     )
+
+
+@pytest.fixture(autouse=True)
+def _close_idle_asyncio_policy_loop() -> Iterator[None]:
+    """Close dormant loops pytest-asyncio can leave on the event-loop policy.
+
+    pytest-asyncio preserves a previous policy loop while setting up async
+    fixtures. On Python 3.12, looking up that previous loop can create an idle
+    selector loop; when later sync tests run, pytest's unraisable-exception
+    collector can surface the idle loop's self-pipe as ResourceWarning. The
+    fixture only closes a non-running current policy loop after pytest has
+    finished the test body and fixture cleanup.
+    """
+    yield
+
+    policy = asyncio.get_event_loop_policy()
+    local = getattr(policy, "_local", None)
+    loop = getattr(local, "_loop", None)
+    if loop is None or loop.is_closed() or loop.is_running():
+        return
+
+    loop.close()
+    with suppress(RuntimeError):
+        asyncio.set_event_loop(None)
 
 
 @pytest.fixture

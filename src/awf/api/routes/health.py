@@ -116,7 +116,7 @@ async def release_readiness(
         strict_providers = validate_provider_names(provider)
     except ProviderReadinessError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
 
@@ -440,7 +440,7 @@ async def readyz(
         strict_providers = validate_provider_names(provider)
     except ProviderReadinessError as exc:
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=str(exc),
         ) from exc
 
