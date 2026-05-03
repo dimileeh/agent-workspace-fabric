@@ -124,9 +124,14 @@ See:
 - [CLI Reference](docs/CLI_REFERENCE.md)
 - [REST API Reference](docs/REST_API_REFERENCE.md)
 - [MCP Reference](docs/MCP_REFERENCE.md)
+- [Client Surfaces](docs/CLIENT_SURFACES.md)
 - [Troubleshooting](docs/TROUBLESHOOTING.md)
 - [Trust Model](docs/AWF_CORE_TRUST_MODEL.md)
 - [Contributor Guide](CONTRIBUTING.md)
+
+## Supported Client Surfaces (v0.1)
+
+REST, CLI, and MCP are the supported client surfaces for v0.1. AWF does not currently ship with a supported Python SDK. Integrators should use one of the supported surfaces (e.g., the CLI for operator convenience or the REST API for control-plane programmatic access). Please do not import internal AWF modules (such as `awf.*` or other internal paths) to build custom API clients, as they are not part of the stable public contract and are subject to change without notice.
 
 ## License
 
