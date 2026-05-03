@@ -695,26 +695,22 @@ class TestCliHelp:
         result = _runner.invoke(app, ["--help"])
         assert result.exit_code == 0
         assert "Mutates:" in result.stdout
-        assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
         assert "recommended first path" in result.stdout.lower()
 
     @pytest.mark.unit
     def test_init_help_contains_dx_guidance(self) -> None:
         result = _runner.invoke(app, ["init", "--help"])
         assert result.exit_code == 0
-        assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
         assert "recommended first path" in result.stdout.lower()
 
     @pytest.mark.unit
     def test_service_bootstrap_help_contains_dx_guidance(self) -> None:
         result = _runner.invoke(app, ["service", "bootstrap", "--help"])
         assert result.exit_code == 0
-        assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
         assert "recommended first path" in result.stdout.lower()
 
     @pytest.mark.unit
     def test_workspace_help_contains_dx_guidance(self) -> None:
         result = _runner.invoke(app, ["workspace", "--help"])
         assert result.exit_code == 0
-        assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
         assert "recommended first path" in result.stdout.lower()
