@@ -506,14 +506,18 @@ coding agent in any project to use AWF for a feature.
   requires an explicit override when required auth/model readiness is missing,
   and uses a real non-secret provider probe where file/env presence alone can be
   stale or non-portable, especially Claude Code OAuth and Gemini auth.
-- [ ] Research and decide the local control-plane container UID/GID strategy.
+- [x] Research and decide the local control-plane container UID/GID strategy.
   Compare keeping API/worker as root with explicit post-provision ownership
   repair versus running local control-plane containers as the host UID/GID.
   Acceptance: document Docker socket, SSH/auth mounts, bind-mounted AWF state,
   linked worktree metadata, Linux/macOS behavior, cleanup permissions, and
   migration path for existing root-owned state; choose the default local setup
   and add regression coverage proving workspace containers can run `git status`,
-  `git add`, and `git commit` in `/workspace`.
+  `git add`, and `git commit` in `/workspace`. Decision: keep the local control
+  plane root with explicit post-provision chown to UID/GID 1000; see
+  `docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md` and the regression tests in
+  `tests/unit/node/test_git_manager.py::TestAgentWorktreeWritable` plus
+  `tests/integration/test_workspace_agent_git_in_workspace.py`.
 - [x] Add PRD SLO thresholds to the Core release scorecard: workspace creation
   success, cleanup success, stuck-state rate, and actionable failure reason
   coverage must meet the local release bar or be explicitly allowlisted with a

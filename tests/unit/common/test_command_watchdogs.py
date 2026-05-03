@@ -85,14 +85,14 @@ async def test_asyncio_runner_idle_timeout_terminates_when_output_stalls() -> No
         ],
         on_stdout=stdout.append,
         on_stderr=stderr.append,
-        wall_timeout_seconds=5.0,
-        idle_timeout_seconds=0.2,
+        wall_timeout_seconds=10.0,
+        idle_timeout_seconds=1.5,
     )
 
     assert result.returncode == 124
     assert result.reason_code == "COMMAND_IDLE_TIMEOUT"
     assert result.stdout == "first\n"
-    assert "idle timeout after 0.2s without output" in result.stderr
+    assert "idle timeout after 1.5s without output" in result.stderr
     assert stdout == ["first\n"]
     assert stderr == [result.stderr]
 

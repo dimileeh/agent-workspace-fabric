@@ -110,6 +110,9 @@ See:
 - [docs/PLAN_RELEASE_PR_SYNC.md](docs/PLAN_RELEASE_PR_SYNC.md) for release PR sync.
 - [docs/AWF_CORE_TRUST_MODEL.md](docs/AWF_CORE_TRUST_MODEL.md) for the local
   Core trust boundary and future Operator/Architect split.
+- [docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md](docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md)
+  for the local control-plane container UID/GID strategy and per-pillar
+  analysis behind the root-by-default decision.
 
 ## Architecture
 
@@ -705,6 +708,20 @@ itself. The default service stack does not bind-mount the repository into the
 control-plane containers; rebuild the image to pick up code changes. Both the
 API and worker containers mount `/var/run/docker.sock` so AWF can create,
 inspect, and manage per-workspace Compose stacks on the host Docker daemon.
+
+The control-plane containers run as `root` by design, and the agent runtime
+container runs as the unprivileged `agent` user (UID/GID `1000`). Per-workspace
+worktrees and the agent-writable subset of the bare-mirror admin metadata are
+chowned to UID/GID `1000` after `git worktree add` so the agent can run
+`git status`, `git add`, and `git commit` inside `/workspace`. Because the
+control plane is `root`, the host directory at `AWF_HOST_WORK_DIR` is normally
+root-owned on Linux. Use `awf service gc` and `awf service teardown` to clean
+up workspace state from the in-container worker rather than `rm` from the host
+shell. See
+[docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md](docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md)
+for the full per-pillar analysis (Docker socket, SSH/auth mounts, bind-mounted
+state, linked worktree metadata, Linux/macOS behavior, cleanup permissions,
+migration path) and the locked test contract.
 
 Because the API and worker use the host Docker daemon, AWF state must live at a
 host-visible path that is mounted at the same absolute path inside the

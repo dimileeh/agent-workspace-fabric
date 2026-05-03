@@ -1,5 +1,10 @@
 name: awf-local-service
 
+# api/worker/migrate run as root inside the container by design. The control
+# plane needs root to use the host Docker socket, the Docker Desktop SSH-agent
+# forwarder, and to chown per-workspace worktrees to UID/GID 1000 so the
+# agent-runtime container's `agent` user can run git commands in /workspace.
+# See docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md.
 x-awf-service: &awf-service
   build:
     context: ../..

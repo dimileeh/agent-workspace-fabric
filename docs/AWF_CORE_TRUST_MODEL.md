@@ -25,6 +25,18 @@ container may be isolated from other workspaces, but the daemon itself can start
 containers, attach networks, mount declared paths, and consume local CPU, disk,
 and memory. Treat Docker daemon access as a privileged local trust boundary.
 
+The local control plane (`api`, `worker`, `migrate`) runs as `root` inside its
+container by design so it can use the host Docker socket, the Docker Desktop
+SSH-agent forwarder, and chown per-workspace state to the unprivileged `agent`
+user (UID/GID `1000`) that the agent runtime container runs as. Workspace
+state under `AWF_HOST_WORK_DIR` is therefore root-owned on the host on Linux
+and is normally cleaned up through `awf service gc` / `awf service teardown`
+rather than host `rm`. See
+[docs/AWF_LOCAL_CONTAINER_UID_STRATEGY.md](AWF_LOCAL_CONTAINER_UID_STRATEGY.md)
+for the per-pillar analysis (Docker socket, SSH/auth mounts, bind-mounted AWF
+state, linked worktree metadata, Linux/macOS behavior, cleanup permissions,
+migration path) and the locked test contract.
+
 AWF enforces workspace-level lifecycle, declared profile configuration,
 validation provenance, PR monitor policy, stale detection, and cleanup. It does
 not make an untrusted local machine safe, and it does not replace OS-level
