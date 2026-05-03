@@ -776,7 +776,7 @@ def test_project_onboarding_doc_distinguishes_init_modes() -> None:
 def test_project_onboarding_doc_has_provider_prompts() -> None:
     """Regression: every supported provider has a copy-paste prompt block."""
     readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
-    doc = Path("PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
+    doc = Path("docs/PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
 
     # README links to the onboarding doc
     assert "PROJECT_ONBOARDING.md" in readme

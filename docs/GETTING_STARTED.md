@@ -47,6 +47,14 @@ If you prefer to install it into an existing environment, use:
 uv pip install aira-awf
 ```
 
+For contributors who want to modify AWF itself:
+
+```bash
+git clone git@github.com:aira/awf.git
+cd awf
+uv sync
+```
+
 ### Recommended Local Bootstrap
 
 Once AWF is installed, the fastest path to a working local control plane is
