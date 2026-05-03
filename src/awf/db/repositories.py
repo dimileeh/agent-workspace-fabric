@@ -315,6 +315,16 @@ def _callback_subscription_event_type_filter(
     )
 
 
+class TaskExternalIdConflictError(ValueError):
+    """Raised when a caller reuses an external task id for a different task scope."""
+
+    def __init__(self, external_id: str) -> None:
+        self.external_id = external_id
+        super().__init__(
+            f"External task id {external_id!r} already belongs to a different task scope."
+        )
+
+
 class TaskRepository:
     """CRUD helpers for first-class task rows."""
 
@@ -338,6 +348,19 @@ class TaskRepository:
             idempotency_key=idempotency_key,
         )
         if existing is not None:
+            if (
+                external_id is not None
+                and existing.external_id == external_id
+                and not _task_scope_matches(
+                    existing,
+                    repo_url=repo_url,
+                    base_branch=base_branch,
+                    title=title,
+                    task_class=task_class,
+                    owned_paths=owned_paths,
+                )
+            ):
+                raise TaskExternalIdConflictError(external_id)
             if existing.external_id is None and external_id is not None:
                 existing.external_id = external_id
             if existing.idempotency_key is None and idempotency_key is not None:
@@ -387,6 +410,24 @@ class TaskRepository:
             return (await self._session.execute(stmt)).scalar_one_or_none()
 
         return None
+
+
+def _task_scope_matches(
+    task: Task,
+    *,
+    repo_url: str,
+    base_branch: str,
+    title: str,
+    task_class: str | None,
+    owned_paths: list[str],
+) -> bool:
+    return (
+        task.repo_url == repo_url
+        and task.base_branch == base_branch
+        and task.title == title
+        and task.task_class == task_class
+        and list(task.owned_paths) == list(owned_paths)
+    )
 
 
 class TaskAttemptRepository:
