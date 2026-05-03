@@ -54,8 +54,14 @@ def _unexpected_subprocess(args: list[str], **_kwargs: object) -> Any:
 
 def _ollama_ok(url: str, *, timeout: float) -> Any:
     assert timeout > 0
-    assert url == "http://ollama.local:11434/api/version"
-    return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+    if url == "http://ollama.local:11434/api/version":
+        return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+    if url == "http://ollama.local:11434/api/tags":
+        return SimpleNamespace(
+            status_code=200,
+            text='{"models":[{"name":"kimi-k2.6:cloud"}]}',
+        )
+    raise AssertionError(f"unexpected Ollama probe URL: {url}")
 
 
 @pytest.mark.unit
@@ -178,6 +184,47 @@ def test_selected_provider_preflight_maps_agents_to_effective_models(
 
     assert ["claude", "auth", "status"] in probe_calls
     assert ["gemini", "auth", "status"] in probe_calls
+
+
+@pytest.mark.unit
+def test_selected_opencode_preflight_requires_selected_ollama_model(
+    tmp_path: Path,
+) -> None:
+    home = tmp_path / "home"
+    (home / ".config" / "opencode").mkdir(parents=True)
+    urls: list[str] = []
+
+    def _http_get(url: str, *, timeout: float) -> Any:
+        assert timeout > 0
+        urls.append(url)
+        if url == "http://ollama.local:11434/api/version":
+            return SimpleNamespace(status_code=200, text='{"version":"0.1.0"}')
+        if url == "http://ollama.local:11434/api/tags":
+            return SimpleNamespace(
+                status_code=200,
+                text='{"models":[{"name":"other-model:latest"}]}',
+            )
+        raise AssertionError(f"unexpected Ollama probe URL: {url}")
+
+    result = selected_provider_readiness_preflight(
+        _settings(tmp_path),
+        agent="opencode",
+        task_policy={"agent_model": "ollama/kimi-k2.6:cloud"},
+        environ={"AWF_OPENCODE_OLLAMA_BASE_URL": "http://ollama.local:11434/v1"},
+        run_subprocess=_unexpected_subprocess,
+        http_get=_http_get,
+    )
+
+    assert result["provider"] == "opencode"
+    assert result["model"] == "ollama/kimi-k2.6:cloud"
+    assert result["auth_status"] == "ok"
+    assert result["probe_status"] == "fail"
+    assert result["reason_code"] == "OLLAMA_MODEL_NOT_AVAILABLE"
+    assert result["blocks_launch"] is True
+    assert urls == [
+        "http://ollama.local:11434/api/version",
+        "http://ollama.local:11434/api/tags",
+    ]
 
 
 @pytest.mark.unit

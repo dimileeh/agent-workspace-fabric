@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import subprocess
@@ -280,6 +281,7 @@ def selected_provider_readiness_preflight(
         model=identity.model,
         environ=env,
         run_subprocess=resolved_run,
+        http_get=resolved_http_get,
         secrets=secrets,
     )
 
@@ -356,6 +358,7 @@ def _selected_launch_probe(
     model: str | None,
     environ: Mapping[str, str],
     run_subprocess: SubprocessRun,
+    http_get: HttpGet,
     secrets: frozenset[str],
 ) -> dict[str, Any]:
     if not provider_result.get("ok") or not model:
@@ -385,7 +388,12 @@ def _selected_launch_probe(
             secrets=secrets,
         )
     if provider == "opencode":
-        return {"status": "ok", "reason_code": "OLLAMA_HOST_REACHABLE"}
+        return _probe_ollama_model(
+            _ollama_tags_urls(environ),
+            model=model,
+            http_get=http_get,
+            secrets=secrets,
+        )
     return {"status": "unavailable", "reason_code": "PROVIDER_PROBE_UNAVAILABLE"}
 
 
@@ -1465,6 +1473,14 @@ def _ollama_version_url(environ: Mapping[str, str]) -> str:
 
 
 def _ollama_version_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
+    return _ollama_api_urls(environ, "api/version")
+
+
+def _ollama_tags_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
+    return _ollama_api_urls(environ, "api/tags")
+
+
+def _ollama_api_urls(environ: Mapping[str, str], api_path: str) -> tuple[str, ...]:
     raw = (
         environ.get("AWF_OPENCODE_OLLAMA_BASE_URL")
         or environ.get("OLLAMA_HOST")
@@ -1476,7 +1492,8 @@ def _ollama_version_urls(environ: Mapping[str, str]) -> tuple[str, ...]:
     path = parts.path.rstrip("/")
     if path.endswith("/v1"):
         path = path[: -len("/v1")]
-    path = f"{path}/api/version" if path else "/api/version"
+    suffix = api_path if api_path.startswith("/") else f"/{api_path}"
+    path = f"{path}{suffix}" if path else suffix
     primary = urlunsplit((parts.scheme, parts.netloc, path, "", ""))
     if parts.hostname == "host.docker.internal":
         fallback = urlunsplit((parts.scheme, "localhost:11434", path, "", ""))
@@ -1504,6 +1521,104 @@ def _probe_ollama(
         failure = f"HTTP {response.status_code}: {detail}"
         failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
     return {"ok": False, "detail": _redact("; ".join(failures), secrets)}
+
+
+def _probe_ollama_model(
+    urls: tuple[str, ...],
+    *,
+    model: str | None,
+    http_get: HttpGet,
+    secrets: frozenset[str],
+) -> dict[str, Any]:
+    candidates = _ollama_model_candidates(model)
+    if not candidates:
+        return {
+            "status": "fail",
+            "reason_code": "MODEL_NOT_SELECTED",
+            "message": "No OpenCode/Ollama model was selected for launch.",
+        }
+
+    failures: list[str] = []
+    for url in urls:
+        try:
+            response = http_get(url, timeout=_HTTP_TIMEOUT_SECONDS)
+        except Exception as exc:
+            detail = f"{type(exc).__name__}: {exc}"
+            failures.append(f"{url}: {detail}" if len(urls) > 1 else detail)
+            continue
+        if not 200 <= response.status_code < 300:
+            detail = response.text or f"HTTP {response.status_code}"
+            failure = f"HTTP {response.status_code}: {detail}"
+            failures.append(f"{url}: {failure}" if len(urls) > 1 else failure)
+            continue
+        try:
+            payload = json.loads(response.text or "{}")
+        except json.JSONDecodeError as exc:
+            failures.append(
+                f"{url}: invalid JSON from Ollama /api/tags: {exc}"
+                if len(urls) > 1
+                else f"invalid JSON from Ollama /api/tags: {exc}"
+            )
+            continue
+
+        available = _ollama_model_names(payload)
+        if candidates & available:
+            return {"status": "ok", "reason_code": "OLLAMA_MODEL_AVAILABLE"}
+        return {
+            "status": "fail",
+            "reason_code": "OLLAMA_MODEL_NOT_AVAILABLE",
+            "message": "Selected OpenCode/Ollama model is not available from Ollama /api/tags.",
+            "detail": _redact(
+                _truncate(
+                    f"selected={model}; available_count={len(available)}"
+                ),
+                secrets,
+            ),
+        }
+
+    return {
+        "status": "fail",
+        "reason_code": "OLLAMA_MODEL_PROBE_FAILED",
+        "message": "Ollama model availability probe did not complete successfully.",
+        "detail": _redact(_truncate("; ".join(failures)), secrets),
+    }
+
+
+def _ollama_model_candidates(model: str | None) -> set[str]:
+    if model is None:
+        return set()
+    raw = model.strip()
+    if not raw:
+        return set()
+    candidates = {raw}
+    model_name = raw
+    if "/" in raw:
+        provider, remainder = raw.split("/", 1)
+        if provider == "ollama" and remainder:
+            model_name = remainder
+            candidates.add(model_name)
+    if ":" not in model_name:
+        candidates.add(f"{model_name}:latest")
+    return candidates
+
+
+def _ollama_model_names(payload: object) -> set[str]:
+    if not isinstance(payload, Mapping):
+        return set()
+    raw_models = payload.get("models")
+    if not isinstance(raw_models, list):
+        return set()
+    names: set[str] = set()
+    for item in raw_models:
+        if isinstance(item, str) and item:
+            names.add(item)
+            continue
+        if not isinstance(item, Mapping):
+            continue
+        name = item.get("name") or item.get("model")
+        if isinstance(name, str) and name:
+            names.add(name)
+    return names
 
 
 def _ordered_names(providers: set[ProviderName]) -> list[str]:

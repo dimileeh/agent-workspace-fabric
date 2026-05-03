@@ -85,6 +85,11 @@ import {
   summarizeWorkspaceOperatorSuccess,
 } from "@/lib/workspace-operator-controls";
 import {
+  formatProviderReadinessRetryError,
+  providerReadinessPreflightFacts,
+  providerReadinessPreflightTone,
+} from "@/lib/provider-readiness-format";
+import {
   DEFAULT_OPERATOR_PREFERENCES,
   OPERATOR_PREFERENCES_STORAGE_KEY,
   decodeOperatorPreferences,
@@ -510,7 +515,7 @@ export function ConsoleDashboard() {
       `/api/awf/workspaces/${encodeURIComponent(selectedId)}/retry`,
     );
     if (!result.ok) {
-      setRetryState({ status: "error", message: retryErrorMessage(result) });
+      setRetryState({ status: "error", message: formatProviderReadinessRetryError(result) });
       return;
     }
     setRetryState({
@@ -2025,12 +2030,10 @@ function ProviderReadinessPreflightBlock({
   if (!preflight) {
     return null;
   }
-  const tone =
-    preflight.blocks_launch || preflight.readiness_status === "blocked"
-      ? "bad"
-      : preflight.override_used
-        ? "warn"
-        : "good";
+  const tone = providerReadinessPreflightTone(preflight);
+  const facts = providerReadinessPreflightFacts(preflight, {
+    formatCheckedAt: relativeTime,
+  });
   return (
     <div className={`rounded-md border px-3 py-2 text-xs ${toneClass(tone)}`}>
       <div className="flex min-w-0 flex-wrap items-center justify-between gap-2">
@@ -2038,19 +2041,16 @@ function ProviderReadinessPreflightBlock({
         <span className="mono truncate text-[11px]">{preflight.reason_code}</span>
       </div>
       <div className="mt-2 grid gap-1 sm:grid-cols-2 xl:grid-cols-4">
-        <QueueChip label="Provider" value={preflight.provider} detail={preflight.agent} mono />
-        <QueueChip label="Model" value={preflight.model ?? "unavailable"} mono />
-        <QueueChip label="Readiness" value={preflight.readiness_status} tone={tone} />
-        <QueueChip
-          label="Auth"
-          value={preflight.auth_status}
-          detail={`${preflight.auth_source} / ${preflight.credential_scope ?? "unknown"}`}
-          mono
-        />
-        <QueueChip label="Probe" value={preflight.probe_status} mono />
-        <QueueChip label="Override" value={preflight.override_used ? "used" : "not used"} />
-        <QueueChip label="Checked" value={relativeTime(preflight.checked_at)} />
-        <QueueChip label="Isolation" value={preflight.isolation ?? "unknown"} mono />
+        {facts.map((fact) => (
+          <QueueChip
+            key={fact.label}
+            label={fact.label}
+            value={fact.value}
+            detail={fact.detail}
+            mono={fact.mono}
+            tone={fact.tone}
+          />
+        ))}
       </div>
       {preflight.override_reason ? (
         <div className="mt-2 truncate text-[11px] text-slate-600">
@@ -3920,42 +3920,6 @@ function Td({
   className?: string;
 }) {
   return <td className={`min-w-0 overflow-hidden px-3 py-2 align-top ${className}`}>{children}</td>;
-}
-
-function retryErrorMessage(result: Extract<ApiEnvelope<unknown>, { ok: false }>): string {
-  const code = result.errorCode ? `${result.errorCode}: ` : "";
-  const preflight = providerReadinessPreflightFromError(result.detail);
-  if (preflight) {
-    return `${code}${result.message} ${preflight.provider}/${preflight.model ?? "model unavailable"} readiness ${preflight.readiness_status}; auth ${preflight.auth_status} via ${preflight.auth_source}; probe ${preflight.probe_status}; reason ${preflight.reason_code}.`;
-  }
-  return `${code}${result.message} Confirm the workspace is still failed or cancelled, resolve any reported lock conflict, then retry.`;
-}
-
-function providerReadinessPreflightFromError(detail: unknown): ProviderReadinessPreflight | null {
-  if (!detail || typeof detail !== "object") {
-    return null;
-  }
-  const root = detail as { detail?: unknown; provider_readiness_preflight?: unknown };
-  const nested =
-    root.provider_readiness_preflight ??
-    (root.detail && typeof root.detail === "object"
-      ? (root.detail as { provider_readiness_preflight?: unknown }).provider_readiness_preflight
-      : null);
-  if (!nested || typeof nested !== "object") {
-    return null;
-  }
-  const candidate = nested as Partial<ProviderReadinessPreflight>;
-  if (
-    typeof candidate.provider === "string" &&
-    typeof candidate.readiness_status === "string" &&
-    typeof candidate.auth_status === "string" &&
-    typeof candidate.auth_source === "string" &&
-    typeof candidate.probe_status === "string" &&
-    typeof candidate.reason_code === "string"
-  ) {
-    return candidate as ProviderReadinessPreflight;
-  }
-  return null;
 }
 
 function formatScalar(value: number): string {
