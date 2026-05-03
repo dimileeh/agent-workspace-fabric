@@ -65,7 +65,7 @@ def test_ready_for_gke_criteria_reference_executable_release_gate() -> None:
 
     assert "awf service readiness --format json" in todo
     assert "examples/awf-core-demo" in todo
-        assert "awf service readiness --format json" in readme
+    assert "awf service readiness --format json" in readme
 
 
 @pytest.mark.unit
