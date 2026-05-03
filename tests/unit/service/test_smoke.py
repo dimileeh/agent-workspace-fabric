@@ -192,6 +192,32 @@ class TestCollectSmokeReportLiveMode:
         assert auth_phase["reason_code"] == "SMOKE_AUTH_PARTIAL"
         assert auth_phase["status"] == "warn"
 
+    async def test_auth_status_ok_but_partial_providers_downgrades_to_warn(self, tmp_path: Path) -> None:
+        def _ok_status_partial_providers(settings, *, environ=None, strict_providers=None, **kwargs):
+            return {
+                "status": "ok",
+                "strict_providers": [],
+                "providers": {
+                    "github": {"ok": True, "status": "ok", "reason": "GITHUB_AUTH_OK", "message": "GitHub ready.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": []},
+                    "codex": {"ok": False, "status": "warn", "reason": "CODEX_AUTH_MISSING", "message": "Codex missing.", "credential_sources": [], "credential_scope": "none", "isolation": "process", "warnings": []},
+                },
+                "security": {},
+            }
+
+        report = await collect_smoke_report(
+            project=tmp_path,
+            settings=_settings(),
+            mocked_local=False,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_status_partial_providers,
+            profile_preview=_ok_profile_preview_ok(),
+            config_resolver=_config_resolver(),
+        )
+
+        auth_phase = next(p for p in report["phases"] if p["name"] == "auth_readiness")
+        assert auth_phase["reason_code"] == "SMOKE_AUTH_PARTIAL"
+        assert auth_phase["status"] == "warn"
+
     async def test_profile_phase_detects_template(self, tmp_path: Path) -> None:
         (tmp_path / "package.json").write_text('{"dependencies": {"next": "^14"}}')
 
