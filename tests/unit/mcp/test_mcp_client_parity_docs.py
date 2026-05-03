@@ -11,7 +11,7 @@ from tests.unit.mcp._parity_utils import (
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 PARITY_DOC = REPO_ROOT / "docs" / "MCP_CLIENT_PARITY.md"
-README = REPO_ROOT / "README.md"
+MCP_REFERENCE = REPO_ROOT / "docs" / "MCP_REFERENCE.md"
 
 REQUIRED_COLUMNS = [
     "Capability",
@@ -68,9 +68,9 @@ def _row_for_capability(rows: list[dict[str, str]], capability: str) -> dict[str
 @pytest.mark.unit
 def test_mcp_client_parity_doc_publishes_roles_and_backlog_surfaces() -> None:
     doc = PARITY_DOC.read_text(encoding="utf-8")
-    readme = README.read_text(encoding="utf-8")
+    mcp_ref = MCP_REFERENCE.read_text(encoding="utf-8")
 
-    assert "docs/MCP_CLIENT_PARITY.md" in readme
+    assert "MCP_CLIENT_PARITY.md" in mcp_ref
     assert "REST is the canonical AWF control-plane API" in doc
     assert "CLI is a JSON-first operator convenience layer" in doc
     assert "MCP is a first-class parity client for agent orchestrators" in doc

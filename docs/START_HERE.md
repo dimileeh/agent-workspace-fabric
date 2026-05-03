@@ -52,4 +52,4 @@ Before running the commands below, ensure your system has the following installe
 
 Once the control plane is successfully running, you are ready to use AWF on real codebases:
 - [Project Onboarding](PROJECT_ONBOARDING.md): Run `awf init <path>` in an existing project to configure AWF for a specific codebase.
-- [AWF Setup Documentation](../README.md#setup): Detailed instructions for contributor setup, credential injection, and configuration.
+- [AWF Setup Documentation](GETTING_STARTED.md): Detailed instructions for contributor setup, credential injection, and configuration.

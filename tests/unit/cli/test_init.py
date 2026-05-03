@@ -756,7 +756,7 @@ def test_init_without_path_rejects_include_smoke_request_flag(
 
 @pytest.mark.unit
 def test_readme_recommends_awf_init_for_local_bootstrap() -> None:
-    readme = Path("README.md").read_text(encoding="utf-8")
+    readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
 
     assert "awf init" in readme
     assert "awf init <path>" in readme
@@ -775,11 +775,11 @@ def test_project_onboarding_doc_distinguishes_init_modes() -> None:
 @pytest.mark.unit
 def test_project_onboarding_doc_has_provider_prompts() -> None:
     """Regression: every supported provider has a copy-paste prompt block."""
-    readme = Path("README.md").read_text(encoding="utf-8")
+    readme = Path("docs/GETTING_STARTED.md").read_text(encoding="utf-8")
     doc = Path("docs/PROJECT_ONBOARDING.md").read_text(encoding="utf-8")
 
     # README links to the onboarding doc
-    assert "docs/PROJECT_ONBOARDING.md" in readme
+    assert "PROJECT_ONBOARDING.md" in readme
 
     providers = ["Codex", "Claude Code", "Gemini", "OpenCode", "OpenClaw"]
     for provider in providers:
