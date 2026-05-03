@@ -46,6 +46,16 @@ via the async worker.
 """
 
 _DX_HELP = "DX smoke proof: validate local service, profile, and PR path."
+_PROVIDER_HELP = (
+    "Repeatable provider strictness check: github, codex, claude_code, "
+    "gemini, opencode, or docker."
+)
+_PROVIDER_HELP_PASSTHROUGH = (
+    "Repeatable provider strictness check passed through to local "
+    "service bootstrap: github, codex, claude_code, gemini, opencode, "
+    "or docker."
+)
+
 
 app = typer.Typer(
     name="awf",
@@ -303,11 +313,7 @@ def init(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check passed through to local "
-            "service bootstrap: github, codex, claude_code, gemini, opencode, "
-            "or docker."
-        ),
+        help=_PROVIDER_HELP_PASSTHROUGH,
     ),
     fmt: OutputFormat = typer.Option(
         OutputFormat.pretty,
@@ -708,10 +714,7 @@ def service_status(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check: github, codex, claude_code, "
-            "gemini, opencode, or docker."
-        ),
+        help=_PROVIDER_HELP,
     ),
 ) -> None:
     """Check local AWF service dependencies."""
@@ -743,10 +746,7 @@ def service_doctor(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check: github, codex, claude_code, "
-            "gemini, opencode, or docker."
-        ),
+        help=_PROVIDER_HELP,
     ),
 ) -> None:
     """Run operator-friendly local AWF diagnostics."""
@@ -820,10 +820,7 @@ def service_readiness(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check: github, codex, claude_code, "
-            "gemini, opencode, or docker."
-        ),
+        help=_PROVIDER_HELP,
     ),
 ) -> None:
     """Run the executable local AWF Core release-readiness gate."""
@@ -882,10 +879,7 @@ def service_bootstrap(
     provider: list[str] = typer.Option(
         [],
         "--provider",
-        help=(
-            "Repeatable provider strictness check: github, codex, claude_code, "
-            "gemini, opencode, or docker."
-        ),
+        help=_PROVIDER_HELP,
     ),
 ) -> None:
     from awf.service.bootstrap import (
