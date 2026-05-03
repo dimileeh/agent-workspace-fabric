@@ -921,6 +921,9 @@ class TestCreateWorkspaceV2:
             blocked.structuredContent["error_code"]
             == "PROVIDER_READINESS_PRECHECK_FAILED"
         )
+        blocked_preflight = blocked.structuredContent["detail"]["provider_readiness_preflight"]
+        assert blocked_preflight["provider"] == "codex"
+        assert blocked_preflight["source_workspace_id"] == workspace_id
 
         retried = await _call(
             mcp,

@@ -277,7 +277,7 @@ def build_mcp_server(
             )
             return _tool_result(error.model_dump(mode="json"), is_error=True)
         except WorkspaceProviderReadinessBlockedError as exc:
-            return _workspace_error_result(exc)
+            return _provider_readiness_blocked_result(exc)
         return _tool_result(ws.model_dump(mode="json"))
 
     @mcp.tool(name="awf_retry_workspace")
@@ -300,8 +300,10 @@ def build_mcp_server(
                 provider_readiness_override=provider_readiness_override,
                 provider_readiness_override_reason=provider_readiness_override_reason,
             )
+        except WorkspaceProviderReadinessBlockedError as exc:
+            return _provider_readiness_blocked_result(exc)
         except WorkspaceRetryError as exc:
-            return _workspace_error_result(exc)
+            return _workspace_retry_error_result(exc)
         return _tool_result(response.model_dump(mode="json"))
 
     @mcp.tool(name="awf_get_workspace")
@@ -967,7 +969,23 @@ def _tool_error(exc: WorkspaceControlError) -> CallToolResult:
     return _tool_result(error.model_dump(mode="json"), is_error=True)
 
 
-def _workspace_error_result(exc: WorkspaceRetryError) -> CallToolResult:
+class _WorkspaceErrorSource(Protocol):
+    error_code: str
+    message: str
+    detail: dict[str, Any] | None
+
+
+def _workspace_retry_error_result(exc: WorkspaceRetryError) -> CallToolResult:
+    return _workspace_error_result(exc)
+
+
+def _provider_readiness_blocked_result(
+    exc: WorkspaceProviderReadinessBlockedError,
+) -> CallToolResult:
+    return _workspace_error_result(exc)
+
+
+def _workspace_error_result(exc: _WorkspaceErrorSource) -> CallToolResult:
     error = ErrorResponse(
         error_code=exc.error_code,
         message=exc.message,
