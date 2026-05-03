@@ -50,6 +50,7 @@ from pathlib import Path
 
 import pytest
 
+from awf.common.git_identity import git_safe_directory_config_args
 from awf.node.compose_manager import ComposeManager, WorkspaceComposeSpec
 from awf.node.git_manager import GitManager
 
@@ -345,12 +346,28 @@ async def test_agent_container_can_git_status_add_commit_in_workspace(
         # locks the contract that the agent's commit was a real ref update
         # against the shared mirror, not a detached write the worktree
         # cannot reach.
+        #
+        # In the ``needs_sudo_chown`` branch the worktree and mirror are
+        # owned by UID 1000 (so the agent container can write to them),
+        # but this process runs as the invoking UID (e.g., 1001 on
+        # GitHub Actions). git refuses with "dubious ownership" when the
+        # repo directory's owner does not match the caller, so each
+        # invocation whitelists its own path via ``-c safe.directory``.
+        # Harmless in the root and UID-1000 branches.
         rev_in_worktree = _run(
-            ["git", "-C", str(layout.worktree_path), "rev-parse", "HEAD"]
+            [
+                "git",
+                *git_safe_directory_config_args(layout.worktree_path),
+                "-C",
+                str(layout.worktree_path),
+                "rev-parse",
+                "HEAD",
+            ]
         ).stdout.strip()
         rev_in_mirror = _run(
             [
                 "git",
+                *git_safe_directory_config_args(layout.mirror_path),
                 "--git-dir",
                 str(layout.mirror_path),
                 "rev-parse",
