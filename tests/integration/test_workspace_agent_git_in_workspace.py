@@ -12,20 +12,28 @@ Skipped when:
 - no Docker daemon reachable (``docker version`` fails),
 - the Docker Compose plugin is unavailable,
 - the ``awf-agent-runtime:latest`` image is not present locally outside CI
-  (CI builds it on demand before running the regression), or
-- the ``AWF_SKIP_DOCKER_TESTS=1`` env var is set.
+  (CI builds it on demand before running the regression),
+- the ``AWF_SKIP_DOCKER_TESTS=1`` env var is set, or
+- the test process is neither root nor the agent UID *and* passwordless
+  sudo is not available (the test needs one of those three to land the
+  prepared worktree owned by UID 1000).
 
 When ``CI=true`` (set by GitHub Actions and most CI providers) the missing
 image case is handled by building ``awf-agent-runtime:latest`` from the
 checked-out source tree. If that build fails, the test fails loudly instead
 of silently skipping the container-side contract.
 
-The test runs as the invoking user. On Linux CI runners that user is
-typically UID 1000, which matches the agent-runtime image's ``agent`` user;
-the prepared worktree is then directly readable inside the container without
-any chown. When the test process is privileged (UID 0), it exercises the
-full root-control-plane path and chowns the worktree to UID/GID 1000
-through ``GitManager`` before launching the agent.
+The test runs as the invoking user and supports three modes:
+
+- **UID 0 (root):** exercises the full root-control-plane path; ``GitManager``
+  chowns the worktree to UID/GID 1000 before the agent container launches.
+- **UID 1000 (agent UID, common on bespoke Linux dev hosts):** the worktree
+  is created by the test process and is already owned by the agent UID, so
+  no chown is needed.
+- **any other UID with passwordless sudo (e.g. GitHub Actions' ``runner``
+  user is UID 1001):** the test uses ``sudo chown`` to mimic what the root
+  control-plane would do. This keeps the contract exercised on standard CI
+  runners instead of silently skipping there.
 """
 
 from __future__ import annotations
@@ -80,6 +88,30 @@ def _agent_image_present() -> bool:
 
 def _running_in_ci() -> bool:
     return os.environ.get("CI", "").lower() == "true"
+
+
+def _passwordless_sudo_available() -> bool:
+    """``sudo -n true`` succeeds, i.e. sudo runs without prompting."""
+    if shutil.which("sudo") is None:
+        return False
+    try:
+        result = subprocess.run(
+            ["sudo", "-n", "true"],
+            check=False,
+            capture_output=True,
+            timeout=5,
+        )
+    except (subprocess.TimeoutExpired, FileNotFoundError):
+        return False
+    return result.returncode == 0
+
+
+def _sudo_chown(target: Path, *, uid: int, gid: int) -> None:
+    """Recursively chown ``target`` to ``uid:gid`` via passwordless sudo."""
+    _run(
+        ["sudo", "-n", "chown", "-R", f"{uid}:{gid}", str(target)],
+        timeout=120,
+    )
 
 
 def _ensure_agent_image_present() -> None:
@@ -159,10 +191,15 @@ async def test_agent_container_can_git_status_add_commit_in_workspace(
     _ensure_agent_image_present()
 
     is_root = os.geteuid() == 0
-    if not is_root and os.geteuid() != _AGENT_RUNTIME_UID:
+    is_agent_uid = os.geteuid() == _AGENT_RUNTIME_UID
+    needs_sudo_chown = not is_root and not is_agent_uid
+    if needs_sudo_chown and not _passwordless_sudo_available():
         pytest.skip(
-            "test must run as root or as UID "
-            f"{_AGENT_RUNTIME_UID} so the prepared worktree is owned by the agent user"
+            f"test must run as root, as UID {_AGENT_RUNTIME_UID}, or with "
+            "passwordless sudo available so the prepared worktree can be "
+            "chowned to the agent UID (GitHub Actions ubuntu-latest runs as "
+            "UID 1001 with passwordless sudo, so the CI integration job "
+            "exercises this path)"
         )
 
     workspace_id = f"test_agent_git_{os.getpid()}"
@@ -173,9 +210,9 @@ async def test_agent_container_can_git_status_add_commit_in_workspace(
         tmp_path / "awf-work" / "git",
         # When running as root the post-provision repair chowns to UID/GID
         # 1000. When running unprivileged, the chown step short-circuits
-        # because ``os.geteuid() != 0`` — and the worktree files are
-        # already owned by the test user (matching the agent UID on most
-        # Linux CI runners) so no repair is needed.
+        # because ``os.geteuid() != 0``; the chown is reapplied below via
+        # sudo for the non-root, non-agent-UID case so the contract is
+        # still exercised on standard CI runners.
         worktree_owner_uid=_AGENT_RUNTIME_UID,
         worktree_owner_gid=_AGENT_RUNTIME_GID,
     )
@@ -185,6 +222,15 @@ async def test_agent_container_can_git_status_add_commit_in_workspace(
         base_branch="development",
         new_branch=f"awf/{workspace_id}",
     )
+
+    if needs_sudo_chown:
+        # Mimic the root control-plane chown so the agent inside the
+        # container can write to the host-bind-mounted worktree. Without
+        # this, ``git add`` / ``git commit`` would fail with EACCES on the
+        # mirror's ``objects/`` and ``refs/`` paths and the contract this
+        # test exists to lock would skip silently in CI.
+        _sudo_chown(layout.mirror_path, uid=_AGENT_RUNTIME_UID, gid=_AGENT_RUNTIME_GID)
+        _sudo_chown(layout.worktree_path, uid=_AGENT_RUNTIME_UID, gid=_AGENT_RUNTIME_GID)
 
     manager = ComposeManager(work_dir=tmp_path / "awf-work", template_path=_TEMPLATE)
     spec = WorkspaceComposeSpec(
@@ -294,6 +340,24 @@ async def test_agent_container_can_git_status_add_commit_in_workspace(
         assert rev_in_worktree == rev_in_mirror
     finally:
         await manager.down(spec)
+        if needs_sudo_chown:
+            # Best-effort: chown back to the test UID so pytest's tmp_path
+            # rotation can remove the worktree + mirror tree on later runs.
+            # We don't fail the test if this step errors — the next run's
+            # rotation cleanup just warns.
+            subprocess.run(
+                [
+                    "sudo",
+                    "-n",
+                    "chown",
+                    "-R",
+                    f"{os.geteuid()}:{os.getegid()}",
+                    str(tmp_path),
+                ],
+                check=False,
+                capture_output=True,
+                timeout=120,
+            )
 
     ps = _run(
         [

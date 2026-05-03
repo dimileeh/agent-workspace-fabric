@@ -285,7 +285,10 @@ The decision is locked by the following tests:
     `awf-agent-runtime` container's `agent` user run the three required
     git commands in `/workspace`. Skipped when Docker is unavailable, the
     agent-runtime image is not present, or the test process is neither
-    UID `0` nor UID `1000`.
+    UID `0` nor UID `1000` *and* passwordless sudo is not available
+    (GitHub Actions ubuntu-latest runs as UID `1001` with passwordless
+    sudo, so the CI integration job exercises this path via
+    `sudo chown` instead of skipping).
 
 ## See Also
 
