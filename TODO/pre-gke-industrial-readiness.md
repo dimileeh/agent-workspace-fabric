@@ -75,7 +75,6 @@ Status values:
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 MCP And Project Onboarding Client Parity | Local control-plane UID/GID strategy | `ws_add274bc03eb49c28a00dd3d` | [#186](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/186) | monitoring_pr | Manually salvaged 2026-05-03: dropped the out-of-scope workflow edit, addressed the image-missing review inside the integration test, force-pushed cleaned head `655ad145`, and requested AWF remonitor. |
 
 ### Reschedule Required Slices
 
@@ -94,6 +93,7 @@ reschedule its corresponding slice.
 
 | TODO area | Slice | Workspace | PR | Status | Notes |
 | --- | --- | --- | --- | --- | --- |
+| P1 MCP And Project Onboarding Client Parity | Local control-plane UID/GID strategy | `ws_add274bc03eb49c28a00dd3d` | [#186](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/186) | merged | Manually salvaged 2026-05-03: dropped the out-of-scope workflow edit, addressed the image-missing review inside the integration test, force-pushed cleaned head `655ad145`, requested AWF remonitor, and PR merged 2026-05-03. |
 | P1 MCP And Project Onboarding Client Parity | First-run smoke workspace command | `ws_cd491b1fdb514174974ed549` | [#188](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/188) | merged | OpenCode/Ollama `deepseek-v4-pro:cloud`; validate-only recovery completed, AWF monitored checks/comments/merge gates, and PR merged 2026-05-03. |
 | P1 MCP And Project Onboarding Client Parity | Copy-paste agent onboarding prompts | `ws_55479d5e2367490184a947ea` | [#185](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/185) | merged | OpenCode/Ollama `kimi-k2.6:cloud`; merged 2026-05-03 after candidate provenance repair and validate-only recovery. |
 | P1 MCP And Project Onboarding Client Parity | Primary local Core install path | `ws_9e695c9961bb45f9a9b1ff8b` | [#187](https://github.com/dimileeh/aira-agent-workspace-fabric/pull/187) | merged | Gemini `gemini-3.1-pro-preview`; completed 2026-05-03 and marks the primary package-manager install path P1 done. |
