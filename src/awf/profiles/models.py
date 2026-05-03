@@ -222,6 +222,19 @@ class ProfileCoverage(BaseModel):
         return value
 
 
+class ProfileValidationStrategy(BaseModel):
+    """Policy for when AWF runs or reuses expensive validation evidence."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    baseline_coverage: Literal["always", "reuse_or_run_when_unknown", "skip"] = "always"
+    edit_gate: Literal["full", "targeted"] = "full"
+    final_gate: Literal["none", "coverage"] = "none"
+    reuse_evidence: bool = False
+    freshness_max_age_seconds: int = Field(default=86400, ge=1, le=2592000)
+    full_gate_concurrency: int = Field(default=0, ge=0, le=64)
+
+
 class ProfileAlembicValidation(BaseModel):
     """Opt-in Alembic migration-chain validation policy."""
 
@@ -285,6 +298,7 @@ class ProfileValidation(BaseModel):
     timeout_seconds: int | None = Field(default=None, ge=1, le=14400)
     requested_tier: int = Field(default=1, ge=1, le=3)
     coverage: ProfileCoverage = Field(default_factory=ProfileCoverage)
+    strategy: ProfileValidationStrategy = Field(default_factory=ProfileValidationStrategy)
     alembic: ProfileAlembicValidation = Field(default_factory=ProfileAlembicValidation)
     retry_budget: int = Field(default=0, ge=0, le=10)
 

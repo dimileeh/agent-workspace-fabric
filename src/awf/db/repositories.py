@@ -180,8 +180,21 @@ class QueueDecisionCreate:
 def validation_command_set_hash(commands: list[dict[str, Any]]) -> str:
     """Stable hash for the configured command metadata in a validation run."""
 
-    payload = json.dumps(commands, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    payload = json.dumps(
+        [_validation_command_identity(command) for command in commands],
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+
+
+def _validation_command_identity(command: Mapping[str, Any]) -> dict[str, Any]:
+    return {
+        key: value
+        for key, value in command.items()
+        if key not in {"evidence_status", "evidence_reason_code", "evidence_source_run_id"}
+    }
 
 
 def _resolve_session_dialect_name(
@@ -1393,6 +1406,9 @@ class ValidationRunRepository:
         retry_count: int = 0,
         coverage: dict[str, Any] | None = None,
         command_retries: list[int] | None = None,
+        coverage_evidence_status: str | None = None,
+        coverage_evidence_reason_code: str | None = None,
+        coverage_evidence_source_run_id: str | None = None,
     ) -> ValidationRun | None:
         run = await self.get(validation_run_id)
         if run is None:
@@ -1410,6 +1426,19 @@ class ValidationRunRepository:
             for i, rc in enumerate(command_retries):
                 if i < len(updated_commands):
                     updated_commands[i] = dict(updated_commands[i], retry_count=rc)
+            run.commands = updated_commands
+        if coverage_evidence_status is not None:
+            updated_commands = list(run.commands)
+            for i, command in enumerate(updated_commands):
+                if command.get("phase") == "coverage":
+                    updated = dict(command)
+                    updated["evidence_status"] = coverage_evidence_status
+                    if coverage_evidence_reason_code is not None:
+                        updated["evidence_reason_code"] = coverage_evidence_reason_code
+                    if coverage_evidence_source_run_id is not None:
+                        updated["evidence_source_run_id"] = coverage_evidence_source_run_id
+                    updated_commands[i] = updated
+                    break
             run.commands = updated_commands
         await self._session.flush()
         return run
@@ -1429,6 +1458,47 @@ class ValidationRunRepository:
             run.workspace_head_sha = workspace_head_sha
         await self._session.flush()
         return run
+
+    async def find_reusable_coverage_evidence(
+        self,
+        *,
+        workspace_id: str,
+        tier: int,
+        commands: list[dict[str, Any]],
+        workspace_head_sha: str | None,
+        resolved_profile_digest: str | None,
+        environment_identity_digest: str | None,
+        max_age_seconds: int,
+        now: datetime | None = None,
+    ) -> ValidationRun | None:
+        if not workspace_head_sha:
+            return None
+        cutoff = (now or datetime.now(UTC)) - timedelta(seconds=max_age_seconds)
+        stmt = (
+            select(ValidationRun)
+            .where(
+                ValidationRun.workspace_id == workspace_id,
+                ValidationRun.tier == tier,
+                ValidationRun.workspace_head_sha == workspace_head_sha,
+                ValidationRun.command_set_hash == validation_command_set_hash(commands),
+                ValidationRun.resolved_profile_digest == resolved_profile_digest,
+                ValidationRun.environment_identity_digest == environment_identity_digest,
+                ValidationRun.status == "succeeded",
+                ValidationRun.finished_at.is_not(None),
+                ValidationRun.finished_at >= cutoff,
+            )
+            .order_by(ValidationRun.finished_at.desc(), ValidationRun.id.desc())
+            .limit(5)
+        )
+        rows = (await self._session.execute(stmt)).scalars().all()
+        for row in rows:
+            coverage = (row.log_stream_refs or {}).get("coverage")
+            if isinstance(coverage, Mapping) and coverage.get("status") in {
+                "passed",
+                "not_configured",
+            }:
+                return row
+        return None
 
     async def list_for_workspace(self, workspace_id: str) -> builtins.list[ValidationRun]:
         stmt = (

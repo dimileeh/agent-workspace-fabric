@@ -349,6 +349,113 @@ async def test_append_healthcheck_stderr_skips_invalid_stream_id(tmp_path: Path)
 
 
 @pytest.mark.unit
+async def test_run_profile_phases_can_skip_coverage_for_targeted_edit_gate(
+    tmp_path: Path,
+) -> None:
+    runner = FakeCommandRunner()
+    runner.queue_result(returncode=0, stdout="ok\n")
+    validation = ValidationRunner(runner=runner, artifacts_dir=tmp_path / "artifacts")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "targeted",
+            "validation": {
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                }
+            },
+            "phases": {"validate": ["python -m pytest tests/unit/test_fast.py -q"]},
+        }
+    )
+
+    result = await validation.run_profile_phases(
+        workspace_id="ws_targeted",
+        compose_project="proj",
+        compose_file=tmp_path / "compose.yml",
+        profile=profile,
+        phase_names=("validate",),
+        include_coverage=False,
+    )
+
+    assert result.all_passed
+    assert result.coverage is None
+    assert [call.args[-1] for call in runner.calls] == [
+        "[ -f /workspace/.venv/bin/activate ] && . /workspace/.venv/bin/activate; "
+        "python -m pytest tests/unit/test_fast.py -q"
+    ]
+
+
+@pytest.mark.unit
+async def test_run_profile_coverage_uses_full_gate_throttle(tmp_path: Path) -> None:
+    class BlockingRunner(FakeCommandRunner):
+        async def run(
+            self,
+            args: list[str],
+            *,
+            input_bytes: bytes | None = None,
+            cwd: str | None = None,
+        ) -> CommandResult:
+            del input_bytes, cwd
+            nonlocal concurrent, max_concurrent
+            self.calls.append(type("RecordedCall", (), {"args": args})())
+            concurrent += 1
+            max_concurrent = max(max_concurrent, concurrent)
+            first_started.set()
+            if not release_first.is_set():
+                await release_first.wait()
+            concurrent -= 1
+            return CommandResult(returncode=0, stdout="TOTAL 1 0 100%\n", stderr="")
+
+    runner = BlockingRunner()
+    first_started = asyncio.Event()
+    release_first = asyncio.Event()
+    concurrent = 0
+    max_concurrent = 0
+    validation = ValidationRunner(runner=runner, artifacts_dir=tmp_path / "artifacts")
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "throttled",
+            "validation": {
+                "strategy": {"full_gate_concurrency": 1},
+                "coverage": {
+                    "minimum_percent": 99,
+                    "command": "pytest --cov=awf",
+                },
+            },
+        }
+    )
+
+    first = asyncio.create_task(
+        validation.run_profile_coverage(
+            workspace_id="ws_throttle_1",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            profile=profile,
+            phase="final_coverage",
+        )
+    )
+    await first_started.wait()
+    second = asyncio.create_task(
+        validation.run_profile_coverage(
+            workspace_id="ws_throttle_2",
+            compose_project="proj",
+            compose_file=tmp_path / "compose.yml",
+            profile=profile,
+            phase="final_coverage",
+        )
+    )
+    await asyncio.sleep(0)
+    assert max_concurrent == 1
+
+    release_first.set()
+    first_result, second_result = await asyncio.gather(first, second)
+
+    assert first_result is not None and first_result.ok
+    assert second_result is not None and second_result.ok
+    assert max_concurrent == 1
+
+
+@pytest.mark.unit
 def test_environment_identity_digest_changes_for_database_hooks() -> None:
     refresh_hook = {
         "database": {

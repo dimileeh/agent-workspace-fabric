@@ -187,6 +187,14 @@ class _RebaseRecoveryResult:
 
 
 @dataclass(frozen=True)
+class _CoverageEvidenceResult:
+    coverage: ValidationCoverageResult | None
+    evidence_status: str | None = None
+    reason_code: str | None = None
+    source_run_id: str | None = None
+
+
+@dataclass(frozen=True)
 class _PrReexecutionGuardResult:
     blocked: bool
     recovery: dict[str, Any] | None = None
@@ -1395,6 +1403,31 @@ class WorkspaceExecutor:
                 target_head_sha=None,
                 tier=validation_tier,
             )
+            run_coverage_during_edit_gate = not (
+                profile.validation.strategy.edit_gate == "targeted"
+                and profile.validation.strategy.final_gate == "coverage"
+            )
+            coverage_evidence = _CoverageEvidenceResult(
+                coverage=None,
+                evidence_status=(
+                    "executed"
+                    if run_coverage_during_edit_gate
+                    and profile.validation.coverage.command is not None
+                    else "skipped_by_policy"
+                    if not run_coverage_during_edit_gate
+                    and profile.validation.coverage.command is not None
+                    else None
+                ),
+                reason_code=(
+                    "VALIDATION_EVIDENCE_EXECUTED"
+                    if run_coverage_during_edit_gate
+                    and profile.validation.coverage.command is not None
+                    else "TARGETED_EDIT_GATE"
+                    if not run_coverage_during_edit_gate
+                    and profile.validation.coverage.command is not None
+                    else None
+                ),
+            )
             try:
                 val_result = await self._validation.run_profile_phases(
                     workspace_id=workspace_id,
@@ -1404,7 +1437,22 @@ class WorkspaceExecutor:
                     phase_names=("post_agent", "validate"),
                     run_healthchecks=True,
                     worktree_path=worktree_path,
+                    include_coverage=run_coverage_during_edit_gate,
                 )
+                if (
+                    not run_coverage_during_edit_gate
+                    and val_result.all_passed
+                    and profile.validation.strategy.final_gate == "coverage"
+                ):
+                    coverage_evidence = await self._run_final_coverage_gate(
+                        workspace_id=workspace_id,
+                        compose_project=compose_project,
+                        compose_file=compose_file,
+                        profile=profile,
+                        validation_tier=validation_tier,
+                        workspace_head_sha=validation_workspace_head_sha,
+                    )
+                    val_result = replace(val_result, coverage=coverage_evidence.coverage)
             except ComposeExecCleanupError as exc:
                 message = cleanup_failure_message(exc)
                 _log.error(
@@ -1488,6 +1536,9 @@ class WorkspaceExecutor:
                     baseline_coverage=baseline_coverage,
                 ),
                 command_retries=[c.retry_count for c in val_result.commands],
+                coverage_evidence_status=coverage_evidence.evidence_status,
+                coverage_evidence_reason_code=coverage_evidence.reason_code,
+                coverage_evidence_source_run_id=coverage_evidence.source_run_id,
             )
             if val_result.all_passed:
                 successful_validation_run_id = validation_run_id
@@ -2487,6 +2538,13 @@ class WorkspaceExecutor:
         tests instead of weakening the gate.
         """
         coverage = profile.validation.coverage
+        if profile.validation.strategy.baseline_coverage == "skip":
+            _log.info(
+                "executor.baseline_coverage_skipped_by_policy",
+                workspace_id=workspace_id,
+                reason_code="BASELINE_COVERAGE_SKIPPED_BY_POLICY",
+            )
+            return None
         if coverage.command is None and coverage.minimum_percent <= 0:
             return None
         result = await self._validation.run_profile_coverage(
@@ -2505,6 +2563,61 @@ class WorkspaceExecutor:
                 reason_code=result.reason_code,
             )
         return result
+
+    async def _run_final_coverage_gate(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        profile: WorkspaceProfile,
+        validation_tier: int,
+        workspace_head_sha: str | None,
+    ) -> _CoverageEvidenceResult:
+        coverage = profile.validation.coverage
+        if coverage.command is None and coverage.minimum_percent <= 0:
+            return _CoverageEvidenceResult(coverage=None)
+
+        command_records = _validation_run_command_records(
+            profile=profile,
+            phase_names=("post_agent", "validate"),
+            run_healthchecks=True,
+        )
+        strategy = profile.validation.strategy
+        if strategy.reuse_evidence:
+            async with self._session_factory() as session:
+                reusable = await ValidationRunRepository(session).find_reusable_coverage_evidence(
+                    workspace_id=workspace_id,
+                    tier=validation_tier,
+                    commands=command_records,
+                    workspace_head_sha=workspace_head_sha,
+                    resolved_profile_digest=resolved_profile_digest(profile),
+                    environment_identity_digest=environment_identity_digest(profile),
+                    max_age_seconds=strategy.freshness_max_age_seconds,
+                    now=datetime.now(UTC),
+                )
+            if reusable is not None:
+                metadata = (reusable.log_stream_refs or {}).get("coverage")
+                if isinstance(metadata, Mapping):
+                    return _CoverageEvidenceResult(
+                        coverage=_coverage_result_from_metadata(metadata),
+                        evidence_status="reused",
+                        reason_code="VALIDATION_EVIDENCE_REUSED",
+                        source_run_id=reusable.id,
+                    )
+
+        result = await self._validation.run_profile_coverage(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            profile=profile,
+            phase="final_coverage",
+        )
+        return _CoverageEvidenceResult(
+            coverage=result,
+            evidence_status="executed" if result is not None else None,
+            reason_code="VALIDATION_EVIDENCE_EXECUTED" if result is not None else None,
+        )
 
     async def _run_agent_task_with_optional_planning(
         self,
@@ -3336,11 +3449,15 @@ class WorkspaceExecutor:
         target_branch: str | None,
         target_head_sha: str | None,
         tier: int,
+        coverage_evidence_status: str | None = None,
+        coverage_evidence_reason_code: str | None = None,
     ) -> str:
         command_records = _validation_run_command_records(
             profile=profile,
             phase_names=("post_agent", "validate"),
             run_healthchecks=True,
+            coverage_evidence_status=coverage_evidence_status,
+            coverage_evidence_reason_code=coverage_evidence_reason_code,
         )
         async with self._session_factory() as session:
             attempt = await TaskAttemptRepository(session).get_by_workspace_id(workspace_id)
@@ -4009,6 +4126,9 @@ class WorkspaceExecutor:
         retry_count: int = 0,
         coverage: dict[str, object] | None = None,
         command_retries: list[int] | None = None,
+        coverage_evidence_status: str | None = None,
+        coverage_evidence_reason_code: str | None = None,
+        coverage_evidence_source_run_id: str | None = None,
     ) -> None:
         async with self._session_factory() as session:
             await ValidationRunRepository(session).finish(
@@ -4019,6 +4139,9 @@ class WorkspaceExecutor:
                 retry_count=retry_count,
                 coverage=coverage,
                 command_retries=command_retries,
+                coverage_evidence_status=coverage_evidence_status,
+                coverage_evidence_reason_code=coverage_evidence_reason_code,
+                coverage_evidence_source_run_id=coverage_evidence_source_run_id,
             )
             await session.commit()
 
@@ -4351,6 +4474,8 @@ def _validation_run_command_records(
     profile: WorkspaceProfile,
     phase_names: tuple[str, ...],
     run_healthchecks: bool,
+    coverage_evidence_status: str | None = None,
+    coverage_evidence_reason_code: str | None = None,
 ) -> list[dict[str, Any]]:
     ordered: list[dict[str, Any]] = []
     if "validate" in phase_names and profile.validation.alembic.enabled:
@@ -4391,7 +4516,15 @@ def _validation_run_command_records(
     if pending_healthchecks:
         ordered.extend(_healthcheck_command_records(pending_healthchecks))
     if "validate" in phase_names and profile.validation.coverage.command is not None:
-        ordered.append({"phase": "coverage", "command": profile.validation.coverage.command.command})
+        coverage_record = {
+            "phase": "coverage",
+            "command": profile.validation.coverage.command.command,
+        }
+        if coverage_evidence_status is not None:
+            coverage_record["evidence_status"] = coverage_evidence_status
+        if coverage_evidence_reason_code is not None:
+            coverage_record["evidence_reason_code"] = coverage_evidence_reason_code
+        ordered.append(coverage_record)
 
     records: list[dict[str, Any]] = []
     phase_indices: dict[str, int] = {}
@@ -4562,6 +4695,38 @@ def _validation_run_coverage_metadata(
         metadata["baseline_status"] = baseline_coverage.status
         metadata["baseline_reason_code"] = baseline_coverage.reason_code
     return metadata
+
+
+def _coverage_result_from_metadata(metadata: Mapping[str, object]) -> ValidationCoverageResult:
+    percent = metadata.get("percent")
+    minimum = metadata.get("minimum_percent")
+    enforce = metadata.get("enforce")
+    gaps = metadata.get("gaps")
+    failing_node_ids = metadata.get("failing_test_node_ids")
+    failing_evidence = metadata.get("failing_test_evidence")
+    return ValidationCoverageResult(
+        provider=str(metadata.get("provider") or "python"),
+        percent=float(percent) if isinstance(percent, int | float) else None,
+        minimum_percent=float(minimum) if isinstance(minimum, int | float) else 0.0,
+        enforce=bool(enforce) if isinstance(enforce, bool) else True,
+        status=str(metadata.get("status") or "passed"),
+        reason_code=str(metadata.get("reason_code") or "COVERAGE_OK"),
+        gaps=[item for item in gaps if isinstance(item, dict)] if isinstance(gaps, list) else [],
+        failing_test_node_ids=[
+            str(item)
+            for item in failing_node_ids
+            if isinstance(item, str)
+        ]
+        if isinstance(failing_node_ids, list)
+        else [],
+        failing_test_evidence=[
+            str(item)
+            for item in failing_evidence
+            if isinstance(item, str)
+        ]
+        if isinstance(failing_evidence, list)
+        else [],
+    )
 
 
 def _format_coverage_gaps(gaps: list[dict[str, object]]) -> str:

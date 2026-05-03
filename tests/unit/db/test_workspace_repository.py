@@ -34,6 +34,7 @@ from awf.db.repositories import (
     ValidationRunRepository,
     WorkspaceEventRepository,
     WorkspaceRepository,
+    validation_command_set_hash,
 )
 from awf.db.session import make_engine, make_session_factory
 
@@ -338,6 +339,185 @@ class TestRelationshipLoading:
 
 
 class TestValidationRunRepository:
+    @pytest.mark.unit
+    def test_validation_command_set_hash_ignores_evidence_annotations(self) -> None:
+        executed = [
+            {
+                "phase": "coverage",
+                "command": "pytest --cov=awf",
+                "evidence_status": "executed",
+                "evidence_reason_code": "VALIDATION_EXECUTED",
+            }
+        ]
+        reused = [
+            {
+                "phase": "coverage",
+                "command": "pytest --cov=awf",
+                "evidence_status": "reused",
+                "evidence_reason_code": "VALIDATION_EVIDENCE_REUSED",
+            }
+        ]
+
+        assert validation_command_set_hash(executed) == validation_command_set_hash(reused)
+
+    @pytest.mark.unit
+    async def test_find_reusable_coverage_evidence_matches_exact_fresh_identity(self) -> None:
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        commands = [{"phase": "coverage", "command": "pytest --cov=awf"}]
+        async with make_session_factory(engine)() as s:
+            workspace = await WorkspaceRepository(s).create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="main",
+                task_title="coverage",
+                task_prompt="run validation",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            repo = ValidationRunRepository(s)
+            run = await repo.start(
+                workspace_id=workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=commands,
+                base_commit="base",
+                target_branch="main",
+                target_head_sha=None,
+                workspace_head_sha="head",
+                resolved_profile_digest="profile",
+                environment_identity_digest="env",
+                log_stream_refs={},
+                started_at=now,
+            )
+            await repo.finish(
+                run.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                coverage={"status": "passed", "reason_code": "COVERAGE_OK", "percent": 99.0},
+                finished_at=now,
+            )
+
+            reused = await repo.find_reusable_coverage_evidence(
+                workspace_id=workspace.id,
+                tier=1,
+                commands=commands,
+                workspace_head_sha="head",
+                resolved_profile_digest="profile",
+                environment_identity_digest="env",
+                max_age_seconds=3600,
+                now=now,
+            )
+
+        assert reused is not None
+        assert reused.id == run.id
+
+    @pytest.mark.unit
+    async def test_find_reusable_coverage_evidence_rejects_changed_stale_or_failed_identity(
+        self,
+    ) -> None:
+        engine = make_engine("sqlite+aiosqlite:///:memory:")
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+        now = datetime(2026, 1, 2, tzinfo=UTC)
+        old = datetime(2026, 1, 1, tzinfo=UTC)
+        commands = [{"phase": "coverage", "command": "pytest --cov=awf"}]
+        async with make_session_factory(engine)() as s:
+            workspace = await WorkspaceRepository(s).create(
+                repo_url="git@github.com:example/a.git",
+                branch_base="main",
+                task_title="coverage",
+                task_prompt="run validation",
+                agent=AgentRuntime.codex.value,
+                test_commands=[],
+            )
+            repo = ValidationRunRepository(s)
+            stale = await repo.start(
+                workspace_id=workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=commands,
+                base_commit="base",
+                target_branch="main",
+                target_head_sha=None,
+                workspace_head_sha="head",
+                resolved_profile_digest="profile",
+                environment_identity_digest="env",
+                log_stream_refs={},
+                started_at=old,
+            )
+            await repo.finish(
+                stale.id,
+                status="succeeded",
+                reason_code="VALIDATION_OK",
+                coverage={"status": "passed", "reason_code": "COVERAGE_OK", "percent": 99.0},
+                finished_at=old,
+            )
+            failed = await repo.start(
+                workspace_id=workspace.id,
+                attempt_id=None,
+                tier=1,
+                commands=commands,
+                base_commit="base",
+                target_branch="main",
+                target_head_sha=None,
+                workspace_head_sha="failed-head",
+                resolved_profile_digest="profile",
+                environment_identity_digest="env",
+                log_stream_refs={},
+                started_at=now,
+            )
+            await repo.finish(
+                failed.id,
+                status="failed",
+                reason_code="COVERAGE_BELOW_THRESHOLD",
+                coverage={"status": "failed", "reason_code": "COVERAGE_BELOW_THRESHOLD"},
+                finished_at=now,
+            )
+
+            assert (
+                await repo.find_reusable_coverage_evidence(
+                    workspace_id=workspace.id,
+                    tier=1,
+                    commands=commands,
+                    workspace_head_sha="changed",
+                    resolved_profile_digest="profile",
+                    environment_identity_digest="env",
+                    max_age_seconds=3600,
+                    now=now,
+                )
+                is None
+            )
+            assert (
+                await repo.find_reusable_coverage_evidence(
+                    workspace_id=workspace.id,
+                    tier=1,
+                    commands=commands,
+                    workspace_head_sha="head",
+                    resolved_profile_digest="profile",
+                    environment_identity_digest="env",
+                    max_age_seconds=60,
+                    now=now,
+                )
+                is None
+            )
+            assert (
+                await repo.find_reusable_coverage_evidence(
+                    workspace_id=workspace.id,
+                    tier=1,
+                    commands=commands,
+                    workspace_head_sha="failed-head",
+                    resolved_profile_digest="profile",
+                    environment_identity_digest="env",
+                    max_age_seconds=3600,
+                    now=now,
+                )
+                is None
+            )
+
     @pytest.mark.unit
     async def test_list_by_workspace_ids_can_filter_by_status(
         self,

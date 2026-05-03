@@ -88,6 +88,7 @@ _PROFILE_PHASE_EXECUTION_ORDER = {
     "validate": 3,
     "cleanup": 4,
 }
+_FULL_GATE_SEMAPHORES: dict[int, asyncio.Semaphore] = {}
 
 _HTTP_HEALTHCHECK_SCRIPT = (
     "import sys, urllib.error, urllib.request\n"
@@ -330,11 +331,16 @@ class ValidationRunner:
         phase_names: list[str] | tuple[str, ...],
         run_healthchecks: bool = False,
         worktree_path: Path | None = None,
+        include_coverage: bool = True,
     ) -> ValidationResult:
         """Run the selected profile phases in order."""
         requested_phases = set(phase_names)
         healthchecks = profile.validation.healthchecks if run_healthchecks else []
-        coverage = profile.validation.coverage if "validate" in requested_phases else None
+        coverage = (
+            profile.validation.coverage
+            if include_coverage and "validate" in requested_phases
+            else None
+        )
         alembic_policy = (
             profile.validation.alembic if "validate" in requested_phases else None
         )
@@ -381,6 +387,7 @@ class ValidationRunner:
             results=[],
             phase_indices={},
             phase=phase,
+            full_gate_concurrency=profile.validation.strategy.full_gate_concurrency,
         )
 
     async def _run_commands(
@@ -555,6 +562,7 @@ class ValidationRunner:
                 artifacts_dir=workspace_artifacts,
                 results=results,
                 phase_indices=phase_indices,
+                full_gate_concurrency=0,
             )
 
         return ValidationResult(commands=results, coverage=coverage_result)
@@ -809,6 +817,45 @@ class ValidationRunner:
         results: list[ValidationCommandResult],
         phase_indices: dict[str, int],
         phase: str = "coverage",
+        full_gate_concurrency: int = 0,
+    ) -> ValidationCoverageResult:
+        if full_gate_concurrency > 0:
+            semaphore = _FULL_GATE_SEMAPHORES.setdefault(
+                full_gate_concurrency, asyncio.Semaphore(full_gate_concurrency)
+            )
+            async with semaphore:
+                return await self._collect_coverage_unthrottled(
+                    workspace_id=workspace_id,
+                    compose_project=compose_project,
+                    compose_file=compose_file,
+                    coverage=coverage,
+                    artifacts_dir=artifacts_dir,
+                    results=results,
+                    phase_indices=phase_indices,
+                    phase=phase,
+                )
+        return await self._collect_coverage_unthrottled(
+            workspace_id=workspace_id,
+            compose_project=compose_project,
+            compose_file=compose_file,
+            coverage=coverage,
+            artifacts_dir=artifacts_dir,
+            results=results,
+            phase_indices=phase_indices,
+            phase=phase,
+        )
+
+    async def _collect_coverage_unthrottled(
+        self,
+        *,
+        workspace_id: str,
+        compose_project: str,
+        compose_file: Path,
+        coverage: ProfileCoverage,
+        artifacts_dir: Path,
+        results: list[ValidationCommandResult],
+        phase_indices: dict[str, int],
+        phase: str,
     ) -> ValidationCoverageResult:
         if coverage.provider != "python":
             return ValidationCoverageResult(

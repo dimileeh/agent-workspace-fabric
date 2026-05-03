@@ -582,6 +582,59 @@ def test_profile_schema_coerces_string_coverage_command() -> None:
 
 
 @pytest.mark.unit
+def test_profile_schema_accepts_validation_strategy() -> None:
+    profile = WorkspaceProfile.model_validate(
+        {
+            "name": "awf-self",
+            "validation": {
+                "strategy": {
+                    "baseline_coverage": "reuse_or_run_when_unknown",
+                    "edit_gate": "targeted",
+                    "final_gate": "coverage",
+                    "reuse_evidence": True,
+                    "freshness_max_age_seconds": 3600,
+                    "full_gate_concurrency": 1,
+                }
+            },
+        }
+    )
+
+    strategy = profile.validation.strategy
+    assert strategy.baseline_coverage == "reuse_or_run_when_unknown"
+    assert strategy.edit_gate == "targeted"
+    assert strategy.final_gate == "coverage"
+    assert strategy.reuse_evidence is True
+    assert strategy.freshness_max_age_seconds == 3600
+    assert strategy.full_gate_concurrency == 1
+
+
+@pytest.mark.unit
+def test_validation_strategy_defaults_preserve_legacy_behavior() -> None:
+    profile = WorkspaceProfile.model_validate({"name": "legacy"})
+
+    strategy = profile.validation.strategy
+    assert strategy.baseline_coverage == "always"
+    assert strategy.edit_gate == "full"
+    assert strategy.final_gate == "none"
+    assert strategy.reuse_evidence is False
+    assert strategy.full_gate_concurrency == 0
+
+
+@pytest.mark.unit
+def test_awf_self_profile_uses_targeted_edit_validation_and_final_coverage_gate() -> None:
+    profile_path = Path(__file__).resolve().parents[3] / ".awf" / "workspace.yml"
+    profile = WorkspaceProfile.model_validate(
+        yaml.safe_load(profile_path.read_text(encoding="utf-8"))["awf"]
+    )
+
+    assert profile.validation.strategy.baseline_coverage == "skip"
+    assert profile.validation.strategy.edit_gate == "targeted"
+    assert profile.validation.strategy.final_gate == "coverage"
+    assert profile.validation.strategy.reuse_evidence is True
+    assert profile.validation.strategy.full_gate_concurrency == 1
+
+
+@pytest.mark.unit
 def test_profile_schema_accepts_planning_policy() -> None:
     profile = WorkspaceProfile.model_validate(
         {
