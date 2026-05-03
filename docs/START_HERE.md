@@ -32,7 +32,7 @@ Before running the commands below, ensure your system has the following installe
    *Expected Output Snippet:*
    ```text
    AWF init: local service bootstrap
-     state directory: /home/user/.local/state/awf
+     state directory: /home/user/.awf/service
      created: false
      kept existing .env
      bootstrap status: ok
