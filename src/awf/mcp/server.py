@@ -15,7 +15,7 @@ from __future__ import annotations
 import inspect
 import json
 from collections.abc import Awaitable, Callable
-from typing import Annotated, Any, Protocol
+from typing import TYPE_CHECKING, Annotated, Any, Protocol
 
 from mcp.server.fastmcp import FastMCP
 from mcp.types import CallToolResult, TextContent
@@ -81,6 +81,9 @@ from awf.service.workspaces import (
     WorkspaceRetryError,
     WorkspaceService,
 )
+
+if TYPE_CHECKING:
+    from awf.service.config import ServiceSettings
 
 StructuredToolResult = Annotated[CallToolResult, dict[str, Any]]
 DiskCheckProvider = Callable[[Settings], DiskCheck | Awaitable[DiskCheck]]
@@ -1251,33 +1254,50 @@ async def _provided_health(
 
 
 def _redact_sensitive_payload(payload: dict[str, Any], settings: Settings) -> dict[str, Any]:
-    redacted = _redact_sensitive_value(payload, settings)
+    from awf.service.config import resolve_service_settings
+
+    service_settings = resolve_service_settings(settings)
+    redacted = _redact_sensitive_value(payload, settings, service_settings=service_settings)
     return redacted if isinstance(redacted, dict) else {}
 
 
-def _redact_sensitive_value(value: Any, settings: Settings) -> Any:
+def _redact_sensitive_value(
+    value: Any,
+    settings: Settings,
+    *,
+    service_settings: ServiceSettings,
+) -> Any:
     if isinstance(value, str):
-        return _redact_sensitive_text(value, settings)
+        return _redact_sensitive_text(value, settings, service_settings=service_settings)
     if isinstance(value, list):
-        return [_redact_sensitive_value(item, settings) for item in value]
+        return [
+            _redact_sensitive_value(item, settings, service_settings=service_settings)
+            for item in value
+        ]
     if isinstance(value, dict):
         return {
-            _redact_sensitive_text(key, settings) if isinstance(key, str) else key:
-            _redact_sensitive_value(item, settings)
+            _redact_sensitive_text(key, settings, service_settings=service_settings)
+            if isinstance(key, str)
+            else key:
+            _redact_sensitive_value(item, settings, service_settings=service_settings)
             for key, item in value.items()
         }
     return value
 
 
-def _redact_sensitive_text(value: str, settings: Settings) -> str:
-    from awf.service.config import resolve_service_settings
+def _redact_sensitive_text(
+    value: str,
+    settings: Settings,
+    *,
+    service_settings: ServiceSettings,
+) -> str:
     from awf.service.provider_readiness import redact_launch_preflight_text
 
     redacted = value
     for secret in (settings.api_token, settings.github_token):
         if secret and len(secret) >= 4:
             redacted = redacted.replace(secret, "<redacted>")
-    return redact_launch_preflight_text(resolve_service_settings(settings), redacted)
+    return redact_launch_preflight_text(service_settings, redacted)
 
 
 def _tool_result(payload: dict[str, Any], *, is_error: bool = False) -> CallToolResult:

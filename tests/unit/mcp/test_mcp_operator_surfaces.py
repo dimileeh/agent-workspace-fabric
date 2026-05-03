@@ -893,6 +893,44 @@ class TestMcpOperatorSurfaceParity:
             assert "<redacted>" in rendered
 
     @pytest.mark.unit
+    def test_sensitive_payload_redaction_resolves_service_settings_once(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        from awf.service import config as service_config
+
+        api_secret = "api-secret-do-not-leak-12345"
+        provider_secret = "ghp_providerSecretDoNotLeak12345"
+        settings = Settings(
+            _env_file=None,
+            api_token=api_secret,
+            github_token=provider_secret,
+        )
+        payload: dict[str, Any] = {
+            "outer": [
+                "plain text",
+                {"inner": f"token {api_secret}", "provider": provider_secret},
+            ],
+            "list": ["another", {"deep": ["one", "two"]}],
+        }
+        calls = 0
+        real_resolve = service_config.resolve_service_settings
+
+        def counting_resolve(base: Settings | None = None) -> service_config.ServiceSettings:
+            nonlocal calls
+            calls += 1
+            return real_resolve(base)
+
+        monkeypatch.setattr(service_config, "resolve_service_settings", counting_resolve)
+
+        redacted = mcp_server._redact_sensitive_payload(payload, settings)
+
+        rendered = json.dumps(redacted, sort_keys=True)
+        assert api_secret not in rendered
+        assert provider_secret not in rendered
+        assert calls == 1
+
+    @pytest.mark.unit
     async def test_resource_provider_helpers_support_async_and_absent_providers(
         self,
         resource_stack: OperatorStack,
