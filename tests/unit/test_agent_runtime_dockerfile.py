@@ -58,7 +58,7 @@ def test_agent_runtime_installs_all_supported_coding_clis() -> None:
 def test_readme_notes_agent_runtime_rebuild_for_docker_tooling_changes() -> None:
     readme = Path("CONTRIBUTING.md").read_text(encoding="utf-8")
     start = readme.index("### Build the Agent Runtime Image")
-    end = readme.index("### Configure Environment")
+    end = readme.index("### Database Migrations")
     section = readme[start:end]
 
     assert "Docker CLI" in section
