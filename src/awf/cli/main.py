@@ -34,12 +34,16 @@ from awf.service.logs import DEFAULT_LOG_TAIL, ServiceLogName
 
 app = typer.Typer(
     name="awf",
-    help="Aira Agent Workspace Fabric — CLI operator surface.",
+    help="Aira Agent Workspace Fabric — CLI operator surface."
+    "\n\nFor first-time users: the recommended first path is to run `awf init` \nto verify prerequisites and bootstrap your local service stack, followed by \n`awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md \nfor more details.\n\nSafety defaults & Dry-run: Commands that modify local state default to \ndry-runs or previews unless explicit write flags are passed.\n\nMutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub \nvia the async worker.\n",
     no_args_is_help=True,
     pretty_exceptions_enable=False,
 )
 
-workspace_app = typer.Typer(help="Workspace lifecycle (create/inspect/destroy).")
+workspace_app = typer.Typer(
+    help="Workspace lifecycle (create/inspect/destroy)."
+    "\n\nFor first-time users: the recommended first path is to run `awf init` \nto verify prerequisites and bootstrap your local service stack, followed by \n`awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md \nfor more details.\n\nSafety defaults & Dry-run: Commands that modify local state default to \ndry-runs or previews unless explicit write flags are passed.\n\nMutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub \nvia the async worker.\n"
+)
 profile_app = typer.Typer(help="Workspace profile inspection.")
 service_app = typer.Typer(help="Local service operations.")
 locks_app = typer.Typer(help="Owned-path reservation and overlap-risk visibility.")
@@ -91,9 +95,7 @@ def _run_terminal_workspace_compose_teardown(
     candidate_compose_file_path = getattr(candidate, "compose_file_path", None)
     workspace_id = getattr(candidate, "workspace_id", None)
     compose_project_name = getattr(candidate, "compose_project_name", None)
-    compose_project_name = (
-        compose_project_name if isinstance(compose_project_name, str) else None
-    )
+    compose_project_name = compose_project_name if isinstance(compose_project_name, str) else None
     compose_file_path = (
         candidate_compose_file_path.expanduser()
         if isinstance(candidate_compose_file_path, Path)
@@ -103,10 +105,7 @@ def _run_terminal_workspace_compose_teardown(
             else compose_path
         )
     )
-    if (
-        not isinstance(compose_file_path, Path)
-        or not isinstance(workspace_id, str)
-    ):
+    if not isinstance(compose_file_path, Path) or not isinstance(workspace_id, str):
         return WorkspaceGCComposeTeardownResult(
             status="failed",
             reason_code="DOCKER_COMPOSE_DOWN_FAILED",
@@ -300,7 +299,19 @@ def init(
         help="Output format. JSON unlocks scripting; pretty is the default.",
     ),
 ) -> None:
-    """Bootstrap AWF on this machine, or run local onboarding checks for a project path."""
+    """Bootstrap AWF on this machine, or run local onboarding checks for a project path.
+
+    For first-time users: the recommended first path is to run `awf init`
+    to verify prerequisites and bootstrap your local service stack, followed by
+    `awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md
+    for more details.
+
+    Safety defaults & Dry-run: Commands that modify local state default to
+    dry-runs or previews unless explicit write flags are passed.
+
+    Mutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub
+    via the async worker.
+    """
     if path is None:
         if include_smoke_request:
             typer.echo(
@@ -468,7 +479,9 @@ def _run_init_project_onboarding(
     typer.echo("")
     typer.echo("Suggested next steps:")
     typer.echo("  - Run `awf profile init <path> --write` to create `.awf/workspace.yml`.")
-    typer.echo("  - Run `awf profile preview <path> --profile <name>` to inspect profile resolution.")
+    typer.echo(
+        "  - Run `awf profile preview <path> --profile <name>` to inspect profile resolution."
+    )
     typer.echo(
         "  - Optional: generate a smoke workspace request locally with "
         "`awf init <path> --include-smoke-request`; this prints the payload inline and does "
@@ -641,16 +654,9 @@ def _run_init_service_bootstrap(
         typer.echo("  bootstrap status: ok")
         typer.echo("")
         typer.echo("Next steps:")
-        typer.echo(
-            "  - export AWF_GITHUB_TOKEN=\"$(gh auth token)\" so the worker can "
-            "create PRs."
-        )
-        typer.echo(
-            "  - Run `awf service status --format pretty` to verify readiness."
-        )
-        typer.echo(
-            "  - Run `awf init <path>` to onboard a project repository."
-        )
+        typer.echo('  - export AWF_GITHUB_TOKEN="$(gh auth token)" so the worker can create PRs.')
+        typer.echo("  - Run `awf service status --format pretty` to verify readiness.")
+        typer.echo("  - Run `awf init <path>` to onboard a project repository.")
     else:
         payload = result.to_dict()
         payload["state_directory"] = str(state_dir)
@@ -876,7 +882,19 @@ def service_bootstrap(
         ),
     ),
 ) -> None:
-    """Start local Postgres, migrations, API, worker, and verify readiness."""
+    """Start local Postgres, migrations, API, worker, and verify readiness.
+
+    For first-time users: the recommended first path is to run `awf init`
+    to verify prerequisites and bootstrap your local service stack, followed by
+    `awf init <path>` to prepare your project repository. See docs/CLI_REFERENCE.md
+    for more details.
+
+    Safety defaults & Dry-run: Commands that modify local state default to
+    dry-runs or previews unless explicit write flags are passed.
+
+    Mutates: Local state (.env, .awf/), Docker Compose stacks, and Git/GitHub
+    via the async worker.
+    """
     from awf.service.bootstrap import (
         ServiceBootstrapError,
         ServiceBootstrapOptions,
@@ -1009,9 +1027,7 @@ def service_gc(
     engine = make_engine(settings.database_url)
     session_factory = make_session_factory(engine)
     retention_hours = (
-        settings.completed_workspace_retention_hours
-        if min_age_hours is None
-        else min_age_hours
+        settings.completed_workspace_retention_hours if min_age_hours is None else min_age_hours
     )
     candidate_limit = limit if limit is not None else settings.workspace_cleanup_batch_limit
 
@@ -1208,8 +1224,7 @@ def workspace_retry(
                 "provider_readiness_override": provider_readiness_override,
                 "provider_readiness_override_reason": provider_readiness_override_reason,
             }
-            if provider_readiness_override
-            or provider_readiness_override_reason is not None
+            if provider_readiness_override or provider_readiness_override_reason is not None
             else None
         ),
     )

@@ -639,9 +639,7 @@ class TestConnectionErrors:
 
 class TestServiceStatusOrphanReporting:
     @pytest.mark.unit
-    def test_pretty_output_surfaces_orphan_summary(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
+    def test_pretty_output_surfaces_orphan_summary(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from awf.service import config as config_mod
         from awf.service import status as status_mod
 
@@ -674,9 +672,7 @@ class TestServiceStatusOrphanReporting:
                                 "reason": "WORKSPACE_MISSING",
                             },
                         ],
-                        "action": (
-                            "Run docker compose -p <project> down -v --remove-orphans"
-                        ),
+                        "action": ("Run docker compose -p <project> down -v --remove-orphans"),
                     }
                 },
             }
@@ -691,3 +687,41 @@ class TestServiceStatusOrphanReporting:
         assert "ORPHANS_PRESENT" in result.stdout
         assert "ws_dead" in result.stdout
         assert "ws_ghost" in result.stdout
+
+
+class TestCliHelp:
+    @pytest.mark.unit
+    def test_main_help_contains_dx_guidance(self) -> None:
+        result = _runner.invoke(app, ["--help"])
+        assert result.exit_code == 0
+        assert "Mutates:" in result.stdout
+        assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
+        assert "docs/CLI_REFERENCE.md" in result.stdout
+        assert "recommended first path" in result.stdout.lower()
+
+    @pytest.mark.unit
+    def test_init_help_contains_dx_guidance(self) -> None:
+        result = _runner.invoke(app, ["init", "--help"])
+        assert result.exit_code == 0
+        assert "Mutates:" in result.stdout
+        assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
+        assert "docs/CLI_REFERENCE.md" in result.stdout
+        assert "recommended first path" in result.stdout.lower()
+
+    @pytest.mark.unit
+    def test_service_bootstrap_help_contains_dx_guidance(self) -> None:
+        result = _runner.invoke(app, ["service", "bootstrap", "--help"])
+        assert result.exit_code == 0
+        assert "Mutates:" in result.stdout
+        assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
+        assert "docs/CLI_REFERENCE.md" in result.stdout
+        assert "recommended first path" in result.stdout.lower()
+
+    @pytest.mark.unit
+    def test_workspace_help_contains_dx_guidance(self) -> None:
+        result = _runner.invoke(app, ["workspace", "--help"])
+        assert result.exit_code == 0
+        assert "Mutates:" in result.stdout
+        assert "Dry-run" in result.stdout or "Safety defaults" in result.stdout
+        assert "docs/CLI_REFERENCE.md" in result.stdout
+        assert "recommended first path" in result.stdout.lower()
