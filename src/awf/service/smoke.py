@@ -13,6 +13,17 @@ AuthCollector = Callable[..., dict[str, Any]]
 ProfilePreview = Callable[..., Any]
 ConfigResolver = Callable[[ServiceSettings], dict[str, Any]]
 
+_PROFILE_MARKER_PATHS = (
+    ".awf/workspace.yml",
+    ".awf/workspace.yaml",
+    "awf.workspace.yml",
+    "awf.workspace.yaml",
+)
+
+
+def _project_has_awf_profile(path: Path) -> bool:
+    return any((path / rel).is_file() for rel in _PROFILE_MARKER_PATHS)
+
 
 async def collect_smoke_report(
     *,
@@ -39,7 +50,7 @@ async def collect_smoke_report(
     ))
     overall.append(phases[-1]["status"])
 
-    if project.exists():
+    if project.exists() and (demo_path is None or _project_has_awf_profile(project)):
         effective_project = project
     elif demo_path is not None and demo_path.exists():
         effective_project = demo_path

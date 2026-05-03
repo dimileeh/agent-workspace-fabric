@@ -347,6 +347,31 @@ class TestCollectSmokeReportMockedMode:
         assert profile_phase["status"] in ("ok", "warn")
         assert profile_phase["reason_code"] in ("SMOKE_PROFILE_READY", "SMOKE_PROFILE_NOT_DETECTED")
 
+    async def test_demo_path_fallback_used_when_project_exists_but_has_no_profile(
+        self, tmp_path: Path
+    ) -> None:
+        project = tmp_path / "existing_no_profile"
+        project.mkdir()
+        (project / "pyproject.toml").write_text("[project]\nname = 'no-profile'\n")
+        (tmp_path / "demo_project").mkdir()
+        (tmp_path / "demo_project" / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
+        demo_path = tmp_path / "demo_project"
+
+        report = await collect_smoke_report(
+            project=project,
+            settings=_settings(),
+            mocked_local=True,
+            demo_path=demo_path,
+            service_collector=_ok_service_collector(),
+            auth_collector=_ok_auth_collector(),
+            config_resolver=_config_resolver(),
+        )
+
+        profile_phase = next(p for p in report["phases"] if p["name"] == "profile_preview")
+        assert profile_phase["status"] in ("ok", "warn")
+        assert profile_phase["reason_code"] in ("SMOKE_PROFILE_READY", "SMOKE_PROFILE_NOT_DETECTED")
+        assert report["project"] == str(demo_path)
+
     async def test_no_validation_commands_reports_validation_missing(self, tmp_path: Path) -> None:
         (tmp_path / "pyproject.toml").write_text("[project]\nname = 'demo'\n")
 
