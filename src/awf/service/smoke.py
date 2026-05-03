@@ -425,7 +425,7 @@ async def _default_service_collector(settings: ServiceSettings) -> dict[str, Any
     import httpx
 
     async with httpx.AsyncClient(timeout=5.0) as client:
-        response = await client.get(f"{settings.api_base_url.rstrip('/')}/health")
+        response = await client.get(f"{settings.api_base_url.rstrip('/')}/healthz")
         if response.status_code == 200:
             return {"status": "ok"}
         return {"status": "unreachable"}
