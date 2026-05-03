@@ -7,9 +7,11 @@ compose YAML is syntactically valid and contains all the expected wiring.
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 
 import pytest
+import structlog
 import yaml
 
 from awf.node import compose_manager as compose_module
@@ -55,6 +57,23 @@ class _FakeProcess:
 
     async def communicate(self) -> tuple[bytes, bytes]:
         return self._stdout, self._stderr
+
+
+class _HangingProcess:
+    def __init__(self) -> None:
+        self.returncode: int | None = None
+        self.kill_called = False
+
+    async def communicate(self) -> tuple[bytes, bytes]:
+        await asyncio.Event().wait()
+        return b"", b""
+
+    def kill(self) -> None:
+        self.kill_called = True
+        self.returncode = -9
+
+    async def wait(self) -> int | None:
+        return self.returncode
 
 
 @pytest.mark.unit
@@ -624,11 +643,12 @@ class TestRender:
 
         manager = _RecordingComposeManager()
 
-        await manager.remove_project_by_label(
-            project_name="awf_ws_lost",
-            workspace_id="ws_lost",
-            remove_volumes=True,
-        )
+        with structlog.testing.capture_logs() as captured:
+            await manager.remove_project_by_label(
+                project_name="awf_ws_lost",
+                workspace_id="ws_lost",
+                remove_volumes=True,
+            )
 
         label_filter = "label=com.docker.compose.project=awf_ws_lost"
         assert manager.calls == [
@@ -640,6 +660,10 @@ class TestRender:
             ("volume ls", "volume", "ls", "-q", "--filter", label_filter),
             ("volume rm", "volume", "rm", "-f", "volume-a", "volume-b"),
         ]
+        event = next(item for item in captured if item["event"] == "compose.project_label_removed")
+        assert event["containers"] == 2
+        assert event["networks"] == 2
+        assert event["volumes"] == 2
 
     @pytest.mark.unit
     async def test_remove_project_by_label_can_keep_volumes(
@@ -663,11 +687,12 @@ class TestRender:
 
         manager = _RecordingComposeManager()
 
-        await manager.remove_project_by_label(
-            project_name="awf_ws_keep_volumes",
-            workspace_id="ws_keep_volumes",
-            remove_volumes=False,
-        )
+        with structlog.testing.capture_logs() as captured:
+            await manager.remove_project_by_label(
+                project_name="awf_ws_keep_volumes",
+                workspace_id="ws_keep_volumes",
+                remove_volumes=False,
+            )
 
         label_filter = "label=com.docker.compose.project=awf_ws_keep_volumes"
         assert manager.calls == [
@@ -675,6 +700,8 @@ class TestRender:
             ("network ls", "network", "ls", "-q", "--filter", label_filter),
             ("network rm", "network", "rm", "network-a"),
         ]
+        event = next(item for item in captured if item["event"] == "compose.project_label_removed")
+        assert event["volumes"] == 0
 
     @pytest.mark.unit
     async def test_compose_command_reports_missing_docker_binary(
@@ -783,3 +810,25 @@ class TestRender:
 
         assert exc.value.returncode == 127
         assert exc.value.reason_code == "DOCKER_UNAVAILABLE"
+
+    @pytest.mark.unit
+    async def test_docker_capture_times_out_and_kills_hung_process(
+        self,
+        manager: ComposeManager,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        process = _HangingProcess()
+
+        async def _spawn(*_args: object, **_kwargs: object) -> _HangingProcess:
+            return process
+
+        monkeypatch.setattr(compose_module, "DOCKER_CAPTURE_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr(compose_module.asyncio, "create_subprocess_exec", _spawn)
+
+        with pytest.raises(ComposeOperationError) as exc:
+            await manager._docker_capture(["ps"], operation="ps")  # noqa: SLF001
+
+        assert process.kill_called is True
+        assert exc.value.returncode == 124
+        assert exc.value.reason_code == "DOCKER_COMMAND_TIMEOUT"
+        assert "exceeded" in exc.value.stderr

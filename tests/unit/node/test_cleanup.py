@@ -81,10 +81,13 @@ class TestCleanup:
 
     @pytest.mark.unit
     async def test_uses_stored_compose_file_path_for_compose_down(
-        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+        tmp_path: Path,
     ) -> None:
         git, compose, wc = cleaner
-        compose_file = Path("/var/lib/awf/compose/ws_stored/compose.yml")
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text("services: {}\n", encoding="utf-8")
 
         failures = await wc.cleanup(
             workspace_id="ws_stored",
@@ -101,6 +104,7 @@ class TestCleanup:
             remove_volumes=True,
         )
         compose.down.assert_not_awaited()
+        compose.remove_project_by_label.assert_not_awaited()
         git.remove_worktree.assert_awaited_once()
 
     @pytest.mark.unit
@@ -122,10 +126,13 @@ class TestCleanup:
 
     @pytest.mark.unit
     async def test_remove_volumes_false_applies_to_stored_compose_file(
-        self, cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner]
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+        tmp_path: Path,
     ) -> None:
         git, compose, wc = cleaner
-        compose_file = Path("/var/lib/awf/compose/ws_keep_volumes/compose.yml")
+        compose_file = tmp_path / "compose.yml"
+        compose_file.write_text("services: {}\n", encoding="utf-8")
 
         failures = await wc.cleanup(
             workspace_id="ws_keep_volumes",
@@ -139,6 +146,32 @@ class TestCleanup:
             project_name="awf_ws_keep_volumes",
             compose_file=compose_file,
             workspace_id="ws_keep_volumes",
+            remove_volumes=False,
+        )
+        git.remove_worktree.assert_awaited_once()
+
+    @pytest.mark.unit
+    async def test_missing_stored_compose_file_skips_down_project_and_uses_label_cleanup(
+        self,
+        cleaner: tuple[AsyncMock, AsyncMock, WorkspaceCleaner],
+        tmp_path: Path,
+    ) -> None:
+        git, compose, wc = cleaner
+        compose_file = tmp_path / "missing-compose.yml"
+
+        failures = await wc.cleanup(
+            workspace_id="ws_missing_compose",
+            repo_url="git@x:y.git",
+            compose_project_name="awf_ws_missing_compose",
+            compose_file_path=compose_file,
+            remove_volumes=False,
+        )
+
+        assert failures == []
+        compose.down_project.assert_not_awaited()
+        compose.remove_project_by_label.assert_awaited_once_with(
+            project_name="awf_ws_missing_compose",
+            workspace_id="ws_missing_compose",
             remove_volumes=False,
         )
         git.remove_worktree.assert_awaited_once()

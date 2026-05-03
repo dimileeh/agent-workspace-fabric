@@ -17,6 +17,7 @@ class CLI feature; SDK-based implementations tend to reinvent them.
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -29,6 +30,9 @@ from awf.common.immutability import frozen_mapping
 from awf.common.logging import get_logger
 
 _log = get_logger(__name__)
+
+DOCKER_CAPTURE_TIMEOUT_SECONDS = 30.0
+_DOCKER_CAPTURE_KILL_WAIT_SECONDS = 5.0
 
 
 class ComposeOperationError(Exception):
@@ -364,6 +368,7 @@ class ComposeManager:
         for network_id in network_ids:
             await self._docker(["network", "rm", network_id], operation="network rm")
 
+        volume_names: list[str] = []
         if remove_volumes:
             volume_names = await self._docker_resource_ids(
                 ["volume", "ls", "-q", "--filter", label_filter],
@@ -378,6 +383,7 @@ class ComposeManager:
             project_name=project_name,
             containers=len(container_ids),
             networks=len(network_ids),
+            volumes=len(volume_names),
         )
 
     # ── Internals ──────────────────────────────────────────────────────────
@@ -451,7 +457,10 @@ class ComposeManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout_bytes, stderr_bytes = await proc.communicate()
+            stdout_bytes, stderr_bytes = await asyncio.wait_for(
+                proc.communicate(),
+                timeout=DOCKER_CAPTURE_TIMEOUT_SECONDS,
+            )
         except FileNotFoundError as e:
             raise ComposeOperationError(
                 operation=operation,
@@ -459,6 +468,24 @@ class ComposeManager:
                 stdout="",
                 stderr=str(e),
                 reason_code="DOCKER_UNAVAILABLE",
+            ) from e
+        except TimeoutError as e:
+            with contextlib.suppress(ProcessLookupError):
+                proc.kill()
+            with contextlib.suppress(ProcessLookupError, TimeoutError):
+                await asyncio.wait_for(
+                    proc.wait(),
+                    timeout=_DOCKER_CAPTURE_KILL_WAIT_SECONDS,
+                )
+            raise ComposeOperationError(
+                operation=operation,
+                returncode=124,
+                stdout="",
+                stderr=(
+                    f"docker {operation} exceeded "
+                    f"{DOCKER_CAPTURE_TIMEOUT_SECONDS:g}s timeout"
+                ),
+                reason_code="DOCKER_COMMAND_TIMEOUT",
             ) from e
 
         stdout = stdout_bytes.decode("utf-8", errors="replace")

@@ -170,25 +170,26 @@ class WorkspaceCleaner:
             workspace_id=workspace_id,
             worktree_host_path=worktree_host_path or Path("/dev/null"),
         )
-        compose_file_missing = compose_file_path is not None and not compose_file_path.exists()
+        project_name = compose_project_name or spec.project_name()
         try:
             if compose_file_path is not None:
-                await self._compose.down_project(
-                    project_name=compose_project_name or spec.project_name(),
-                    compose_file=compose_file_path,
-                    workspace_id=workspace_id,
-                    remove_volumes=remove_volumes,
-                )
-                if compose_file_missing:
+                if compose_file_path.exists():
+                    await self._compose.down_project(
+                        project_name=project_name,
+                        compose_file=compose_file_path,
+                        workspace_id=workspace_id,
+                        remove_volumes=remove_volumes,
+                    )
+                else:
                     await self._compose.remove_project_by_label(
-                        project_name=compose_project_name or spec.project_name(),
+                        project_name=project_name,
                         workspace_id=workspace_id,
                         remove_volumes=remove_volumes,
                     )
             else:
                 await self._compose.down(spec, remove_volumes=remove_volumes)
                 await self._compose.remove_project_by_label(
-                    project_name=compose_project_name or spec.project_name(),
+                    project_name=project_name,
                     workspace_id=workspace_id,
                     remove_volumes=remove_volumes,
                 )
