@@ -327,6 +327,18 @@ def provider_readiness_preflight_from_task_policy(
     return dict(value) if isinstance(value, Mapping) else None
 
 
+def redact_launch_preflight_text(
+    settings: ServiceSettings,
+    value: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+) -> str:
+    """Normalize launch preflight text with the same redaction used for snapshots."""
+
+    env = os.environ if environ is None else environ
+    return _redact(value, _secret_values(settings, env))
+
+
 def validate_provider_names(values: Iterable[str]) -> set[ProviderName]:
     """Normalize and validate provider names accepted by strict checks."""
 

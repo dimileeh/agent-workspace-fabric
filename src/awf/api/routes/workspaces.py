@@ -43,7 +43,9 @@ from awf.db.repositories import (
     WorkspaceRepository,
 )
 from awf.profiles.resolver import ProfileResolutionError
+from awf.service.config import resolve_service_settings
 from awf.service.disk import DiskCheck, check_disk_space
+from awf.service.provider_readiness import redact_launch_preflight_text
 from awf.service.secret_leases import SecretLeaseService
 from awf.service.validation_observability import (
     latest_merge_candidate,
@@ -156,7 +158,7 @@ async def create_workspace_v2(
     if idempotency_key is not None:
         existing = await repo.get_by_idempotency_key(idempotency_key)
         if existing is not None:
-            if not _payloads_match_v2(existing, payload):
+            if not _payloads_match_v2(existing, payload, settings=settings):
                 return JSONResponse(
                     status_code=status.HTTP_409_CONFLICT,
                     content=ErrorResponse(
@@ -467,7 +469,12 @@ def _payloads_match(existing: Workspace, payload: WorkspaceCreateRequest) -> boo
     )
 
 
-def _payloads_match_v2(existing: Workspace, payload: WorkspaceCreateV2Request) -> bool:
+def _payloads_match_v2(
+    existing: Workspace,
+    payload: WorkspaceCreateV2Request,
+    *,
+    settings: Settings,
+) -> bool:
     requested_profile = (
         payload.workspace.profile.model_dump(mode="json", by_alias=True)
         if payload.workspace.profile is not None
@@ -502,7 +509,7 @@ def _payloads_match_v2(existing: Workspace, payload: WorkspaceCreateV2Request) -
         )
         and list(existing.test_commands) == list(payload.validation.commands)
         and _stored_task_provider_readiness_override(existing)
-        == _requested_provider_readiness_override(payload)
+        == _requested_provider_readiness_override(payload, settings=settings)
     )
 
 
@@ -556,10 +563,15 @@ def _stored_task_agent_model(existing: Workspace) -> str | None:
 
 def _requested_provider_readiness_override(
     payload: WorkspaceCreateV2Request,
+    *,
+    settings: Settings,
 ) -> tuple[bool, str | None]:
+    reason = payload.preflight.provider_readiness_override_reason
     return (
         payload.preflight.provider_readiness_override,
-        payload.preflight.provider_readiness_override_reason,
+        redact_launch_preflight_text(resolve_service_settings(settings), reason)
+        if reason is not None
+        else None,
     )
 
 
